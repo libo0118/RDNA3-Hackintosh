@@ -23,6 +23,8 @@ static inline int nvmtl_log_failure(const char *text)
                     nvmtl_log_fault_word(text, "FAULT") || strstr(text, "-> -") ||
                     strstr(text, "missing") || strstr(text, "cannot") ||
                     strstr(text, "unsupported") || strstr(text, "refused") ||
+                    /* framebuffer fetch (N48): a read that is not served, a draw that is skipped, a pass that is restarted */
+                    strstr(text, "UNSUPPORTED") || strstr(text, "SKIPPED") || strstr(text, "RESTARTED") || strstr(text, "are zeroed") ||
                     /* a process denied a device: for WindowServer that is the "Failed to create MetalDevice" abort,
                      * and /tmp/nvmtl.log is gone after the reboot that rescues the machine */
                     strstr(text, "no device"));

@@ -173,6 +173,36 @@ int main(void)
       PUT(m, n, I0(253), I0(56));
       nn = n; memcpy(c, m, n * 4);
       CHECK(nvmtl_spirv_fbfetch(c, &nn, 1024 + 3 * 16, 1, &f) == 0 && f.patched == 8 && nn == n + 24 && c[3] == 208); }
+    /* nvmtl_spirv_fbfetch_mask: only the reads whose colour index is in the mask are zeroed (valid module: reads of 192 x2 and 193 x1) */
+    n = build_valid(m); nn = n; memcpy(c, m, n * 4);
+    CHECK(nvmtl_spirv_fbfetch_mask(c, &nn, 1024 + NVMTL_FBFETCH_GROW, 2u, &f) == 0 && f.reads == 3 && f.patched == 1 && f.read_mask == 3u);
+    { int reads_left = 0, copies = 0;
+      for (size_t i = 5; i < nn; ) { uint32_t wc = c[i] >> 16, op = c[i] & 0xffffu; if (!wc) break; if (op == 98) reads_left++; if (op == 83) copies++; i += wc; }
+      CHECK(reads_left == 2 && copies == 1);                                              /* the two reads of colour(0) stay, colour(1)'s became a copy */
+      if (have_val()) CHECK(validate(c, nn) == 0); }
+    n = build_valid(m); nn = n; memcpy(c, m, n * 4);
+    CHECK(nvmtl_spirv_fbfetch_mask(c, &nn, 1024 + NVMTL_FBFETCH_GROW, 0u, &f) == 0 && f.patched == 0 && nn == n && !memcmp(c, m, n * 4));
+    n = build_valid(m); nn = n; memcpy(c, m, n * 4);
+    CHECK(nvmtl_spirv_fbfetch_mask(c, &nn, 1024 + NVMTL_FBFETCH_GROW, 1u, &f) == 0 && f.patched == 2);
+    /* nvmtl_spirv_fbfetch_set: the variables of binding 192..199 move to the new set, nothing else does */
+    n = build_valid(m); nn = n; memcpy(c, m, n * 4);
+    CHECK(nvmtl_spirv_fbfetch_set(c, nn, 3) == 2);
+    { int moved = 0, other = 0;
+      for (size_t i = 5; i < nn; ) { uint32_t wc = c[i] >> 16, op = c[i] & 0xffffu; if (!wc) break;
+          if (op == 71 && c[i + 2] == 34) { if (c[i + 3] == 3 && (c[i + 1] == 7 || c[i + 1] == 14)) moved++; else other++; }
+          i += wc; }
+      CHECK(moved == 2 && other == 0); }
+    CHECK(nvmtl_spirv_fbfetch(c, &nn, 1024 + NVMTL_FBFETCH_GROW, 0, &f) == 0 && f.decl_mask == 3u && f.read_mask == 3u);   /* still seen after the move */
+    n = build(m, 191, 1, 6); nn = n; memcpy(c, m, n * 4);                                                        /* binding 191: not ours, stays at set 0 */
+    CHECK(nvmtl_spirv_fbfetch_set(c, nn, 3) == 0 && !memcmp(c, m, n * 4));
+    n = build(m, 192, 1, 6); nn = n; memcpy(c, m, n * 4); c[0] = 0;
+    CHECK(nvmtl_spirv_fbfetch_set(c, nn, 3) == -1);
+    n = build(m, 192, 1, 6); nn = n; memcpy(c, m, n * 4); c[3] = NVMTL_FBFETCH_MAX_BOUND + 1;
+    CHECK(nvmtl_spirv_fbfetch_set(c, nn, 3) == -1);
+    n = build(m, 192, 1, 6); nn = n; memcpy(c, m, n * 4); c[5] = (0x7fffu << 16) | 17;
+    CHECK(nvmtl_spirv_fbfetch_set(c, nn, 3) == -1);
+    n = build(m, 194, 1, 6); nn = n; memcpy(c, m, n * 4);                                                        /* DescriptorSet precedes Binding in `build` */
+    CHECK(nvmtl_spirv_fbfetch_set(c, nn, 3) == 1);
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("test_spirv_fbfetch: ok\n");
     return 0;

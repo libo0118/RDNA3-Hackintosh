@@ -89,25 +89,14 @@ static int nvmtl_sample_payload_abi(id value) {
     return 1;
 }
 
-#define NVLOG_SITES    256
-#define NVLOG_VERBATIM 8
-#define NVLOG_EVERY    4096
-static struct { const char *fmt; uint64_t n; } g_nvlog_sites[NVLOG_SITES];
+#include "nvmtl_log_cap.h"
+static nvmtl_log_site g_nvlog_sites[NVLOG_SITES];
 static pthread_mutex_t g_nvlog_lock = PTHREAD_MUTEX_INITIALIZER;
 static int nvlog_dropped(const char *fmt, uint64_t *rep) {
-    *rep = 0;
     pthread_mutex_lock(&g_nvlog_lock);
-    int i = 0;
-    for (; i < NVLOG_SITES; i++) {
-        if (g_nvlog_sites[i].fmt == fmt) break;
-        if (!g_nvlog_sites[i].fmt) { g_nvlog_sites[i].fmt = fmt; break; }
-    }
-    if (i == NVLOG_SITES) { pthread_mutex_unlock(&g_nvlog_lock); return 0; }
-    uint64_t n = ++g_nvlog_sites[i].n;
+    int dropped = nvmtl_log_cap_dropped(g_nvlog_sites, NVLOG_SITES, fmt, rep);
     pthread_mutex_unlock(&g_nvlog_lock);
-    if (n <= NVLOG_VERBATIM) return 0;
-    if (n % NVLOG_EVERY == 0) { *rep = n; return 0; }
-    return 1;
+    return dropped;
 }
 const char *nvmtl_log_path(void) {
 #if NVMTL_RELEASE
@@ -126,10 +115,10 @@ const char *nvmtl_log_path(void) {
     }
     return path;
 }
-void nvlog(const char *fmt, ...) {
-    uint64_t rep; if (nvlog_dropped(fmt, &rep)) return;
-    char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
-    char t[640];
+static void nvlog_emit(const char *fmt, uint64_t rep, va_list a) {
+    char b[768];
+    vsnprintf(b, sizeof b, fmt, a);
+    char t[900];
     if (rep) snprintf(t, sizeof t, "%s   [logged %llu times now]", b, (unsigned long long)rep);
     else     snprintf(t, sizeof t, "%s", b);
 #if NVMTL_RELEASE
@@ -138,6 +127,15 @@ void nvlog(const char *fmt, ...) {
     syslog(LOG_NOTICE, "NVMTL: %s", t);
     FILE *f = nvmtl_log_open(nvmtl_log_path()); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 #endif
+}
+void nvlog(const char *fmt, ...) {
+    uint64_t rep; if (nvlog_dropped(fmt, &rep)) return;
+    va_list a; va_start(a, fmt); nvlog_emit(fmt, rep, a); va_end(a);
+}
+/* Not capped per site: for a summary the CALLER rate-limits (by time, by a power of two of a total). In a release build it reaches the
+ * syslog only when it carries a failure word (nvmtl_log_failure), like every other line. */
+void nvlog_uncapped(const char *fmt, ...) {
+    va_list a; va_start(a, fmt); nvlog_emit(fmt, 0, a); va_end(a);
 }
 
 /* the per-process frame trace (docs/AFTER-TESTS.md "Plugin frame trace"; nvmtl_trace.h is included above) */

@@ -2653,6 +2653,7 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
         }
     }
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
+    if (![self nvmtlFetchPass:&selected->_p]) return NO;
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
     nvmtl_split_add(sp_pipe, &g_split.pipe, &g_split.pipe_max);
     const uint64_t sp_desc = nvmtl_split_now();
@@ -2660,6 +2661,37 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
     nvmtl_split_add(sp_desc, &g_split.desc, &g_split.desc_max);
+    if (_cb->_c.nobind) {   /* no descriptor set, or a framebuffer-fetch draw that cannot read its input: the vk layer drops the draw; say so in the trace */
+        nvtrace("DRAW NOT DRAWN: bind_set refused it (nobind; vs %s | fs %s) - see the vk: fbfetch / descriptor lines", _ps ? _ps->_vname.UTF8String : "-", _ps ? _ps->_fname.UTF8String : "-");
+        return NO;
+    }
+    return YES;
+}
+/* Framebuffer fetch ([[color(n)]]): the pass was begun by the first pipeline of the encoder, so it carries input attachments only for what THAT
+ * pipeline reads. A pipeline drawn later (or a sampler variant of the first) that reads colour attachments the pass does not carry makes
+ * the pass end and begin again with LOAD and the union of the inputs (the same restart the mesh stage uses): nothing is lost, the
+ * attachments keep their contents. The union is kept in _pass.fbin so that it never ping-pongs between two pipelines. */
+- (BOOL)nvmtlFetchPass:(nvk_pipeline *)p {
+    if (!p->fbread || !_begun) return YES;
+    const uint32_t had = nvmtl_vk_fbf_pass_inputs(&_cb->_c);
+    if (!(p->fbread & ~had)) return YES;
+    nvmtl_vk_fbf_note_restart(had, p->fbread);
+    const BOOL vis = _visActive; const NSUInteger visOffset = _visOffset;
+    if (vis) [self nvmtlCloseVisibility];
+    nvmtl_vk_cmd_end_render(&_cb->_c);
+    /* LOAD stays for good: the pass already drew, so any later re-begin (after a failure here, the mesh stage) must keep the contents,
+     * not repeat the first begin's clear actions */
+    _pass.load = NVMTL_LOAD_ALL; _pass.fbin |= had | p->fbread;
+    const int rc = nvmtl_vk_cmd_begin_pass(&_cb->_c, &_pass, p);
+    if (rc) {
+        _begun = NO;
+        nvlog("fbfetch: the render pass could not be RESTARTED with input attachments 0x%x - the rest of this encoder is not drawn", _pass.fbin);
+        return NO; }
+    nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
+    if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
+    if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
+    [self nvmtlApplyDepthStencil];
+    if (vis) { _visOffset = visOffset; _visPending = YES; [self nvmtlBeginVisibility]; }
     return YES;
 }
 - (BOOL)nvmtlSamplePositionError:(NSString *)message {

@@ -106,6 +106,9 @@ $(BUILD)/test_linear_pitch: tests/test_linear_pitch.c metal/plugin/nvmtl_linear_
 $(BUILD)/test_spirv_fbfetch: tests/test_spirv_fbfetch.c metal/plugin/nvmtl_spirv_fbfetch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_spirv_fbfetch.c
 
+$(BUILD)/test_fbfetch_plan: tests/test_fbfetch_plan.c metal/plugin/nvmtl_fbfetch_plan.h metal/plugin/nvmtl_log_cap.h metal/plugin/nvmtl_log_failure.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_fbfetch_plan.c
+
 $(BUILD)/test_msupload: tests/test_msupload.c metal/plugin/nvmtl_msupload.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_msupload.c
 
@@ -170,7 +173,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_spirv_fbfetch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -184,6 +187,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	$(BUILD)/test_copy_pack
 	$(BUILD)/test_msupload
 	$(BUILD)/test_spirv_fbfetch
+	$(BUILD)/test_fbfetch_plan
 	$(BUILD)/test_agdc_k5
 	$(BUILD)/test_agdc_n48
 	$(BUILD)/test_bootargs

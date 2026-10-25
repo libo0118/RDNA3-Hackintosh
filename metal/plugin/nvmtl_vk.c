@@ -201,7 +201,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkDestroyPipeline) X(vkDestroyRenderPass) X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkCmdDispatch) X(vkCmdPushConstants) X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) \
     X(vkCmdBeginRenderPass) X(vkCmdBindPipeline) X(vkCmdDraw) X(vkCmdEndRenderPass) X(vkEndCommandBuffer) \
     X(vkQueueSubmit) X(vkQueueBindSparse) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
-    X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
+    X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
     X(vkDestroyBuffer) X(vkFreeMemory) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyFramebuffer) X(vkDestroyCommandPool) \
     X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask)
 static int g_dyn3;
@@ -1532,6 +1532,9 @@ static int nvmtl_vk_3d_slice_ok(VkFormat fmt, VkImageUsageFlags usage)
               (unsigned)fmt, (unsigned)usage, (int)r);
     return r == VK_SUCCESS;
 }
+/* a render-target colour image: INPUT_ATTACHMENT too, so that [[color(n)]] framebuffer fetch can read it (nvmtl_fbf_bind; same format
+ * requirement as COLOR_ATTACHMENT). The size query below must use the same bits as the images it sizes. */
+#define NVMTL_COLOR_USAGE(mtl_type) (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | ((mtl_type) == 7 ? 0 : VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))   /* not a 3D volume: nvmtl_fbf_attachment_reason refuses it */
 static void nvmtl_vk_image_mutable(VkImageCreateInfo *ici, nvk_image *out)
 {
     ici->flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
@@ -1878,7 +1881,7 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
     { uint32_t bb = 0; if (nvmtl_vk_format_block(vkfmt, &out->bw, &out->bh, &bb)) { out->bpp = bb; out->storage = 0; storage = 0; } }
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, (mtl_type == 5 || mtl_type == 6) ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, mtl_type == 7 ? VK_IMAGE_TYPE_3D : mtl_type < 2 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
         fmt, { w, h, mtl_type == 7 ? layers : 1 }, mips, mtl_type == 7 ? 1 : layers, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
-        (out->bw > 1 ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+        (out->bw > 1 ? 0 : NVMTL_COLOR_USAGE(mtl_type)) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     nvmtl_vk_image_mutable(&ici, out);
@@ -2218,49 +2221,118 @@ static int nvmtl_spirv_bands_ok(const void *p, size_t n, const char *what)
 }
 
 #include "nvmtl_spirv_fbfetch.h"
-/* [[color(n)]] framebuffer fetch (nvmtl_spirv_fbfetch.h): the set layout has no binding 192..199 and no render pass here has
- * an input attachment, so a read that is still in the fragment module makes RADV load a descriptor that is not there (card
- * run 2026-10-25c: WindowServer and Terminal). Logged once per pipeline (first 16, then every 256th) with the numbers that
- * tell "declared but folded away" from "read"; NVMTL_FBFETCH_ZERO=1 replaces each read by a zero vector, a defined value
- * for an A/B on the card (random colours / corrupt glyphs gone or not). Default off: the read is left as translated. */
-static _Atomic unsigned g_fbf_modules, g_fbf_declared_only, g_fbf_read, g_fbf_zeroed, g_fbf_zero_failed, g_fbf_scan_failed;
+#include "nvmtl_fbfetch_plan.h"
+/* [[color(n)]] framebuffer fetch (nvmtl_spirv_fbfetch.h, nvmtl_fbfetch_plan.h; DRIVER-PLAN N48). The fragment module reads a subpass
+ * input at binding 192 + n. A pipeline that passes nvmtl_fbf_plan() is IMPLEMENTED: out->fbread says which colour attachments it reads,
+ * its render passes carry them as input attachments (GENERAL, self-dependency), the variable is moved to descriptor set NVMTL_FBF_SET
+ * (an INPUT_ATTACHMENT set of its own, written once per pass) and every draw is preceded by a by-region barrier
+ * (nvmtl_fbf_bind). Anything the plan refuses (multisample target, integer format, ...) is counted, logged with the reason and
+ * the reads become a zero vector, a defined value, never an undefined descriptor. NVMTL_FBFETCH_ZERO=1 forces that for every
+ * pipeline (an A/B on the card).
+ * LOGGING (nvmtl_log_cap.h): nvlog passes the first 8 calls of each FORMAT LITERAL and then every 4096th, so (1) every kind of event
+ * has a literal of its own (a flood of the benign kind must not use up the slots of a serious one), (2) the totals reach the report
+ * through the SUMMARY line (nvlog_uncapped, at most every 10 s while a counter moved, at a power of two of an error counter and at exit). */
+void nvlog_uncapped(const char *fmt, ...);
+static VkDescriptorSetLayout g_fbfLayout, g_emptyLayout;   /* set NVMTL_FBF_SET (INPUT_ATTACHMENT at 192..199, fragment) / an empty layout for a missing heap set */
+static _Atomic unsigned g_fbf_modules, g_fbf_declared_only, g_fbf_read, g_fbf_zeroed, g_fbf_zero_failed, g_fbf_scan_failed, g_fbf_served,
+                        g_fbf_move_failed, g_fbf_refused[NVMTL_FBF_REASONS];
+enum { NVMTL_FBF_SK_NOPASS, NVMTL_FBF_SK_NOINPUT, NVMTL_FBF_SK_ATTACHMENT, NVMTL_FBF_SK_NOSET, NVMTL_FBF_SK_N };
+static _Atomic unsigned g_fbf_sets, g_fbf_draws, g_fbf_skip[NVMTL_FBF_SK_N], g_fbf_restarts, g_fbf_att_refused, g_fbf_alloc_failed;
+static _Atomic uint64_t g_fbf_sum_ns; static unsigned g_fbf_sum_last;
+static int nvmtl_fbf_pow2(unsigned k) { return k && !(k & (k - 1)); }
+/* One line with every total (key=value; tools/triage_n48.py reads the newest). Emitted at most every 10 s, and only when a total moved
+ * since the last one; `force` (a power of two of an error counter, the exit handler) skips the clock. */
+static void nvmtl_fbf_summary(int force)
+{
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), last = atomic_load(&g_fbf_sum_ns);
+    if (!force && now - last < 10ull * 1000000000ull) return;
+    unsigned r[NVMTL_FBF_REASONS], sk[NVMTL_FBF_SK_N], sum = 0;
+    for (unsigned i = 0; i < NVMTL_FBF_REASONS; i++) sum += (r[i] = atomic_load(&g_fbf_refused[i]));
+    for (unsigned i = 0; i < NVMTL_FBF_SK_N; i++) sum += (sk[i] = atomic_load(&g_fbf_skip[i]));
+    const unsigned served = atomic_load(&g_fbf_served), modules = atomic_load(&g_fbf_modules), rd = atomic_load(&g_fbf_read), zm = atomic_load(&g_fbf_zeroed),
+                   zf = atomic_load(&g_fbf_zero_failed), sf = atomic_load(&g_fbf_scan_failed), mf = atomic_load(&g_fbf_move_failed),
+                   sets = atomic_load(&g_fbf_sets), draws = atomic_load(&g_fbf_draws), rs = atomic_load(&g_fbf_restarts),
+                   ar = atomic_load(&g_fbf_att_refused), af = atomic_load(&g_fbf_alloc_failed);
+    sum += served + modules + rd + zm + zf + sf + mf + sets + draws + rs + ar + af;
+    if (!sum || sum == g_fbf_sum_last) return;
+    if (!atomic_compare_exchange_strong(&g_fbf_sum_ns, (uint64_t *)&last, now) && !force) return;
+    g_fbf_sum_last = sum;
+    nvlog_uncapped("vk: fbfetch: SUMMARY served=%u modules=%u read=%u zmod=%u zero_failed=%u scan_failed=%u move_failed=%u "
+                   "zr_noatt=%u zr_ms=%u zr_int=%u zr_tess=%u zr_nolayout=%u zr_forced=%u sets=%u draws=%u skipped=%u skip_nopass=%u skip_noinput=%u "
+                   "skip_att=%u skip_noset=%u restarts=%u att_refused=%u alloc_failed=%u",
+                   served, modules, rd, zm, zf, sf, mf, r[NVMTL_FBF_NO_ATTACHMENT], r[NVMTL_FBF_MULTISAMPLE], r[NVMTL_FBF_INTEGER_FORMAT], r[NVMTL_FBF_TESS],
+                   r[NVMTL_FBF_NO_LAYOUT], r[NVMTL_FBF_FORCED_ZERO], sets, draws, sk[0] + sk[1] + sk[2] + sk[3], sk[NVMTL_FBF_SK_NOPASS], sk[NVMTL_FBF_SK_NOINPUT],
+                   sk[NVMTL_FBF_SK_ATTACHMENT], sk[NVMTL_FBF_SK_NOSET], rs, ar, af);
+}
+static void nvmtl_fbf_atexit(void) { nvmtl_fbf_summary(1); }
+static void nvmtl_fbf_arm(void) { static int armed; if (!armed) { armed = 1; atexit(nvmtl_fbf_atexit); } }
 static int nvmtl_fbfetch_zero_on(void)
 {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_FBFETCH_ZERO"); on = e && *e && *e != '0';
-        nvlog("vk: framebuffer fetch ([[color(n)]]) reads %s (NVMTL_FBFETCH_ZERO=%s)",
-              on ? "become a ZERO vector (experiment: a defined value instead of an undefined descriptor)" : "are left as translated (undefined descriptor)", e ? e : "unset"); }
+        nvlog("vk: framebuffer fetch ([[color(n)]]) is %s (NVMTL_FBFETCH_ZERO=%s)",
+              on ? "FORCED to a ZERO vector (experiment: nothing is fetched)" : "implemented with render-pass input attachments", e ? e : "unset"); }
     return on;
 }
-static void nvmtl_fbfetch_pipeline_note(uint32_t *fcopy, size_t *fwords, const void *orig, uint32_t ncol, uint32_t samples)
+#define NVMTL_FBF_LOG(...) nvlog(__VA_ARGS__)
+static void nvmtl_fbfetch_pipeline_note(uint32_t *fcopy, size_t *fwords, const void *orig, uint32_t ncol, uint32_t samples,
+                                        uint32_t served, uint32_t zero_mask, unsigned why, uint32_t move_to_set)
 {
     nvmtl_fbfetch fb; const size_t orig_words = *fwords;
     if (nvmtl_spirv_fbfetch(fcopy, fwords, orig_words + NVMTL_FBFETCH_GROW, 0, &fb)) {
-        const unsigned k = atomic_fetch_add(&g_fbf_scan_failed, 1) + 1;
-        if (k <= 8 || k % 256 == 0)
-            nvlog("vk: fbfetch: the scan of a fragment module (%zu words) FAILED - malformed module, an id bound over %u, or out of memory; "
-                  "a framebuffer fetch in it would go unnoticed [%u so far]", orig_words, NVMTL_FBFETCH_MAX_BOUND, k);
+        atomic_fetch_add(&g_fbf_scan_failed, 1);
+        nvlog("vk: fbfetch: the scan of a fragment module (%zu words) FAILED - malformed module, an id bound over %u, or out of memory; "
+              "a framebuffer fetch in it would go unnoticed (this pipeline's reads are NOT handled)", orig_words, NVMTL_FBFETCH_MAX_BOUND);
+        nvmtl_fbf_arm(); nvmtl_fbf_summary(1);
         return;
     }
     if (!fb.decl_mask) return;
+    nvmtl_fbf_arm();
     unsigned seq = atomic_fetch_add(&g_fbf_modules, 1) + 1;
-    int zeroed = 0;
+    int zeroed = 0, zero_failed = 0, moved = 0;
     if (!fb.reads) atomic_fetch_add(&g_fbf_declared_only, 1);
     else {
         atomic_fetch_add(&g_fbf_read, 1);
-        if (nvmtl_fbfetch_zero_on()) {
+        if (zero_mask) {
             nvmtl_fbfetch zb; size_t nw = orig_words;
-            if (!nvmtl_spirv_fbfetch(fcopy, &nw, orig_words + NVMTL_FBFETCH_GROW, 1, &zb)) { *fwords = nw; zeroed = 1; atomic_fetch_add(&g_fbf_zeroed, 1); }
-            else { memcpy(fcopy, orig, orig_words * sizeof(uint32_t)); *fwords = orig_words; atomic_fetch_add(&g_fbf_zero_failed, 1); }
+            if (!nvmtl_spirv_fbfetch_mask(fcopy, &nw, orig_words + NVMTL_FBFETCH_GROW, zero_mask, &zb)) { *fwords = nw; zeroed = 1; atomic_fetch_add(&g_fbf_zeroed, 1); }
+            else { memcpy(fcopy, orig, orig_words * sizeof(uint32_t)); *fwords = orig_words; zero_failed = 1; atomic_fetch_add(&g_fbf_zero_failed, 1); }
         }
     }
-    if (seq <= 16 || seq % 256 == 0)
-        nvlog("vk: fbfetch: fragment module #%u declares [[color(n)]] subpass inputs 0x%x (binding 192+n) and %s; pipeline has %u colour attachment(s), %u sample(s); "
-              "the set layout has no such binding and no render pass an input attachment: %s [%u read / %u declared-only / %u zeroed / %u zeroing failed so far]",
-              seq, fb.decl_mask, fb.reads ? "READS them" : "no read is left (folded away)", ncol, samples ? samples : 1u,
-              !fb.reads ? "harmless" : zeroed ? "each read replaced by a zero vector (NVMTL_FBFETCH_ZERO=1)"
-                        : "the read hits an undefined descriptor (NVMTL_FBFETCH_ZERO=1 makes it a defined zero)",
-              atomic_load(&g_fbf_read), atomic_load(&g_fbf_declared_only), atomic_load(&g_fbf_zeroed), atomic_load(&g_fbf_zero_failed));
+    if (zero_failed) {   /* the old bug: a read of an unwritten descriptor. Own literal, never behind a gate. */
+        nvlog("vk: fbfetch: ZEROING FAILED for a fragment module (%zu words, zero mask 0x%x): the reads of colour attachment(s) 0x%x hit an UNDEFINED descriptor "
+              "(corrupt colours are to be expected from this pipeline)", orig_words, zero_mask, zero_mask);
+        nvmtl_fbf_summary(1);
+    }
+    if (move_to_set) {
+        int m = nvmtl_spirv_fbfetch_set(fcopy, *fwords, NVMTL_FBF_SET);
+        if (m < 0) {
+            /* the served reads would look in set 1: serve nothing from this module, zero every read (the render pass keeps its input attachment, unread) */
+            atomic_fetch_add(&g_fbf_move_failed, 1);
+            nvmtl_fbfetch zb; size_t nw = orig_words;
+            memcpy(fcopy, orig, orig_words * sizeof(uint32_t)); *fwords = orig_words;
+            const int z = fb.reads ? nvmtl_spirv_fbfetch_mask(fcopy, &nw, orig_words + NVMTL_FBFETCH_GROW, 0xffu, &zb) : 0;
+            if (!z) *fwords = nw; else { memcpy(fcopy, orig, orig_words * sizeof(uint32_t)); *fwords = orig_words; atomic_fetch_add(&g_fbf_zero_failed, 1); }
+            nvlog("vk: fbfetch: moving the subpass inputs to descriptor set %u FAILED - every read of this module is %s instead (served mask 0x%x NOT served)",
+                  NVMTL_FBF_SET, z ? "left UNDEFINED (the zeroing failed too)" : "zeroed", served);
+            nvmtl_fbf_summary(1);
+        } else moved = m;
+    }
+    if (seq <= 8)   /* the cap of this literal; the totals are in the SUMMARY line */
+        nvlog("vk: fbfetch: fragment module #%u declares [[color(n)]] subpass inputs 0x%x (binding 192+n, %d decoration(s) moved to set %u) and %s; "
+              "pipeline has %u colour attachment(s), %u sample(s); served 0x%x, zeroed 0x%x: %s [%u served / %u read / %u declared-only / %u zeroed / %u zeroing failed so far]",
+              seq, fb.decl_mask, moved, NVMTL_FBF_SET, fb.reads ? "READS them" : "no read is left (folded away)", ncol, samples ? samples : 1u, served, zero_mask,
+              !fb.reads ? "harmless"
+              : zero_failed ? "UNSUPPORTED and the zeroing FAILED - the read hits an undefined descriptor"
+              : served && zeroed ? "IMPLEMENTED for the attachments the pipeline has (input attachments of the render pass, barrier before each draw); the other reads zeroed"
+              : served ? "IMPLEMENTED (colour attachments are input attachments of the render pass, barrier before each draw)"
+              : "still UNSUPPORTED - each read replaced by a zero vector",
+              atomic_load(&g_fbf_served), atomic_load(&g_fbf_read), atomic_load(&g_fbf_declared_only), atomic_load(&g_fbf_zeroed), atomic_load(&g_fbf_zero_failed));
+    if (fb.reads && zero_mask) {   /* one literal per reason (nvmtl_fbfetch_plan.h): the benign one cannot use up the slots of a real limit */
+        const unsigned cnt = atomic_load(&g_fbf_refused[why < NVMTL_FBF_REASONS ? why : 0]);
+        NVMTL_FBF_LOG_REASON(NVMTL_FBF_LOG, why, zero_mask, served, cnt);
+    }
+    nvmtl_fbf_summary(0);
 }
 static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
 {
@@ -2272,7 +2344,8 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
         if (!wc || i + wc > nw) return 0;
         if (op == 71 && wc == 4 && w[i + 2] == 33) {
             uint32_t b = w[i + 3];
-            if (b == NVMTL_ADDRESS_BINDING_NUMBER) out[NVMTL_ADDRESS_BINDING >> 6] |= 1ull << (NVMTL_ADDRESS_BINDING & 63);
+            if (b >= NVMTL_FBFETCH_BASE && b < NVMTL_FBFETCH_BASE + NVMTL_FBFETCH_COUNT) { }   /* framebuffer fetch: descriptor set NVMTL_FBF_SET, not the table */
+            else if (b == NVMTL_ADDRESS_BINDING_NUMBER) out[NVMTL_ADDRESS_BINDING >> 6] |= 1ull << (NVMTL_ADDRESS_BINDING & 63);
             else if (b < NVMTL_ADDRESS_BINDING) out[b >> 6] |= 1ull << (b & 63);
             else if (!(b >= NVMTL_STEX_BINDING_NUMBER && b < NVMTL_STEX_BINDING_NUMBER + NVMTL_NSTEX)) return 0;
         }
@@ -2537,6 +2610,28 @@ static int ensure_descriptors_locked(void)
             }
     }
     VKCK(pvkCreateDescriptorSetLayout(g_dev, &lci, NULL, &g_setLayout), "vkCreateDescriptorSetLayout");
+    {   /* framebuffer fetch: the input-attachment set (NVMTL_FBF_SET) and an empty layout for the heap's slot when this device has no heap.
+         * Not fatal: without them every [[color(n)]] read is turned into a zero vector (reason NVMTL_FBF_NO_LAYOUT, logged per pipeline). */
+        VkPhysicalDeviceProperties lp; pvkGetPhysicalDeviceProperties(g_pdev, &lp);
+        if (lp.limits.maxPerStageDescriptorInputAttachments < NVMTL_FBFETCH_COUNT || lp.limits.maxDescriptorSetInputAttachments < NVMTL_FBFETCH_COUNT) {
+            nvlog("vk: fbfetch: this device allows only %u input attachments per stage / %u per set (need %u) - [[color(n)]] reads will be zero vectors",
+                  lp.limits.maxPerStageDescriptorInputAttachments, lp.limits.maxDescriptorSetInputAttachments, (unsigned)NVMTL_FBFETCH_COUNT);
+        } else {
+            VkDescriptorSetLayoutBinding fb[NVMTL_FBFETCH_COUNT];
+            for (uint32_t i = 0; i < NVMTL_FBFETCH_COUNT; i++)
+                fb[i] = (VkDescriptorSetLayoutBinding){ NVMTL_FBFETCH_BASE + i, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+            VkDescriptorSetLayoutCreateInfo fli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, NVMTL_FBFETCH_COUNT, fb };
+            VkDescriptorSetLayoutCreateInfo eli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL };
+            VkResult fr = pvkCreateDescriptorSetLayout(g_dev, &fli, NULL, &g_fbfLayout), er = pvkCreateDescriptorSetLayout(g_dev, &eli, NULL, &g_emptyLayout);
+            if (fr != VK_SUCCESS || er != VK_SUCCESS) {
+                nvlog("vk: fbfetch: descriptor layouts FAILED (input attachments %d, empty %d) - [[color(n)]] reads will be zero vectors", (int)fr, (int)er);
+                if (pvkDestroyDescriptorSetLayout) {   /* the one that was made would leak otherwise */
+                    if (fr == VK_SUCCESS) pvkDestroyDescriptorSetLayout(g_dev, g_fbfLayout, NULL);
+                    if (er == VK_SUCCESS) pvkDestroyDescriptorSetLayout(g_dev, g_emptyLayout, NULL);
+                }
+                g_fbfLayout = VK_NULL_HANDLE; g_emptyLayout = VK_NULL_HANDLE; }
+        }
+    }
     if (nvmtl_desc_pool_open()) return -1;
     if (nvmtl_vk_buffer_create(256, 1, &g_dummyBuf)) return -1;
     if (nvmtl_vk_image_create_fmt(1, 1, 0, &g_dummyImg)) return -1;
@@ -3180,6 +3275,143 @@ static VkSampleLocationsInfoEXT nvmtl_sample_info(const nvmtl_sample_pattern *p,
         (VkSampleCountFlagBits)p->count, {1,1}, p->count, vk };
 }
 
+/* ---- framebuffer fetch: the input-attachment set, the barrier, the restart bookkeeping (DRIVER-PLAN N48) ---- */
+#define NVMTL_FBF_POOLS 16
+#define NVMTL_FBF_POOL_SETS 512
+static VkDescriptorPool g_fbfPools[NVMTL_FBF_POOLS]; static unsigned g_nfbfPools;   /* under g_desc_lock */
+static VkDescriptorSet nvmtl_fbf_alloc_set(nvk_cmdbuf *c)
+{
+    VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE; VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+    unsigned opened = 0, npools;
+    pthread_mutex_lock(&g_desc_lock);
+    for (unsigned k = g_nfbfPools; k > 0 && r != VK_SUCCESS; k--) {   /* newest first; an older pool has room again once its command buffers retired */
+        VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_fbfPools[k - 1], 1, &g_fbfLayout };
+        r = pvkAllocateDescriptorSets(g_dev, &ai, &set); pool = g_fbfPools[k - 1];
+    }
+    if (r != VK_SUCCESS && g_nfbfPools < NVMTL_FBF_POOLS) {
+        VkDescriptorPoolSize sz = { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, NVMTL_FBFETCH_COUNT * NVMTL_FBF_POOL_SETS };
+        VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, NVMTL_FBF_POOL_SETS, 1, &sz };
+        VkDescriptorPool np = VK_NULL_HANDLE;
+        r = pvkCreateDescriptorPool(g_dev, &pci, NULL, &np);
+        if (r == VK_SUCCESS) {
+            g_fbfPools[g_nfbfPools++] = np; opened = g_nfbfPools;
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, np, 1, &g_fbfLayout };
+            r = pvkAllocateDescriptorSets(g_dev, &ai, &set); pool = np;
+        }
+    }
+    if (r == VK_SUCCESS && c->nsets == c->capsets) {
+        unsigned cap = c->capsets ? c->capsets * 2 : 64;
+        nvk_setref *grown = (nvk_setref *)realloc(c->sets, cap * sizeof *grown);
+        if (grown) { c->sets = grown; c->capsets = cap; }
+        else { pvkFreeDescriptorSets(g_dev, pool, 1, &set); r = VK_ERROR_OUT_OF_HOST_MEMORY; }
+    }
+    if (r == VK_SUCCESS) c->sets[c->nsets++] = (nvk_setref){ pool, set };   /* freed with the others when the command buffer retires */
+    npools = g_nfbfPools;
+    pthread_mutex_unlock(&g_desc_lock);   /* no log file I/O under the lock */
+    if (opened) nvlog("vk: fbfetch: input-attachment descriptor pool %u opened (%d sets each)", opened, NVMTL_FBF_POOL_SETS);
+    if (r != VK_SUCCESS) {
+        const unsigned k = atomic_fetch_add(&g_fbf_alloc_failed, 1) + 1;
+        nvlog("vk: fbfetch: input-attachment descriptor set allocation FAILED (VkResult %d, %u pool(s)) - the draws that read it are SKIPPED", (int)r, npools);
+        if (nvmtl_fbf_pow2(k)) nvmtl_fbf_summary(1);
+        return VK_NULL_HANDLE;
+    }
+    return set;
+}
+/* the reason an attachment cannot be an input, one literal per reason (see the logging note at the top of the framebuffer-fetch section) */
+static void nvmtl_fbf_log_attachment(uint32_t n, unsigned why, const nvk_fbf_att *a, uint32_t layers)
+{
+    const uint32_t fmt = a->fmt, ty = a->img ? a->img->mtl_type : 0u, smp = a->img ? a->img->samples : 0u;
+    switch (why) {
+    case NVMTL_FBF_MULTISAMPLE: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: a multisample image (format %u, %u sample(s), %u layer(s), textureType %u) - pipelines that read it are SKIPPED", n, fmt, smp, layers, ty); break;
+    case NVMTL_FBF_LAYERED: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: a layered render pass (format %u, %u sample(s), %u layer(s), textureType %u) - pipelines that read it are SKIPPED", n, fmt, smp, layers, ty); break;
+    case NVMTL_FBF_VOLUME: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: a slice of a 3D texture (format %u, %u sample(s), %u layer(s), textureType %u) - pipelines that read it are SKIPPED", n, fmt, smp, layers, ty); break;
+    case NVMTL_FBF_NO_USAGE: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: the image was created without INPUT_ATTACHMENT usage (format %u, %u sample(s), %u layer(s), textureType %u) - pipelines that read it are SKIPPED", n, fmt, smp, layers, ty); break;
+    case NVMTL_FBF_NO_VIEW: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: the input view could not be created, the image_view_create line before this one has the reason (format %u, %u sample(s), %u layer(s), textureType %u) - pipelines that read it are SKIPPED", n, fmt, smp, layers, ty); break;
+    case NVMTL_FBF_NO_IMAGE: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: the pass has no image for that slot (format %u) - pipelines that read it are SKIPPED", n, fmt); break;
+    default: nvlog("vk: fbfetch: colour attachment %u of this pass cannot be an input attachment: reason code %u (format %u, %u sample(s), %u layer(s), textureType %u) - pipelines that read it are SKIPPED", n, why, fmt, smp, layers, ty); break;
+    }
+}
+/* Once per pass, at the first draw that reads: one view per input attachment (a 2D view of the attachment's level/slice in the format
+ * the pass draws in, usage INPUT_ATTACHMENT) and the descriptor set at binding 192 + n. An attachment that cannot be an input attachment
+ * is recorded in c->fbf_bad with the reason; a pipeline that reads it is skipped, never drawn with an unwritten descriptor. */
+static void nvmtl_fbf_prepare_pass(nvk_cmdbuf *c)
+{
+    void *views[NVMTL_NCOL] = { NULL };
+    c->fbf_ready = 1;
+    for (uint32_t n = 0; n < NVMTL_NCOL; n++) {
+        if (!(c->fbin & (1u << n))) continue;
+        const nvk_fbf_att *a = &c->fbf_att[n];
+        unsigned why = a->img ? nvmtl_fbf_attachment_reason(a->img->samples, c->fbf_layers, a->img->mtl_type, (a->img->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) != 0)
+                              : NVMTL_FBF_NO_IMAGE;
+        if (!why) {
+            if (nvmtl_vk_image_view_create_range(a->img, a->fmt, 0, a->level, 1, a->layer, 1, 2u, &views[n]) || !views[n]) why = NVMTL_FBF_NO_VIEW;
+            else if (nvmtl_vk_cmd_retire_view(c, views[n])) { views[n] = NULL; why = NVMTL_FBF_NO_VIEW; }   /* a failed retire destroyed the view itself */
+        }
+        if (why) {
+            c->fbf_bad |= 1u << n;
+            const unsigned k = atomic_fetch_add(&g_fbf_att_refused, 1) + 1;
+            nvmtl_fbf_log_attachment(n, why, a, c->fbf_layers);
+            if (nvmtl_fbf_pow2(k)) nvmtl_fbf_summary(1);
+        }
+    }
+    if (!(c->fbin & ~c->fbf_bad)) return;
+    VkDescriptorSet set = nvmtl_fbf_alloc_set(c);
+    if (!set) { c->fbf_noset = 1; return; }   /* not an attachment problem: the skip line says so */
+    VkDescriptorImageInfo ii[NVMTL_NCOL]; VkWriteDescriptorSet w[NVMTL_NCOL]; uint32_t nw = 0;
+    for (uint32_t n = 0; n < NVMTL_NCOL; n++) {
+        if (!(c->fbin & ~c->fbf_bad & (1u << n))) continue;
+        ii[n] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)views[n], VK_IMAGE_LAYOUT_GENERAL };
+        w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_FBFETCH_BASE + n, 0, 1,
+                                          VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &ii[n], NULL, NULL };
+    }
+    pvkUpdateDescriptorSets(g_dev, nw, w, 0, NULL);
+    c->fbf_set = (void *)set;
+    const unsigned k = atomic_fetch_add(&g_fbf_sets, 1) + 1;
+    if (k <= 8)
+        nvlog("vk: fbfetch: pass %u with input attachments 0x%x (%u written, refused 0x%x): descriptor set made", k, c->fbin, nw, c->fbf_bad);
+    nvmtl_fbf_summary(0);
+}
+/* before a draw whose pipeline reads: the descriptor set, then the by-region barrier of the self-dependency. 0 = recorded, -1 = skip the draw.
+ * Every skip cause has its own literal; the first two are logic bugs (the encoder restarts a pass that lacks an input), the others are resource failures. */
+static int nvmtl_fbf_bind(nvk_cmdbuf *c, nvk_pipeline *p)
+{
+    int cause = -1;
+    if (!c->in_rp) cause = NVMTL_FBF_SK_NOPASS;
+    else if (nvmtl_fbf_missing(c->fbin, p->fbread)) cause = NVMTL_FBF_SK_NOINPUT;
+    else {
+        if (!c->fbf_ready) nvmtl_fbf_prepare_pass(c);
+        if (c->fbf_noset) cause = NVMTL_FBF_SK_NOSET;
+        else if (p->fbread & c->fbf_bad) cause = NVMTL_FBF_SK_ATTACHMENT;
+        else if (!c->fbf_set) cause = NVMTL_FBF_SK_NOSET;
+    }
+    if (cause >= 0) {
+        const unsigned k = atomic_fetch_add(&g_fbf_skip[cause], 1) + 1;
+        switch (cause) {
+        case NVMTL_FBF_SK_NOPASS: nvlog("vk: fbfetch: BUG: a draw that reads [[color(n)]] 0x%x was reached with no render pass in progress - SKIPPED", p->fbread); break;
+        case NVMTL_FBF_SK_NOINPUT: nvlog("vk: fbfetch: BUG: a draw that reads [[color(n)]] 0x%x was reached in a render pass with input attachments 0x%x only - the encoder's restart did not happen, SKIPPED", p->fbread, c->fbin); break;
+        case NVMTL_FBF_SK_ATTACHMENT: nvlog("vk: fbfetch: a draw that reads [[color(n)]] 0x%x is SKIPPED: an attachment it reads (refused 0x%x of the pass's 0x%x) cannot be an input attachment - see the 'cannot be an input attachment' lines", p->fbread, c->fbf_bad, c->fbin); break;
+        default: nvlog("vk: fbfetch: a draw that reads [[color(n)]] 0x%x is SKIPPED: no input-attachment descriptor set could be made for this pass (pool exhausted or out of memory, see the allocation line)", p->fbread); break;
+        }
+        if (nvmtl_fbf_pow2(k)) nvmtl_fbf_summary(1);
+        return -1;
+    }
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+    VkDescriptorSet set = (VkDescriptorSet)c->fbf_set;
+    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FBF_SET, 1, &set, 0, NULL);
+    const unsigned k = atomic_fetch_add(&g_fbf_draws, 1) + 1;
+    if (k <= 4) nvlog("vk: fbfetch: draw %u reads [[color(n)]] 0x%x: barrier + set %u bound (pass inputs 0x%x)", k, p->fbread, NVMTL_FBF_SET, c->fbin);
+    if (nvmtl_fbf_pow2(k) || !(k & 255)) nvmtl_fbf_summary(nvmtl_fbf_pow2(k));
+    return 0;
+}
+uint32_t nvmtl_vk_fbf_pass_inputs(const nvk_cmdbuf *c) { return c->in_rp ? c->fbin : 0u; }
+void nvmtl_vk_fbf_note_restart(uint32_t had, uint32_t wants)
+{
+    const unsigned k = atomic_fetch_add(&g_fbf_restarts, 1) + 1;
+    nvlog("vk: fbfetch: a pipeline that reads [[color(n)]] 0x%x was bound in a pass with input attachments 0x%x - the pass is RESTARTED (LOAD) with 0x%x", wants, had, wants | had);
+    if (nvmtl_fbf_pow2(k)) nvmtl_fbf_summary(1);
+}
+
 void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
 {
     VkDescriptorSet s[3] = { nvmtl_snapshot_set_c(c, 0, p), nvmtl_snapshot_set_c(c, 1, p), g_heapSet };
@@ -3189,6 +3421,7 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
         pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET,
                            NVMTL_SAMPLE_POSITION_BYTES, c->sample_pattern.position);
     pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
+    if (p->fbread && nvmtl_fbf_bind(c, p)) { c->nobind = 1; c->skipped++; }   /* never draw a pipeline that reads [[color(n)]] without its input attachment */
 }
 
 #define NVMTL_DEPTH_USAGE (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | \
@@ -3456,7 +3689,39 @@ static uint32_t nvmtl_rt_shape(const nvk_pipeline *p, uint32_t cf[NVMTL_NCOL], u
     for (uint32_t i = 0; i < n; i++) cf[i] = p->cfmts[i];
     return n;
 }
-static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, VkRenderPass *out)
+static uint32_t nvmtl_fbf_fmt_int(uint32_t f)
+{
+    switch (f) {
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+        case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_B8G8R8A8_SINT:
+        case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+        case VK_FORMAT_A2R10G10B10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32:
+        case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT:
+        case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16G16B16A16_SINT:
+        case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT:
+        case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: return 1;
+        default: return 0;
+    }
+}
+/* Decide, before the render pass is built, which of the fragment module's [[color(n)]] reads are served (out->fbread), which are zeroed
+ * (*zero, with the first reason in *why) and whether its subpass inputs get the input-attachment set (out->fbdecl). Reads the module only. */
+static void nvmtl_fbfetch_prepare(nvk_pipeline *out, const void *fs, size_t fn, uint32_t samples, int tess, uint32_t *zero, unsigned *why)
+{
+    out->fbread = out->fbdecl = 0; *zero = 0; *why = NVMTL_FBF_OK;
+    nvmtl_fbfetch fb; size_t nw = fn / 4;
+    if (nvmtl_spirv_fbfetch((uint32_t *)fs, &nw, nw, 0, &fb)) return;   /* the scan only reads; its failure is logged by the note */
+    out->fbdecl = g_fbfLayout ? fb.decl_mask : 0u;
+    if (!fb.read_mask) return;
+    uint32_t cf[NVMTL_NCOL], rmask, ncol = nvmtl_rt_shape(out, cf, &rmask);
+    nvmtl_fbf_in in; memset(&in, 0, sizeof in);
+    in.read_mask = fb.read_mask; in.ncol = ncol; in.samples = samples > 1 ? samples : 1u; in.layout_ok = g_fbfLayout != VK_NULL_HANDLE;
+    in.forced_zero = (uint32_t)nvmtl_fbfetch_zero_on(); in.tess = tess ? 1u : 0u;
+    for (uint32_t i = 0; i < ncol; i++) if (cf[i]) { in.cfmt_present |= 1u << i; if (nvmtl_fbf_fmt_int(cf[i])) in.cfmt_int |= 1u << i; }
+    nvmtl_fbf_plan(&in, &out->fbread, zero, why);
+    if (out->fbread) atomic_fetch_add(&g_fbf_served, 1);
+    if (*zero) atomic_fetch_add(&g_fbf_refused[*why], 1);
+}
+static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, uint32_t fbin, VkRenderPass *out)
 {
     VkSampleCountFlagBits sc = (VkSampleCountFlagBits)(p->samples > 1 ? p->samples : 1);
     int ms = p->samples > 1, anyres = 0;
@@ -3489,14 +3754,28 @@ static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, VkR
             VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL };
     }
-    VkSubpassDescription sp = { 0, VK_PIPELINE_BIND_POINT_GRAPHICS, 0, NULL, ncol, ncol ? cref : NULL, anyres ? rref : NULL,
+    /* framebuffer fetch: colour attachment i is also input attachment i of the subpass; Vulkan wants GENERAL for both references */
+    VkAttachmentReference iref[NVMTL_NCOL]; uint32_t nin = 0;
+    if (fbin && !ms) {
+        uint32_t att[NVMTL_NCOL], ia[NVMTL_NCOL];
+        for (uint32_t i = 0; i < ncol; i++) att[i] = cref[i].attachment;
+        nin = nvmtl_fbf_input_refs(fbin, ncol, att, VK_ATTACHMENT_UNUSED, ia);
+        for (uint32_t i = 0; i < nin; i++) {
+            iref[i] = (VkAttachmentReference){ ia[i], VK_IMAGE_LAYOUT_GENERAL };
+            if (ia[i] != VK_ATTACHMENT_UNUSED) cref[i].layout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+    }
+    VkSubpassDescription sp = { 0, VK_PIPELINE_BIND_POINT_GRAPHICS, nin, nin ? iref : NULL, ncol, ncol ? cref : NULL, anyres ? rref : NULL,
         p->has_depth ? &dref : NULL, 0, NULL };
-    const VkSubpassDependency deps[2] = {
+    const VkSubpassDependency deps[3] = {
         { VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 },
         { 0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-          VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 } };
-    VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, n, atts, 1, &sp, 2, deps };
+          VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 },
+        /* the self-dependency that makes the pipeline barrier recorded before each fetching draw legal (nvmtl_fbf_bind) */
+        { 0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT } };
+    VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, n, atts, 1, &sp, nin ? 3u : 2u, deps };
     return pvkCreateRenderPass(g_dev, &rpci, NULL, out);
 }
 int nvmtl_vk_pipeline_create_blend(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const nvk_blend_state *blend, nvk_pipeline *out)
@@ -3976,7 +4255,10 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     out->tbany = 0; for (int k = 0; k < 4; k++) out->tbany |= (out->tbm[0][k] | out->tbm[1][k]) != 0;
     (void)vkfmt;
     VkRenderPass pass = VK_NULL_HANDLE;
-    VKCK(nvmtl_make_render_pass(out, 0, &pass), "vkCreateRenderPass");
+    if (ensure_descriptors()) return -1;
+    uint32_t fbf_zero = 0; unsigned fbf_why = NVMTL_FBF_OK;
+    nvmtl_fbfetch_prepare(out, fs, fn, samples, td != NULL, &fbf_zero, &fbf_why);   /* before the pass: its input attachments depend on it */
+    VKCK(nvmtl_make_render_pass(out, 0, out->fbread, &pass), "vkCreateRenderPass");
     out->rp = pass;
 
     if (!nvmtl_spirv_ok(vs, vn, "vertex module") || !nvmtl_spirv_ok(fs, fn, "fragment module")) return -1;
@@ -3986,7 +4268,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     if (!fcopy) { nvlog("vk: out of memory copying the fragment module"); return -1; }
     memcpy(fcopy, fs, fn);
     size_t fwords = fn / 4;
-    nvmtl_fbfetch_pipeline_note(fcopy, &fwords, fs, out->ncol ? out->ncol : (out->cfmt ? 1u : 0u), samples);
+    nvmtl_fbfetch_pipeline_note(fcopy, &fwords, fs, out->ncol ? out->ncol : (out->cfmt ? 1u : 0u), samples, out->fbread, fbf_zero, fbf_why, out->fbdecl);
     if (ensure_descriptors()) { free(fcopy); return -1; }
     if (!g_heapSet && (nvmtl_spirv_uses_set(vs, vn / 4, 2) || nvmtl_spirv_uses_set(fs, fn / 4, 2))) {
         free(fcopy); nvlog("vk: render pipeline REFUSED - a shader indexes the bindless heap (set 2) and this device has none"); return -1; }
@@ -4009,11 +4291,11 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     }
 
     if (ensure_descriptors()) goto pipeline_failed;
-    VkDescriptorSetLayout sl2[3] = { g_setLayout, g_setLayout, g_heapLayout };
+    VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapSet ? g_heapLayout : g_emptyLayout, g_fbfLayout };   /* [2] only used by a fetch pipeline without a heap */
     VkPushConstantRange pc[2]; uint32_t npc = 0;
     if (td) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, NVMTL_TESS_PC_BYTES };
     if (g_sample_locations) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET, NVMTL_SAMPLE_POSITION_BYTES };
-    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, g_heapSet ? 3 : 2, sl2, npc, npc ? pc : NULL };
+    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, out->fbdecl ? 4u : (g_heapSet ? 3u : 2u), sl2, npc, npc ? pc : NULL };
     NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout), "vkCreatePipelineLayout");
 
     VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, NULL, 0, nvib, vib, nvia, via };
@@ -4578,7 +4860,7 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
 }
 
 static pthread_mutex_t g_rpv_lock = PTHREAD_MUTEX_INITIALIZER;
-static void *nvmtl_rp_variant(nvk_pipeline *p, uint32_t load, uint32_t was)
+static void *nvmtl_rp_variant(nvk_pipeline *p, uint32_t load, uint32_t was, uint32_t fbin)
 {
     uint32_t cf[NVMTL_NCOL], rmask, ncol = nvmtl_rt_shape(p, cf, &rmask), keep = 0;
     for (uint32_t i = 0; i < ncol; i++) if (cf[i]) keep |= NVMTL_LOAD_COLOUR(i);
@@ -4594,10 +4876,12 @@ static void *nvmtl_rp_variant(nvk_pipeline *p, uint32_t load, uint32_t was)
                   "'MRT PASS' line above therefore MEASURED that every render pass in this process had one colour slot",
                   ncol, p->has_depth);
     }
-    if (!load) return p->rp;
+    if (!load && fbin == p->fbread) return p->rp;
+    /* variant key = load bits | the input attachments the pass carries (framebuffer fetch); without input attachments the plain load key */
+    const uint32_t key = nvmtl_fbf_rp_key(load, fbin);
     pthread_mutex_lock(&g_rpv_lock);
-    int legacy = load < 4u; void *rp = legacy ? p->rpv[load] : NULL;
-    for (uint32_t i = 0; !legacy && i < p->nrpx; i++) if (p->rpxk[i] == load) { rp = p->rpx[i]; break; }
+    int legacy = key < 4u; void *rp = legacy ? p->rpv[key] : NULL;
+    for (uint32_t i = 0; !legacy && i < p->nrpx; i++) if (p->rpxk[i] == key) { rp = p->rpx[i]; break; }
     if (!rp && !legacy && p->nrpx >= p->crpx && p->crpx < NVMTL_RPX_MAX) {
         uint32_t cap = p->crpx ? p->crpx * 2u : NVMTL_RPX_GROW;
         if (cap > NVMTL_RPX_MAX) cap = NVMTL_RPX_MAX;
@@ -4605,15 +4889,15 @@ static void *nvmtl_rp_variant(nvk_pipeline *p, uint32_t load, uint32_t was)
         if (gx) { p->rpx = gx; uint32_t *gk = (uint32_t *)realloc(p->rpxk, cap * sizeof *gk); if (gk) { p->rpxk = gk; p->crpx = cap; } }
     }
     if (!rp && !legacy && p->nrpx >= p->crpx)
-        nvlog("vk: apps2 load variant 0x%x on pipeline %p: rpx holds %u of a DERIVED ceiling of %u and did not grow — "
+        nvlog("vk: apps2 load variant 0x%x (input attachments 0x%x) on pipeline %p: rpx holds %u of a DERIVED ceiling of %u and did not grow — "
               "THIS PASS CLEARS INSTEAD OF LOADING and the attachment's previous contents are LOST",
-              load, (void *)p, p->crpx, NVMTL_RPX_MAX);
+              load, fbin, (void *)p, p->crpx, NVMTL_RPX_MAX);
     else if (!rp) {
         VkRenderPass made = VK_NULL_HANDLE;
-        VkResult r = nvmtl_make_render_pass(p, load, &made);
-        if (r == VK_SUCCESS && legacy) { rp = p->rpv[load] = (void *)made; nvlog("vk: G11 load-action render pass variant %u made (%u colour slot(s), colour %s, depth %s)", load, ncol, (load & 1u) ? "LOAD" : "clear", (load & 2u) ? "LOAD" : "clear"); }
-        else if (r == VK_SUCCESS) { rp = (void *)made; p->rpxk[p->nrpx] = load; p->rpx[p->nrpx++] = rp;
-            nvlog("vk: apps2 load variant 0x%x made (%u colour slot(s), stencil %s)", load, ncol, (load & NVMTL_LOAD_STENCIL) ? "LOAD" : "clear"); }
+        VkResult r = nvmtl_make_render_pass(p, load, fbin, &made);
+        if (r == VK_SUCCESS && legacy) { rp = p->rpv[key] = (void *)made; nvlog("vk: G11 load-action render pass variant %u made (%u colour slot(s), colour %s, depth %s)", load, ncol, (load & 1u) ? "LOAD" : "clear", (load & 2u) ? "LOAD" : "clear"); }
+        else if (r == VK_SUCCESS) { rp = (void *)made; p->rpxk[p->nrpx] = key; p->rpx[p->nrpx++] = rp;
+            nvlog("vk: apps2 load variant 0x%x made (%u colour slot(s), stencil %s, input attachments 0x%x)", load, ncol, (load & NVMTL_LOAD_STENCIL) ? "LOAD" : "clear", fbin); }
         else if (legacy) nvlog("vk: G11 vkCreateRenderPass(variant %u) -> %d — this pass CLEARS instead of loading", load, r);
         else nvlog("vk: apps2 vkCreateRenderPass(variant 0x%x) -> %d — this pass CLEARS instead of loading", load, r);
     }
@@ -4756,6 +5040,15 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     if (p->has_depth && ps->ds && g_sample_locations &&
         (ps->load & (NVMTL_LOAD_DEPTH | NVMTL_LOAD_STENCIL)))
         nvmtl_private_depth_layout(c, ps->ds, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    /* framebuffer fetch: which colour attachments this pass carries as input attachments, and the facts the descriptors are made from at
+     * the first draw that reads (nvmtl_fbf_bind). A pass restarted by the encoder arrives with ps->fbin widened. */
+    uint32_t fbf_slots = 0;
+    for (uint32_t i = 0; i < ncol; i++) if (cf[i]) fbf_slots |= 1u << i;
+    const uint32_t fbin = nvmtl_fbf_pass_fbin(ps->fbin, p->fbread, fbf_slots, p->samples);
+    c->fbin = fbin; c->fbf_bad = 0; c->fbf_noset = 0; c->fbf_set = NULL; c->fbf_ready = 0; c->fbf_layers = ps->layers;
+    memset(c->fbf_att, 0, sizeof c->fbf_att);
+    for (uint32_t i = 0; i < ncol; i++)
+        if (cf[i] && ps->col[i]) c->fbf_att[i] = (nvk_fbf_att){ ps->col[i], ps->col_level[i], ps->col_layer[i], ps->colfmt[i] ? ps->colfmt[i] : ps->col[i]->fmt };
     VkImageView views[2 * NVMTL_NCOL + 2]; uint32_t nviews = 0, was = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; int first = 1;
     uint32_t prm = 0;
     for (uint32_t i = 0; p->samples > 1 && i < ncol; i++) if (cf[i] && (rmask & (1u << i)) && ps->res[i] && ps->resview[i]) prm |= 1u << i;
@@ -4798,8 +5091,8 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     VkClearValue cv[2 * NVMTL_NCOL + 1]; uint32_t ncv = 0; memset(cv, 0, sizeof cv);
     for (uint32_t i = 0; i < ncol; i++) if (cf[i]) { nvmtl_clear_colour(&cv[ncv].color, cf[i], ps->clear[i]); ncv++; }
     if (p->has_depth) { cv[ncv].depthStencil.depth = ps->clear_depth; cv[ncv].depthStencil.stencil = ps->clear_stencil; ncv++; }
-    void *rpUse = rpShape ? rpShape : nvmtl_rp_variant(p, ps->load, was);
-    if (!rpUse) rpUse = p->rp;
+    void *rpUse = rpShape ? rpShape : nvmtl_rp_variant(p, ps->load, was, fbin);
+    if (!rpUse) { rpUse = p->rp; c->fbin = p->samples > 1 ? 0u : p->fbread; }   /* the pipeline's own pass: its input attachments, whatever the variant would have had */
     VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, (VkRenderPass)rpUse, c->fb,
         { { 0, 0 }, { ps->w, ps->h } }, ncv, cv };
     c->sample_pattern = pattern;
@@ -5124,7 +5417,7 @@ int nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps)
         nvk_pipeline *q = &g_shapes[g_nshapes].p; memset(q, 0, sizeof *q);
         q->ncol = k.ncol; memcpy(q->cfmts, k.cfmts, sizeof q->cfmts); q->cfmt = k.cfmts[0];
         q->has_depth = (int)k.has_depth; q->dfmt = k.dfmt; q->has_stencil = (uint32_t)nvmtl_fmt_stencil(k.dfmt); q->samples = k.samples; q->rmask = rmask;
-        VkRenderPass made = VK_NULL_HANDLE; VkResult r = nvmtl_make_render_pass(q, 0, &made);
+        VkRenderPass made = VK_NULL_HANDLE; VkResult r = nvmtl_make_render_pass(q, 0, 0, &made);
         if (r == VK_SUCCESS) { q->rp = (void *)made; g_shapes[g_nshapes].k = k; g_shapes[g_nshapes].rmask = rmask; g_nshapes++; p = q; }
         else nvlog("encoder: apps2 empty-pass vkCreateRenderPass -> %d", r);
     }
@@ -5621,7 +5914,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     pvkDestroyFence(g_dev, fence, NULL);
     if (c->nsets > g_peak_sets) { g_peak_sets = c->nsets; nvlog("vk: commit high-water: %u descriptor sets = %u draws in one command buffer (%u pools open)", c->nsets, c->nsets / 2, g_ndescPools); }
     if (c->nfb > g_peak_fbs) g_peak_fbs = c->nfb;
-    if (c->skipped) nvlog("vk: commit with %u draws/dispatches SKIPPED (no descriptor set could be allocated)", c->skipped);
+    if (c->skipped) nvlog("vk: commit with %u draws/dispatches SKIPPED (no descriptor set could be allocated, an alignment/vertex-buffer guard refused, or a framebuffer-fetch draw was refused: see the fbfetch lines)", c->skipped);
     const unsigned perf_sets = c->nsets;
     pt[6] = nvmtl_perf_now();
     if (pre->begun) {
@@ -7308,7 +7601,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, g_linmod ? (void *)&eci : NULL, 0, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt,
         { w, h, 1 }, 1, 1, VK_SAMPLE_COUNT_1_BIT, g_linmod ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_LINEAR,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
-            | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | (render ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0),
+            | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | (render ? NVMTL_COLOR_USAGE(2) : 0),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_PREINITIALIZED };
     uint32_t vp = a8 ? 0 : nvmtl_vk_srgb_pair(vkfmt);
     VkFormat vfl[2] = { (VkFormat)vkfmt, (VkFormat)vp };
@@ -7543,7 +7836,7 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
     { uint32_t bb = 0; if (nvmtl_vk_format_block(vkfmt, &out->bw, &out->bh, &bb)) { out->bpp = bb; out->storage = 0; storage = 0; } }
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, (mtl_type == 5 || mtl_type == 6) ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, mtl_type == 7 ? VK_IMAGE_TYPE_3D : mtl_type < 2 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
         fmt, { w, h, mtl_type == 7 ? layers : 1 }, mips, mtl_type == 7 ? 1 : layers, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
-        (out->bw > 1 ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+        (out->bw > 1 ? 0 : NVMTL_COLOR_USAGE(mtl_type)) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     nvmtl_vk_image_mutable(&ici, out);
@@ -7609,7 +7902,7 @@ static int nvmtl_vk_image_size_align_uncached(uint32_t w, uint32_t h, uint32_t v
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, (!depth_attachment && (mtl_type == 5 || mtl_type == 6)) ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, (!depth_attachment && mtl_type == 7) ? VK_IMAGE_TYPE_3D : (!depth_attachment && mtl_type < 2) ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
         (VkFormat)vkfmt, { w, h, (!depth_attachment && mtl_type == 7) ? layers : 1 }, depth_attachment ? 1 : mips, (depth_attachment || mtl_type == 7) ? 1 : layers, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
         depth_attachment ? NVMTL_DEPTH_USAGE
-                         : ((compressed ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                         : ((compressed ? 0 : NVMTL_COLOR_USAGE(mtl_type)) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                             VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0)),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     VkImage im = VK_NULL_HANDLE;
@@ -7795,7 +8088,7 @@ void nvmtl_vk_pipeline_destroy(nvk_pipeline *p)
     pthread_mutex_unlock(&g_ag_lock);
     if (safe) { nvmtl_vk_pipeline_destroy(safe); free(safe); }
     pthread_mutex_lock(&g_rpv_lock);
-    for (uint32_t i = 1; i < 4; i++) if (p->rpv[i] && p->rpv[i] != p->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)p->rpv[i], NULL);
+    for (uint32_t i = 0; i < 4; i++) if (p->rpv[i] && p->rpv[i] != p->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)p->rpv[i], NULL);
     for (uint32_t i = 0; i < p->nrpx; i++) if (p->rpx[i] && p->rpx[i] != p->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)p->rpx[i], NULL);
     free(p->rpx); free(p->rpxk); p->rpx = NULL; p->rpxk = NULL; p->nrpx = p->crpx = 0;
     if (p->shape_identity) {

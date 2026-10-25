@@ -35,6 +35,8 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint64_t shape_identity;
     uint32_t lin;
     uint64_t tbm[2][4]; uint32_t tbany;
+    uint32_t fbread;   /* bit n: the fragment module reads [[color(n)]] and the render passes it is drawn in carry colour n as an input attachment */
+    uint32_t fbdecl;   /* bit n: the module declares the subpass input (its variable sits in descriptor set NVMTL_FBF_SET) */
 } nvk_pipeline;
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;
@@ -55,6 +57,8 @@ typedef struct {
 void nvmtl_vk_clock_refresh(void);
 int nvmtl_vk_interval_seconds(const nvmtl_gpu_interval *t, double *start, double *end);
 
+/* the colour attachments of the pass in progress, kept for the input-attachment descriptors (framebuffer fetch) */
+typedef struct { nvk_image *img; uint32_t level, layer, fmt; } nvk_fbf_att;
 typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view; void *table;
                  void **fbs; unsigned nfb, capfb;
                  nvk_setref *sets; unsigned nsets, capsets;
@@ -68,6 +72,9 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *counter_recording; unsigned counter_error;
                  nvmtl_sample_pattern sample_pattern;
                  void **rvs; unsigned nrv, caprv;
+                 uint32_t fbin, fbf_bad, fbf_layers, fbf_noset;   /* input attachments the pass in progress declares; of them the ones that cannot be served; its layer count */
+                 void *fbf_set; uint32_t fbf_ready;     /* the pass's descriptor set (set NVMTL_FBF_SET) and whether it was built (or failed) */
+                 nvk_fbf_att fbf_att[NVMTL_NCOL];
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
@@ -161,6 +168,8 @@ int  nvmtl_vk_sampler_create_desc(const nvmtl_sampler_desc *desc, nvk_sampler *o
 void nvmtl_vk_sampler_destroy(nvk_sampler *s);
 int  nvmtl_vk_bind_sampler(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_sampler *s);
 void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p);
+uint32_t nvmtl_vk_fbf_pass_inputs(const nvk_cmdbuf *c);   /* framebuffer fetch: the input attachments of the pass in progress (0 = none / no pass) */
+void nvmtl_vk_fbf_note_restart(uint32_t had, uint32_t wants);
 int  nvmtl_vk_compute_pipeline_create(const void *cs, size_t n, nvk_pipeline *out);
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz);
 void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_t threads[3], const uint32_t tg[3]);
@@ -225,7 +234,9 @@ typedef struct { nvk_image *col[NVMTL_NCOL]; void *colview[NVMTL_NCOL]; uint32_t
     nvmtl_sample_pattern sample_pattern; uint32_t depth_store_options, stencil_store_options;
     uint32_t ds_level, ds_layer;
     uint32_t colfmt[NVMTL_NCOL], resfmt[NVMTL_NCOL];
-    uint32_t col_level[NVMTL_NCOL], col_layer[NVMTL_NCOL];  } nvk_pass;
+    uint32_t col_level[NVMTL_NCOL], col_layer[NVMTL_NCOL];
+    uint32_t fbin;   /* colour attachments the render pass must carry as input attachments, besides the ones the pipeline reads (a restart widens it) */
+} nvk_pass;
 typedef struct { uint32_t ncol, cfmts[NVMTL_NCOL], has_depth, dfmt, samples; } nvk_rtsig;
 int  nvmtl_vk_pipeline_create_rt(const void *vs, size_t vn, const void *fs, size_t fn, const nvk_rt *rt, const void *vin, uint32_t samples,
                                  const nvk_tess_desc *td, void *out);

@@ -4,6 +4,7 @@ framebuffer fetch (WARN while a read is left, INFO when folded away, WARN for a 
 process died at or after its last line), a clean log (nothing), and the hook in triage_reports.py.
 Run: python3 -I -B tests/test_triage_n48.py"""
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,13 +73,68 @@ r = rows_of(rd)
 check(r["framebuffer fetch"][0] == "WARN" and "WindowServer (up to module #1)" in r["framebuffer fetch"][2] and "Terminal" in r["framebuffer fetch"][2]
       and "reads left as translated" in r["framebuffer fetch"][2], "fbfetch read: %r" % r)
 z = L("Terminal", 797, "1a41", FB % (1, "READS them", "each read replaced by a zero vector (NVMTL_FBFETCH_ZERO=1)", 1, 0, 1, 0))
-check("1 read(s) replaced by zero" in rows_of(z)["framebuffer fetch"][2], "fbfetch zeroed")
+check("1 module(s) with zeroed reads" in rows_of(z)["framebuffer fetch"][2], "fbfetch zeroed")
 gone = L("Terminal", 797, "1a41", FB % (1, "no read is left (folded away)", "harmless", 0, 1, 0, 0))
 r = rows_of(gone)
 check(r["framebuffer fetch"][0] == "INFO" and "folded away" in r["framebuffer fetch"][2], "fbfetch folded: %r" % r)
 check(rows_of(gone + rd)["framebuffer fetch"][0] == "WARN", "a read anywhere wins over a folded one")
 sf = L("Terminal", 797, "1a41", "vk: fbfetch: the scan of a fragment module (4096 words) FAILED - malformed module, an id bound over 1048576, or out of memory; a framebuffer fetch in it would go unnoticed [1 so far]")
 check(rows_of(sf)["framebuffer fetch"][0] == "WARN", "scan failure: WARN")
+
+# framebuffer fetch, the implemented path (line formats of nvmtl_vk.c: nvmtl_fbfetch_pipeline_note, nvmtl_fbf_bind, nvmtl_fbf_prepare_pass)
+FB2 = ("vk: fbfetch: fragment module #%d declares [[color(n)]] subpass inputs 0x7 (binding 192+n, 3 decoration(s) moved to set 3) and READS them; pipeline has 1 colour "
+       "attachment(s), 1 sample(s); served 0x%x, zeroed 0x%x: %s [%d served / %d read / 0 declared-only / %d zeroed / %d zeroing failed so far]")
+impl = L("Terminal", 904, "1e1e", FB2 % (1, 1, 6, "IMPLEMENTED for the attachments the pipeline has (input attachments of the render pass, barrier before each draw); the other reads zeroed", 1, 1, 1, 0))
+impl += L("Terminal", 904, "1e1e", "vk: fbfetch: reads of attachments the pipeline lacks (the pipeline has no colour attachment at that index (normal: the translator reads every colour input it declares)): reads of colour attachment(s) 0x6 are zeroed, 0x1 are served [1 such pipeline(s) for this reason so far]")
+impl += L("Terminal", 904, "1e1e", "vk: fbfetch: draw 4 reads [[color(n)]] 0x1: barrier + set 3 bound (pass inputs 0x1)")
+SUM = ("vk: fbfetch: SUMMARY served=%d modules=5 read=5 zmod=5 zero_failed=%d scan_failed=0 move_failed=0 zr_noatt=5 zr_ms=%d zr_int=0 zr_tess=0 zr_nolayout=0 zr_forced=0 "
+       "sets=%d draws=%d skipped=%d skip_nopass=0 skip_noinput=0 skip_att=%d skip_noset=0 restarts=%d att_refused=%d alloc_failed=0")
+impl += L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0))
+r = rows_of(impl)
+check(list(r) == ["framebuffer fetch"] and r["framebuffer fetch"][0] == "INFO" and "IMPLEMENTED" in r["framebuffer fetch"][2]
+      and "Terminal 5 pipeline(s) served, 9000 draw(s), 40 pass set(s), 3 restart(s)" in r["framebuffer fetch"][2], "implemented: INFO only, %r" % r)
+uns = L("Chess", 3000, "1", "vk: fbfetch: UNSUPPORTED (a multisample target (per-sample fetch is not carried)): reads of colour attachment(s) 0x1 are zeroed, 0x0 are served [1 such pipeline(s) for this reason so far]")
+rr = [x for x in t48.n48_plugin_rows(impl + uns) if x[0] == "WARN"]
+check(len(rr) == 1 and "multisample target" in rr[0][2] and "Chess" in rr[0][2], "unsupported reason: WARN, %r" % rr)
+for bad in ("vk: fbfetch: a draw that reads [[color(n)]] 0x1 is SKIPPED: an attachment it reads (refused 0x1 of the pass's 0x1) cannot be an input attachment - see the 'cannot be an input attachment' lines",
+            "vk: fbfetch: colour attachment 0 of this pass cannot be an input attachment: a layered render pass (format 44, 1 sample(s), 4 layer(s), textureType 3) - pipelines that read it are SKIPPED [1 so far]",
+            "vk: fbfetch: input-attachment descriptor set allocation FAILED (-1000069000, 16 pool(s)) - the draws that read it are SKIPPED [1 so far]",
+            "fbfetch: the render pass could not be RESTARTED with input attachments 0x1 - the rest of this encoder is not drawn",
+            "vk: fbfetch: ZEROING FAILED for a fragment module (812 words, zero mask 0x6): the reads of colour attachment(s) 0x6 hit an UNDEFINED descriptor (corrupt colours are to be expected from this pipeline)",
+            "vk: fbfetch: BUG: a draw that reads [[color(n)]] 0x1 was reached in a render pass with input attachments 0x2 only - the encoder's restart did not happen, SKIPPED",
+            "vk: fbfetch: moving the subpass inputs to descriptor set 3 FAILED - every read of this module is zeroed instead (served mask 0x1 NOT served)",
+            "vk: fbfetch: this device allows only 4 input attachments per stage / 4 per set (need 8) - [[color(n)]] reads will be zero vectors"):
+    rr = [x for x in t48.n48_plugin_rows(impl + L("Terminal", 904, "1e1e", bad)) if x[0] == "WARN"]
+    check(len(rr) == 1 and ("SKIPPED" in rr[0][2] or "FAILED" in rr[0][2] or "BUG" in rr[0][2]) and "Terminal" in rr[0][2], "refusal line is a WARN: %s -> %r" % (bad[:60], rr))
+failed = L("Terminal", 904, "1e1e", FB2 % (2, 0, 1, "UNSUPPORTED and the zeroing FAILED - the read hits an undefined descriptor", 0, 1, 0, 1))
+check(rows_of(failed)["framebuffer fetch"][0] == "WARN" and "reads left as translated" in rows_of(failed)["framebuffer fetch"][2], "zeroing failed: WARN")
+
+# the plugin log keeps the first 8 lines of each format literal: eight benign lines, then a real limit, then the totals
+benign = "".join(L("Terminal", 904, "1e1e", "vk: fbfetch: reads of attachments the pipeline lacks (normal, the translator reads every colour input it declares): reads of colour attachment(s) 0x6 are zeroed, 0x1 are served [%d such pipeline(s) so far]" % k) for k in range(1, 9))
+ms = L("Chess", 3000, "1", "vk: fbfetch: UNSUPPORTED (a multisample target, per-sample fetch is not carried): reads of colour attachment(s) 0x1 are zeroed, 0x0 are served [1 such pipeline(s) so far]")
+rr = [x for x in t48.n48_plugin_rows(benign + ms) if x[0] == "WARN"]
+check(len(rr) == 1 and "multisample target" in rr[0][2], "a real limit after a flood of benign lines: WARN, %r" % rr)
+check(not [x for x in t48.n48_plugin_rows(benign) if x[0] == "WARN"], "only the benign reason: no WARN")
+# the totals alone raise the WARN (the individual lines may have been capped away)
+for key, val in (("skipped", 3), ("zero_failed", 1), ("att_refused", 2), ("alloc_failed", 1), ("zr_int", 4), ("restarts", 101)):
+    line = SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0)
+    line = line.replace(" %s=" % key, " %s=" % key + str(val) + "#", 1)
+    line = re.sub(r"(%s=)\d+#\d+" % key, r"\g<1>%d" % val, line) if key != "restarts" else line.replace("restarts=3", "restarts=101")
+    w = [x for x in t48.n48_plugin_rows(L("Terminal", 904, "1e1e", line)) if x[0] == "WARN"]
+    check(len(w) == 1 and "totals:" in w[0][2], "summary alone: %s -> %r (%s)" % (key, w, line[-90:]))
+check(not [x for x in t48.n48_plugin_rows(L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0))) if x[0] == "WARN"], "a clean summary: no WARN")
+# the newest summary of a process wins
+old_new = L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 1, 10, 7, 7, 0, 0)) + L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0))
+check(not [x for x in t48.n48_plugin_rows(old_new) if x[0] == "WARN"], "newest summary wins")
+# every UNSUPPORTED literal of the plugin (the NVMTL_FBF_LOG_REASON macro) is read by the triage
+import re as _re
+hdr = open(os.path.join(ROOT, "metal", "plugin", "nvmtl_fbfetch_plan.h")).read()
+lits = _re.findall(r'LOG\("(vk: fbfetch: UNSUPPORTED \([^"]*)"', hdr)
+check(len(lits) >= 6, "found the UNSUPPORTED literals in the plan header: %d" % len(lits))
+for lit in lits:
+    text = _re.sub(r"%[ux]", "1", lit)
+    ww = [x for x in t48.n48_plugin_rows(L("Terminal", 904, "1e1e", text)) if x[0] == "WARN"]
+    check(len(ww) == 1, "triage reads the plugin literal: %s" % lit[:70])
 
 # the copy bracket
 B = "copy_image_to_buffer: recording vk format 130 971x680 (level 0 of 1, layer 0 of 1) 1 sample(s) type 2 aspect 2 element 4 B region (0,0) 971x680 -> row 3884 B offset 0 of 2639120, image layout 1"
