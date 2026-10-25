@@ -27,6 +27,9 @@ static inline int nvmtl_log_failure(const char *text)
                     strstr(text, "UNSUPPORTED") || strstr(text, "SKIPPED") || strstr(text, "RESTARTED") || strstr(text, "are zeroed") ||
                     /* a process denied a device: for WindowServer that is the "Failed to create MetalDevice" abort,
                      * and /tmp/nvmtl.log is gone after the reboot that rescues the machine */
-                    strstr(text, "no device"));
+                    strstr(text, "no device") ||
+                    /* DRIVER-PLAN N49 open item 1: whether this process has its IOAccelCommandQueue (Activity Monitor's % GPU), once per
+                     * process, opened or not: triage needs the line either way */
+                    strstr(text, "GPU time queue:"));
 }
 #endif

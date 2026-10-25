@@ -19,6 +19,11 @@
  *   IOAccelCommandQueue::connectClient(IOAccelSharedUserClient2 of the same accelerator and task): start(), which is
  *     IOAccelSubmitter2::start (creates the 64-bit accumulatedGPUTime / lastSubmittedTime) + commandQueueStart.
  * The plugin does the first two steps only: it submits nothing through the queue, so it needs no notification port.
+ * Selector 5 (s_set_get_info, read from the family) copies the 1 KiB process path into the submitter (+0xd8, read
+ * only by IOGraphicsAccelerator2::reportGPURestart to name the process in a family GPU-restart report), sets the QoS
+ * (commandQueueStart already set the default, 2, which IOAccelCommandQueueCreate passes) and returns the trace object
+ * ID: no registry property, nothing Activity Monitor or our report reads, so it is left out (one kernel call less in
+ * WindowServer's device creation).
  *
  * Plain C, no IOKit types: tests/test_gpu_time_queue.c drives it with fake calls; NVMTLDevice.m passes the real ones
  * (IOServiceOpen / IOConnectAddClient / IOServiceClose, found with dlsym: the plugin does not link IOKit).
@@ -28,6 +33,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* IOGraphicsAccelerator2::newUserClient's switch: 0 surface, 1/3/7 contexts, 2 2D context, 4 display pipe, 5 IOAccelDevice2,
  * 6 IOAccelSharedUserClient2, 8 IOAccelCommandQueue, 9 GL drawable (0x20 Metal surface, 0x21 memory info) */
@@ -54,11 +60,13 @@ typedef struct {
     int step;            /* enum nvmtl_gpuq_step                                     */
     int32_t ret;         /* the IOReturn of the failing call (0 when none failed)    */
     uint32_t conn;       /* the open queue's connection (NVMTL_GPUQ_OPENED only)     */
-    int32_t close_ret;   /* NVMTL_GPUQ_ADD_FAILED: what IOServiceClose answered      */
+    int32_t close_ret;   /* what IOServiceClose answered for a connection the failure left */
+    int closed;          /* IOServiceClose was called (ADD_FAILED, or OPEN_FAILED with a connection) */
 } nvmtl_gpuq_result;
 
-/* the knob NVMTL_GPUTIME_QUEUE (environment, or a line of rdna3mtl.conf): "0" switches the queue off, anything else
- * (or unset) leaves it on */
+/* the knob NVMTL_GPUTIME_QUEUE: a line of rdna3mtl.conf, or the environment of a development build (a release build
+ * clears every NVMTL_ variable it inherits, so there only the conf file works). "0" switches the queue off, anything
+ * else (or unset) leaves it on */
 static inline int nvmtl_gpuq_enabled(const char *knob)
 {
     return !(knob && knob[0] == '0' && knob[1] == 0);
@@ -68,7 +76,7 @@ static inline int nvmtl_gpuq_enabled(const char *knob)
  * start is closed again: a half-made queue would be an IOAccelSubmitter2 without accumulatedGPUTime. */
 static inline nvmtl_gpuq_result nvmtl_gpuq_open(const nvmtl_gpuq_ops *ops, uint32_t accel, uint32_t shared_conn)
 {
-    nvmtl_gpuq_result r = { NVMTL_GPUQ_OPENED, 0, 0, 0 };
+    nvmtl_gpuq_result r = { NVMTL_GPUQ_OPENED, 0, 0, 0, 0 };
     if (!ops || !ops->service_open || !ops->add_client || !ops->close) { r.step = NVMTL_GPUQ_NO_API; return r; }
     if (!accel) { r.step = NVMTL_GPUQ_NO_ACCEL; return r; }
     if (!shared_conn) { r.step = NVMTL_GPUQ_NO_SHARED; return r; }
@@ -78,7 +86,7 @@ static inline nvmtl_gpuq_result nvmtl_gpuq_open(const nvmtl_gpuq_ops *ops, uint3
         r.step = NVMTL_GPUQ_OPEN_FAILED;
         r.ret = o;
         if (o == 0 && c == 0) r.ret = -1;     /* "success" with no connection: never seen, but not a queue */
-        else if (o != 0 && c) r.close_ret = ops->close(ops->ctx, c);   /* a connection with a failure: give it back */
+        else if (o != 0 && c) { r.close_ret = ops->close(ops->ctx, c); r.closed = 1; }   /* a connection with a failure: give it back */
         return r;
     }
     const int32_t a = ops->add_client(ops->ctx, c, shared_conn);
@@ -86,10 +94,31 @@ static inline nvmtl_gpuq_result nvmtl_gpuq_open(const nvmtl_gpuq_ops *ops, uint3
         r.step = NVMTL_GPUQ_ADD_FAILED;
         r.ret = a;
         r.close_ret = ops->close(ops->ctx, c);
+        r.closed = 1;
         return r;
     }
     r.conn = c;
     return r;
+}
+
+/* a failure worth one more try at the process's next Metal device (the shared connection or the accelerator may not
+ * have been ready); a refused start (ADD_FAILED) or a missing API would fail the same way again */
+static inline int nvmtl_gpuq_retry_ok(int step)
+{
+    return step == NVMTL_GPUQ_NO_SHARED || step == NVMTL_GPUQ_OPEN_FAILED;
+}
+
+/* what became of a connection the failure left: "" (none), " (the queue was closed again)" (IOServiceClose 0), or
+ * " (closing it FAILED too: IOReturn 0x...)" - the half-made queue may still be there */
+static inline const char *nvmtl_gpuq_close_note(const nvmtl_gpuq_result *r, char *buf, size_t cap)
+{
+    if (!buf || !cap) return "";
+    buf[0] = 0;
+    const int closed = r->step == NVMTL_GPUQ_ADD_FAILED || (r->step == NVMTL_GPUQ_OPEN_FAILED && r->closed);
+    if (!closed) return buf;
+    if (r->close_ret == 0) snprintf(buf, cap, " (the queue was closed again)");
+    else snprintf(buf, cap, " (closing it FAILED too: IOReturn 0x%08x)", (unsigned)r->close_ret);
+    return buf;
 }
 
 static inline const char *nvmtl_gpuq_step_name(int step)

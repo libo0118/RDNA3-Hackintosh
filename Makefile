@@ -105,7 +105,7 @@ $(BUILD)/test_mtl_allow: tests/test_mtl_allow.c metal/plugin/rdna3mtl_allow_poli
 # the linear buffer texture's pitch rule (RADV: a multiple of 256 B), card runs 2026-10-17d / 18b
 $(BUILD)/test_linear_pitch: tests/test_linear_pitch.c metal/plugin/nvmtl_linear_pitch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_linear_pitch.c
-$(BUILD)/test_gpu_time_queue: tests/test_gpu_time_queue.c metal/plugin/nvmtl_gpu_time_queue.h | $(BUILD)
+$(BUILD)/test_gpu_time_queue: tests/test_gpu_time_queue.c metal/plugin/nvmtl_gpu_time_queue.h metal/plugin/nvmtl_log_failure.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_gpu_time_queue.c
 
 $(BUILD)/test_ab_switch: tests/test_ab_switch.c metal/plugin/nvmtl_ab_switch.h | $(BUILD)

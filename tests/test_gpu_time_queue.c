@@ -2,7 +2,9 @@
  * item 1): the knob, every failure step with its IOReturn, a queue that does not start closed again, the success
  * path keeping the connection. SPDX-License-Identifier: MIT */
 #include <stdio.h>
+#include <string.h>
 #include "nvmtl_gpu_time_queue.h"
+#include "nvmtl_log_failure.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -84,6 +86,30 @@ int main(void)
     nvmtl_gpuq_ops half = { f_open, NULL, f_close, &n };
     CHECK(nvmtl_gpuq_open(&half, 0x55u, 0x77u).step == NVMTL_GPUQ_NO_API);
     CHECK(n.opens == 0 && n.adds == 0 && n.closes == 0);
+
+    /* the close note: only a connection the failure left, and a failed close says so */
+    char nb[96];
+    nvmtl_gpuq_result c0 = { NVMTL_GPUQ_ADD_FAILED, (int32_t)0xe00002c2, 0, 0, 1 };
+    CHECK(!strcmp(nvmtl_gpuq_close_note(&c0, nb, sizeof nb), " (the queue was closed again)"));
+    nvmtl_gpuq_result c1 = { NVMTL_GPUQ_ADD_FAILED, (int32_t)0xe00002c2, 0, (int32_t)0xe00002c0, 1 };
+    CHECK(!strcmp(nvmtl_gpuq_close_note(&c1, nb, sizeof nb), " (closing it FAILED too: IOReturn 0xe00002c0)"));
+    nvmtl_gpuq_result c2 = { NVMTL_GPUQ_OPEN_FAILED, (int32_t)0xe00002be, 0, 0, 0 };
+    CHECK(!strcmp(nvmtl_gpuq_close_note(&c2, nb, sizeof nb), ""));
+    nvmtl_gpuq_result c3 = { NVMTL_GPUQ_OPEN_FAILED, (int32_t)0xe00002bc, 0, 0, 1 };
+    CHECK(!strcmp(nvmtl_gpuq_close_note(&c3, nb, sizeof nb), " (the queue was closed again)"));
+    struct fake w = { 0, (int32_t)0xe00002c2, (int32_t)0xe00002c0, 0x31u, 0, 0, 0, 0, 0, 0, 0, 0 };
+    ops.ctx = &w;
+    r = nvmtl_gpuq_open(&ops, 0x55u, 0x77u);
+    CHECK(r.step == NVMTL_GPUQ_ADD_FAILED && r.closed && r.close_ret == (int32_t)0xe00002c0);
+
+    /* one more try only where the next device could see it differently */
+    CHECK(nvmtl_gpuq_retry_ok(NVMTL_GPUQ_NO_SHARED) && nvmtl_gpuq_retry_ok(NVMTL_GPUQ_OPEN_FAILED));
+    CHECK(!nvmtl_gpuq_retry_ok(NVMTL_GPUQ_ADD_FAILED) && !nvmtl_gpuq_retry_ok(NVMTL_GPUQ_NO_API));
+    CHECK(!nvmtl_gpuq_retry_ok(NVMTL_GPUQ_OPENED) && !nvmtl_gpuq_retry_ok(NVMTL_GPUQ_OFF) && !nvmtl_gpuq_retry_ok(NVMTL_GPUQ_NO_ACCEL));
+
+    /* a release build keeps the line either way (the syslog filter), opened as well as failed */
+    CHECK(nvmtl_log_failure("GPU time queue: IOAccelCommandQueue opened for Chess (pid 812; connection 0x2a03)"));
+    CHECK(nvmtl_log_failure("GPU time queue: off (NVMTL_GPUTIME_QUEUE=0) for Maps (pid 903)"));
 
     /* every step has a name for the log line */
     for (int s = NVMTL_GPUQ_OPENED; s <= NVMTL_GPUQ_ADD_FAILED; s++) CHECK(nvmtl_gpuq_step_name(s)[0] != '?');

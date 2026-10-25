@@ -199,7 +199,7 @@ run 40-app-crashes.txt crash_reports
 run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
 # CoreDisplay / IOPresentment / GPUWrangler / the Metal plugin in
 # WindowServer, unfiltered: why a display pipe or Metal device failed
-run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\" OR eventMessage CONTAINS \"Invalid end point size\" OR eventMessage CONTAINS \"capabilities with no devices\" OR eventMessage CONTAINS \"device with no planes\" OR eventMessage CONTAINS \"Failed to get capabilities\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture: '"
+run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS \"NullMoth:\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\" OR eventMessage CONTAINS \"Invalid end point size\" OR eventMessage CONTAINS \"capabilities with no devices\" OR eventMessage CONTAINS \"device with no planes\" OR eventMessage CONTAINS \"Failed to get capabilities\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture: '"
 # whole (card run 48 lost the plugin's start to a tail, run 49 the middle
 # where WindowServer restarted six times)
 # every WindowServer crash of this boot, its termination reason and the
@@ -208,7 +208,7 @@ run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --
 run 25-windowserver-exits.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -12); do echo \"== \$f\"; tr -d '\\n' < \"\$f\" | grep -o -E '\"(pid|procLaunch|termination|asi|exception)\" *: *(\\{[^}]*\\}|\"[^\"]*\"|[0-9]+)' | head -8; done; echo '== launchd about WindowServer'; log show --last boot --style compact --predicate 'process == \"launchd\" AND eventMessage CONTAINS \"WindowServer\"' 2>/dev/null | grep -i -E 'exit|crash|signal|spawn' | tail -40"
 # the Metal plugin in every other process (card run 51: Chess's plugin
 # log stopped where its lines no longer named RDNA3, before the failure)
-run 26-log-metal-plugin.txt sh -c "log show --last boot --info --style compact --predicate 'eventMessage CONTAINS \"NVMTL\" AND process != \"WindowServer\"' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture: '"
+run 26-log-metal-plugin.txt sh -c "log show --last boot --info --style compact --predicate '(eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS \"NullMoth:\") AND process != \"WindowServer\"' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture: '"
 lim=45
 # card run 54 (stale regions, Chess, Maps): RD3Surface::submitCopyForward and
 # CoreDisplay's copy forward in one place, then each app's plugin warnings

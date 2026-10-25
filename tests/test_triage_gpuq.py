@@ -3,8 +3,13 @@ item 1) on synthetic data:
  gpu_time_queue_rows: the plugin's 'GPU time queue:' lines give an INFO with the processes that opened theirs, a WARN
      per failure step and IOReturn naming the processes, an INFO for NVMTL_GPUTIME_QUEUE=0, nothing for a log without
      them;
- gpu_util_verdict: perf_cmdqueues > 0 is an INFO; 0 while some GPU time had no IOAccelSubmitter2 is a WARN; 0 with
-     every process credited, or a kernel without the counter, gives no row.
+ gpu_time_queue_rows against the kernel's 'pid N used the GPU ... has no IOAccelSubmitter2' lines: a pid that opened its
+     queue is the start-up gap (INFO), a pid with a plugin device and no opened queue is a WARN by name (with its failure
+     step), a pid without a plugin device is an INFO; a close that failed too is a WARN; plugin device lines with no 'GPU
+     time queue:' line at all are a WARN (an older plugin);
+ gpu_util_verdict: perf_cmdqueues > 0 is an INFO; 0 while some GPU time had no IOAccelSubmitter2 is an INFO (the last
+     walk; the processes may have exited); 0 with every process credited, or a kernel without the counter, gives no
+     row; perf_creditwait is an INFO up to GPUQ_CREDITWAIT_WARN, a WARN above.
 Run: python3 -I -B tests/test_triage_gpuq.py"""
 import os
 import sys
@@ -47,12 +52,44 @@ check(any("IOServiceOpen(accelerator, type 8" in r[2] and "0xe00002be" in r[2] a
 check(any("switched off" in r[2] and "1 process(es)" in r[2] for r in info), "off: %r" % rows)
 check(tr.gpu_time_queue_rows("NVMTL: something else", "") == [], "no lines, no rows")
 
+# the kernel's no-submitter lines against the plugin's
+DEV = ("2026-10-26 10:00:05.1 Df Chess[812:2b] (RDNA3MTLDriver) NVMTL: -[NVMTLDevice initWithAcceleratorPort:36867] in Chess\n"
+       "2026-10-26 10:00:06.1 Df Terminal[900:3c] (RDNA3MTLDriver) NVMTL: -[NVMTLDevice initWithAcceleratorPort:36868] in Terminal\n"
+       "2026-10-26 10:00:06.2 Df Photos[950:3c] (RDNA3MTLDriver) NVMTL: -[NVMTLDevice initWithAcceleratorPort:36869] in Photos\n")
+KLOG = ("RDNA3Accelerator: perfstats: pid 812 used the GPU (1200 us, 3 job(s)) but has no IOAccelSubmitter2 (context\n"
+        "RDNA3Accelerator: perfstats: pid 900 used the GPU (5000 us, 9 job(s)) but has no IOAccelSubmitter2 (context\n"
+        "RDNA3Accelerator: perfstats: pid 950 used the GPU (7000 us, 9 job(s)) but has no IOAccelSubmitter2 (context\n"
+        "RDNA3Accelerator: perfstats: pid 4242 used the GPU (100 us, 1 job(s)) but has no IOAccelSubmitter2 (context\n")
+rows = tr.gpu_time_queue_rows(WS, DEV + APPS, KLOG)
+check(any(r[0] == "INFO" and "pid(s) 812 had GPU time before their queue opened" in r[2] for r in rows), "gap: %r" % rows)
+check(any(r[0] == "WARN" and "pid 900 (Terminal): 5.0 ms" in r[2] and "FAILED at IOConnectAddClient" in r[2] for r in rows),
+      "lost with step: %r" % rows)
+check(any(r[0] == "WARN" and "pid 950 (Photos): 7.0 ms" in r[2] and "logged no opened queue" in r[2] for r in rows),
+      "lost, no line: %r" % rows)
+check(any(r[0] == "INFO" and "pid(s) 4242 used the GPU with no submitter and no Metal device" in r[2] for r in rows),
+      "other: %r" % rows)
+rows = tr.gpu_time_queue_rows("", DEV, "")
+check(any(r[0] == "WARN" and "3 process(es) made a Metal device of the plugin but no 'GPU time queue:' line" in r[2]
+          for r in rows), "older plugin: %r" % rows)
+BAD = ("2026-10-26 10:00:06.3 E Notes[902:3e] NVMTL: GPU time queue: FAILED at IOConnectAddClient(queue, shared): the kernel's "
+       "connectClient / start, IOReturn 0xe00002c2 (closing it FAILED too: IOReturn 0xe00002c0) for Notes (pid 902): Activity\n")
+rows = tr.gpu_time_queue_rows("", BAD, "")
+check(any(r[0] == "WARN" and "Notes (pid 902): the queue that did not start was NOT closed (IOServiceClose 0xe00002c0)" in r[2]
+          for r in rows), "bad close: %r" % rows)
+check(any(r[0] == "WARN" and "IOReturn 0xe00002c2 (Notes (902))" in r[2] for r in rows), "bad close group: %r" % rows)
+
 base = {"perf_rings": 10, "perf_jobs": 5}
 v = tr.gpu_util_verdict(dict(base, perf_cmdqueues=3, perf_gpuns=10 ** 9))
 check(any(l == "INFO" and "3 IOAccelCommandQueue(s)" in t for l, t in v), "cmdqueues INFO: %r" % v)
 v = tr.gpu_util_verdict(dict(base, perf_cmdqueues=0, perf_nosubns=2 * 10 ** 9))
-check(any(l == "WARN" and "no IOAccelCommandQueue under the accelerator although 2.0 s" in t for l, t in v),
-      "cmdqueues WARN: %r" % v)
+check(any(l == "INFO" and "no IOAccelCommandQueue under the accelerator at the last credit walk" in t for l, t in v),
+      "cmdqueues 0 INFO: %r" % v)
+check(not any(l == "WARN" and "IOAccelCommandQueue" in t for l, t in v), "cmdqueues 0 no WARN: %r" % v)
+v = tr.gpu_util_verdict(dict(base, perf_creditwait=2, perf_pendingns=3 * 10 ** 6))
+check(any(l == "INFO" and "2 take(s) found a process's only submitter not started yet (3.0 ms" in t for l, t in v),
+      "creditwait INFO: %r" % v)
+v = tr.gpu_util_verdict(dict(base, perf_creditwait=tr.GPUQ_CREDITWAIT_WARN + 1))
+check(any(l == "WARN" and "stays unstarted" in t for l, t in v), "creditwait WARN: %r" % v)
 v = tr.gpu_util_verdict(dict(base, perf_cmdqueues=0, perf_gpuns=10 ** 9))
 check(not any("IOAccelCommandQueue" in t for _, t in v), "0 queues, all credited: %r" % v)
 v = tr.gpu_util_verdict(dict(base, perf_nosubns=10 ** 9))

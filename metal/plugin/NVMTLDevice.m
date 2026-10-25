@@ -391,7 +391,7 @@ static bool nvmtl_process_is_allowed(void)
  * device opens one for the process and keeps it until the process exits (one Metal device per process here). Nothing is
  * submitted through it. A failure is logged once with its IOReturn and changes nothing else: Metal works as before. */
 static uint32_t g_gpuq_conn;        /* the open queue (0: none); closed by the kernel when the process exits */
-static _Atomic int g_gpuq_tried;
+static _Atomic int g_gpuq_state;   /* 0 not tried, 1 done, 2 one more try allowed (nvmtl_gpuq_retry_ok) */
 typedef kern_return_t (*nvmtl_ioso_fn)(mach_port_t, task_port_t, uint32_t, mach_port_t *);
 typedef kern_return_t (*nvmtl_ioadd_fn)(mach_port_t, mach_port_t);
 typedef kern_return_t (*nvmtl_iocl_fn)(mach_port_t);
@@ -406,8 +406,9 @@ static int32_t nvmtl_gpuq_io_close(void *ctx, uint32_t conn) {
     (void)ctx; return (int32_t)g_gpuq_io.close((mach_port_t)conn); }
 static void nvmtl_gpu_time_queue_open(id dev, mach_port_t accel)
 {
-    if (atomic_exchange(&g_gpuq_tried, 1)) return;   /* once per process: the first device that came up */
-    nvmtl_gpuq_result r = { NVMTL_GPUQ_OFF, 0, 0, 0 };
+    const int prev = atomic_exchange(&g_gpuq_state, 1);   /* once per process: the first device that came up */
+    if (prev == 1) return;
+    nvmtl_gpuq_result r = { NVMTL_GPUQ_OFF, 0, 0, 0, 0 };
     uint32_t shared = 0;
     if (nvmtl_gpuq_enabled(getenv("NVMTL_GPUTIME_QUEUE"))) {
         g_gpuq_io.open  = (nvmtl_ioso_fn)dlsym(RTLD_DEFAULT, "IOServiceOpen");
@@ -421,7 +422,7 @@ static void nvmtl_gpu_time_queue_open(id dev, mach_port_t accel)
         r = nvmtl_gpuq_open((g_gpuq_io.open && g_gpuq_io.add && g_gpuq_io.close) ? &ops : NULL, (uint32_t)accel, shared);
         if (r.step == NVMTL_GPUQ_NO_SHARED && (!get_conn || !ref))
             nvlog("GPU time queue: %s", !get_conn ? "IOAccelSharedGetConnect missing (IOAccelerator.framework not loaded?)"
-                                                  : "the device's sharedRef is NULL (lazy device initialisation?)");
+                                                  : "the device's sharedRef is NULL (lazy device initialisation?): cannot open the queue");
     }
     if (r.step == NVMTL_GPUQ_OPENED) {
         g_gpuq_conn = r.conn;
@@ -432,9 +433,12 @@ static void nvmtl_gpu_time_queue_open(id dev, mach_port_t accel)
         nvlog("GPU time queue: off (NVMTL_GPUTIME_QUEUE=0) for %s (pid %d): Activity Monitor shows 0 %% GPU for it",
               getprogname(), getpid());
     } else {
-        nvlog("GPU time queue: FAILED at %s, IOReturn 0x%08x%s for %s (pid %d): Activity Monitor shows 0 %% GPU for it; Metal works as before",
-              nvmtl_gpuq_step_name(r.step), (unsigned)r.ret, r.step == NVMTL_GPUQ_ADD_FAILED ? " (the queue was closed again)" : "",
-              getprogname(), getpid());
+        const int again = prev == 0 && nvmtl_gpuq_retry_ok(r.step);
+        char note[96];
+        nvlog("GPU time queue: FAILED at %s, IOReturn 0x%08x%s for %s (pid %d): Activity Monitor shows 0 %% GPU for it; Metal works as before%s",
+              nvmtl_gpuq_step_name(r.step), (unsigned)r.ret, nvmtl_gpuq_close_note(&r, note, sizeof note), getprogname(), getpid(),
+              again ? "; one more try at this process's next Metal device" : prev == 2 ? " (the second and last try)" : "");
+        if (again) atomic_store(&g_gpuq_state, 2);
     }
 }
 static void nvmtl_fill_pool_args(uint8_t *a, int second)
@@ -476,6 +480,9 @@ static void nvmtl_install_hw_resource_pools(id dev)
         nvlog("  GPU vendor %04x (%s)", live, live == 0x1002 ? "AMD, RADV" : live == 0x8086 ? "Intel, ANV" : "NVIDIA, NVK");
     }
     if (!nvmtl_process_is_allowed()) { nvlog("  not allow-listed: no device for %s", getprogname()); return nil; }
+    /* before the device's first GPU work (the hardware pools, the gpupass probe, Vulkan): GPU time from here on has a
+       submitter to go to. If Vulkan then fails the device is refused and the queue stays, idle, until the process exits. */
+    nvmtl_gpu_time_queue_open(self, port);
     nvlog("MTLIOAccelDevice's initWithAcceleratorPort: -> %p", (__bridge void *)self);
     gNVMTLMainDevice = self;
     nvmtl_install_hw_resource_pools(self);
@@ -498,7 +505,6 @@ static void nvmtl_install_hw_resource_pools(id dev)
               NVMTL_U("featureProfile"), NVMTL_U("maxTextureWidth2D"), NVMTL_U("maxComputeTextures"), NVMTL_U("maxComputeBuffers"));
         #undef NVMTL_U
     } else nvlog("limits: -initLimits not found - every table-served limit stays 0 (CoreImage will refuse renders)");
-    nvmtl_gpu_time_queue_open(self, port);
     return self;
 }
 
