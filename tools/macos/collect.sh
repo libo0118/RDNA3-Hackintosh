@@ -32,7 +32,11 @@ run() {   # run <file> <command...>: output and exit code, never stops the
 # framebuffer instance (-c RDNA3Framebuffer matches AMDRDNA3Framebuffer, the leaf
 # class since N44, and the older class of earlier reports), then the registry path
 # of every RDNA3Accelerator to compare IOAccelTypes with (the path is built from the
-# indentation of `ioreg -p IOService`: two columns per level). Triage row
+# indentation of `ioreg -p IOService`: two columns per level; the first component below
+# the registry root (the platform expert device, named after the Mac model, e.g.
+# MacBookPro16,1) is left out, as the kernel's getPath leaves it out of IOAccelTypes:
+# card run 2026-10-25c, macOS 26.4.1: IOAccelTypes
+# IOService:/AppleACPIPlatformExpert/PCI0/.../RDNA3Accelerator). Triage row
 # "display pairing" (tools/triage_reports.py); a key that is not printed is not set.
 pairing_report() {
     echo "== framebuffers (ioreg -c RDNA3Framebuffer; IOAccel keys, RDNA3,Connected)"
@@ -44,9 +48,95 @@ pairing_report() {
         { p = index($0, "+-o "); if (!p) next
           d = int((p - 1) / 2); n = substr($0, p + 4); sub(/  <.*/, "", n); comp[d] = n
           if (index($0, "<class " cls ",") || index($0, "<class " cls ">")) {
-              path = "IOService:"; for (i = 1; i <= d; i++) path = path "/" comp[i]
+              path = "IOService:"; for (i = 2; i <= d; i++) path = path "/" comp[i]
               print "accelerator: " path; found++ } }
         END { if (!found) print "(no " cls " in the IOService plane)" }'
+}
+
+# Crash reports of this boot (card run 2026-10-25c: Chess crashed three times and nothing
+# was collected, the only crash list was the one in /Library/Logs/DiagnosticReports).
+# crash_reports() lists every *.ips in /Library/Logs/DiagnosticReports and in each
+# /Users/*/Library/Logs/DiagnosticReports newer than the boot (kern.boottime), the
+# newest 12, copies each (the first 300000 bytes: 40-crash-ips/) and prints a short
+# summary: process, pid, exception, termination, the crashed thread and its top frames.
+# The .ips is a JSON header line, then a JSON body; macOS has osascript (JXA) on every
+# install, a grep fallback prints the header fields when it fails. Triage row "app
+# crashes" (tools/triage_reports.py reads the "== crash:" blocks and "crashes: N").
+# RDNA3_CRASH_DIRS replaces the directories (tests/test_collect_crashes.sh).
+IPS_JXA='
+function run(a) {
+    var t = $.NSString.stringWithContentsOfFileEncodingError(a[0], 4, null).js;
+    var nl = t.indexOf("\n"), h = {}, j, o = [];
+    try { h = JSON.parse(t.slice(0, nl)); } catch (e) {}
+    j = JSON.parse(t.slice(nl + 1));
+    o.push("process: " + (j.procName || h.app_name || "?"));
+    o.push("pid: " + (j.pid === undefined ? "?" : j.pid));
+    var x = j.exception;
+    if (x) o.push("exception: " + (x.type || "?") + (x.signal ? " (" + x.signal + ")" : "") + (x.subtype ? " " + x.subtype : ""));
+    var tm = j.termination;
+    if (tm) o.push("termination: " + JSON.stringify(tm).slice(0, 300));
+    if (j.asi) o.push("asi: " + JSON.stringify(j.asi).slice(0, 300));
+    var ths = j.threads || [], ix = -1, i;
+    for (i = 0; i < ths.length; i++) if (ths[i].triggered) { ix = i; break; }
+    if (ix < 0 && j.faultingThread !== undefined) ix = j.faultingThread;
+    var th = ths[ix], im = j.usedImages || [];
+    if (th) {
+        o.push("crashed thread: " + ix + (th.queue ? " (" + th.queue + ")" : th.name ? " (" + th.name + ")" : ""));
+        (th.frames || []).slice(0, 8).forEach(function (f, n) {
+            var m = im[f.imageIndex];
+            o.push("frame " + n + ": " + (m && m.name ? m.name : "?") + "  " +
+                   (f.symbol || "0x" + (f.imageOffset || 0).toString(16)) + (f.symbolLocation ? " + " + f.symbolLocation : ""));
+        });
+    }
+    return o.join("\n");
+}'
+mtime_of() {   # mtime_of FILE: epoch seconds (BSD stat; GNU stat as the fallback), empty when neither works
+    _mt=$(stat -f %m "$1" 2>/dev/null)
+    case $_mt in ''|*[!0-9]*) _mt=$(stat -c %Y "$1" 2>/dev/null) ;; esac
+    case $_mt in ''|*[!0-9]*) _mt= ;; esac
+    echo "$_mt"
+}
+ips_brief() {   # ips_brief FILE: the summary lines of one .ips
+    _ib=
+    if command -v osascript >/dev/null 2>&1; then
+        _ib=$(osascript -l JavaScript -e "$IPS_JXA" "$1" 2>/dev/null)
+    fi
+    if [ -n "$_ib" ]; then printf '%s\n' "$_ib"; return 0; fi
+    echo "(no JSON summary: osascript missing or failed; header fields by grep)"
+    tr -d '\n' < "$1" | grep -o -E '"(app_name|procName|pid|bug_type)" *: *("[^"]*"|[0-9]+)' | head -6
+    tr -d '\n' < "$1" | grep -o -E '"(exception|termination|asi)" *: *\{[^}]*\}' | cut -c1-300 | head -3
+}
+crash_reports() {
+    _cbt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
+    echo "boot: ${_cbt:-unknown}"
+    [ -n "$_cbt" ] || echo "(boot time unknown: every crash report found is listed, newest 12)"
+    mkdir -p "$dir/40-crash-ips"
+    _cl="$dir/.40.list"; : > "$_cl"
+    for _cd in ${RDNA3_CRASH_DIRS:-/Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports}; do
+        for _cf in "$_cd"/*.ips; do
+            [ -f "$_cf" ] || continue
+            _cm=$(mtime_of "$_cf")
+            if [ -n "$_cbt" ] && [ -n "$_cm" ] && [ "$_cm" -lt "$_cbt" ]; then continue; fi
+            printf '%s\t%s\n' "${_cm:-0}" "$_cf" >> "$_cl"
+        done
+    done
+    _cn=0; _tab=$(printf '\t')
+    sort -rn "$_cl" | head -12 > "$_cl.s"
+    while IFS= read -r _cline; do
+        _cm=${_cline%%"$_tab"*}; _cf=${_cline#*"$_tab"}
+        _cn=$((_cn + 1))
+        echo "== crash: $_cf"
+        echo "mtime: $_cm${_cbt:+ ($((_cm - _cbt)) s after the boot)}"
+        if [ ! -r "$_cf" ]; then echo "unreadable: no permission (run collect.sh as the admin user, or with sudo)"; continue; fi
+        _csz=$(wc -c < "$_cf" | tr -d ' ')
+        _cname="$_cn-$(printf '%s' "$(basename "$_cf")" | tr -c 'A-Za-z0-9._-' '_')"
+        head -c 300000 "$_cf" > "$dir/40-crash-ips/$_cname" 2>/dev/null
+        if [ "${_csz:-0}" -gt 300000 ]; then echo "size: $_csz bytes (copy cut at 300000)"; else echo "size: $_csz bytes"; fi
+        echo "copy: 40-crash-ips/$_cname"
+        ips_brief "$_cf"
+    done < "$_cl.s"
+    rm -f "$_cl" "$_cl.s"
+    echo "crashes: $_cn"
 }
 
 # the Metal plugin's traces first (tools/macos/collect_plugin_trace.sh, as
@@ -104,6 +194,8 @@ run 21-log-panics.txt sh -c "ls -lt /Library/Logs/DiagnosticReports/ 2>/dev/null
 # the assertion text ("asi") is near the END of the .ips, so it is printed
 # on its own first (card runs 41/45: cut off at 24 KB, it was lost)
 run 23-windowserver-crash.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -2); do echo \"== \$f\"; grep -o '\"asi\" *: *{[^}]*}' \"\$f\" | head -3; head -c 24000 \"\$f\"; echo; done"
+# crash reports of this boot, user apps and system (crash_reports above; triage row "app crashes")
+run 40-app-crashes.txt crash_reports
 run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
 # CoreDisplay / IOPresentment / GPUWrangler / the Metal plugin in
 # WindowServer, unfiltered: why a display pipe or Metal device failed
