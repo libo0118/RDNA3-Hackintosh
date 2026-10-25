@@ -19,7 +19,7 @@ fail() { echo "test_triage_stale_plugin: FAIL $*"; exit 1; }
 # a repo: c1 metal, c2 mesa, c3 metal, c4 other, c5 mesa
 R=$T/repo
 mkdir -p "$R/tools" "$R/metal" "$R/userspace/mesa" "$R/docs"
-cp "$ROOT/tools/triage_reports.py" "$R/tools/"
+cp "$ROOT/tools/triage_reports.py" "$ROOT/tools/triage_n48.py" "$R/tools/"
 g() { git -C "$R" -c user.name=t -c user.email=t@t -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
 g init -q
 commit() {   # commit <file> <message>: prints the new short id

@@ -1087,6 +1087,35 @@ Residual risks: the trace is an mmap'd file, so a process that truncates it
 `NVMTL_TRACE_HASH=2` reads IOSurface memory the plugin did not lock, so only
 use it on a run where that is the question. Triage: `plugin_trace.triage_lines(report)`.
 
+## Metal plugin: blit copies, framebuffer fetch, encode-time split (N48)
+
+Card run 2026-10-25c: Chess died three times in glReadPixels (crash reports: `__assert_rtn` in RADV's `gfx_or_compute_copy_memory_to_image`,
+which asserts `image->vk.samples == 1`, called from the plugin's `copyFromBuffer:toTexture:` on a 4-sample texture; DRIVER-PLAN N48). The
+plugin now uploads into multisample colour textures itself (`msupload:` lines below). Read `26-log-metal-plugin.txt` for the Chess pid
+(`tools/triage_n48.py` prints the rows `plugin copy refused`, `multisample upload`, `framebuffer fetch`, `plugin copy bracket`):
+
+| Line | Meaning | Action |
+|---|---|---|
+| `G14 census: copy texture->buffer WxH iosurface=N, vkfmt F samples S type T layers L mips M aspect A bpp B, metal pixel format P, region ... (first time ...)` | what the copy reads: Vulkan format (126 D32, 130 D32_S8), sample count, the aspect (1 colour, 2 depth, 4 stencil) and element size it will use | `samples` above 1 or `REFUSED (...)` in this line is the finding |
+| `copy_image_to_buffer: recording vk format ... layout L` then `layout transition recorded` then `vkCmdCopyImageToBuffer recorded` | the first 8 distinct copy shapes are bracketed | the LAST of the three lines in the log before the process disappears says where it died: no `recording` = the ObjC side (guard in the blit method), `recording` only = the barrier (RADV `radv_CmdPipelineBarrier`, depth decompress), `transition recorded` only = inside `vkCmdCopyImageToBuffer`, all three = after the copy (commit, submit, the next command) |
+| `copy_image_to_buffer: REFUSED - ...` / `copy_buffer_to_image: REFUSED - ...` | the copy broke Vulkan valid usage (multisampled image, an aspect the format has not, depth/stencil buffer offset not a multiple of 4, null VkImage / VkBuffer, region outside the image / buffer) and was not handed to RADV; the log has the numbers | the app reads an unfilled buffer: if Chess now survives, the refusal is the cause and the numbers say which rule |
+| `msupload: buffer -> N-sample image WxH (vk format F via view V, mode M): region ... [K so far]` | a buffer -> multisample texture upload ran through the plugin's pass (first 8, then every 1024th); `msupload: pass built for view format V at N samples` once per pair | INFO. `msupload: REFUSED`, `vkCreateFramebuffer`, `vkCreateGraphicsPipelines ... -> N` lines are the failures (WARN row) |
+| `copy_buffer_to_image: REFUSED - a N-sample image: <reason>` | an upload the pass does not carry (multisample depth/stencil, array, a format beyond 8-bit RGBA/BGRA/R/RG) | the reason names it; extending the pass is the fix |
+| `copy_image_to_buffer: recording (depth/stencil, multisample or non-colour copy) ...` and `(special copy)` lines | the bracket of copies that are not plain single-sample colour ones (always logged: 16, then every 256th) | read like the plain bracket |
+| `blit copyFromTexture:toBuffer: REFUSED - source is a X, destination a Y` | a Metal object that is not this plugin's | the GL layer hands over something the plugin does not model |
+
+`vk: fbfetch: fragment module #N declares [[color(n)]] subpass inputs 0x1 (binding 192+n) and READS them ...`: once per pipeline
+(first 16, then every 256th). The plugin's set layout has no binding 192..199 and no render pass an input attachment, so a read that
+is still in the module hits an undefined descriptor (random colours, corrupt glyphs in WindowServer / Terminal are the suspects).
+`NVMTL_FBFETCH_ZERO=1` (environment or a line in `rdna3mtl.conf`) turns every such read into a zero vector: if the random colours
+become a fixed pattern the read is the cause; the real fix (the colour attachment as an input attachment of the render pass, descriptor
+at 192+n, a self-dependency barrier per draw) is open in DRIVER-PLAN N48.
+
+Trace record `kind 17` (`NVT_K_ENC_SPLIT`, one per render encoder that drew; `tools/plugin_trace.py` prints it as `kind 17` until its
+decoder is taught): `dur_us` encoder begin -> end, `rc` pipeline-state variants built while drawing, `a0` draws, `a1` pipeline lookup us,
+`a2` descriptor writes us, `a3` surface-in checks us over `a4` calls, `a5` / `a6` the slowest single draw's lookup / descriptor writes us
+(raw fields of `nvt_rec`; `seed0` is the traced pass id). The accumulators are per thread (an encoder is encoded by one thread; one encoded from two would be undercounted) and run only between a render encoder's creation and its endEncoding; `tools/plugin_trace.py` prints the line `encoder cb N: D draw(s) in ...` and an `encode-time split` summary block.
+
 ## Linux reference dump (`tools/linux/card_dump.sh`)
 
 `sudo bash tools/linux/card_dump.sh` on the Linux host (amdgpu, idle desktop)

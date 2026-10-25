@@ -90,3 +90,41 @@ static void nvmtl_tr_pass_end(NVMTLRenderCommandEncoder *e, unsigned path, int r
                     now >= e->_trSets0 ? now - e->_trSets0 : 0u, e->_clear, e->_trT0);
     e->_trPass = 0;
 }
+
+
+/* ---- the encode-time split of a render encoder (nvt_ev_enc_split) ----
+ * Per thread: an encoder is encoded by one thread. t0 != 0 only between a render encoder's creation and its endEncoding, so
+ * the surface-in checks of blit and compute encoders are not counted. With the trace off nvmtl_split_now() is 0 and every
+ * add is a branch. Reads clocks only; changes no decision. */
+typedef struct { uint64_t t0, pipe, desc, sin, pipe_max, desc_max; uint32_t draws, builds, sin_calls; } nvmtl_split;
+static __thread nvmtl_split g_split;
+static inline uint64_t nvmtl_split_now(void) { return g_split.t0 ? nvt_now() : 0; }
+static inline void nvmtl_split_add(uint64_t t0, uint64_t *sum, uint64_t *mx)
+{
+    if (!t0) return;
+    const uint64_t now = nvt_now(), d = now > t0 ? now - t0 : 0;
+    *sum += d;
+    if (mx && d > *mx) *mx = d;
+}
+static void nvmtl_split_begin(void)
+{
+    if (!nvt_on()) return;
+    memset(&g_split, 0, sizeof g_split);
+    g_split.t0 = nvt_now();
+}
+static inline uint32_t nvmtl_split_us(uint64_t ticks)
+{
+    const uint64_t us = nvt_ticks_to_ns(ticks) / 1000u;
+    return us > 0xffffffffull ? 0xffffffffu : (uint32_t)us;
+}
+static void nvmtl_split_end(NVMTLRenderCommandEncoder *e)
+{
+    if (!g_split.t0) return;
+    const nvmtl_split s = g_split;
+    memset(&g_split, 0, sizeof g_split);
+    if (!s.draws) return;
+    const uint64_t now = nvt_now();
+    nvt_ev_enc_split(nvmtl_tr_cb_id(e->_cb), e->_trPass, s.draws, s.builds, nvmtl_split_us(now > s.t0 ? now - s.t0 : 0),
+                     nvmtl_split_us(s.pipe), nvmtl_split_us(s.desc), nvmtl_split_us(s.sin), s.sin_calls,
+                     nvmtl_split_us(s.pipe_max), nvmtl_split_us(s.desc_max));
+}

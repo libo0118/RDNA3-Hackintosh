@@ -81,6 +81,8 @@ static int scenario(void)
     nvt_ev_map(101, 0, W, H, 80, W * 4u, 1, 0, 0);
     nvt_ev_map(102, 0, W, H, 80, W * 4u, 0, NVT_WHY_PITCH, 0);
     nvt_kreq_probe(1, -1, ENOENT);
+    /* a render encoder's encode-time split (older decoders print it as "kind 17") */
+    nvt_ev_enc_split(nvt_next_id(), 0, 40, 1, 2500, 300, 900, 450, 12, 60, 140);
     for (unsigned f = 0; f < 8; f++) {
         const uint32_t cb = nvt_next_id();
         if (f % 2 == 0) frame(cb, 101, 0, 0, 1, 40 + f);     /* surface 101: rendered, marked dirty        */
