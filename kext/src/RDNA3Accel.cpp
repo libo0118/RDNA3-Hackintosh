@@ -240,6 +240,10 @@ void RDNA3Accel::free()
         IOSimpleLockFree(fIdxLock);
         fIdxLock = nullptr;
     }
+    if (fBoMapLock) {   /* every RDNA3BoMemory retained this object: none is left */
+        IOLockFree(fBoMapLock);
+        fBoMapLock = nullptr;
+    }
     super::free();
 }
 

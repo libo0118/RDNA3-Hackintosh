@@ -115,6 +115,14 @@ $(BUILD)/test_copy_pack: tests/test_copy_pack.c metal/plugin/nvmtl_copy_pack.h |
 $(BUILD)/test_range_alloc: tests/test_range_alloc.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion $(SAN) $(INC) -o $@ tests/test_range_alloc.c $(COMMON)
 # card run 2026-10-17c: where VRAM goes (the CPU-visible heap's reserve, no-CPU BOs stay out)
+# DRIVER-PLAN N47 (b): a CPU mapping holds its BO (common/rdna3_bo_map.h with the real UAPI)
+$(BUILD)/test_bo_map: tests/test_bo_map.c common/rdna3_bo_map.h $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_bo_map.c $(COMMON) $(UAPI)
+
+# the descriptor's release protocol under threads (ECC review round 1 of N47 (b))
+$(BUILD)/test_bo_map_race: tests/test_bo_map_race.c common/rdna3_bo_map.h $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) -std=c11 -Wno-conversion -Wno-cast-align $(SAN) -pthread $(INC) -o $@ tests/test_bo_map_race.c $(COMMON) $(UAPI)
+
 $(BUILD)/test_vram_place: tests/test_vram_place.c common/rdna3_vram_place.h accel/rdna3k_abi.h $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_vram_place.c $(COMMON) $(UAPI)
 
@@ -162,13 +170,15 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_spirv_fbfetch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_spirv_fbfetch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
 	$(BUILD)/test_uapi
 	$(BUILD)/test_range_alloc
 	$(BUILD)/test_vram_place
+	$(BUILD)/test_bo_map
+	$(BUILD)/test_bo_map_race
 	$(BUILD)/test_mtl_allow metal/rdna3mtl-allow.txt
 	$(BUILD)/test_linear_pitch
 	$(BUILD)/test_copy_pack

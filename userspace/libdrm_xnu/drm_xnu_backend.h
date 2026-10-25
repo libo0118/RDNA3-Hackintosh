@@ -17,7 +17,10 @@ typedef struct drm_xnu_backend {
     /* returns 0 or a positive errno */
     int       (*ioctl)(uintptr_t conn, uint32_t nr, void *arg, uint32_t size);
     void     *(*map)(uintptr_t conn, uint64_t offset, size_t len);   /* NULL + errno */
-    int       (*unmap)(uintptr_t conn, void *addr, size_t len);
+    /* 'offset': what map() was given for this mapping. The kernel finds the
+     * mapping again through it (IOConnectUnmapMemory64's memory type names
+     * the BO; DRIVER-PLAN N47 (b): a mapping holds its BO until unmapped) */
+    int       (*unmap)(uintptr_t conn, void *addr, size_t len, uint64_t offset);
     /* device identity for drmGetDevices2 */
     int       (*pci_info)(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
                           uint16_t *subdevice, uint8_t *revision,

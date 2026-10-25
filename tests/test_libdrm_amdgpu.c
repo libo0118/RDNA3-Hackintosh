@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include "amdgpu.h"
 #include "amdgpu_drm.h"
@@ -81,6 +82,23 @@ int main(void)
             bad += p[i] != (i ^ 0xA5A5A5A5u);
         CHECK(bad == 0);
         CHECK(amdgpu_bo_cpu_unmap(bo) == 0);
+        {
+            /* drm_mmap twice (the kernel hands back the same mapping), two
+             * unmaps: only the last goes to the backend, with the BO's offset
+             * (DRIVER-PLAN N47 (b): the kext finds the mapping through it) */
+            extern uint32_t lb_unmap_refused;
+            union drm_amdgpu_gem_mmap mm;
+            uint32_t kh = 0;
+            void *a, *b;
+            memset(&mm, 0, sizeof(mm));
+            CHECK(amdgpu_bo_export(bo, amdgpu_bo_handle_type_kms, &kh) == 0);
+            mm.in.handle = kh;
+            CHECK(drmCommandWriteRead(amdgpu_device_get_fd(dev), DRM_AMDGPU_GEM_MMAP, &mm, sizeof(mm)) == 0);
+            a = drm_xnu_mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, amdgpu_device_get_fd(dev), (off_t)mm.out.addr_ptr);
+            b = drm_xnu_mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, amdgpu_device_get_fd(dev), (off_t)mm.out.addr_ptr);
+            CHECK(a != MAP_FAILED && a == b);
+            CHECK(drm_xnu_munmap(b, 1 << 20) == 0 && drm_xnu_munmap(a, 1 << 20) == 0 && lb_unmap_refused == 0);
+        }
         CHECK(amdgpu_va_range_alloc(dev, amdgpu_gpu_va_range_general, 1 << 20, 4096, 0, &va,
                                     &vah, 0) == 0 && va);
         CHECK(amdgpu_bo_va_op(bo, 0, 1 << 20, va, 0, AMDGPU_VA_OP_MAP) == 0);
@@ -89,6 +107,31 @@ int main(void)
         CHECK(amdgpu_bo_free(bo) == 0);
     }
 
+    {
+        /* an unmap after GEM_CLOSE fails, and the entry stays: a retry must
+         * not reach libc's munmap (the kernel's mapping would live on) */
+        extern uint32_t lb_unmap_refused;
+        struct amdgpu_bo_alloc_request rq;
+        amdgpu_bo_handle b2;
+        union drm_amdgpu_gem_mmap mm;
+        uint32_t kh = 0, before = lb_unmap_refused;
+        void *a;
+        memset(&rq, 0, sizeof(rq));
+        rq.alloc_size = 4096;
+        rq.phys_alignment = 4096;
+        rq.preferred_heap = AMDGPU_GEM_DOMAIN_GTT;
+        CHECK(amdgpu_bo_alloc(dev, &rq, &b2) == 0);
+        CHECK(amdgpu_bo_export(b2, amdgpu_bo_handle_type_kms, &kh) == 0);
+        memset(&mm, 0, sizeof(mm));
+        mm.in.handle = kh;
+        CHECK(drmCommandWriteRead(amdgpu_device_get_fd(dev), DRM_AMDGPU_GEM_MMAP, &mm, sizeof(mm)) == 0);
+        a = drm_xnu_mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, amdgpu_device_get_fd(dev),
+                         (off_t)mm.out.addr_ptr);
+        CHECK(a != MAP_FAILED);
+        CHECK(amdgpu_bo_free(b2) == 0);   /* libdrm did not map it: no unmap first */
+        CHECK(drm_xnu_munmap(a, 4096) == -1 && lb_unmap_refused == before + 1);
+        CHECK(drm_xnu_munmap(a, 4096) == -1 && lb_unmap_refused == before + 2);   /* still ours */
+    }
     /* syncobj "fds": a sync_file export is a file holding the fence by value
      * (usable in any process), an opaque export is the same object
      * (process-local), transfer copies points */
@@ -429,6 +472,10 @@ int main(void)
         CHECK(drmGetFormatModifierName(1ull << 56) == NULL);
         free(n0);
         free(na);
+    }
+    {
+        extern uint32_t lb_unmap_refused;
+        CHECK(lb_unmap_refused == 2);   /* only the two below: every libdrm unmap named its BO (N47 (b)) */
     }
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

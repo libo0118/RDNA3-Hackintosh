@@ -355,12 +355,16 @@ void RDNA3Accel::vramReport(char *buf, size_t n)
         snprintf(buf, n, "visible_kib=%llu reserve_kib=%llu reserve_arg=%lld refused=%u refused_accel=%u "
                  "refused_gem=%u refused_hi=%u reserve_blocked=%u hi_full=%u hi_clear_fail=%u lost_kib=%llu "
                  "free_fail=%u free_fail_kib=%llu retired_n=%u retired_kib=%llu refused_other=%u gtt_fail=%u "
-                 "gtt_fail_kib=%llu",
+                 "gtt_fail_kib=%llu bomap_live=%u bomap_live_kib=%llu bomap_made=%u bomap_reused=%u "
+                 "bomap_refused=%u bomap_quota=%u bomap_nodesc=%u bomap_nobo=%u bomap_fail=%d",
                  KIB(p->vis_end - ra[0]->base), KIB(p->acc_end - ra[0]->base), (long long)fVisReserveArg,
                  p->refused_total, refusedAccel, p->own[RD3_VO_GEM].refused, p->own[RD3_VO_GEM_HI].refused,
                  p->gem_reserve_blocked, p->hi_full, fVramHiClearFails, KIB(lost),
                  p->free_fail, KIB(p->free_fail_bytes), p->retired_n, KIB(p->retired_bytes), p->refused_other,
-                 fDrm ? fDrm->gtt_fallback_fail : 0u, fDrm ? KIB(fDrm->gtt_fallback_fail_bytes) : 0ull));
+                 fDrm ? fDrm->gtt_fallback_fail : 0u, fDrm ? KIB(fDrm->gtt_fallback_fail_bytes) : 0ull,
+                 fBoMapLive, KIB(fBoMapLiveBytes), fBoMapMade, fBoMapReused, fBoMapRefused, fBoMapQuota,
+                 fBoMapNoDesc, fBoMapNoBo,
+                 (int)fBoMapFail));
     for (int i = 0; i < RD3_POOL_N && len + 1 < n; i++)
         len = vramAppend(buf, n, len,
             snprintf(buf + len, n - len, " free_%s_kib=%llu largest_%s_kib=%llu nfree_%s=%u full_skips_%s=%u",

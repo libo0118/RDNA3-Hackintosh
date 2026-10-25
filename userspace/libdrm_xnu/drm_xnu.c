@@ -26,7 +26,8 @@
  * this in amdgpu_device_initialize) refer to the same pipe inode, so any
  * duplicate resolves to the same connection through fstat(). */
 static struct { uintptr_t conn; dev_t dev; ino_t ino; int fd; int used; int orphan; } g_conns[MAX_CONN];
-static struct { void *addr; size_t len; int ci; } g_maps[MAX_MAPS];
+static struct { void *addr; size_t len; uint64_t off; uint64_t seq; int ci; } g_maps[MAX_MAPS];
+static uint64_t g_map_seq;   /* the order of the maps, for munmap of an address mapped more than once */
 /* Syncobj "fds" (DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD / FD_TO_HANDLE): the kext has
  * no file descriptors.
  * - sync_file export: an unlinked temporary file holding the fence by value
@@ -156,9 +157,15 @@ static void gc_orphans_locked(void)
     for (ci = 0; ci < MAX_CONN; ci++)
         if (g_conns[ci].used && g_conns[ci].orphan &&
             !inode_in_use(g_conns[ci].dev, g_conns[ci].ino)) {
+            int i;
             be()->close(g_conns[ci].conn);
             g_conns[ci].used = 0;
             g_conns[ci].orphan = 0;
+            /* its mappings went with the connection (a failed unmap kept
+             * its entry until here) */
+            for (i = 0; i < MAX_MAPS; i++)
+                if (g_maps[i].addr && g_maps[i].ci == ci)
+                    g_maps[i].addr = NULL;
         }
 }
 
@@ -561,6 +568,8 @@ void *drm_xnu_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t of
         if (!g_maps[i].addr) {
             g_maps[i].addr = p;
             g_maps[i].len = len;
+            g_maps[i].off = (uint64_t)off;
+            g_maps[i].seq = ++g_map_seq;
             g_maps[i].ci = ci;
             break;
         }
@@ -568,19 +577,45 @@ void *drm_xnu_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t of
     return p;
 }
 
+/* An address can be in the table more than once: the kernel hands a task
+ * the mapping it already has for a second map of the same BO (xnu's
+ * makeMapping reuses a compatible one), and the loopback maps BOs that share
+ * memory (IOSurface imports) at one address. The newest entry goes; the
+ * kernel's mapping goes with the last entry of its connection and BO. */
 int drm_xnu_munmap(void *addr, size_t len)
 {
-    int i;
+    int i, j, ci;
+    uint64_t off;
     pthread_mutex_lock(&g_lock);
-    for (i = 0; i < MAX_MAPS; i++)
-        if (g_maps[i].addr == addr) {
-            int ci = g_maps[i].ci;
+    for (i = -1, j = 0; j < MAX_MAPS; j++)
+        if (g_maps[j].addr == addr && (i < 0 || g_maps[j].seq > g_maps[i].seq))
+            i = j;
+    if (i < 0) {
+        pthread_mutex_unlock(&g_lock);
+        return munmap(addr, len);
+    }
+    ci = g_maps[i].ci;
+    off = g_maps[i].off;
+    for (j = 0; j < MAX_MAPS; j++)
+        if (j != i && g_maps[j].addr == addr && g_maps[j].ci == ci && g_maps[j].off == off) {
             g_maps[i].addr = NULL;
             pthread_mutex_unlock(&g_lock);
-            return be()->unmap(g_conns[ci].conn, addr, len) ? (errno = EINVAL, -1) : 0;
+            return 0;
         }
+    /* the entry stays until the kernel let the mapping go: a failed unmap
+     * (the BO's handle already closed, a stale offset) must not leave a
+     * retry to libc's munmap, which would drop the pages and leave the
+     * kernel's IOMemoryMap, and the BO it holds, alive (N47 (b)) */
+    if (be()->unmap(g_conns[ci].conn, addr, len, off)) {
+        pthread_mutex_unlock(&g_lock);
+        fprintf(stderr, "drm_xnu: unmap of %p (offset 0x%llx) failed: the mapping stays until the device "
+                        "is closed\n", addr, (unsigned long long)off);
+        errno = EINVAL;
+        return -1;
+    }
+    g_maps[i].addr = NULL;
     pthread_mutex_unlock(&g_lock);
-    return munmap(addr, len);
+    return 0;
 }
 
 int drm_xnu_close(int fd)

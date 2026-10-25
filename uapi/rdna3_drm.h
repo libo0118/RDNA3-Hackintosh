@@ -230,7 +230,38 @@ typedef struct rdna3_bo {
                                  the OS's hold on it, no VRAM usage is counted */
     uint32_t visit;           /* rdna3_drm_device_for_each_vram_bo: seen in this pass */
     uint64_t user_addr;
+    void    *os_map;          /* the OS layer's CPU-mapping object of this BO, a weak link it
+                                 keeps itself (common/rdna3_bo_map.h); the UAPI never reads it */
+    /* the newest CPU-mapping charge of this BO (rdna3_drm_bomap_charge):
+     * its generation (0: none) and uid, for file_foreign_bytes' view only;
+     * the charge itself is the descriptor's (rdna3_bomap_charge) */
+    uint64_t map_gen;
+    uint32_t map_owner;
 } rdna3_bo;
+
+/* BOs a CPU mapping holds (DRIVER-PLAN N47 (b)): such a BO outlives its
+ * handles and its file, so it is charged to the uid that made its mapping
+ * descriptor (rdna3_drm_bomap_charge) until the descriptor goes; the caps
+ * are common/rdna3_bo_map.h's rd3_bomap_quota_admit */
+#define RD_BOMAP_OWNERS 64
+typedef struct rdna3_bomap_owner {
+    uint32_t used, uid, n;
+    uint64_t bytes, foreign_bytes;   /* foreign: IOSurface VRAM (RD_NR_XNU_SURFACE_BO) */
+} rdna3_bomap_owner;
+typedef struct rdna3_bomap_quota {
+    rdna3_bomap_owner o[RD_BOMAP_OWNERS];   /* uids the caps apply to (not root, _windowserver) */
+    uint32_t n;
+    uint64_t bytes;
+    uint64_t gen;                           /* the last charge's generation */
+} rdna3_bomap_quota;
+/* one descriptor's charge, kept by the descriptor and given back exactly:
+ * a BO's next descriptor can be charged while the last one's uncharge is
+ * still to come (ECC review round 2 of N47 (b)) */
+typedef struct rdna3_bomap_charge {
+    uint64_t gen, size;
+    uint32_t uid;
+    uint8_t  foreign, exempt, charged;
+} rdna3_bomap_charge;
 
 typedef struct rdna3_va {
     uint32_t handle;          /* 0 = free slot */
@@ -499,6 +530,7 @@ typedef struct rdna3_drm_device {
     uint32_t vbios_len;
     struct drm_amdgpu_info_vbios vbios_info;
     uint64_t next_mmap_offset;
+    rdna3_bomap_quota bomap;      /* BOs held by CPU mappings, per uid (N47 (b)) */
     uint32_t gc_base0;            /* GC register segment 0 (discovery) */
     uint32_t gb_addr_config;      /* cached like adev->gfx.config.gb_addr_config */
     int      enumeration_only;    /* rings faked for libdrm (rdna3enum=1) */
@@ -570,6 +602,8 @@ typedef struct rdna3_drm_file {
     uint32_t nvas;
     void    *vm;              /* ops.vm_create() result, may be NULL */
     void    *os;              /* the OS's handle on the client (its task), for bo_userptr */
+    uint32_t owner;           /* the opener's uid, set by the OS after rdna3_drm_file_open:
+                                 charged for the BOs its CPU mappings hold */
     uint32_t next_bo_list;
     struct { uint32_t handle, count; rdna3_bo *gds, *gws, *oa; } bo_lists[RD_MAX_BO_LISTS];
     uint64_t client_caps;
@@ -619,6 +653,17 @@ void rdna3_drm_file_close(rdna3_drm_file *f);
 /* Returns 0 or a negative Linux errno. 'data' is a kernel copy of the
  * ioctl payload of 'size' bytes; results are written back into it. */
 int  rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
+
+/* DRIVER-PLAN N47 (b): the OS layer makes a new CPU-mapping descriptor of
+ * 'bo' for file 'f' (it holds the BO until the last mapping goes): charge
+ * it to f->owner, always (one charge per descriptor, never per BO), filling
+ * '*c', which the descriptor keeps. Returns 0, or an rd3_bomap_quota
+ * reason (common/rdna3_bo_map.h) with nothing charged. uncharge gives back
+ * exactly '*c' when the descriptor goes (no-op if not charged); 'bo' is
+ * still alive then (the descriptor's reference). Under the OS lock, as the
+ * ioctls. */
+int  rdna3_drm_bomap_charge(rdna3_drm_device *dev, const rdna3_drm_file *f, rdna3_bo *bo, rdna3_bomap_charge *c);
+void rdna3_drm_bomap_uncharge(rdna3_drm_device *dev, rdna3_bo *bo, rdna3_bomap_charge *c);
 
 /* Enumeration-only mode: report accel_working and one ring per GFX /
  * COMPUTE / DMA so libdrm_amdgpu and RADV can create a device (vulkaninfo,

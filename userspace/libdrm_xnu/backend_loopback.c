@@ -7,6 +7,7 @@
  */
 #include "drm_xnu_backend.h"
 #include "rdna3_drm.h"
+#include "rdna3_bo_map.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -427,17 +428,35 @@ static int lb_ioctl(uintptr_t c, uint32_t nr, void *arg, uint32_t size)
     return r < 0 ? -r : 0;
 }
 
+/* the kernel's checks (common/rdna3_bo_map.h: no userptr, no BO without
+ * CPU access; no BAR limits here) */
 static void *lb_map(uintptr_t c, uint64_t off, size_t len)
 {
     rdna3_bo *bo = rdna3_drm_bo_by_mmap_offset((rdna3_drm_file *)c, off);
-    if (!bo || len > bo->size) {
+    enum rd3_bomap_kind k = rd3_bomap_classify(bo, UINT64_MAX, UINT64_MAX);
+    if (!bo || rd3_bomap_refused(k) || len > bo->size) {
         errno = EINVAL;
         return NULL;
     }
     return bo->backing;   /* the BO's own pages: CPU view == "GPU" view */
 }
 
-static int lb_unmap(uintptr_t c, void *a, size_t l) { (void)c; (void)a; (void)l; return 0; }
+/* as the kext: the offset must still name the mapped BO of this file
+ * (IOConnectUnmapMemory64 finds the mapping through it), so a caller that
+ * passes the wrong one, or closes the BO first, fails here too */
+uint32_t lb_unmap_refused;   /* host tests: every unmap must find its BO */
+static int lb_unmap(uintptr_t c, void *a, size_t l, uint64_t off)
+{
+    rdna3_bo *bo = rdna3_drm_bo_by_mmap_offset((rdna3_drm_file *)c, off);
+    (void)l;
+    if (!bo || bo->backing != a) {
+        lb_unmap_refused++;
+        fprintf(stderr, "loopback: unmap of %p with offset 0x%llx names no mapped BO of this file\n", a,
+                (unsigned long long)off);
+        return -1;
+    }
+    return 0;
+}
 
 static int lb_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
                        uint16_t *subdevice, uint8_t *revision, uint16_t *domain,

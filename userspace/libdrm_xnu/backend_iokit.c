@@ -78,10 +78,14 @@ static void *iokit_map(uintptr_t c, uint64_t off, size_t len)
     return (void *)(uintptr_t)a;
 }
 
-static int iokit_unmap(uintptr_t c, void *addr, size_t len)
+/* the memory type is the BO's, as in iokit_map: xnu looks the mapping up
+ * through clientMemoryForType(type) (kIOMapReference). Type 0, what this
+ * passed before DRIVER-PLAN N47, names no BO: every unmap failed and each
+ * mapping, and since N47 its BO, stayed until the connection closed. */
+static int iokit_unmap(uintptr_t c, void *addr, size_t len, uint64_t off)
 {
     (void)len;
-    return IOConnectUnmapMemory64((io_connect_t)c, 0, mach_task_self(),
+    return IOConnectUnmapMemory64((io_connect_t)c, (uint32_t)(off >> 12), mach_task_self(),
                                   (mach_vm_address_t)(uintptr_t)addr) == KERN_SUCCESS ? 0 : -1;
 }
 
