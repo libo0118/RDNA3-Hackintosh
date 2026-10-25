@@ -46,6 +46,7 @@
 extern "C" {
 #include "amd_discovery.h"
 #include "rdna3_drm.h"
+#include "rdna3_bo_map.h"
 #include "range_alloc.h"
 #include "rdna3_vram_place.h"
 #include "rdna3_pmctl.h"
@@ -111,7 +112,14 @@ public:
     int   drmOpen(rdna3_drm_file *f, bool console);   /* console: kIOClientPrivilegeConsoleSession */
     void  drmClose(rdna3_drm_file *f);
     int   drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
-    void drmBoRelease(rdna3_bo *bo);   /* a CPU mapping's reference (RDNA3BoMemory) */
+    /* a BO's CPU-mapping descriptor (RDNA3BoMemory, RDNA3Drm.cpp) gives
+     * back its BO reference; takes fDrmLock */
+    void drmBoMapRelease(rdna3_bo *bo, uint64_t size);
+    /* xnu refused to map / unmap a BO's range (logged, bomap_fail) */
+    void drmBoMapFailed(const rdna3_bo *bo, const char *what, IOReturn err);
+    /* the BOs' weak links to their mapping descriptors (common/rdna3_bo_map.h);
+     * lives until free(): the descriptors retain this object */
+    IOLock *boMapLock() const { return fBoMapLock; }
     IOMemoryDescriptor *drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
                                            IOOptionBits *options);
 
@@ -218,6 +226,18 @@ private:
     /* Stage 4 */
     rdna3_drm_device *fDrm  = nullptr;
     IOLock       *fDrmLock  = nullptr;
+    /* CPU mappings of BOs (DRIVER-PLAN N47 (b), debug.rdna3_vram bomap_*):
+     * fBoMapLock guards only rdna3_bo::os_map (taken inside fDrmLock, nothing
+     * taken inside it); the counters are under fDrmLock, fBoMapFail atomic */
+    IOLock       *fBoMapLock = nullptr;
+    uint32_t      fBoMapLive = 0;        /* descriptors alive, each holding its BO */
+    uint64_t      fBoMapLiveBytes = 0;   /* the sizes of their BOs */
+    uint32_t      fBoMapMade = 0, fBoMapReused = 0;
+    uint32_t      fBoMapRefused = 0;     /* userptr, no CPU access, outside the BAR, no memory */
+    uint32_t      fBoMapNoBo = 0;        /* an offset that names no BO of the file */
+    volatile SInt32 fBoMapFail = 0;      /* xnu's map / unmap failed */
+    IOMemoryDescriptor *drmBoMapDescriptor(rdna3_bo *bo, IOMemoryDescriptor *bar);   /* fDrmLock held */
+    void          drmBoMapRefused(enum rd3_bomap_kind k, const rdna3_bo *bo, uint64_t off, const char *why);
     IOThread      fDrmHeldBy = nullptr;
     /* the heaps (common/rdna3_vram_place.h, card run 2026-10-17c): the
      * reserve at the start of the CPU-visible part belongs to the

@@ -230,6 +230,8 @@ typedef struct rdna3_bo {
                                  the OS's hold on it, no VRAM usage is counted */
     uint32_t visit;           /* rdna3_drm_device_for_each_vram_bo: seen in this pass */
     uint64_t user_addr;
+    void    *os_map;          /* the OS layer's CPU-mapping object of this BO, a weak link it
+                                 keeps itself (common/rdna3_bo_map.h); the UAPI never reads it */
 } rdna3_bo;
 
 typedef struct rdna3_va {

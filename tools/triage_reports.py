@@ -2262,6 +2262,7 @@ def vram_heap_lines(path, txt, log):
     if not any(lv in ("FAIL", "WARN") for lv, _ in out):
         out.insert(0, ("PASS", "no refusals (%d): the accelerator's reserve is %d KiB of the %d KiB visible heap; held at "
                                "the end: %s" % (refused, c.get("reserve_kib", 0), c.get("visible_kib", 0), owners)))
+    out.extend(bomap_counter_lines(c))   # DRIVER-PLAN N47 (b): BO mappings, after the heap's own verdict
     return out
 
 
@@ -2977,21 +2978,91 @@ def tcall_rows(klog):
 
 
 
-# kext/src/RDNA3Drm.cpp RDNA3BoMemory::doMap / doUnmap (DRIVER-PLAN N47 (b)): xnu-11417 / xnu-12377 never call them
-# on a sub-range descriptor (makeMapping goes to the parent); a line means a newer xnu does, and a client's map of a
-# VRAM or doorbell BO failed (doMap) or left its range mapped (doUnmap)
+# kext/src/RDNA3Drm.cpp, DRIVER-PLAN N47 (b). The kext of 2026-10-25 (before the BO-mapping lifetime fix) logged
+# RDNA3BoMemory::doMap / doUnmap if a newer xnu ever called them on its sub-range descriptor: a client's map of a
+# VRAM or doorbell BO failed (doMap) or left its range mapped (doUnmap). Since the fix the descriptor maps itself,
+# and the kext logs a map or unmap xnu refused, and every map request it refused (common/rdna3_bo_map.h)
 BOMEM_LOG_RE = re.compile(r"RDNA3: GEM: RDNA3BoMemory::(doMap|doUnmap) called \((\d+) such\)")
+BOMAP_FAIL_RE = re.compile(r"RDNA3: GEM: CPU (map|unmap) of a (\d+) KiB (\w+) BO at (0x[0-9a-f]+) failed in xnu "
+                           r"\((0x[0-9a-f]+)\) \(pid (-?\d+), (\d+) such\)")
+BOMAP_REFUSED_RE = re.compile(r"RDNA3: GEM: CPU map of offset (0x[0-9a-f]+) refused: (.*?) \((?:BO [^)]*; )?pid "
+                              r"(-?\d+), (\d+) such\)")
 
 
 def bomem_rows(klog):
-    """[(level, label, text)]: FAIL per call the kernel log shows (the count is the highest the log prints, so
-    "at least"); nothing when there is none"""
+    """[(level, label, text)] of the kernel log's BO mapping lines: FAIL per doMap / doUnmap call of the old kext
+    and per kind of map xnu refused; WARN for the map requests the kext refused (offset 0, which names no BO: an
+    unmap from a libdrm_xnu before N47; the rest: a client asking for what amdgpu never maps). The counts are the
+    highest the log prints, so "at least"; nothing when there is none."""
     seen = {}
     for m in BOMEM_LOG_RE.finditer(klog or ""):
         seen[m.group(1)] = max(seen.get(m.group(1), 0), int(m.group(2)))
-    return [("FAIL", "BO map", "RDNA3BoMemory::%s called at least %d time(s): this macOS maps a sub-range "
+    rows = [("FAIL", "BO map", "RDNA3BoMemory::%s called at least %d time(s): this macOS maps a sub-range "
              "descriptor other than through its parent (xnu-12377 never does); the call answered "
              "kIOReturnUnsupported (DRIVER-PLAN N47 (b))" % (k, seen[k])) for k in sorted(seen)]
+    fails = {}
+    for m in BOMAP_FAIL_RE.finditer(klog or ""):
+        k = (m.group(1), m.group(3))
+        n = int(m.group(7))
+        if k not in fails or n > fails[k][0]:
+            fails[k] = (n, m.group(2), m.group(4), m.group(5), m.group(6))
+    for (what, kind), (n, kib, at, err, pid) in sorted(fails.items()):
+        rows.append(("FAIL", "BO map", "xnu refused a CPU %s of a %s BO at least %d time(s) (the last logged: %s KiB "
+                     "at %s, error %s, pid %s): %s" % (what, kind, n, kib, at, err, pid,
+                                                     "the client got no pointer to it" if what == "map" else
+                                                     "the range may still be mapped in that task")))
+    nobo0, nobo, refused = 0, 0, {}
+    for m in BOMAP_REFUSED_RE.finditer(klog or ""):
+        n = int(m.group(4))
+        if m.group(2).startswith("no BO") and int(m.group(1), 16) == 0:
+            nobo0 = max(nobo0, n)
+        elif m.group(2).startswith("no BO"):
+            nobo = max(nobo, n)
+        else:
+            refused[m.group(2)] = max(refused.get(m.group(2), 0), n)
+    if nobo0:
+        rows.append(("WARN", "BO map", "map / unmap requests for offset 0 (at least %d of the 'no BO' counter): a "
+                     "libdrm_xnu before DRIVER-PLAN N47 unmaps with memory type 0, so its mappings, and the BOs "
+                     "they hold, stay until the process closes the device - install the userspace and the Metal "
+                     "plugin of the same build as the kext (CI full: true)" % nobo0))
+    if nobo:
+        rows.append(("WARN", "BO map", "map / unmap requests for offsets that name no BO of the file (at least %d of the 'no "
+                     "BO' counter): an unmap after GEM_CLOSE (amdgpu's order is unmap, then close) or a stale "
+                     "offset; such a mapping holds its BO until the process closes the device" % nobo))
+    for why in sorted(refused):
+        rows.append(("WARN", "BO map", "a CPU map refused: %s (at least %d time(s); the counter covers every "
+                     "reason)" % (why, refused[why])))
+    return rows
+
+
+# debug.rdna3_vram's bomap_* counters (DRIVER-PLAN N47 (b)): the per-BO mapping descriptors, each holding its BO
+BOMAP_KEYS = ("bomap_live", "bomap_live_kib", "bomap_made", "bomap_reused", "bomap_refused", "bomap_nobo",
+              "bomap_fail")
+
+
+def bomap_counter_lines(c):
+    """[(level, text)] from the counters of one debug.rdna3_vram dump (vram_heap_counters)"""
+    if c is None:
+        return []
+    if any(k not in c for k in BOMAP_KEYS):
+        return [("WARN", "not measured: debug.rdna3_vram has no bomap_* counters (a kext before DRIVER-PLAN N47's "
+                         "BO-mapping fix, or the dump was cut): whether CPU mappings keep BOs alive is not known")]
+    out = [("INFO", "CPU mappings of VRAM / doorbell BOs: %d descriptor(s) live holding %d KiB of BOs (%d made, "
+                    "%d reused by a second map or an unmap)" % (c["bomap_live"], c["bomap_live_kib"],
+                                                                c["bomap_made"], c["bomap_reused"]))]
+    if c["bomap_fail"]:
+        out.append(("FAIL", "%d CPU map / unmap(s) of VRAM or doorbell BOs failed in xnu: the kernel log's 'failed "
+                            "in xnu' lines" % c["bomap_fail"]))
+    if c["bomap_nobo"]:
+        out.append(("WARN", "%d map / unmap request(s) named no BO of the file (an unmap after GEM_CLOSE, or a "
+                            "libdrm_xnu before N47 unmapping with memory type 0: those mappings and their BOs stay "
+                            "until the device is closed); the kernel log's 'CPU map of offset' lines"
+                    % c["bomap_nobo"]))
+    if c["bomap_refused"]:
+        out.append(("WARN", "%d CPU map(s) refused (userptr, no CPU access, outside the BAR, or no memory for the "
+                            "descriptor): the kernel log's 'CPU map of offset ... refused' lines"
+                    % c["bomap_refused"]))
+    return out
 
 CD_PREFS_SEEN_RE = re.compile(r"^== CoreDisplay prefs \(.*?\): this boot's WindowServer started with: (.*)$", re.M)
 CD_PREFS_DID_RE = re.compile(r"^== CoreDisplay prefs: (.*)$", re.M)

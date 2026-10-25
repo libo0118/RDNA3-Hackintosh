@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include "amdgpu.h"
 #include "amdgpu_drm.h"
@@ -81,6 +82,23 @@ int main(void)
             bad += p[i] != (i ^ 0xA5A5A5A5u);
         CHECK(bad == 0);
         CHECK(amdgpu_bo_cpu_unmap(bo) == 0);
+        {
+            /* drm_mmap twice (the kernel hands back the same mapping), two
+             * unmaps: only the last goes to the backend, with the BO's offset
+             * (DRIVER-PLAN N47 (b): the kext finds the mapping through it) */
+            extern uint32_t lb_unmap_refused;
+            union drm_amdgpu_gem_mmap mm;
+            uint32_t kh = 0;
+            void *a, *b;
+            memset(&mm, 0, sizeof(mm));
+            CHECK(amdgpu_bo_export(bo, amdgpu_bo_handle_type_kms, &kh) == 0);
+            mm.in.handle = kh;
+            CHECK(drmCommandWriteRead(amdgpu_device_get_fd(dev), DRM_AMDGPU_GEM_MMAP, &mm, sizeof(mm)) == 0);
+            a = drm_xnu_mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, amdgpu_device_get_fd(dev), (off_t)mm.out.addr_ptr);
+            b = drm_xnu_mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, amdgpu_device_get_fd(dev), (off_t)mm.out.addr_ptr);
+            CHECK(a != MAP_FAILED && a == b);
+            CHECK(drm_xnu_munmap(b, 1 << 20) == 0 && drm_xnu_munmap(a, 1 << 20) == 0 && lb_unmap_refused == 0);
+        }
         CHECK(amdgpu_va_range_alloc(dev, amdgpu_gpu_va_range_general, 1 << 20, 4096, 0, &va,
                                     &vah, 0) == 0 && va);
         CHECK(amdgpu_bo_va_op(bo, 0, 1 << 20, va, 0, AMDGPU_VA_OP_MAP) == 0);
@@ -429,6 +447,10 @@ int main(void)
         CHECK(drmGetFormatModifierName(1ull << 56) == NULL);
         free(n0);
         free(na);
+    }
+    {
+        extern uint32_t lb_unmap_refused;
+        CHECK(lb_unmap_refused == 0);   /* every libdrm unmap named its BO (N47 (b)) */
     }
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
