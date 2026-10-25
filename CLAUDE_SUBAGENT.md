@@ -17,6 +17,14 @@ tools. The owner tests on the real card in a VM and sends reports
 they are read. Nobody can run the hardware but the owner, so every card
 run is expensive: work that needs one must be right the first time.
 
+The owner's macOS 26 VM (OSX-KVM, reached with `ssh -i ~/.ssh/claude_tahoe
+-p 10022 shrek@localhost`) is for read-only probes and plugin builds in
+`/tmp`, and only while the owner has it running. **Never start, stop or
+restart it yourself** (no `boot-macOS*.sh`, no QEMU monitor commands): it
+boots the same disk (`mac_hdd_ng.img`) as the card VM `rdna3vm` runs, and
+two machines on one disk corrupt it. If ssh does not answer, say so in
+your report and let the manager ask the owner; build on CI instead.
+
 ## Find code through the graph first
 
 Before grepping or reading files, ask the code graph (it saves most of
