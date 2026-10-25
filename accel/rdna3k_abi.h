@@ -382,9 +382,11 @@ struct RD3KCopyRequest {
  * reads 100 % at idle, P2), the per-process GPU time since the last take is
  * added to the process's IOAccelSubmitter2 "accumulatedGPUTime". */
 #define RD3K_GPUBUSY_FN      "rdna3GpuBusyTake"
-#define RD3K_GPUBUSY_VERSION 1u
+#define RD3K_GPUBUSY_VERSION 2u   /* 2: cappedNs, uncounted[], sdmaEnds[] (ECC round 1) */
 #define RD3K_GPUBUSY_PIDS    32u
 #define RD3K_GPUBUSY_RINGS   3u   /* GFX, compute, SDMA (RD3_BUSY_*) */
+#define RD3K_GPUBUSY_UNC     5u   /* not counted: VCN, JPEG, other rings, kernel SDMA copies, user queues */
+#define RD3K_GPUBUSY_BY      5u   /* SDMA job ends by: interrupt, waiter, take, submission, reset */
 struct RD3KGpuBusyPid {
     int                pid;
     unsigned int       jobs;           /* jobs ended since the last take */
@@ -400,6 +402,9 @@ struct RD3KGpuBusy {
     unsigned long long jobs, merged, flushed, stale, lostJobs, lostNs;   /* out: totals */
     unsigned int       inflight;       /* out: jobs in flight at the take */
     unsigned int       pad;
+    unsigned long long cappedNs;       /* out: process time dropped above the wall time (total) */
+    unsigned long long uncounted[RD3K_GPUBUSY_UNC];   /* out: submissions / copies / queues the busy time misses */
+    unsigned long long sdmaEnds[RD3K_GPUBUSY_BY];     /* out: SDMA job ends per fence reader */
     struct RD3KGpuBusyPid pids[RD3K_GPUBUSY_PIDS];
 };
 

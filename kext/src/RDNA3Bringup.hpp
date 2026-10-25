@@ -125,6 +125,7 @@ public:
      * totals and the processes' time since the last take (any context; it
      * takes only fBusyLock, a spinlock) */
     uint32_t busyTake(rd3_busy_snap *s, rd3_busy_take_ent *out, uint32_t max);
+    void     busyCounts(uint64_t unc[5], uint64_t sdmaBy[5]) const;
 
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
@@ -307,11 +308,22 @@ private:
     uint64_t         fLastSubmit = 0;      /* mach_absolute_time */
     rd3_busy        *fBusy = nullptr;      /* N49, under fBusyLock */
     IOSimpleLock    *fBusyLock = nullptr;
-    uint64_t         fBusyOdd = 0;         /* flushed + merged + lost at the last take */
-    uint32_t         fBusyLogs = 0;
+    /* the take's last totals per kind and their log budgets (ECC round 1) */
+    uint64_t         fBusySeen[4] = {};    /* flushed, merged, lost, capped */
+    uint32_t         fBusyLogs[4] = {};
+    /* GPU work the busy time does not see, per RD3_BUSY_UNC_* (counted, the first of each logged) */
+    enum { RD3_BUSY_UNC_VCN, RD3_BUSY_UNC_JPEG, RD3_BUSY_UNC_OTHER, RD3_BUSY_UNC_KCOPY, RD3_BUSY_UNC_USERQ,
+           RD3_BUSY_UNC_N };
+    volatile uint64_t fBusyUnc[RD3_BUSY_UNC_N] = {};
+    /* SDMA job ends by who read the fence, per RD3_BUSY_BY_* (its fence raises no interrupt) */
+    enum { RD3_BUSY_BY_IRQ, RD3_BUSY_BY_WAIT, RD3_BUSY_BY_TAKE, RD3_BUSY_BY_SUBMIT, RD3_BUSY_BY_RESET,
+           RD3_BUSY_BY_N };
+    volatile uint64_t fBusySdmaBy[RD3_BUSY_BY_N] = {};
     static uint32_t  busyRing(uint32_t ip, uint32_t ring);   /* RD3_BUSY_* or RD3_BUSY_RINGS */
     void             busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid);
-    void             busyObserve(uint32_t r);                 /* a RD3_BUSY_* ring's fence read */
+    void             busyObserve(uint32_t r, uint32_t by);    /* a RD3_BUSY_* ring's fence read */
+    void             busyEndAll(int ring, const char *why);   /* a reset forced the fences: -1 = every ring */
+    void             busyUncounted(uint32_t kind, uint32_t ip);
     uint32_t         fIdleCaps = 0;
     uint32_t         fSmuVersion = 0;      /* smu_cmn_get_smc_version */
     void             idleCapLift();

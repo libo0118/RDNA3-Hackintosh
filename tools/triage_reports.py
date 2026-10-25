@@ -1020,7 +1020,9 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"irqdone|irqlatus|irqlatmax|irqlive|fbwaitv1))?_h\d|"
                        r"swaps_pq_iopunwritten|swaps_pq_donemax|swap_async|iop_queue|iop_wrote|present_init_failed|"
                        r"perfstats|perf_(?:writes|nocore|nokey|dictfail|setfail|rings|smu|noanswer|util|utilgfx|jobs|flushed|lostns|"
-                       r"gpuns|nosubns|nosub|creditfail)|"
+                       r"gpuns|nosubns|nosub|creditfail|stale|merged|lostjobs|inflight|cappedns|ringns_(?:gfx|comp|sdma)|"
+                       r"unc_(?:vcn|jpeg|other|kcopy|userq)|sdmaend_(?:irq|wait|take|sub|reset)|lastret|winreset|"
+                       r"submitters|uccbad|nolast)|"
                        r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
                        r"flipbuf(?:_scanout|_presented|_held|_failed|_busy|_unlocked|_emptyheld)?_h\d|"
                        r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
@@ -2276,13 +2278,14 @@ def latch_lines(path, txt, args=""):
     an accelerator run"""
     c = a3_counters(txt) if txt else None
     where = "the tests file"
-    sv = log = ""
+    sv = log = ioreg = ""
     if os.path.exists(path):
         try:
             with tarfile.open(path) as tar:
                 sv = read_member(tar, "29-surface-vram.txt") or ""
                 log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt") or ""
                 args = args or read_member(tar, "01-boot-args.txt") or ""
+                ioreg = read_member(tar, "13-ioreg-accel.txt") or ""
         except (OSError, tarfile.TarError):
             pass
     if not has_latch_counters(c):
@@ -2296,7 +2299,7 @@ def latch_lines(path, txt, args=""):
         if "rdna3accel=1" in args or "rdna3accel=1" in txt:
             return [("INFO", "not measured: no rdna3accel counters in the tests file or 29-surface-vram.txt")]
         return []
-    out = latch_verdict(c, current) + present_verdict(c, current, args)
+    out = latch_verdict(c, current) + present_verdict(c, current, args, ioreg)
     if out and where != "the tests file":
         out.append(("INFO", "(counters from %s: no tests file dump)" % where))
     return out
@@ -2316,7 +2319,7 @@ PQ_BUSY_SHARE = 0.25
 PQ_STUCK_RUN = 3
 
 
-def present_verdict(c, current=False, args=""):
+def present_verdict(c, current=False, args="", ioreg=""):
     """[(level, text)] of the present queue (DRIVER-PLAN N38, common/rdna3_flip_queue.h) from its counters. Per
     head: presents programmed at once, queued (replaced: newest wins; Busy kept), joined; latches seen (avg, max),
     queued presents programmed at a latch, latches taken before the worker; writers (copy forward, page-on) that
@@ -2474,14 +2477,26 @@ def present_verdict(c, current=False, args=""):
             if fails["dictfail"] or fails["setfail"]:
                 out.append(("WARN", "GPU utilization updates lost: %d allocation(s) failed, %d refused by setProperty"
                             % (fails["dictfail"], fails["setfail"])))
-        out += gpu_util_verdict(c) if ps else []
+        out += gpu_util_verdict(c, ioreg) if ps else []
     return out
 
 
-def gpu_util_verdict(c):
+UNC_KINDS = (("vcn", "VCN encode jobs"), ("jpeg", "JPEG jobs"), ("other", "jobs on rings other than 0"),
+             ("kcopy", "kernel SDMA copies / clears"), ("userq", "user queues (their jobs never reach the kernel)"))
+
+
+def ioreg_gpu(ioreg):
+    """(Device Utilization % or None, [accumulatedGPUTime values]) from 13-ioreg-accel.txt (DRIVER-PLAN N49)"""
+    m = re.search(r'"Device Utilization %"=(\d+)', ioreg or "")
+    acc = [int(v) for v in re.findall(r'"accumulatedGPUTime" = (\d+)', ioreg or "")]
+    return (int(m.group(1)) if m else None), acc
+
+
+def gpu_util_verdict(c, ioreg=""):
     """[(level, text)] for Activity Monitor's GPU numbers from the rings' busy time (DRIVER-PLAN N49): the
     accelerator's perf_rings / perf_smu / perf_util* and the per-process GPU time it credited (perf_gpuns) or
-    could not (perf_nosubns: no IOAccelSubmitter2 for the process)"""
+    could not (perf_nosubns: no IOAccelSubmitter2 for the process), what the busy time does not count
+    (perf_unc_*), and the accelerator's ioreg (13-ioreg-accel.txt) against the counters"""
     out = []
     if c.get("perf_rings") is None:
         return out   # an accelerator older than N49
@@ -2490,9 +2505,20 @@ def gpu_util_verdict(c):
         out.append(("INFO", "GPU utilization from the rings' busy time: %d update(s), last %s %% (GFX %s %%), %s job(s)"
                     % (rings, c.get("perf_util", "?"), c.get("perf_utilgfx", "?"), c.get("perf_jobs", "?"))))
     if smu or (noans and not rings):
+        lr = c.get("perf_lastret")
         out.append(("WARN", "GPU utilization from the SMU's GFX activity (100 %% at idle on this card, P2) in %d "
-                            "update(s): the core gave no ring busy time %d time(s) (an older core, or no busy "
-                            "accounting: the kernel's 'perfstats: the core did not give' line)" % (smu, noans)))
+                            "update(s): the core gave no ring busy time %d time(s), last answer %s (0xe00002c7 an older "
+                            "core, 0xe00002d8 no busy accounting / no GPU yet, 0xe00002c2 an ABI version mismatch; the "
+                            "kernel's 'perfstats: the core's ring busy time:' lines)" % (
+                                smu, noans, "?" if lr is None else "0x%x" % lr)))
+    unc = [(c.get("perf_unc_" + k, 0), what) for k, what in UNC_KINDS]
+    if any(n for n, _ in unc):
+        txt = ", ".join("%d %s" % (n, what) for n, what in unc if n)
+        if not c.get("perf_jobs"):
+            out.append(("WARN", "GPU work the busy time does not count (%s) and no counted job at all (perf_jobs 0): "
+                                "Activity Monitor's GPU numbers miss all of it" % txt))
+        else:
+            out.append(("INFO", "not in the busy time: %s" % txt))
     gpu, nosub = c.get("perf_gpuns", 0), c.get("perf_nosubns", 0)
     if gpu:
         out.append(("INFO", "%.1f s of GPU time added to the processes' contexts (accumulatedGPUTime: Activity "
@@ -2500,18 +2526,47 @@ def gpu_util_verdict(c):
     if nosub:
         out.append(("INFO", "%.1f s of GPU time (%d take(s)) of processes with no IOAccelSubmitter2 under the "
                             "accelerator: Activity Monitor shows 0 %% GPU for them (DRIVER-PLAN N49 open item; the "
-                            "kernel's 'has no IOAccelSubmitter2' lines name the pids)" % (nosub / 1e9,
-                                                                                         c.get("perf_nosub", 0))))
+                            "kernel's 'has no IOAccelSubmitter2' lines name the pids; the last walk saw %s submitter(s))"
+                    % (nosub / 1e9, c.get("perf_nosub", 0), c.get("perf_submitters", "?"))))
+    if c.get("perf_uccbad"):
+        out.append(("WARN", "%d IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid: their "
+                            "processes' time counts as 'no IOAccelSubmitter2' though they have one" % c["perf_uccbad"]))
     if rings and not gpu and not nosub and c.get("perf_jobs"):
         out.append(("WARN", "the rings ran %s job(s) but no process got GPU time (perf_gpuns 0, perf_nosubns 0)"
                     % c.get("perf_jobs")))
     if c.get("perf_creditfail"):
-        out.append(("WARN", "%d time(s) GPU time NOT credited: no child iterator, or a context without its "
+        out.append(("WARN", "%d time(s) GPU time NOT credited: no child iterator, or a context without a 64-bit "
                             "accumulatedGPUTime number (the kernel's perfstats lines)" % c["perf_creditfail"]))
-    if c.get("perf_flushed") or c.get("perf_lostns"):
-        out.append(("INFO", "busy accounting: %d job(s) flushed with no time (a ring reset / a fence never seen), "
-                            "%.1f ms of GPU time with no process slot" % (c.get("perf_flushed", 0),
-                                                                          c.get("perf_lostns", 0) / 1e6)))
+    if c.get("perf_nolast"):
+        out.append(("WARN", "%d credited context(s) without a 64-bit lastSubmittedTime: Activity Monitor may not list "
+                            "the process as submitting" % c["perf_nolast"]))
+    if c.get("perf_stale"):
+        out.append(("WARN", "%d job(s) flushed as stale: no fence for 30 s and no reset the core saw (the serial "
+                            "log's 'GPU busy: ... flushed' line names the ring)" % c["perf_stale"]))
+    if c.get("perf_flushed") or c.get("perf_lostns") or c.get("perf_merged") or c.get("perf_cappedns"):
+        out.append(("INFO", "busy accounting: %d job(s) flushed with no time (a ring reset / a fence never seen), %d "
+                            "merged into a full queue, %.1f ms with no process slot, %.1f ms dropped above the wall "
+                            "time" % (c.get("perf_flushed", 0), c.get("perf_merged", 0), c.get("perf_lostns", 0) / 1e6,
+                                      c.get("perf_cappedns", 0) / 1e6)))
+    se = [c.get("perf_sdmaend_" + k, 0) for k in ("irq", "wait", "take", "sub", "reset")]
+    if sum(se) and se[2] * 4 > sum(se):
+        out.append(("INFO", "%d of %d SDMA job(s) ended only at the 250 ms take (no waiter read their fence): the SDMA "
+                            "busy time is up to 250 ms long per gap" % (se[2], sum(se))))
+    if c.get("perf_winreset", 0) > 1:
+        out.append(("INFO", "%d take(s) not published: the core's busy totals went back (a core restart?)"
+                    % (c["perf_winreset"] - 1)))
+    util, acc = ioreg_gpu(ioreg)
+    if acc and gpu and not any(acc):
+        out.append(("WARN", "13-ioreg-accel.txt: every accumulatedGPUTime is 0 although %.1f s were credited (the "
+                            "family replaced its numbers, or the ioreg is from before the credits)" % (gpu / 1e9)))
+    if util is not None and rings:
+        if util == 100 and c.get("perf_util", 100) <= 50:
+            out.append(("WARN", "13-ioreg-accel.txt: Device Utilization %% = 100 while the rings' last value is %s %%: "
+                                "the family's or the SMU's value overwrote ours (the ioreg and the counters are read "
+                                "at different times)" % c.get("perf_util")))
+        else:
+            out.append(("INFO", "13-ioreg-accel.txt: Device Utilization %% = %d (the rings' last value %s %%, read at "
+                                "another time)" % (util, c.get("perf_util", "?"))))
     return out
 
 
@@ -2543,7 +2598,13 @@ SERIAL_PQ = (
     ("WARN", r"GPU busy: no memory for the ring busy accounting", "no ring busy accounting in the core (N49)"),
     ("INFO", r"perfstats: pid \d+ used the GPU [^\n]*? has no IOAccelSubmitter2",
      "process(es) with GPU time Activity Monitor cannot show: no IOAccelSubmitter2 (N49)"),
-    ("INFO", r"GPU busy: \d+ job\(s\) flushed", "busy accounting line(s): jobs flushed / merged / with no slot (N49)"),
+    ("WARN", r"GPU busy: \d+ job\(s\) flushed [^\n]*?; (?!0 stale)\d+ stale", "stale flush(es): a ring's jobs never "
+             "saw their fence for 30 s and no reset said so (N49)"),
+    ("INFO", r"GPU busy: \d+ job\(s\) (?:flushed [^\n]*?; 0 stale|merged|with no process slot)|GPU busy: \d+ us "
+             r"of process GPU time dropped", "busy accounting line(s): jobs flushed / merged / with no slot / capped (N49)"),
+    ("INFO", r"GPU busy: [^\n]*? is not in the ring busy time", "kind(s) of GPU work the busy time does not count (N49)"),
+    ("INFO", r"GPU busy: [^\n]*? ended \d+ GFX / \d+ compute / \d+ SDMA job\(s\) in flight",
+     "reset(s) that ended jobs in flight (N49)"),
     ("INFO", r"present queue: head \d+: the queued .*? DROPPED: (?!its buffer was freed)",
      "queued present(s) dropped at a display mode change"),
     ("INFO", r"present queue: head \d+: the framebuffer has no rdna3FlipLatchWait", "an older framebuffer: the "

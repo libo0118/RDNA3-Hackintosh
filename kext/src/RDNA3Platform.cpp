@@ -817,11 +817,13 @@ IOReturn RDNA3Accel::platformGpuBusy(RD3KGpuBusy *q)
     if (!q || q->version != RD3K_GPUBUSY_VERSION)
         return kIOReturnBadArgument;
     q->npids = 0;
-    if (!fBringup || !fDrmLock)
-        return kIOReturnNotReady;
+    if (!fDrm || !fBringup || !fDrmLock)
+        return kIOReturnNotReady;   /* no GPU (yet): not 'an older core' (ECC round 1) */
     IOLockLock(fDrmLock);
     const uint32_t n = fBringup ? fBringup->busyTake(&s, t, RD3K_GPUBUSY_PIDS) : 0;
     const bool live = fBringup && s.now != 0;
+    if (live)
+        fBringup->busyCounts(q->uncounted, q->sdmaEnds);
     IOLockUnlock(fDrmLock);
     if (!live)
         return kIOReturnNotReady;   /* no busy accounting (no memory at start): the accelerator logs it */
@@ -836,6 +838,7 @@ IOReturn RDNA3Accel::platformGpuBusy(RD3KGpuBusy *q)
     q->lostJobs = s.lost_jobs;
     q->lostNs = s.lost_ns;
     q->inflight = s.inflight;
+    q->cappedNs = s.capped_ns;
     for (uint32_t i = 0; i < n; i++) {
         uint64_t abs = 0;
         nanoseconds_to_absolutetime(t[i].last_sub, &abs);
@@ -886,6 +889,10 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
         if (fn->isEqualTo(RD3K_DISPLAY_FN_GAMMA))
             return displayGamma((RD3KDisplayGamma *)p1);
     }
+    /* before the fDrm gate: without the DRM it answers NotReady, not
+     * IOService's Unsupported ('an older core', ECC round 1) */
+    if (fn && fn->isEqualTo(RD3K_GPUBUSY_FN))
+        return platformGpuBusy((RD3KGpuBusy *)p1);
     if (fn && fDrm) {
         if (fn->isEqualTo(RD3K_VRAM_FN_ALLOC))
             return platformVramAlloc((RD3KVramRequest *)p1);
@@ -932,8 +939,6 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformPageoff((RD3KSurfPageoff *)p1);
         if (fn->isEqualTo(RD3K_COPY_FN))
             return platformCopyVram((RD3KCopyRequest *)p1);
-        if (fn->isEqualTo(RD3K_GPUBUSY_FN))
-            return platformGpuBusy((RD3KGpuBusy *)p1);
     }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }

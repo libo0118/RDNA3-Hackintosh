@@ -36,7 +36,15 @@
  * RD3_BUSY_STALE_NS is flushed the same way (a reset that left the fence
  * value behind). A full queue merges the new job into the newest entry
  * (counted): the ring's busy time stays exact, the job's time goes to that
- * entry's process.
+ * entry's process. A reset that completes the fences (amdgpu's
+ * force_completion) ends every job of the ring at once with its time
+ * (rd3_busy_end_all), before the ring's fence_seq starts again at 0.
+ *
+ * A process's time summed over several rings can be more than the wall
+ * time (GFX and SDMA at once); Activity Monitor would show more than 100 %.
+ * rd3_busy_take hands out at most the wall time since the last take per
+ * process and carries the rest over, at most one more such span (the
+ * excess is dropped, counted in capped_ns).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -66,6 +74,7 @@ struct rd3_busy_ring {
     uint64_t busy_since;      /* n > 0: since when the ring has work */
     uint64_t busy_ns;         /* closed busy intervals */
     uint64_t last_end;        /* the newest completion seen */
+    uint64_t flushed;         /* jobs flushed with no time on this ring */
 };
 
 struct rd3_busy_pid {
@@ -82,7 +91,8 @@ struct rd3_busy {
     struct rd3_busy_pid  pid[RD3_BUSY_PIDS];
     uint32_t nbusy;           /* rings with work */
     uint64_t any_since, any_ns;
-    uint64_t jobs, merged, flushed, stale, lost_jobs, lost_ns;
+    uint64_t jobs, merged, flushed, stale, lost_jobs, lost_ns, capped_ns;
+    uint64_t take_last;       /* the previous take's time */
 };
 
 /* what a take returns: totals since init, the busy time up to 'now' */
@@ -90,7 +100,8 @@ struct rd3_busy_snap {
     uint64_t now;
     uint64_t any_ns;
     uint64_t ring_ns[RD3_BUSY_RINGS];
-    uint64_t jobs, merged, flushed, stale, lost_jobs, lost_ns;
+    uint64_t ring_flushed[RD3_BUSY_RINGS];
+    uint64_t jobs, merged, flushed, stale, lost_jobs, lost_ns, capped_ns;
     uint32_t inflight;
 };
 
@@ -184,6 +195,7 @@ static inline void rd3_busy_flush(struct rd3_busy *b, uint32_t ring, uint64_t no
     if (!r->n)
         return;
     b->flushed += r->n;
+    r->flushed += r->n;
     r->n = 0;
     r->head = 0;
     r->last_end = now;
@@ -243,6 +255,19 @@ static inline uint32_t rd3_busy_done(struct rd3_busy *b, uint32_t ring, uint32_t
     return ended;
 }
 
+/* a reset completed the ring's fences (force_completion): every job in
+ * flight ends now, with its time; returns how many */
+static inline uint32_t rd3_busy_end_all(struct rd3_busy *b, uint32_t ring, uint64_t now)
+{
+    const struct rd3_busy_ring *r;
+    if (ring >= RD3_BUSY_RINGS)
+        return 0;
+    r = &b->ring[ring];
+    if (!r->n)
+        return 0;
+    return rd3_busy_done(b, ring, r->q[(r->head + r->n - 1) % RD3_BUSY_FIFO].seq, now);
+}
+
 /* the oldest job of each ring older than RD3_BUSY_STALE_NS: the ring
  * flushed (a reset that left the fence value behind); returns the rings */
 static inline uint32_t rd3_busy_stale(struct rd3_busy *b, uint64_t now)
@@ -269,6 +294,7 @@ static inline void rd3_busy_totals(const struct rd3_busy *b, uint64_t now, struc
         const struct rd3_busy_ring *r = &b->ring[i];
         s->ring_ns[i] = r->busy_ns + (r->n ? rd3_busy_since(now, r->busy_since) : 0);
         s->inflight += r->n;
+        s->ring_flushed[i] = r->flushed;
     }
     s->jobs = b->jobs;
     s->merged = b->merged;
@@ -276,26 +302,37 @@ static inline void rd3_busy_totals(const struct rd3_busy *b, uint64_t now, struc
     s->stale = b->stale;
     s->lost_jobs = b->lost_jobs;
     s->lost_ns = b->lost_ns;
+    s->capped_ns = b->capped_ns;
 }
 
 /* the processes with time or a submission since the last take, at most
- * 'max' (the rest wait for the next take); returns how many */
-static inline uint32_t rd3_busy_take(struct rd3_busy *b, struct rd3_busy_take_ent *out, uint32_t max)
+ * 'max' (the rest wait for the next take); each gets at most the wall time
+ * since the last take, the rest carried over (at most one more such span);
+ * returns how many */
+static inline uint32_t rd3_busy_take(struct rd3_busy *b, uint64_t now, struct rd3_busy_take_ent *out, uint32_t max)
 {
+    const uint64_t span = rd3_busy_since(now, b->take_last);
     uint32_t i, n = 0;
     for (i = 0; i < RD3_BUSY_PIDS && n < max; i++) {
         struct rd3_busy_pid *p = &b->pid[i];
+        uint64_t ns;
         if (!p->used || !p->dirty)
             continue;
+        ns = p->pend_ns < span ? p->pend_ns : span;
         out[n].pid = p->pid;
         out[n].jobs = p->pend_jobs;
-        out[n].ns = p->pend_ns;
+        out[n].ns = ns;
         out[n].last_sub = p->last_sub;
         n++;
-        p->pend_ns = 0;
+        p->pend_ns -= ns;
+        if (p->pend_ns > span) {
+            b->capped_ns += p->pend_ns - span;
+            p->pend_ns = span;
+        }
         p->pend_jobs = 0;
-        p->dirty = 0;
+        p->dirty = p->pend_ns != 0;
     }
+    b->take_last = now;
     return n;
 }
 

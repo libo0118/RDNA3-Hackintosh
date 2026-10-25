@@ -134,23 +134,23 @@ static void takes(void)
     int32_t p;
     rd3_busy_init(&B);
     rd3_busy_submit(&B, RD3_BUSY_GFX, 1, 208, 0);
-    n = rd3_busy_take(&B, t, 8);   /* submitted, nothing done: last_sub only */
+    n = rd3_busy_take(&B, 1 * MS, t, 8);   /* submitted, nothing done: last_sub only */
     CHECK(n == 1 && t[0].pid == 208 && t[0].ns == 0 && t[0].jobs == 0 && t[0].last_sub == 0);
-    CHECK(rd3_busy_take(&B, t, 8) == 0);
+    CHECK(rd3_busy_take(&B, 2 * MS, t, 8) == 0);
     rd3_busy_done(&B, RD3_BUSY_GFX, 1, 6 * MS);
-    n = rd3_busy_take(&B, t, 8);
+    n = rd3_busy_take(&B, 20 * MS, t, 8);
     CHECK(n == 1 && t[0].pid == 208 && t[0].ns == 6 * MS && t[0].jobs == 1);
-    CHECK(rd3_busy_take(&B, t, 8) == 0);
+    CHECK(rd3_busy_take(&B, 21 * MS, t, 8) == 0);
     /* 40 processes, one job each: 32 slots, the idle ones reused after a take */
     for (p = 1000; p < 1040; p++) {
         rd3_busy_submit(&B, RD3_BUSY_SDMA, (uint32_t)(p - 999) + 100, p, (uint64_t)p * MS);
         rd3_busy_done(&B, RD3_BUSY_SDMA, (uint32_t)(p - 999) + 100, (uint64_t)p * MS + MS);
         if (p == 1020) {
-            n = rd3_busy_take(&B, t, RD3_BUSY_PIDS + 4);
+            n = rd3_busy_take(&B, 3000 * MS, t, RD3_BUSY_PIDS + 4);
             CHECK(n == 21);
         }
     }
-    n = rd3_busy_take(&B, t, RD3_BUSY_PIDS + 4);
+    n = rd3_busy_take(&B, 5000 * MS, t, RD3_BUSY_PIDS + 4);
     rd3_busy_totals(&B, 2000 * MS, &s);
     CHECK(n == 19 && s.lost_ns == 0);
     for (i = 0; i < n; i++)
@@ -164,8 +164,41 @@ static void takes(void)
     rd3_busy_done(&B, RD3_BUSY_GFX, 100, 200);
     rd3_busy_totals(&B, 300, &s);
     CHECK(s.lost_jobs == 1 && s.lost_ns == 100 && pid_total(77) == 0);
-    n = rd3_busy_take(&B, t, 4);   /* the rest wait for the next take */
-    CHECK(n == 4 && rd3_busy_take(&B, t, RD3_BUSY_PIDS) == RD3_BUSY_PIDS - 4);
+    n = rd3_busy_take(&B, 1000, t, 4);   /* the rest wait for the next take */
+    CHECK(n == 4 && rd3_busy_take(&B, 2000, t, RD3_BUSY_PIDS) == RD3_BUSY_PIDS - 4);
+}
+
+/* a process busy on two rings at once: at most the wall time per take, one span carried, the rest dropped
+ * (Activity Monitor would show more than 100 %); a reset's force_completion ends every job with its time */
+static void cap_and_reset(void)
+{
+    struct rd3_busy_take_ent t[4];
+    struct rd3_busy_snap s;
+    rd3_busy_init(&B);
+    rd3_busy_submit(&B, RD3_BUSY_GFX, 1, 5, 0);
+    rd3_busy_submit(&B, RD3_BUSY_SDMA, 1, 5, 0);
+    rd3_busy_done(&B, RD3_BUSY_GFX, 1, 10 * MS);
+    rd3_busy_done(&B, RD3_BUSY_SDMA, 1, 10 * MS);
+    CHECK(pid_total(5) == 20 * MS);
+    CHECK(rd3_busy_take(&B, 10 * MS, t, 4) == 1 && t[0].ns == 10 * MS && t[0].jobs == 2);
+    CHECK(rd3_busy_take(&B, 12 * MS, t, 4) == 1 && t[0].ns == 2 * MS && t[0].jobs == 0);
+    CHECK(rd3_busy_take(&B, 20 * MS, t, 4) == 1 && t[0].ns == 2 * MS);
+    CHECK(rd3_busy_take(&B, 30 * MS, t, 4) == 0);
+    rd3_busy_totals(&B, 30 * MS, &s);
+    CHECK(s.capped_ns == 6 * MS);
+    /* force_completion: the three jobs end at the reset, before fence_seq starts again at 0 */
+    rd3_busy_submit(&B, RD3_BUSY_COMPUTE, 900, 7, 40 * MS);
+    rd3_busy_submit(&B, RD3_BUSY_COMPUTE, 901, 8, 41 * MS);
+    rd3_busy_submit(&B, RD3_BUSY_COMPUTE, 902, 7, 42 * MS);
+    CHECK(rd3_busy_end_all(&B, RD3_BUSY_COMPUTE, 50 * MS) == 3);
+    CHECK(rd3_busy_end_all(&B, RD3_BUSY_COMPUTE, 51 * MS) == 0);
+    rd3_busy_submit(&B, RD3_BUSY_COMPUTE, 1, 7, 60 * MS);   /* seq 1 again: no flush, the ring was empty */
+    rd3_busy_totals(&B, 60 * MS, &s);
+    CHECK(pid_total(7) == 10 * MS && pid_total(8) == 0 && s.flushed == 0 && s.inflight == 1 &&
+          s.ring_ns[RD3_BUSY_COMPUTE] == 10 * MS && s.ring_flushed[RD3_BUSY_COMPUTE] == 0);
+    rd3_busy_submit(&B, RD3_BUSY_COMPUTE, 1, 7, 61 * MS);   /* not after: a reset nobody told, flushed */
+    rd3_busy_totals(&B, 62 * MS, &s);
+    CHECK(s.flushed == 1 && s.ring_flushed[RD3_BUSY_COMPUTE] == 1 && s.inflight == 1);
 }
 
 /* the utilisation window and the creator string */
@@ -201,6 +234,7 @@ int main(void)
     wrap_reset_stale();
     full();
     takes();
+    cap_and_reset();
     util();
     if (fails) {
         printf("test_gpu_busy: %d failure(s)\n", fails);
