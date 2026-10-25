@@ -319,6 +319,12 @@ fi
     grep -h 'allow mode' "$dir/24-log-coredisplay.txt" "$dir/26-log-metal-plugin.txt" 2>/dev/null \
         | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -200
 } > "$dir/34-metal-allow.txt" 2>&1
+# N50: the plugin's conf file as the plugin reads it (the A/B profile of a run is in it: NVMTL_RADV_DEBUG, NVMTL_PARANOID, ...); the plugin also logs
+# `conf: set ...` and `vk: ab switches` per process, this is the file itself
+{
+    echo "== /Library/GPUBundles/rdna3mtl/rdna3mtl.conf"
+    cat /Library/GPUBundles/rdna3mtl/rdna3mtl.conf 2>&1 || echo "(no conf file: the defaults)"
+} > "$dir/34-metal-conf.txt" 2>&1
 # which source the Metal plugin and RADV in this machine were built from
 # (build_metal.sh / build_radv.sh write the stamps; tools/triage_reports.py
 # compares them with the checkout: STALE PLUGIN/RADV). The kext was current

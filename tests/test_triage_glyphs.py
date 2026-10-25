@@ -1,10 +1,10 @@
-"""tools/triage_glyphs.py (DRIVER-PLAN N49) on synthetic plugin logs: the line formats are the plugin's (metal/plugin/nvmtl_vk.c, NVMTLObjects.m).
-Cases: a clean default log (INFO only), a RADV debug profile (WARN), the paranoid profile (WARN), a plugin older than N49 (WARN: no RADV line although the
-driver opened), load pass layouts (INFO with the counts), the fence that returned early (WARN, old one-line and new counted format), a managed shadow
-that changed (WARN) and one that did not (INFO), a rejected flag (WARN), and the hook in triage_reports.py.
+"""tools/triage_glyphs.py (DRIVER-PLAN N50) on synthetic plugin logs: the line formats are the plugin's (metal/plugin/nvmtl_vk.c, NVMTLObjects.m).
+Cases: a clean default log (INFO only), a RADV debug profile (WARN, quoted values, an empty value is not a profile, process names with blanks), a
+rejected flag (WARN with the reason), the paranoid profile and the switch list (WARN), a plugin older than N50 (WARN), conf lines applied and skipped,
+the load pass / fence counters of `vk: ab: SUMMARY` (INFO / WARN, pool reuse OFF = no evidence), the managed SUMMARY (changed, inert, skipped,
+snapshot), and the hook in triage_reports.py.
 Run: python3 -I -B tests/test_triage_glyphs.py"""
 import os
-import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,82 +25,90 @@ def L(proc, pid, msg, tid="1e7a"):
 
 def rows_of(log):
     out = {}
-    for lvl, name, text in tg.n49_plugin_rows(log):
+    for lvl, name, text in tg.n50_plugin_rows(log):
         out.setdefault(name, []).append((lvl, text))
     return out
 
 
-check(tg.n49_plugin_rows("") == [], "empty log: nothing")
-check(tg.n49_plugin_rows(L("Chess", 1, "newTextureWithDescriptor: 971x680 -> 0x1")) == [], "an unrelated line: nothing")
+check(tg.n50_plugin_rows("") == [], "empty log: nothing")
+check(tg.n50_plugin_rows(L("Chess", 1, "newTextureWithDescriptor: 971x680 -> 0x1")) == [], "an unrelated line: nothing")
 
-# the default driver: INFO
-log = (L("Terminal", 907, "vk: driver opened directly: /Library/GPUBundles/rdna3mtl/libvulkan_radeon.dylib (image X)") +
-       L("Terminal", 907, "vk: RADV_DEBUG=unset RADV_PERFTEST=unset (NVMTL_RADV_DEBUG=unset, NVMTL_RADV_PERFTEST=unset)"))
+RADV0 = 'vk: RADV_DEBUG=unset RADV_PERFTEST=unset (NVMTL_RADV_DEBUG=unset, NVMTL_RADV_PERFTEST=unset)'
+# the default driver; a process name with a blank is read whole
+log = L("Terminal", 907, "vk: driver opened directly: x") + L("Activity Monitor", 786, "vk: driver opened directly: x") + L("Terminal", 907, RADV0) + L("Activity Monitor", 786, RADV0)
 r = rows_of(log)
-check(list(r) == ["radv debug"] and r["radv debug"][0][0] == "INFO", "default flags: one INFO row, %r" % r)
+check(r["radv debug"][0][0] == "INFO" and "Activity Monitor" in r["radv debug"][0][1] and "Terminal" in r["radv debug"][0][1], "default flags: INFO naming both processes, %r" % r)
 
-# a debug profile: WARN, names the process and the flags
-log = (L("Chess", 814, "vk: driver opened directly: x") +
-       L("Chess", 814, "vk: RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears RADV_PERFTEST=unset (NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears, NVMTL_RADV_PERFTEST=unset) - A DEBUG PROFILE IS ON: this run does not show the default driver") +
-       L("WindowServer", 208, "vk: RADV_DEBUG=unset RADV_PERFTEST=unset (NVMTL_RADV_DEBUG=unset, NVMTL_RADV_PERFTEST=unset)"))
-r = rows_of(log)
-check(r["radv debug"][0][0] == "WARN" and "Chess" in r["radv debug"][0][1] and "nodcc,nohiz,nofmask,nofastclears" in r["radv debug"][0][1], "profile on: WARN naming Chess and the flags, %r" % r)
-check("WindowServer" not in r["radv debug"][0][1].split("(")[0], "the unset process is not blamed")
-
-# a plugin older than N49: the driver opened, no RADV line
+# a profile: WARN naming the process and the flags, and the processes where it is unset
+on = 'vk: RADV_DEBUG="nodcc,nohiz,nofmask,nofastclears" RADV_PERFTEST=unset (NVMTL_RADV_DEBUG="nodcc,nohiz,nofmask,nofastclears", NVMTL_RADV_PERFTEST=unset) - A DEBUG PROFILE IS ON: this run does not show the default driver'
+r = rows_of(L("Chess", 814, on) + L("WindowServer", 208, RADV0))
+check(r["radv debug"][0][0] == "WARN" and "Chess" in r["radv debug"][0][1] and "nodcc,nohiz,nofmask,nofastclears" in r["radv debug"][0][1] and "unset in WindowServer" in r["radv debug"][0][1], "profile on: WARN, %r" % r)
+# an empty value is not a profile
+r = rows_of(L("Chess", 814, 'vk: RADV_DEBUG="" RADV_PERFTEST="" (NVMTL_RADV_DEBUG=unset, NVMTL_RADV_PERFTEST=unset)'))
+check(r["radv debug"][0][0] == "INFO", "an empty RADV_DEBUG is not ON, %r" % r)
+# an older plugin: the driver opened, no RADV line
 r = rows_of(L("Terminal", 907, "vk: driver opened directly: x"))
-check(r.get("radv debug", [("", "")])[0][0] == "WARN" and "older than DRIVER-PLAN N49" in r["radv debug"][0][1], "old plugin: WARN, %r" % r)
+check(r["radv debug"][0][0] == "WARN" and "older than DRIVER-PLAN N50" in r["radv debug"][0][1], "old plugin: WARN, %r" % r)
+check(any("no `vk: ab switches` line" in t for _, t in r["plugin switch"]), "old plugin: no switch line either, %r" % r)
+# a rejected value with a blank is NOT read as an old plugin; the reason is shown
+r = rows_of(L("Terminal", 907, "vk: driver opened directly: x") +
+            L("Terminal", 907, 'vk: NVMTL_RADV_DEBUG="nodcc nohiz" REJECTED: character 0x20 at position 5 (only RADV\'s own flag names, comma separated, at most 200 characters) - RADV_DEBUG unchanged') +
+            L("Terminal", 907, 'vk: RADV_DEBUG=unset RADV_PERFTEST=unset (NVMTL_RADV_DEBUG="nodcc nohiz", NVMTL_RADV_PERFTEST=unset)'))
+check(any("0x20" in t and "nodcc nohiz" in t for _, t in r["radv debug"]), "the rejected value and the character are shown, %r" % r)
+check(not any("older than" in t for _, t in r["radv debug"]), "a rejected value is not an old plugin, %r" % r)
 
-# a rejected flag
-r = rows_of(L("Terminal", 907, "vk: NVMTL_RADV_DEBUG=nodcc;rm REJECTED (only lowercase letters, digits, '_' and ',' are taken, at most 200 characters) - RADV_DEBUG unchanged"))
-check(r["radv debug"][0][0] == "WARN" and "REJECTED" in r["radv debug"][0][1], "a rejected flag: WARN")
+# the profile and the switch list
+r = rows_of(L("Terminal", 907, "conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: 14 switch(es) set by it (NVMTL_RADV_DEBUG=nodcc NVMTL_ASYNC_COMMIT=0), already set and kept: NVMTL_NO_RES2; no async commit, no recycling or reuse, no barrier folding, no residency paging, RADV compression metadata off: this run does NOT show the default plugin"))
+check(r["paranoid profile"][0][0] == "WARN" and "14 set by it" in r["paranoid profile"][0][1] and "kept: NVMTL_NO_RES2" in r["paranoid profile"][0][1], "paranoid: WARN, %r" % r)
+r = rows_of(L("Terminal", 907, "conf: NVMTL_PARANOID=yes is not 1 - the profile is off"))
+check(r["paranoid profile"][0][0] == "WARN" and "NOT 1" not in r["paranoid profile"][0][1] and "OFF" in r["paranoid profile"][0][1], "a PARANOID value that is not 1 is said, %r" % r)
+r = rows_of(L("Terminal", 907, 'vk: ab switches [1]: NVMTL_ASYNC_COMMIT="0" NVMTL_NO_ALIGN_GUARD="1"') + L("Chess", 814, 'vk: ab switches [1]: NVMTL_ASYNC_COMMIT="0" NVMTL_MANAGED_CHECK=" 0"') +
+            L("WindowServer", 208, "vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)"))
+sw = r["plugin switch"][0][1]
+check(r["plugin switch"][0][0] == "WARN" and "NVMTL_ASYNC_COMMIT=0 in Chess, Terminal" in sw and "NVMTL_NO_ALIGN_GUARD=1 in Terminal" in sw and 'NVMTL_MANAGED_CHECK= 0 in Chess' in sw, "switches by knob and value: ' 0' is visible, %r" % r)
+r = rows_of(L("WindowServer", 208, "vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)"))
+check(r["plugin switch"][0][0] == "INFO", "none set: INFO, %r" % r)
 
-# the paranoid profile
-r = rows_of(L("Terminal", 907, "conf: NVMTL_PARANOID=1 - the diagnostic profile is ON (15 switch(es) set: no async commit, no recycling or reuse, no barrier folding, no residency paging, RADV compression metadata off): this run does NOT show the default plugin"))
-check(r["paranoid profile"][0][0] == "WARN" and "15 switches" in r["paranoid profile"][0][1], "paranoid: WARN with the count, %r" % r)
+# the conf file: what was applied, what was skipped
+r = rows_of(L("Terminal", 907, 'conf: set NVMTL_RADV_DEBUG="nodcc" NVMTL_ASYNC_COMMIT="0"') + L("Terminal", 907, 'conf: line 3 skipped: NVMTL_ASYNC_COMMIT is already set (an earlier line of the file, or the environment, wins)') +
+            L("Terminal", 907, 'conf: line 5 skipped: "RADV_DEBUG" is not an NVMTL_ / NVK_ / NVRM_ knob'))
+check(r["plugin conf"][0][0] == "INFO" and 'NVMTL_ASYNC_COMMIT="0"' in r["plugin conf"][0][1], "conf set: INFO, %r" % r)
+check(sum(1 for lvl, t in r["plugin conf"] if lvl == "WARN") == 2 and any("already set" in t for _, t in r["plugin conf"]) and any("not an NVMTL_" in t for _, t in r["plugin conf"]), "skipped lines: WARN each, %r" % r)
 
-# load passes by layout: the newest count wins, per process and kind
-lp = ("vk: load pass colour of an image resting in layout %d, the pass declares 6 [%d such pass(es) so far; per layout (UNDEFINED GENERAL COLOR DS DSRO SRO SRC DST PREINIT other): "
-      "%s]")
-log = (L("Chess", 814, lp % (5, 1, "0 0 0 0 0 1 3 0 0 0")) + L("Chess", 814, lp % (5, 4, "2 1 0 0 0 4 90 0 0 0")) +
-       L("Chess", 814, "vk: load pass depth of an image resting in layout 5, the pass declares 3 [2 such pass(es) so far; per layout (UNDEFINED GENERAL COLOR DS DSRO SRO SRC DST PREINIT other): 0 0 0 7 0 2 0 0 0 0]"))
-r = rows_of(log)
+# the counters
+ab = ("vk: ab: SUMMARY load_colour_all=1200 load_colour_mismatch=40 load_colour_inrp=0 load_colour_barriers=0 load_depth_all=10 load_depth_mismatch=2 load_depth_inrp=3 load_depth_barriers=0 "
+      "colour_by_layout=2,1,0,0,0,37,0,0,0,0 depth_by_layout=0,0,0,0,0,2,0,0,0,0 wit_early=%d wit_ok=%d wit_blind=1 wit_worst_us=%d")
+r = rows_of(L("Chess", 814, ab % (0, 5000, 0)) + L("Chess", 814, ab % (4, 9000, 52)))
 check(len(r["load pass layouts"]) == 2 and all(x[0] == "INFO" for x in r["load pass layouts"]), "two INFO rows (colour, depth), %r" % r)
-check(any("4 load pass(es) began" in x[1] and "UNDEFINED 2" in x[1] and "SRO 4" in x[1] and "SRC 90" in x[1] for x in r["load pass layouts"]), "the newest colour counts are shown, %r" % r["load pass layouts"])
-r = rows_of(L("Chess", 814, "vk: load passes: the declared initial layout is MADE TRUE by a barrier from the tracked layout (experiment) (NVMTL_LOAD_BARRIER=1)") + L("Chess", 814, lp % (5, 1, "0 0 0 0 0 1 3 0 0 0")))
-check("were transitioned" in r["load pass layouts"][0][1], "the barrier experiment is named")
-
-# the fence that returns early: the old once-per-process line and the new counted one
+check(any("1200 load pass(es), 40 began" in x[1] and "UNDEFINED 2" in x[1] and "SRO 37" in x[1] for x in r["load pass layouts"]), "colour counts, %r" % r["load pass layouts"])
+check(any("3 seen with a render pass already open" in x[1] for x in r["load pass layouts"]), "the in_rp count is shown")
+check(r["fence early"][0][0] == "WARN" and "4 time(s) in 9004 witnessed submits" in r["fence early"][0][1] and "worst 52 us" in r["fence early"][0][1], "the newest SUMMARY wins, %r" % r)
+r = rows_of(L("Chess", 814, ab % (0, 5000, 0)))
+check(r["fence early"][0][0] == "INFO" and "5000 witnessed submits, no early fence" in r["fence early"][0][1], "no early fence: INFO with the count, %r" % r)
+r = rows_of(L("Chess", 814, ab % (0, 0, 0)) + L("Chess", 814, "vk: pool reuse OFF by environment - command pools and address pages are created and destroyed per commit"))
+check(r["fence early"][0][0] == "INFO" and "NOT evidence" in r["fence early"][0][1], "pool reuse OFF: no evidence either way, %r" % r)
 r = rows_of(L("Chess", 814, "vk: keep witness 3313 landed only 14 us AFTER the flush returned - the flush is not synchronous any more"))
-check(r["fence early"][0][0] == "WARN" and "1 time(s)" in r["fence early"][0][1] and "14 us late" in r["fence early"][0][1], "the old line: WARN, %r" % r)
-log = (L("Chess", 814, "vk: keep witness 3313 landed only 14 us AFTER the flush returned - the flush is not synchronous any more [1 time(s) so far in 3314 witnessed submit(s), worst 14 us]") +
-       L("Chess", 814, "vk: keep witness 9000 landed only 40 us AFTER the flush returned - the flush is not synchronous any more [4 time(s) so far in 9001 witnessed submit(s), worst 52 us]"))
-r = rows_of(log)
-check(len(r["fence early"]) == 1 and "4 time(s) in 9001 witnessed submits" in r["fence early"][0][1] and "worst 52 us" in r["fence early"][0][1], "the counted line: the newest wins, %r" % r)
+check(r["fence early"][0][0] == "WARN" and "older plugin" in r["fence early"][0][1], "an old one-line report: WARN, %r" % r)
 
-# the managed shadow
-chg = ("managed: the CPU shadow of a 262144-byte buffer CHANGED at bytes 0..4096 between the flush and the GPU's completion (%s) [%d exact, %d envelope of several marks, in %d uploads checked]")
-r = rows_of(L("Terminal", 907, chg % ("one didModifyRange: the GPU copy may have read a mix of two states", 3, 5, 120)))
+# the managed upload check / snapshot
+mg = ("managed: SUMMARY check=%d snapshot=%d flushes=100 uploads=%d prologue_uploads=%d sync_uploads=%d checked=%d changed_exact=%d changed_env=%d check_skipped=%d snapped=%d "
+      "snap_failed=%d snap_skipped_big=%d snap_skipped_noshadow=%d")
+r = rows_of(L("Terminal", 907, mg % (1, 0, 300, 300, 0, 300, 3, 5, 0, 0, 0, 0, 0)))
 check(r["managed shadow"][0][0] == "WARN" and "3 time(s) under a single didModifyRange" in r["managed shadow"][0][1] and "5 merged" in r["managed shadow"][0][1], "a changed shadow: WARN, %r" % r)
-r = rows_of(L("Terminal", 907, "managed: shadow check ON - each upload's shadow range is hashed at the flush and again when the GPU is done") +
-            L("Terminal", 907, "managed: shadow check: 64 upload(s) checked, 0 changed under a single didModifyRange, 0 merged ranges changed"))
-check(r["managed shadow"][0][0] == "INFO" and "64 managed upload(s) checked, none changed" in r["managed shadow"][0][1], "an unchanged shadow: INFO, %r" % r)
+r = rows_of(L("Terminal", 907, mg % (1, 1, 64, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0)))
+check([x[0] for x in r["managed shadow"]] == ["INFO", "INFO"] and "64 managed upload(s) checked, none changed" in r["managed shadow"][0][1] and "64 upload(s) read a private snapshot" in r["managed shadow"][1][1], "clean check + snapshot: INFO, %r" % r)
+r = rows_of(L("Terminal", 907, mg % (1, 1, 100, 40, 60, 40, 0, 0, 0, 40, 0, 0, 0)))
+check(any(x[0] == "WARN" and "60 of 100" in x[1] and "INERT" in x[1] for x in r["managed shadow"]), "uploads as a synchronous submit: INERT is WARNed, %r" % r)
+r = rows_of(L("Terminal", 907, mg % (1, 1, 100, 100, 0, 90, 0, 0, 10, 0, 2, 5, 3)))
+check(any(x[0] == "WARN" and "10 upload(s) not checked" in x[1] and "2 snapshot allocation(s) failed" in x[1] and "5 range(s) over 1 MiB" in x[1] and "NO upload was snapshotted" in x[1] for x in r["managed shadow"]), "skips and failures are WARNed, %r" % r)
+r = rows_of(L("Terminal", 907, mg % (0, 0, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+check("managed shadow" not in r, "both off: nothing, %r" % r)
 r = rows_of(L("Terminal", 907, "managed: shadow check ON - each upload's shadow range is hashed at the flush and again when the GPU is done"))
-check(r["managed shadow"][0][0] == "INFO" and "no managed upload was checked" in r["managed shadow"][0][1], "the check on and nothing checked: INFO")
-
-# the plain diagnostic switches: one WARN row each, naming the processes
-r = rows_of(L("Terminal", 907, "managed: upload snapshot ON - the GPU copy reads a private copy of the shadow range made at the flush (ranges up to 1 MiB) (NVMTL_MANAGED_SNAPSHOT=1)") +
-            L("Chess", 814, "commit: synchronous (NVMTL_ASYNC_COMMIT=0) (NVMTL_ASYNC_COMMIT=0)"))
-check(len(r["plugin switch"]) == 2 and all(x[0] == "WARN" for x in r["plugin switch"]), "two switch rows, %r" % r)
-check(any("NVMTL_MANAGED_SNAPSHOT=1 was on in Terminal" in x[1] for x in r["plugin switch"]) and any("NVMTL_ASYNC_COMMIT=0 was on in Chess" in x[1] for x in r["plugin switch"]), "the rows name switch and process")
-r = rows_of(L("Chess", 814, "managed: upload snapshot off - the GPU copy reads the shadow when it runs (NVMTL_MANAGED_SNAPSHOT=unset)") + L("Chess", 814, "commit: ASYNC (default) - execution worker (NVMTL_ASYNC_COMMIT=unset)"))
-check("plugin switch" not in r, "the defaults raise no row, %r" % r)
-r = rows_of(L("Chess", 814, "vk: load passes: the declared initial layout is MADE TRUE by a barrier from the tracked layout (experiment) (NVMTL_LOAD_BARRIER=1)"))
-check(r["plugin switch"][0][0] == "WARN" and "NVMTL_LOAD_BARRIER=1 was on in Chess" in r["plugin switch"][0][1], "LOAD_BARRIER is a switch row, %r" % r)
+check(r["managed shadow"][0][0] == "INFO" and "no managed upload was seen" in r["managed shadow"][0][1], "the check on and nothing seen: INFO")
 
 # the hook in triage_reports.py
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
-check("from triage_glyphs import n49_plugin_rows" in src and "n49_plugin_rows(" in src, "triage_reports.py calls n49_plugin_rows")
+check("from triage_glyphs import n50_plugin_rows" in src and "n50_plugin_rows(" in src, "triage_reports.py calls n50_plugin_rows")
 check("tools/triage_glyphs.py is missing" in src, "triage_reports.py says so loudly when the module is missing")
 
 if fails:
