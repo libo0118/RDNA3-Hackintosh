@@ -235,16 +235,17 @@ def _lum(pix, w, y, x0, x1):
     return [(a + b + c) // 3 for a, b, c in zip(r[0::3], r[1::3], r[2::3])]
 
 
-def changed_pixels(data_a, data_b, rect):
-    """pixels of `rect` (x0, y0, x1, y1, grown right and down: the next tick lines appear below and the window is wider than its text) whose luminance differs
-    by more than LIVE_STEP between two looks of the same screen; ValueError when the two are not the same size"""
+def changed_pixels(data_a, data_b, rect, pitch=None):
+    """pixels of `rect` (x0, y0, x1, y1) whose luminance differs by more than LIVE_STEP between two looks of the same screen, in the stack's OWN columns (nothing to the sides:
+    a clock or another window there is not the text) and grown downwards by four line pitches only (the next tick lines appear right below). ValueError when the two looks are not
+    the same size"""
     wa, ha, pa = parse_ppm(data_a)
     wb, hb, pb = parse_ppm(data_b)
     if (wa, ha) != (wb, hb):
         raise ValueError("the two looks differ in size (%dx%d against %dx%d)" % (wa, ha, wb, hb))
     x0, y0, x1, y1 = rect
-    pitch = max((y1 - y0) // 20, 8)
-    x0, x1, y0, y1 = max(x0 - 20, 0), min(x1 + 60, wa), max(y0 - 4, 0), min(y1 + 8 * pitch, ha)
+    pitch = pitch or max((y1 - y0) // 20, 8)
+    x0, x1, y0, y1 = max(x0, 0), min(x1 + 1, wa), max(y0 - 2, 0), min(y1 + 4 * pitch, ha)
     n = 0
     for y in range(y0, y1):
         la, lb = _lum(pa, wa, y, x0, x1), _lum(pb, wb, y, x0, x1)
@@ -265,7 +266,7 @@ def verdict_files(paths, tol=TWIN_TOL, later=None):
     With `later` (the second look of each pipe, taken a few seconds after the first, same file names with another look name) only a LIVE stack counts: the text
     script prints a line a second, so the window that holds the rung's own text CHANGES between the two looks, and a window that does not (a restored one, another
     rung's, a frozen screen) is listed as static and left out of the verdict. No live stack = `none`. `none` also when no file could be read; the text says which."""
-    stacks, errs, static = [], [], []
+    stacks, errs, static, pipes = [], [], [], set()
     partner = {}
     if later is not None:
         for q in later:
@@ -283,10 +284,11 @@ def verdict_files(paths, tol=TWIN_TOL, later=None):
                     continue
                 with open(q, "rb") as f:
                     other = f.read()
+            pipes.add(_pipe_of(p) or "?")
             for r in found:
                 r["file"] = p
                 if other is not None:
-                    r["changed"] = changed_pixels(data, other, r["rect"])
+                    r["changed"] = changed_pixels(data, other, r["rect"], max((r["rect"][3] - r["rect"][1]) // max(r["lines"], 1), 8))
                     r["live"] = r["changed"] >= LIVE_MIN
                     if not r["live"]:
                         static.append(r)
@@ -305,7 +307,7 @@ def verdict_files(paths, tol=TWIN_TOL, later=None):
             why = "no LIVE tick stack: the %d tick stack(s) on the screens did not change between the two looks (restored or frozen text, not the rung's own)" % len(static)
         else:
             why = "no stack of >= %d tick lines in the look%s" % (MIN_BANDS, "" if len(paths) == 1 else "s")
-        return {"verdict": "none", "text": why, "stacks": [], "static": static}
+        return {"verdict": "none", "text": why + ("; pipes judged: " + ", ".join(sorted(pipes)) if pipes else ""), "stacks": [], "static": static, "pipes": sorted(pipes)}
     worst = min(stacks, key=lambda r: (_ORDER[r["verdict"]], r["share"]))
     text = "%s: %d of %d tick lines have a twin (%.0f %%)" % (worst["verdict"].upper(), worst["twinned"], worst["lines"], 100.0 * worst["share"])
     if later is not None:
@@ -313,6 +315,7 @@ def verdict_files(paths, tol=TWIN_TOL, later=None):
     if len(stacks) > 1:
         text += "; %d tick stack(s) on the screens: %s" % (len(stacks), ", ".join("%d/%d %s" % (r["twinned"], r["lines"], r["verdict"]) for r in stacks[:4]))
     text += live_note
+    text += "; pipes judged: " + ", ".join(sorted(pipes))
     if errs:
         text += "; unreadable: " + "; ".join(errs)[:120]
-    return {"verdict": worst["verdict"], "text": text, "stacks": stacks, "static": static}
+    return {"verdict": worst["verdict"], "text": text, "stacks": stacks, "static": static, "pipes": sorted(pipes)}

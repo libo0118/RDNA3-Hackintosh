@@ -60,6 +60,7 @@ exit 0
 EOF
 cat > "$T/bin/pgrep" <<'EOF'
 #!/bin/sh
+[ "$1" = -f ] && [ -n "${OLDTICK:-}" ] && echo 4242
 [ "$1" = -x ] && cat "$STUBDIR/pids-$2" 2>/dev/null
 exit 0
 EOF
@@ -70,6 +71,7 @@ cat > "$T/bin/log" <<'EOF'
 echo "log $*" >> "$STUBLOG"
 pred=
 while [ $# -gt 0 ]; do [ "$1" = --predicate ] && pred=$2; shift; done
+[ -n "${BIGLOG:-}" ] && awk 'BEGIN { for (i = 0; i < 9000; i++) print "2026-10-25 12:00:01.000 Df  Chess[1000:1f] (RDNA3MTLDriver) NVMTL: filler line number " i " xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }'
 PKEYS="NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears NVMTL_ASYNC_COMMIT=0 NVMTL_GSUB_INFLIGHT=1 NVMTL_PRESUBMIT_PROLOGUE=0 NVMTL_NO_POOL_REUSE=1 NVMTL_NO_BUFREUSE=1 NVMTL_NO_BUFTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_PLACE=1 NVMTL_NO_DIRTYONLY=1 NVMTL_ENC78_OFF=all NVMTL_G79_OFF=all NVMTL_NO_RES2=1 NVMTL_NO_PURGE_RECLAIM=1 NVMTL_NO_SURFIN_CACHE=1"
 for p in $(echo "$pred" | sed -n 's/processID == \([0-9]*\)/\1/gp' | tr -cs '0-9' ' '); do
     ev=$(tr '\n' ' ' < "$STUBDIR/env-$p" 2>/dev/null)
@@ -94,7 +96,32 @@ for p in $(echo "$pred" | sed -n 's/processID == \([0-9]*\)/\1/gp' | tr -cs '0-9
     else
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab switches: none set (x)"
     fi
-    echo "2026-10-25 12:00:11.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab: SUMMARY wit_ok=3 wit_early=0 wit_blind=0 wit_worst_us=0"
+    # the effective state of the plugin as the knobs of the rung change it, and the counters only those knobs move (tools/triage_glyphs.py rung_engaged compares them with the baseline's)
+    has() { case " $ev " in *" $1 "*) return 0 ;; esac; return 1; }
+    share="live in the surface's family VRAM"; has NVMTL_NO_SURFACE_SHARE=1 && share="private per process"
+    po="marked newest; a CPU lock pages it off"; has NVMTL_NO_SURFACE_PAGEOFF=1 && po="copied out eagerly (old)"
+    zf="clear their VRAM copy on the GPU"; has NVMTL_MANAGED_EAGER_ZERO=1 && zf="memset their CPU copy at creation and upload it (old)"
+    tb=ON; has NVMTL_NO_TEXBUF=1 && tb=OFF
+    bl=ON; has NVMTL_NO_BINDLESS=1 && bl=OFF
+    se="are NOT submitted"; has NVMTL_SKIP_EMPTY=0 && se="are submitted as before b78"
+    dc=0; has NVMTL_DONTCARE_CLEARS=1 && dc=9
+    wide=0; wh=0; pg=0; ck=0; sc=0
+    has NVMTL_MANAGED_WHOLE=1 && { wh=1; wide=70; }
+    has NVMTL_MANAGED_PAGES=1 && { pg=1; wide=50; }
+    has NVMTL_MANAGED_CHECK=1 && { ck=1; sc=380; }
+    zr=0; has NVMTL_FBFETCH_ZERO=1 && zr=2
+    pre="2026-10-25 12:00:02.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL:"
+    echo "$pre item 7: IOSurface textures $share (NVK import ABSENT, NVMTL_NO_SURFACE_SHARE=unset)"
+    echo "$pre after a GPU write, IOSurface VRAM is $po (NVK dirty export ABSENT)"
+    echo "$pre zero-fill: managed buffers $zf (NVMTL_MANAGED_EAGER_ZERO=unset)"
+    echo "$pre vk: par3 VK_EXT_mutable_descriptor_type present - texture buffers $tb (mutable texture/storage bands)"
+    echo "$pre vk: descriptor indexing present - bindless textures $bl (set 2)"
+    echo "$pre commit: empty submission parts $se (NVMTL_SKIP_EMPTY=unset)"
+    case "$se" in "are NOT"*) echo "$pre commit: 3 empty submission parts NOT submitted (no encoder, no resources) - each WAS a full submit + wait" ;; esac
+    echo "2026-10-25 12:00:11.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab: SUMMARY wit_ok=3 wit_early=0 wit_blind=0 wit_worst_us=0 same_image_copies=0 dontcare_seen=9 dontcare_cleared=$dc"
+    echo "2026-10-25 12:00:11.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: managed: SUMMARY check=$ck snapshot=0 flushes=40 uploads=80 prologue_uploads=80 sync_uploads=0 checked=0 changed_exact=0 changed_env=0 check_skipped=0 whole=$wh pages=$pg decl_bytes=9000 up_bytes=9000 widened_uploads=$wide ud_scans=$sc ud_idle_scans=0 ud_hits=0 ud_mirrors=3 ud_managed=3"
+    echo "2026-10-25 12:00:11.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: fbfetch: SUMMARY served=4 modules=4 read=4 zr_forced=$zr draws=100"
+    echo "2026-10-25 12:00:11.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: census: SUMMARY seq=1 t_ms=10000 surfaces=1 overflow=0 sin_up_vram=0 sin_up_priv=0 sin_up_mb=0 sin_skip=0 sin_fail=0 pass=10 pass_clear=0 draws=5 draw_blit=2 draw_fbf=3 blitenc=0 replace=0 compute=0 present=0 out_dirty=9 out_copy=0 out_fail=0 top=325:640x353:V:P10,D5"
 done
 exit 0
 EOF
@@ -148,7 +175,7 @@ kill() {   # the real kill is not wanted: the fake instances are forgotten, the 
 }
 if [ -n "${STOP_AT:-}" ]; then   # an interrupt in the middle of a rung: the harness's own SIGTERM at the Nth hires look
     ladder_look_hires() { n=$(cat "$STUBDIR/looks" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUBDIR/looks"
-        if [ "$n" = "$STOP_AT" ]; then [ -n "${STRAY:-}" ] && echo 1999 >> "$STUBDIR/pids-Chess"; command kill -TERM $$; fi; return 0; }
+        if [ "$n" = "$STOP_AT" ]; then [ -n "${STRAY:-}" ] && echo 1999 >> "$STUBDIR/pids-Chess"; command kill -${STOP_SIG:-TERM} $$; fi; return 0; }
 fi
 if [ -n "${FAIL_WS:-}" ]; then bisect_restart_ws() { echo "bisect_restart_ws FAILED (stub)" >> "$STUBLOG"; return 1; }; fi
 STANDALONE=1; HOST=; base=rdna3-report-test; D=$HT/D; TS=$HT/ts; mkdir -p "$TS"
@@ -244,7 +271,8 @@ text = open(sys.argv[1]).read()
 logs = {r: open(os.path.join(sys.argv[2], r + ".log")).read() for r in t.LADDER_RUNGS}
 v, rungs, probs = t.parse_ladder(text, logs)
 assert v == 1 and not probs and list(rungs) == list(t.LADDER_RUNGS), (v, probs, list(rungs))
-rows = t.ladder_rows(rungs, v, probs)
+gl = {n: {"verdict": "broken", "text": "BROKEN: 3 of 20 (test)"} for n in rungs}   # (the looks are 2x2 stubs: the verdicts are given, the run's evidence is what is tested)
+rows = t.ladder_rows(rungs, v, probs, gl)
 bad = [r for r in rows if r[0] != "INFO"]
 assert not bad, bad
 assert any(r[1] == "ladder radv" and "NVMTL_RADV_DEBUG" in r[2] for r in rows), rows
@@ -330,6 +358,33 @@ assert kil and kil[0][0] == "INFO" and "ended by SIGKILL" in kil[0][2], kil
 assert ok and ok[0][0] == "INFO" and "14 instance(s) ended by SIGINT" in ok[0][2], ok
 assert stub and "ended by SIGTERM" in stub[0][2], stub
 PYEOF
+    # a log slice over 600000 bytes keeps its END (the SUMMARY lines) and says it was truncated
+    fresh
+    run 1 big BIGLOG=1
+    grep -q '^rc=0$' "$T/big.out" && grep -q 'slice truncated: kept the last 600000 of [0-9]* bytes' "$T/big/ladder.txt" && grep -q 'census: SUMMARY' "$T/big/baseline.log" && [ "$(wc -c < "$T/big/baseline.log" | tr -d ' ')" -le 600000 ] || fail "$SH: a large log slice: $(grep '^log: baseline' "$T/big/ladder.txt")"
+    # a tick window of an earlier run is said before the first rung
+    fresh
+    run 1 oldtick OLDTICK=1
+    grep -q '^WARN: the text script of an earlier run is still running (pids 4242 )' "$T/oldtick/ladder.txt" || fail "$SH: an earlier run's text script is not warned about: $(grep '^WARN' "$T/oldtick/ladder.txt")"
+    # a signal ends the run with a line that names it and the rung, and the triage shows it
+    grep -q '^ABORTED by SIGTERM at rung ' "$T/intr1/ladder.txt" && grep -q '^ABORTED by SIGTERM at rung ' "$T/intr/ladder.txt" || fail "$SH: an interrupted run left no ABORTED line: $(tail -3 "$T/intr1/ladder.txt")"
+    python3 -I - "$T/intr1/ladder.txt" <<'PYEOF' || fail "$SH: the triage does not show the abort"
+import sys, os
+sys.path.insert(0, os.environ["ROOT"] + "/tools")
+import triage_glyphs as t
+v, rungs, probs = t.parse_ladder(open(sys.argv[1]).read(), {})
+assert any(p.startswith("ABORTED by SIGTERM") for p in probs), probs
+assert any(r[1] == "ladder" and r[2].startswith("ABORTED") for r in t.ladder_rows(rungs, v, probs, {})), probs
+PYEOF
+    fresh
+    run 1 hup1 STOP_AT=2 STOP_SIG=HUP
+    grep -q '^rc=129$' "$T/hup1.out" && grep -q '^ABORTED by SIGHUP at rung ' "$T/hup1/ladder.txt" && cmp -s "$T/conf" "$T/conf.orig" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: SIGHUP in an app rung: $(tail -3 "$T/hup1.out")"
+    fresh
+    run 3 hup3 STOP_AT=3 STOP_SIG=HUP
+    grep -q '^rc=129$' "$T/hup3.out" && grep -q '^ABORTED by SIGHUP at rung ' "$T/hup3/ladder.txt" || fail "$SH: SIGHUP in the glyph hunt: $(tail -3 "$T/hup3.out")"
+    fresh
+    run 2 hup2 STOP_AT=8 STOP_SIG=HUP
+    grep -q '^rc=0$' "$T/hup2.out" && ! grep -q '^ABORTED' "$T/hup2/ladder.txt" || fail "$SH: the WindowServer variant must go on after SIGHUP (the restart closes its Terminal): $(tail -3 "$T/hup2.out")"
     # the text script is made in a directory of mktemp's and removed at the end (no fixed name in /Users/Shared)
     fresh
     run 1 mk LADDER_TEXT=
@@ -406,16 +461,18 @@ logs = {r: open(os.path.join(sys.argv[2], r + ".log")).read() for r in t.LADDER_
 v, rungs, probs = t.parse_ladder(text, logs)
 assert v == 3 and not probs and list(rungs) == list(t.LADDER_GLYPHS_RUNGS), (v, probs, list(rungs))
 assert all(r["looks"] == ["ladder-%sa" % n, "ladder-%sh" % n, "ladder-%sh2" % n] for n, r in rungs.items()), [r["looks"] for r in rungs.values()][:2]
-rows = t.ladder_rows(rungs, v, probs)
+gl = {n: {"verdict": "broken", "text": "BROKEN: 3 of 20 (test)"} for n in rungs}
+rows = t.ladder_rows(rungs, v, probs, gl)
 bad = [r for r in rows if r[0] != "INFO"]
 assert not bad, bad
 assert [r[1] for r in rows if r[1].startswith("ladder ")][:3] == ["ladder baseline", "ladder managed-whole", "ladder managed-check"], rows[:3]
+assert all("knob engaged" in [r for r in rows if r[1] == "ladder " + n][0][2] for n in rungs if n != "baseline"), "every rung's knob engaged in the stub run"
 m = [r for r in rows if r[1] == "ladder no-texbuf"][0]
 assert "NVMTL_NO_TEXBUF" in m[2], m
 # a log in which the knob never reached the plugin is a WARN
-rows2 = t.ladder_rows(dict(rungs, **{"managed-pages": dict(rungs["managed-pages"], log=logs["baseline"])}), v, probs)
+rows2 = t.ladder_rows(dict(rungs, **{"managed-pages": dict(rungs["managed-pages"], log=logs["baseline"])}), v, probs, gl)
 m2 = [r for r in rows2 if r[1] == "ladder managed-pages"][0]
-assert m2[0] == "WARN" and "did not reach the plugin" in m2[2], m2
+assert m2[0] == "WARN" and "did not reach the plugin" in m2[2] and "Terminal pid" in m2[2] and "engagement could not be shown" in m2[2], m2
 PYEOF
     echo "test_ladder_step: ok glyph hunt ($SH)"
 

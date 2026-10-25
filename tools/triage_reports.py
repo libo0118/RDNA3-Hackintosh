@@ -4804,7 +4804,7 @@ def report(path, show_all):
             from triage_glyphs import parse_ladder, ladder_rows, glyph_verdicts
             lv_, lr_, lp_ = parse_ladder(ladder_txt, ladder_logs)
             # the automatic glyph verdict reads the rungs' 1280-wide looks that sit next to the archive (<report>-scanoutladder-<rung>h-pipe<N>.ppm)
-            gl_ = glyph_verdicts(lr_, path[:-len(".tar.gz")]) if path.endswith(".tar.gz") else {}
+            gl_ = glyph_verdicts(lr_, path[:-len(".tar.gz")] if path.endswith(".tar.gz") else None)   # (None: said per rung, not skipped)
             ladder_rows_ = ladder_rows(lr_, lv_, lp_, gl_)
         except ImportError:
             ladder_rows_ = [("WARN", "ladder", "tools/triage_glyphs.py is missing next to triage_reports.py: the ladder's rungs were NOT read")]

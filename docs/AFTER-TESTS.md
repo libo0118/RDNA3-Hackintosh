@@ -1264,6 +1264,25 @@ rung gives (the host test compares them with the source). What a CLEAN rung (bas
 The verdict of a rung looks at the window that CHANGED between its two 1280-wide looks (`...h` and `...h2`, three seconds apart; the text script prints a line a second): a tick-line window
 that did not change (a restored one, another rung's, a frozen screen) is listed as `STATIC ... ignored` and never decides; no live window at all is `none` (`ladder glyphs none` names the rungs).
 
+**A rung only counts if its knob was ENGAGED.** A key that reached the plugin (`vk: ab switches`) can still change nothing: the feature was already off, or the app never uses it. The triage compares the Terminal's
+effective-state lines and counters with the baseline's and says `knob engaged (...)` or **`KNOB NOT ENGAGED: <why>`** (WARN; "engagement could not be shown" when a line is missing): `no-surface-share` / `no-surface-pageoff` / `managed-eager-zero` /
+`no-texbuf` / `no-bindless` / `skip-empty-0` (the `item 7: ...`, `after a GPU write ...`, `zero-fill: ...`, `texture buffers ON/OFF`, `bindless textures ON/OFF`, `commit: empty submission parts ...` lines, and
+`commit: N empty submission parts NOT submitted` in the baseline), `managed-whole` / `managed-pages` (`widened_uploads` > 0 or `ud_whole_marks` > 0), `managed-check` (scans > 0), `fbfetch-zero` (`zr_forced` > 0 in
+`vk: fbfetch: SUMMARY`), `dontcare-clears` (`dontcare_cleared` > 0 in `vk: ab: SUMMARY`; `dontcare_seen` counts every don't-care attachment), `paranoid` (the profile line). A clean rung that did not engage is a WARN, not a cure,
+and the "no knob is the cure" sentence lists the engaged rungs and says the others exclude nothing. Every rung, the baseline too, must also show that ITS Terminal (the pid in `pids:`) logged `vk: ab switches` in the slice, otherwise the
+rung "proves nothing"; a missing log slice, a Terminal that did not start, a look whose `exit:` was not 0, a log slice cut at 600000 bytes (the END is kept), ppm files that were not sent (`push: N ppm file(s) not sent`), a run ended by
+a signal (`ABORTED by SIGx at rung N`) and a tick text script of an earlier run still running are all WARN rows. A rung with a hires look and no glyph verdict is WARNed (never left out).
+
+**The detector's blind spot and what WHOLE covers.** The detector watches a managed buffer from its first `didModifyRange` or its first `-contents` call (the only way an app can write a buffer without ever declaring a range), so a buffer
+written only through a cached `contents` pointer is watched too, from the moment it was first read. A buffer that was neither declared nor read is not watched: `ud_managed` counts the managed buffers made, the triage row says how
+many were never watched, and softens "hypothesis A is not supported" to "NOT excluded" when a third or more were blind. `NVMTL_MANAGED_WHOLE=1` also covers the buffers that never declare a range: at every submit a watched buffer whose
+shadow differs from the mirror is marked dirty and uploaded whole (`ud_whole_marks`), as Apple's copy of "everything" would. `NVMTL_MANAGED_PAGES=1` only widens the ranges the app DID declare (Apple copies what is modified, in pages;
+a buffer with no declared range is not copied there either). **The detector perturbs timing**: with `NVMTL_MANAGED_CHECK` (and `NVMTL_MANAGED_WHOLE`) every flush hashes the uploaded range and compares/copies the whole shadow against the mirror, every
+submit scans every watched buffer; a Terminal at 256 KB x 3 buffers pays tens of microseconds per submit. A rung that comes out clean with `managed-check` alone means a race the timing hides, not a missing declaration.
+
+**Summaries are timer-driven.** One 10 s timer (armed when the device is made) prints `managed:`, `census:`, `vk: ab:` and `vk: fbfetch:` (the surface-in cache has its own), each only when a counter moved; the last tick before a signal is the
+last evidence (a signal skips atexit). The surface-in SUMMARY is two lines (`SUMMARY` and `SUMMARY2` with the same `seq`; nvlog cuts at 1023 characters); the triage merges them. Rows carry the process and pid (`Terminal[907]`).
+
 **What the new counters say** (all in the plugin log of the process; the triage prints a row for each):
 
 | Line / row | Meaning | Action |

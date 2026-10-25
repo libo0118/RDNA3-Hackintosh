@@ -1192,15 +1192,24 @@ ladder_look_hires() {   # ladder_look_hires NAME: the 1280-wide look (small text
     grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep' "$LD/look.out" | cut -c1-140 >> "$LF"
     ladder_w "exit: $_lr"
 }
-ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began
+ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began (the LAST 600000 bytes: a flood keeps the end, where the SUMMARY lines are)
     _ls_start=$(date -r "$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d "@$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
     _ls_pred='(eventMessage CONTAINS "NVMTL" OR eventMessage CONTAINS "NullMoth:") AND ('
     _ls_or=
     for _lp in $3; do _ls_pred="$_ls_pred${_ls_or}processID == $_lp"; _ls_or=" OR "; done
     _ls_pred="$_ls_pred)"
-    : > "$LD/$1.log"
-    with_limit 90 sh -c "log show --start \"$_ls_start\" --info --style compact --predicate '$_ls_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery | head -c 600000" > "$LD/$1.log" 2>/dev/null
-    ladder_w "log: $1.log ($(wc -l < "$LD/$1.log" | tr -d ' ') lines, pids $3, since $_ls_start)"
+    : > "$LD/$1.full"
+    with_limit 90 sh -c "log show --start \"$_ls_start\" --info --style compact --predicate '$_ls_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery > \"$LD/$1.full\"" 2>/dev/null
+    _ls_sz=$(wc -c < "$LD/$1.full" | tr -d ' ')
+    _ls_note=
+    if [ "${_ls_sz:-0}" -gt 600000 ]; then
+        tail -c 600000 "$LD/$1.full" > "$LD/$1.log"
+        _ls_note=", slice truncated: kept the last 600000 of $_ls_sz bytes"
+    else
+        cp "$LD/$1.full" "$LD/$1.log"
+    fi
+    rm -f "$LD/$1.full"
+    ladder_w "log: $1.log ($(wc -l < "$LD/$1.log" | tr -d ' ') lines, pids $3, since $_ls_start$_ls_note)"
 }
 ladder_ws_conf() {   # ladder_ws_conf "<NAME=value ...>": rdna3mtl.conf = the run's original without these keys, then these lines (the original stays in the backup)
     bisect_plugin_save
@@ -1244,7 +1253,7 @@ ladder_quit() {   # ladder_quit "<pids>" [graceful]: the instances this rung sta
     return 0
 }
 ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
-    _rn=$1; _rs=$2
+    _rn=$1; _rs=$2; _LADDER_CUR=$_rn
     _renv=$(ladder_rung_env "$_rn") || { ladder_w "== rung $_rn: unknown"; return 1; }
     ladder_w "== rung $_rn"
     ladder_w "scope: $_rs"
@@ -1305,15 +1314,20 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     ladder_push
     return 0
 }
-ladder_push() {   # up to the host after every rung: a run cut short keeps what it did
+ladder_push() {   # up to the host after every rung: a run cut short keeps what it did. A file that did not go up is counted in ladder.txt (the triage then cannot judge that rung's glyphs)
     [ -n "$HOST" ] || return 0
-    curl -sf --max-time 10 -T "$LF" "$HOST/reports/$base-ladder.txt" >/dev/null 2>&1
+    _pu_miss=0
     for _pp in "$HOME"/rdna3-scanout/ladder-*/scanout-pipe*.ppm; do
         [ -f "$_pp" ] || continue
         [ -f "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")" ] && continue
-        curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1 &&
+        if curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1; then
             : > "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")"
+        else
+            _pu_miss=$((_pu_miss + 1))
+        fi
     done
+    [ "$_pu_miss" = 0 ] || ladder_w "push: $_pu_miss ppm file(s) not sent to the host (curl failed): their rungs have no glyph verdict in the report"
+    curl -sf --max-time 10 -T "$LF" "$HOST/reports/$base-ladder.txt" >/dev/null 2>&1
     return 0
 }
 ladder_restore() {   # the plugin's conf and allow list exactly as the run found them; the instances still running are quit
@@ -1326,6 +1340,13 @@ ladder_restore() {   # the plugin's conf and allow list exactly as the run found
     if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
     return 0
 }
+ladder_abort() {   # ladder_abort SIGNAME EXITCODE: the run is ending because of a signal
+    ladder_w "ABORTED by SIG$1 at rung ${_LADDER_CUR:-none} ($(date +%T)): the rungs after it did not run"
+    ladder_restore
+    ladder_push
+    trap - EXIT
+    exit "$2"
+}
 ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServer rungs, 3 = the glyph hunt (ladder-glyphs); 0 when every rung ran
     _lv=$1; _LADDER_V=$1
     _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_GLYPHS_RUNGS
@@ -1334,7 +1355,7 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     _btty=
     if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
-    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=
+    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=; _LADDER_CUR=
     ladder_w "# rdna3 ladder v1"
     ladder_w "variant: $_lv ($(case $_lv in 2) echo ladder-ws ;; 3) echo ladder-glyphs ;; *) echo ladder ;; esac))"
     ladder_w "started: $(date +%T)"
@@ -1351,13 +1372,18 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
         ladder_w "ABORT: nobody logged in after $_w s: no app can be opened"
         bisect_say "LADDER: NOBODY LOGGED IN - nothing ran"
         return 1 ;; esac
+    # a signal ends the run with a line that says so, the evidence pushed and the conf put back. HUP too (the Terminal this was started from was closed), except in the WindowServer
+    # variant, where the restart of WindowServer closes that Terminal on purpose and the run must go on
     trap 'ladder_restore' EXIT
-    trap 'ladder_restore; exit 130' INT
-    trap 'ladder_restore; exit 143' TERM
-    [ "$_lv" = 2 ] && trap '' HUP   # a WindowServer restart closes the Terminal this was started from
+    trap 'ladder_abort INT 130' INT
+    trap 'ladder_abort TERM 143' TERM
+    if [ "$_lv" = 2 ]; then trap '' HUP; else trap 'ladder_abort HUP 129' HUP; fi
     # the instances that were there before the run: never ours to quit
     _LADDER_BASE_Terminal=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' '); _LADDER_BASE_Chess=$(pgrep -x Chess 2>/dev/null | tr '\n' ' '); _LADDER_BASE_SET=1
     ladder_w "baseline_pids: Terminal=${_LADDER_BASE_Terminal:-none}Chess=${_LADDER_BASE_Chess:-none}"
+    # tick windows that were already there: the text script of an earlier run still printing its lines in some Terminal. They are live too, so the glyph verdict could judge them as well as ours
+    _old_ticks=$(pgrep -f 'rdna3-ladder-text\.' 2>/dev/null | tr '\n' ' ')
+    [ -z "$_old_ticks" ] || ladder_w "WARN: the text script of an earlier run is still running (pids $_old_ticks): its Terminal window shows tick lines too and is as live as this run's; close it and run again if a verdict says STATIC/live windows"
     ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM; return 1; }
     caffeinate -u -t 5 >/dev/null 2>&1 &
     notify "ladder: $(echo $_lrungs | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
@@ -1373,7 +1399,7 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     ladder_w "finished: $(date +%T)"
     ladder_w "== end"
     ladder_push
-    trap - EXIT INT TERM
+    trap - EXIT INT TERM HUP
     [ -n "$STANDALONE" ] && trap 'restore_sleep' EXIT && trap 'restore_sleep; exit 130' INT && trap 'restore_sleep; exit 143' TERM
     echo "LADDER: $_lv, $([ "$_lfail" = 0 ] && echo "every rung ran" || echo "A RUNG DID NOT RUN"); ladder.txt in the report"
     bisect_say "LADDER done: the report has the table (41-ladder.txt)"

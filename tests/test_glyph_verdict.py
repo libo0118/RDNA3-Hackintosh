@@ -189,6 +189,13 @@ check(v["verdict"] == "clean" and not v["static"], "a stack that grew downwards 
 look(a1, [static_clean]); look(a2, [static_clean])
 v = gv.verdict_files([a1], later=[a2])
 check(v["verdict"] == "none" and "no LIVE tick stack" in v["text"] and len(v["static"]) == 1, "only static text: %r" % (v["text"],))
+look(a1, [Window(1100, 330, 80, 24, tick_lines(22, seed=5)), static_clean]); look(a2, [Window(1100, 330, 80, 24, tick_lines(22, seed=6, first=3)), static_clean])
+v = gv.verdict_files([a1], later=[a2])
+check("pipes judged: 0" in v["text"] and v["pipes"] == ["0"], "the pipes judged are listed: %r" % (v["text"],))
+# something that changes BESIDE a static stack (a clock, another window in its rows) does not make it live: only its own columns count
+look(a1, [static_clean, Window(1100, 200, 40, 6, ragged_lines(5, seed=3))]); look(a2, [static_clean, Window(1100, 200, 40, 6, ragged_lines(5, seed=4))])
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "none" and len(v["static"]) == 1, "a change beside the stack does not make it live: %r" % (v["text"],))
 # no tick stack at all, and a missing / differently sized second look
 look(a1, [Window(1100, 330, 80, 24, ragged_lines(22))]); look(a2, [Window(1100, 330, 80, 24, ragged_lines(22, seed=12))])
 v = gv.verdict_files([a1], later=[a2])
