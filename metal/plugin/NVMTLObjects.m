@@ -170,7 +170,8 @@ static int nvmtl_dontcare_clears(void) {
     return on;
 }
 static inline int nvmtl_load_keeps(MTLLoadAction a) {
-    return a == MTLLoadActionLoad || (a == MTLLoadActionDontCare && !nvmtl_dontcare_clears());
+    if (a == MTLLoadActionDontCare) { const int clears = nvmtl_dontcare_clears(); nvmtl_vk_note_dontcare(clears); return !clears; }   /* counted: NVMTL_DONTCARE_CLEARS only changes these */
+    return a == MTLLoadActionLoad;
 }
 static void nvmtl_res3_note_use(NVMTLBuffer *b);
 static uint64_t nvmtl_ep_now(void);
@@ -630,7 +631,22 @@ void nvlog_uncapped(const char *fmt, ...);
 static int nvmtl_managed_check_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_MANAGED_CHECK"); on = e && *e && *e != '0';
-        nvlog("managed: shadow check %s (NVMTL_MANAGED_CHECK=%s)", on ? "ON - each upload's shadow range is hashed at the flush and again when the GPU is done" : "off", e ? e : "unset"); }
+        nvlog("managed: shadow check %s (NVMTL_MANAGED_CHECK=%s)", on ? "ON - each upload's shadow range is hashed at the flush and again when the GPU is done; the shadow OUTSIDE the declared ranges is compared with a mirror of its last scan (undeclared CPU writes)" : "off", e ? e : "unset"); }
+    return on;
+}
+/* NVMTL_MANAGED_WHOLE=1 / NVMTL_MANAGED_PAGES=1 (default off; DRIVER-PLAN N50, hypothesis A of the glyph artefacts): Apple's drivers copy a managed buffer's modified
+ * range in whole pages (or all of it), ours is byte-exact, so bytes an app wrote WITHOUT declaring them reach the GPU on Apple's and stay stale in VRAM on ours.
+ * WHOLE uploads the whole buffer at every flush that has a range for it, PAGES widens each range to whole 4 KiB pages (WHOLE wins). nvmtl_managed_widen decides. */
+static int nvmtl_managed_whole_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_WHOLE"); on = e && *e && *e != '0';
+        nvlog("managed: whole-buffer uploads %s (NVMTL_MANAGED_WHOLE=%s)", on ? "ON - every flush uploads the whole buffer, not the declared range" : "off - the declared range, byte exact", e ? e : "unset"); }
+    return on;
+}
+static int nvmtl_managed_pages_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_PAGES"); on = e && *e && *e != '0';
+        nvlog("managed: page-granular uploads %s (NVMTL_MANAGED_PAGES=%s)", on ? "ON - every declared range is widened to whole 4 KiB pages" : "off - the declared range, byte exact", e ? e : "unset"); }
     return on;
 }
 static int nvmtl_managed_snap_on(void);
@@ -651,7 +667,121 @@ static int nvmtl_managed_snap_on(void) {
 }
 static _Atomic unsigned long long gMgFlushes, gMgUploads, gMgPrologue, gMgSync, gMgChecked, gMgChangedExact, gMgChangedEnvelope, gMgCheckSkipped,
                                   gMgSnapped, gMgSnapFailed, gMgSnapBig, gMgSnapNoShadow;
+static _Atomic unsigned long long gMgDeclBytes, gMgUpBytes, gMgWidened,
+                                  gUdScans, gUdIdleScans, gUdHits, gUdIdleHits, gUdBytes, gUdSamePage, gUdLate, gUdBuffers, gUdGpuOff, gUdNoMirror, gUdMirrors, gUdMirrorBytes, gUdManaged, gUdWholeMarks;
 static _Atomic uint64_t gMgSumNs; static unsigned long long gMgSumLast; static int gMgArmed;
+
+/* The undeclared-write detector (NVMTL_MANAGED_CHECK, DRIVER-PLAN N50): the mirror is the shadow as the previous scan saw it (zero for a new buffer: the plugin
+ * clears new buffers, and newBufferWithBytes declares the whole range), so a byte of the shadow that differs from it OUTSIDE the range the app declared since is a CPU
+ * write nobody told the plugin about, which a byte-exact upload leaves stale in VRAM. A flush scans the buffers that have a range (outside it), every submit scans
+ * the registered buffers that have none (outside nothing). A write that is declared at the NEXT flush (another thread's submit saw the bytes before the app called
+ * didModifyRange:) is counted in `ud_late_bytes`, it was a race and not a missing declaration. Buffers the GPU writes back (synchronizeResource, commit's sync-out)
+ * are left out (counted in `ud_gpu_off`: the shadow changes by itself), and so are the ones over 8 MiB or past 64 MiB of mirrors (`ud_nomirror`). */
+#define NVMTL_UD_BUF_MAX   (8u << 20)
+#define NVMTL_UD_TOTAL_MAX (64u << 20)
+#define NVMTL_UD_LOGS_PER_BUFFER 4u
+#define NVMTL_UD_LOG_LINES 64u
+static os_unfair_lock gUdLock = OS_UNFAIR_LOCK_INIT;
+static NSHashTable *gUdRegistry;
+static _Atomic unsigned gUdLines;
+static void nvmtl_mg_summary(int force);
+static void nvmtl_managed_mark(NVMTLBuffer *b, NSUInteger lo, NSUInteger hi);
+static void nvmtl_presubmit(void);
+/* the detector watches while NVMTL_MANAGED_CHECK is on, and NVMTL_MANAGED_WHOLE needs the same mirrors to find the buffers the app wrote without declaring */
+static int nvmtl_ud_watch_on(void) { return nvmtl_managed_check_on() || nvmtl_managed_whole_on(); }
+static void nvmtl_ud_managed_created(void) { atomic_fetch_add(&gUdManaged, 1); }
+/* gUdLock held: the buffer gets its mirror (zero: the plugin clears new buffers, newBufferWithBytes declares the whole range) and enters the registry. 1 = watched. */
+static int nvmtl_ud_attach_locked(NVMTLBuffer *b)
+{
+    if (b->_mirror) return 1;
+    if (b->_mirrorOff || !b->_shadow.map) return 0;
+    const size_t size = b->_b.size;
+    if (!size) return 0;
+    if (b->_shadow.size < size) { b->_mirrorOff = 1; atomic_fetch_add(&gUdNoMirror, 1); return 0; }
+    if (size > NVMTL_UD_BUF_MAX || atomic_load(&gUdMirrorBytes) + size > NVMTL_UD_TOTAL_MAX || !(b->_mirror = (uint8_t *)calloc(1, size))) {
+        b->_mirror = NULL; b->_mirrorOff = 1; atomic_fetch_add(&gUdNoMirror, 1); return 0; }
+    atomic_fetch_add(&gUdMirrorBytes, size); atomic_fetch_add(&gUdMirrors, 1);
+    if (!gUdRegistry) gUdRegistry = [NSHashTable weakObjectsHashTable];
+    @autoreleasepool { [gUdRegistry addObject:b]; }
+    return 1;
+}
+/* -contents of a managed buffer: the app can now write it without ever declaring a range, so the buffer is watched from here on (a buffer only the flush knew was a blind spot) */
+static void nvmtl_ud_touch(NVMTLBuffer *b)
+{
+    if (b->_mirror || b->_mirrorOff || !b->_shadow.map || !nvmtl_ud_watch_on()) return;
+    os_unfair_lock_lock(&gUdLock);
+    nvmtl_ud_attach_locked(b);
+    os_unfair_lock_unlock(&gUdLock);
+    nvmtl_pre_submit_hook = nvmtl_presubmit;   /* the idle scan runs at submits */
+}
+/* 1 = bytes outside [dlo, dhi) changed since the last scan */
+static int nvmtl_ud_scan(NVMTLBuffer *b, NSUInteger dlo, NSUInteger dhi, int idle)
+{
+    if (b->_mirrorOff || !b->_shadow.map || __atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE)) return 0;   /* (an owed lazy zero: the CPU has not touched it) */
+    const size_t size = b->_b.size;
+    if (!size) return 0;
+    nvmtl_undecl u; int hit = 0; unsigned nth = 0; unsigned long long hits = 0;
+    os_unfair_lock_lock(&gUdLock);
+    if (b->_mirrorOff || !nvmtl_ud_attach_locked(b)) { os_unfair_lock_unlock(&gUdLock); return 0; }
+    if (dhi > size) dhi = size;
+    hit = nvmtl_undeclared_scan((const uint8_t *)b->_shadow.map, b->_mirror, size, dlo, dhi, &u);
+    atomic_fetch_add(idle ? &gUdIdleScans : &gUdScans, 1);
+    if (b->_udPendBytes) {
+        if (dhi > dlo && dlo <= b->_udPendLo && dhi > b->_udPendHi) atomic_fetch_add(&gUdLate, b->_udPendBytes);
+        b->_udPendBytes = 0;
+    }
+    if (hit) {
+        nth = ++b->_udLogged;
+        if (nth == 1) atomic_fetch_add(&gUdBuffers, 1);
+        b->_udPendLo = u.first; b->_udPendHi = u.last; b->_udPendBytes = u.bytes;
+        atomic_fetch_add(&gUdHits, 1); atomic_fetch_add(&gUdBytes, u.bytes);
+        if (idle) atomic_fetch_add(&gUdIdleHits, 1);
+        if (u.samepage) atomic_fetch_add(&gUdSamePage, 1);
+        hits = atomic_load(&gUdHits);
+    }
+    memcpy(b->_mirror, b->_shadow.map, size);   /* what this scan saw: a write is counted once, the uploaded range is current */
+    os_unfair_lock_unlock(&gUdLock);
+    if (!hit) return 0;
+    if (nth <= NVMTL_UD_LOGS_PER_BUFFER && atomic_fetch_add(&gUdLines, 1) < NVMTL_UD_LOG_LINES)
+        nvlog_uncapped("managed: UNDECLARED CPU write in a %zu-byte buffer (%s): %zu byte(s) changed outside the declared %s, at offsets %zu..%zu, the nearest %zu byte(s) from it, %s"
+                       " [hit %u of this buffer, %llu in all]", size, idle ? "scan at a submit, nothing declared since the last scan" : "scan at the flush",
+                       u.bytes, idle ? "ranges" : "range", u.first, u.last, u.nearest,
+                       u.samepage ? "in a page the range touches (a page-granular copy would have carried it)" : "in other pages", nth, hits);
+    if (hits == 1 || !(hits & (hits - 1))) nvmtl_mg_summary(1);
+    return 1;
+}
+static void nvmtl_ud_idle_scan(void)
+{
+    if (!nvmtl_ud_watch_on()) return;
+    const int whole = nvmtl_managed_whole_on();
+    NSArray *all = nil;
+    os_unfair_lock_lock(&gUdLock);
+    if (gUdRegistry) all = gUdRegistry.allObjects;
+    os_unfair_lock_unlock(&gUdLock);
+    for (NVMTLBuffer *b in all) {
+        if (b->_dirtyHi > b->_dirtyLo) continue;   /* (a buffer with a range is the flush's) */
+        /* NVMTL_MANAGED_WHOLE: a buffer the app wrote without a didModifyRange is uploaded whole, as Apple's copy would have carried it */
+        if (nvmtl_ud_scan(b, 0, 0, 1) && whole && b->_b.size) { atomic_fetch_add(&gUdWholeMarks, 1); nvmtl_managed_mark(b, 0, b->_b.size); }
+    }
+}
+/* the GPU writes this buffer's shadow (synchronizeResource, commit's sync-out): the detector leaves it alone from now on */
+static void nvmtl_ud_gpu_written(NVMTLBuffer *b)
+{
+    if (!b || b->_mirrorOff || !nvmtl_ud_watch_on()) return;   /* WHOLE watches too: a GPU write is not an undeclared CPU write */
+    os_unfair_lock_lock(&gUdLock);
+    if (!b->_mirrorOff) {
+        b->_mirrorOff = 1; atomic_fetch_add(&gUdGpuOff, 1);
+        if (b->_mirror) { free(b->_mirror); b->_mirror = NULL; atomic_fetch_sub(&gUdMirrorBytes, b->_b.size); }
+    }
+    os_unfair_lock_unlock(&gUdLock);
+}
+static void nvmtl_ud_forget(NVMTLBuffer *b)
+{
+    if (!b->_mirror) return;
+    os_unfair_lock_lock(&gUdLock);
+    free(b->_mirror); b->_mirror = NULL; atomic_fetch_sub(&gUdMirrorBytes, b->_b.size);
+    os_unfair_lock_unlock(&gUdLock);
+}
 static void nvmtl_mg_summary(int force);
 static void nvmtl_mg_atexit(void) { nvmtl_mg_summary(1); }
 static void nvmtl_mg_summary(int force) {
@@ -661,35 +791,61 @@ static void nvmtl_mg_summary(int force) {
     const unsigned long long fl = atomic_load(&gMgFlushes), up = atomic_load(&gMgUploads), pr = atomic_load(&gMgPrologue), sy = atomic_load(&gMgSync),
         ck = atomic_load(&gMgChecked), ce = atomic_load(&gMgChangedExact), cv = atomic_load(&gMgChangedEnvelope), cs = atomic_load(&gMgCheckSkipped),
         sn = atomic_load(&gMgSnapped), sf = atomic_load(&gMgSnapFailed), sb = atomic_load(&gMgSnapBig), sh = atomic_load(&gMgSnapNoShadow);
-    const unsigned long long total = fl + up + pr + sy + ck + ce + cv + cs + sn + sf + sb + sh;
+    const unsigned long long db = atomic_load(&gMgDeclBytes), ub = atomic_load(&gMgUpBytes), wd = atomic_load(&gMgWidened),
+        us = atomic_load(&gUdScans), ui = atomic_load(&gUdIdleScans), uh = atomic_load(&gUdHits), uih = atomic_load(&gUdIdleHits), uby = atomic_load(&gUdBytes),
+        usp = atomic_load(&gUdSamePage), ul = atomic_load(&gUdLate), ubf = atomic_load(&gUdBuffers), ug = atomic_load(&gUdGpuOff), un = atomic_load(&gUdNoMirror),
+        um = atomic_load(&gUdMirrors), umb = atomic_load(&gUdMirrorBytes), umg = atomic_load(&gUdManaged), uwm = atomic_load(&gUdWholeMarks);
+    const unsigned long long total = fl + up + pr + sy + ck + ce + cv + cs + sn + sf + sb + sh + db + ub + wd + us + ui + uh + uih + uby + usp + ul + ubf + ug + un + um + umb + umg + uwm;
     if (!total || total == gMgSumLast) return;
     if (!atomic_compare_exchange_strong(&gMgSumNs, (uint64_t *)&last, now) && !force) return;
     gMgSumLast = total;
     nvlog_uncapped("managed: SUMMARY check=%d snapshot=%d flushes=%llu uploads=%llu prologue_uploads=%llu sync_uploads=%llu checked=%llu changed_exact=%llu changed_env=%llu "
-                   "check_skipped=%llu snapped=%llu snap_failed=%llu snap_skipped_big=%llu snap_skipped_noshadow=%llu",
-                   nvmtl_managed_check_on(), nvmtl_managed_snap_on(), fl, up, pr, sy, ck, ce, cv, cs, sn, sf, sb, sh);
+                   "check_skipped=%llu snapped=%llu snap_failed=%llu snap_skipped_big=%llu snap_skipped_noshadow=%llu "
+                   "whole=%d pages=%d decl_bytes=%llu up_bytes=%llu widened_uploads=%llu "
+                   "ud_scans=%llu ud_idle_scans=%llu ud_hits=%llu ud_idle_hits=%llu ud_bytes=%llu ud_samepage_hits=%llu ud_late_bytes=%llu ud_buffers=%llu ud_gpu_off=%llu ud_nomirror=%llu ud_mirrors=%llu ud_mirror_bytes=%llu ud_managed=%llu ud_whole_marks=%llu",
+                   nvmtl_managed_check_on(), nvmtl_managed_snap_on(), fl, up, pr, sy, ck, ce, cv, cs, sn, sf, sb, sh,
+                   nvmtl_managed_whole_on(), nvmtl_managed_pages_on(), db, ub, wd, us, ui, uh, uih, uby, usp, ul, ubf, ug, un, um, umb, umg, uwm);
+}
+/* ONE 10 s timer for the plugin's SUMMARY lines, armed when the device is made: `managed:`, `census:`, `vk: ab:` and `vk: fbfetch:` (the surface-in cache has its own). A call-driven
+ * cadence loses the last window of a process that is ended by a signal (atexit does not run) and of one that does a little work and then idles; each summary prints only when a
+ * counter moved since its last line, so an idle process prints nothing. A failed timer is said once and the summaries stay call-driven / at exit. */
+static void nvmtl_summary_timer_arm(void)
+{
+    static dispatch_once_t once; static dispatch_source_t timer;
+    dispatch_once(&once, ^{
+        nvmtl_cen_summary(0);   /* arms the census's atexit and t0 now: a process shorter than the first tick still prints at exit */
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_queue_create("rdna3.summaries", DISPATCH_QUEUE_SERIAL));
+        if (!timer) { nvlog("summaries: the shared 10 s timer could not be made - the managed / census / ab / fbfetch totals go out at their events and at exit only"); return; }
+        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10ll * NSEC_PER_SEC), 10ull * NSEC_PER_SEC, 1ull * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool {
+            nvmtl_cen_summary(1); nvmtl_mg_summary(1); nvmtl_vk_summaries();   /* force: skip each one's own 10 s clock, a line is still printed only when a counter moved */
+        } });
+        dispatch_resume(timer);
+    });
 }
 static void nvmtl_pre_release(void *held) {
     @autoreleasepool {
         NSArray *a = CFBridgingRelease(held);
         if (!nvmtl_managed_check_on()) return;
         for (id e in a) {
-            if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 5) continue;
+            if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] < 5) continue;
             NVMTLBuffer *b = [(NSArray *)e objectAtIndex:0]; if (!b->_shadow.map) { atomic_fetch_add(&gMgCheckSkipped, 1); continue; }
             const NSUInteger lo = [[(NSArray *)e objectAtIndex:1] unsignedIntegerValue], hi = [[(NSArray *)e objectAtIndex:2] unsignedIntegerValue];
             const uint64_t h1 = [[(NSArray *)e objectAtIndex:3] unsignedLongLongValue]; const NSUInteger marks = [[(NSArray *)e objectAtIndex:4] unsignedIntegerValue];
             const unsigned long long n = atomic_fetch_add(&gMgChecked, 1) + 1;
             if (nvmtl_range_hash((const uint8_t *)b->_shadow.map + lo, hi - lo) == h1) continue;
+            const BOOL widened = [(NSArray *)e count] > 5 && [[(NSArray *)e objectAtIndex:5] boolValue];
             const char *snapnote = nvmtl_managed_snap_on() ? " - NVMTL_MANAGED_SNAPSHOT is on: a range up to 1 MiB was read from the snapshot, the GPU saw the state of the flush" : "";
-            if (marks == 1) {
+            if (marks == 1 && !widened) {
                 const unsigned long long k = atomic_fetch_add(&gMgChangedExact, 1) + 1;
                 nvlog("managed: the CPU shadow of a %zu-byte buffer CHANGED at bytes %lu..%lu between the flush and the GPU's completion under ONE didModifyRange: the GPU copy may have read a mix of two states [%llu of %llu uploads checked]%s",
                       (size_t)b->_b.size, (unsigned long)lo, (unsigned long)hi, k, n, snapnote);
                 if (k == 1 || !(k & (k - 1))) nvmtl_mg_summary(1);
             } else {
                 const unsigned long long k = atomic_fetch_add(&gMgChangedEnvelope, 1) + 1;
-                nvlog("managed: the CPU shadow of a %zu-byte buffer changed at bytes %lu..%lu between the flush and the GPU's completion, an envelope of several didModifyRange ranges (the gap between them may legitimately change) [%llu of %llu uploads checked]%s",
-                      (size_t)b->_b.size, (unsigned long)lo, (unsigned long)hi, k, n, snapnote);
+                nvlog("managed: the CPU shadow of a %zu-byte buffer changed at bytes %lu..%lu between the flush and the GPU's completion, %s [%llu of %llu uploads checked]%s",
+                      (size_t)b->_b.size, (unsigned long)lo, (unsigned long)hi,
+                      widened ? "an upload widened by NVMTL_MANAGED_WHOLE / NVMTL_MANAGED_PAGES (the extra bytes were not declared and may legitimately change)" : "an envelope of several didModifyRange ranges (the gap between them may legitimately change)", k, n, snapnote);
                 if (k == 1 || !(k & (k - 1))) nvmtl_mg_summary(1);
             }
         }
@@ -699,19 +855,26 @@ static void nvmtl_pre_release(void *held) {
 static void nvmtl_managed_flush(void) {
     if (!atomic_load(&gManagedAny) || gManagedInFlush) return;
     gManagedInFlush = 1;
-    NSMutableArray *todo = [NSMutableArray new];
+    NSMutableArray *decl = [NSMutableArray new], *todo = [NSMutableArray new];
     const BOOL chk = nvmtl_managed_check_on();   /* before the lock: it logs once */
+    const int whole = nvmtl_managed_whole_on(), pages = nvmtl_managed_pages_on(), watch = nvmtl_ud_watch_on();
     os_unfair_lock_lock(&gManagedLock);
     for (NVMTLBuffer *b in gManagedDirty.allObjects) {
-        if (b->_dirtyHi > b->_dirtyLo) {
-            if (chk && b->_shadow.map && b->_dirtyHi <= b->_b.size)
-                [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi), @(nvmtl_range_hash((const uint8_t *)b->_shadow.map + b->_dirtyLo, b->_dirtyHi - b->_dirtyLo)), @(b->_dirtyN)]];
-            else { if (chk) atomic_fetch_add(&gMgCheckSkipped, 1); [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi)]]; }
-        }
+        if (b->_dirtyHi > b->_dirtyLo) [decl addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi), @(b->_dirtyN)]];
         b->_dirtyLo = b->_dirtyHi = 0; b->_dirtyN = 0;
     }
     [gManagedDirty removeAllObjects]; atomic_store(&gManagedAny, 0);
     os_unfair_lock_unlock(&gManagedLock);
+    for (NSArray *d in decl) {
+        NVMTLBuffer *b = d[0]; const NSUInteger dlo = [d[1] unsignedIntegerValue], dhi = [d[2] unsignedIntegerValue], marks = [d[3] unsignedIntegerValue];
+        size_t ulo, uhi; nvmtl_managed_widen(b->_b.size, dlo, dhi, whole, pages, &ulo, &uhi);
+        const BOOL widened = ulo != dlo || uhi != dhi;
+        atomic_fetch_add(&gMgDeclBytes, dhi - dlo); atomic_fetch_add(&gMgUpBytes, uhi - ulo); if (widened) atomic_fetch_add(&gMgWidened, 1);
+        if (watch) (void)nvmtl_ud_scan(b, dlo, dhi, 0);   /* before the hash: the scan reads the shadow as the app left it */
+        if (chk && b->_shadow.map && uhi <= b->_b.size)
+            [todo addObject:@[b, @(ulo), @(uhi), @(nvmtl_range_hash((const uint8_t *)b->_shadow.map + ulo, uhi - ulo)), @(marks), @(widened)]];
+        else { if (chk) atomic_fetch_add(&gMgCheckSkipped, 1); [todo addObject:@[b, @(ulo), @(uhi)]]; }
+    }
     atomic_fetch_add(&gMgFlushes, 1); atomic_fetch_add(&gMgUploads, todo.count);
     if (todo.count && nvmtl_vk_pre_open()) {
         atomic_fetch_add(&gMgPrologue, todo.count);
@@ -808,7 +971,7 @@ static void nvmtl_zero_flush(void) {
     } else if (todo.count) nvlog("zero-fill: no command buffer for %lu Private clears - they hold what VRAM held", (unsigned long)todo.count);
     gZeroInFlush = 0;
 }
-static void nvmtl_presubmit(void) { @autoreleasepool { nvmtl_zero_flush(); } @autoreleasepool { nvmtl_managed_flush(); } }
+static void nvmtl_presubmit(void) { @autoreleasepool { nvmtl_zero_flush(); } @autoreleasepool { nvmtl_ud_idle_scan(); } @autoreleasepool { nvmtl_managed_flush(); } }
 static int nvmtl_mzero_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_MANAGED_EAGER_ZERO"); on = !(e && e[0] == '1');
@@ -936,15 +1099,18 @@ static void nvmtl_sin_summary(int force) {
     if (!force && (now - gSinSumNs < 9ull * 1000000000ull || !total || total == gSinSumLast)) { os_unfair_lock_unlock(&gSinSumLock); return; }
     gSinSumNs = now; gSinSumLast = total; const unsigned long long seq = ++gSinSeq, tms = (now - gSinT0) / 1000000ull;
     os_unfair_lock_unlock(&gSinSumLock);
+    /* two lines (nvlog cuts at 1023 characters and one line was longer): SUMMARY has the call side, SUMMARY2 (same seq) the buffer-texture refreshes, the verify and the copy images; the triage merges them */
     nvlog_uncapped("vk: surfin: SUMMARY seq=%llu t_ms=%llu cache=%d cimg_on=%d verify=%u calls=%llu sin_us_total=%llu fast=%llu fast_us=%llu miss_unsynced=%llu miss_seed=%llu miss_gen=%llu "
-                   "locked_upload=%llu locked_skip_vram=%llu locked_skip_pending=%llu locked_skip_overwrite=%llu locked_fail=%llu "
+                   "locked_upload=%llu locked_skip_vram=%llu locked_skip_pending=%llu locked_skip_overwrite=%llu locked_fail=%llu",
+                   seq, tms, nvmtl_sin_cache_on(), nvmtl_cimg_on(), nvmtl_sin_verify_n(), atomic_load(&gSinCalls), atomic_load(&gSinNs) / 1000u, atomic_load(&gSinFast), atomic_load(&gSinFastNs) / 1000u,
+                   atomic_load(&gSinMissNs), atomic_load(&gSinMissSeed), atomic_load(&gSinMissGen), g_surfin_copy, g_surfin_skip, atomic_load(&gSinSkipPending),
+                   atomic_load(&gSinSkipOverwrite), atomic_load(&gSinLockedFail));
+    nvlog_uncapped("vk: surfin: SUMMARY2 seq=%llu "
                    "bufcopy=%llu bufcopy_dedup=%llu bufcopy_uploaded=%llu bufcopy_up_us=%llu bufcopy_skipped=%llu bufcopy_skip_us=%llu bufcopy_noshadow=%llu bufcopy_noshadow_us=%llu "
                    "bufcopy_failed=%llu bufcopy_forgotten=%llu bufcopy_skip_refused_layout=%llu shadow_bytes=%llu shadow_refused=%llu "
                    "verify_checked=%llu verify_mismatch=%llu verify_failed=%llu rsample_by_layout=%llu,%llu,%llu,%llu,%llu,%llu "
                    "cimg_new=%llu cimg_recycled=%llu cimg_parked=%llu cimg_evicted=%llu cimg_refused_size=%llu cimg_refused_form=%llu cimg_refused_full=%llu",
-                   seq, tms, nvmtl_sin_cache_on(), nvmtl_cimg_on(), nvmtl_sin_verify_n(), atomic_load(&gSinCalls), atomic_load(&gSinNs) / 1000u, atomic_load(&gSinFast), atomic_load(&gSinFastNs) / 1000u,
-                   atomic_load(&gSinMissNs), atomic_load(&gSinMissSeed), atomic_load(&gSinMissGen), g_surfin_copy, g_surfin_skip, atomic_load(&gSinSkipPending),
-                   atomic_load(&gSinSkipOverwrite), atomic_load(&gSinLockedFail),
+                   seq,
                    atomic_load(&gBcRefresh), atomic_load(&gBcDedup), atomic_load(&gBcUp), atomic_load(&gBcUpUs), atomic_load(&gBcSkip), atomic_load(&gBcSkipUs), atomic_load(&gBcNoShadow),
                    atomic_load(&gBcNoShadowUs), atomic_load(&gBcFail), atomic_load(&gBcForget), atomic_load(&gBcLayoutRefused), atomic_load(&gShadowBytes), atomic_load(&gShadowRefused),
                    atomic_load(&gVerChecked), atomic_load(&gVerMismatch), atomic_load(&gVerFail),
@@ -1152,6 +1318,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_b.buf && nvmtl_trace_on()) nvtrace("BUFFREE 0x%llx len %zu", (unsigned long long)nvmtl_vk_buffer_address(&_b), _b.size);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
+    nvmtl_ud_forget(self);
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
@@ -1159,7 +1326,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
                         d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); if (_shadow.map && !_mirror) nvmtl_ud_touch(self); return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
@@ -1245,7 +1412,7 @@ static void nvmtl_storage_twins_out(NVMTLCommandBuffer *cb) {
         if (nvmtl_vk_cmd_copy_image_sub(&cb->_c, &t->_stTwin, 0, 0, 0, 0, im, 0, 0, 0, 0, im->w, im->h)) {
             nvlog("storage twin: copy back to the %ux%u texture FAILED", im->w, im->h); continue; }
         nvmtl_vk_cmd_prepare_sampled_image(&cb->_c, &t->_stTwin, 1);
-        nvmtl_surf_dirty(cb, t);
+        nvmtl_surf_dirty(cb, t); nvmtl_cen_note(t, NVC_COMPUTE, 1);
     }
 }
 static int g_trace_lines;
@@ -1776,6 +1943,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
                   memcpy(dst + r->_backOff + (region.origin.y + y) * r->_backBPR + region.origin.x * bpp,
                          (const uint8_t *)bytes + y * row, region.size.width * bpp);
       } }
+    nvmtl_cen_note(self, NVC_REPLACE, 1);
     nvmtl_bsh_forget(_parent ? _parent : self);   /* N51: the image is written below, the shadow of the last refresh no longer describes it */
     if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, 0)) [self nvmtlSurfaceIn];
     if (nvmtl_vk_image_write_region_level_layer(_q, [self nvi], (const uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
@@ -1793,6 +1961,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         if (bb.storageMode == MTLStorageModeManaged) [bb didModifyRange:NSMakeRange(at, len)];
         return; }
     if (level >= [self mipmapLevelCount]) { nvlog("replaceRegion: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
+    nvmtl_cen_note(self, NVC_REPLACE, 1);
     nvmtl_bsh_forget(_parent ? _parent : self);   /* N51: as above */
     if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, slice)) [self nvmtlSurfaceIn];
     nvk_image *im = [self nvi]; BOOL vol = im->mtl_type == 7; NSUInteger nz = vol ? (region.size.depth ? region.size.depth : 1) : 1;
@@ -2997,6 +3166,9 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
 }
 - (BOOL)nvmtlBindSamplerPipeline {
     if (!_ps) return NO;
+    if (_cenSlot) {   /* the census: the slot was found when the pass began, the pipeline's blit flag once per pipeline state */
+        if (!_ps->_cenBlit) _ps->_cenBlit = nvc_is_blit_pipeline(_ps->_vname.UTF8String, _ps->_fname.UTF8String) ? 2 : 1;
+        nvmtl_cen_draw(_cenSlot, _ps->_cenBlit == 2, nvmtl_vk_fbf_pass_inputs(&_cb->_c) != 0); }
     const uint64_t sp_pipe = nvmtl_split_now();   /* encode-time split (nvt_ev_enc_split): pipeline lookup, then descriptor writes */
     if (sp_pipe) g_split.draws++;
     NVMTLRenderPipelineState *selected=_ps;
@@ -3128,6 +3300,7 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
             [cb->_resources addObject:t];
             NVMTLTexture *sr = t->_parent ? t->_parent : t;
             if (sr->_surf) {
+                nvmtl_cen_note(sr, NVC_PASS, 1); if (ca.loadAction == MTLLoadActionClear) nvmtl_cen_note(sr, NVC_PASS_CLEAR, 1);
                 if (ca.loadAction == MTLLoadActionClear) nvmtl_surface_overwrite_recorded(cb, sr);
                 else nvmtl_surface_in_for_cb(cb, sr);
                 nvmtl_surf_dirty(cb, sr); }
@@ -4909,7 +5082,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     const BOOL overwrite = [s nvi] != [d nvi] && (!s->_surf || !d->_surf || IOSurfaceGetID(s->_surf) != IOSurfaceGetID(d->_surf))
         && nvmtl_surface_full_overwrite(d, (MTLRegion){dof, size}, dl, ds);
     if (!overwrite) nvmtl_surface_in_for_cb(_cb, d);
-    nvmtl_surf_dirty(_cb, d);
+    nvmtl_surf_dirty(_cb, d); nvmtl_cen_note(d, NVC_BLITENC, 1);
     if (nvmtl_vk_cmd_copy_image_sub3(&_cb->_c, [s nvi], (uint32_t)sl + s->_baseLevel, (uint32_t)ss + s->_baseSlice, (uint32_t)so.x, (uint32_t)so.y, (uint32_t)so.z,
                                 [d nvi], (uint32_t)dl + d->_baseLevel, (uint32_t)ds + d->_baseSlice, (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)dof.z,
                                 (uint32_t)size.width, (uint32_t)size.height, (uint32_t)(size.depth ? size.depth : 1)))
@@ -5005,7 +5178,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
       g_trace_mute = was; }
     const BOOL overwrite = nvmtl_surface_full_overwrite(t, (MTLRegion){dof, size}, dl, ds);
     if (!overwrite) nvmtl_surface_in_for_cb(_cb, t);
-    nvmtl_surf_dirty(_cb, t);
+    nvmtl_surf_dirty(_cb, t); nvmtl_cen_note(t, NVC_BLITENC, 1);
     { BOOL vol = [t nvi]->mtl_type == 7; NSUInteger nz = vol ? (size.depth ? size.depth : 1) : 1; NSUInteger per = img ? img : row * size.height; int rc = 0;
       for (NSUInteger zi = 0; zi < nz && !rc; zi++)
           rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&_cb->_c, &b->_b, so + zi * per, (uint32_t)row, [t nvi],
@@ -5088,7 +5261,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     [_cb->_resources addObject:r];
     if ([(id)r isKindOfClass:[NVMTLBuffer class]] && ((NVMTLBuffer *)r)->_shadow.map) {
         NVMTLBuffer *b = (NVMTLBuffer *)r;
-        __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE); nvmtl_ud_gpu_written(b);
         if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &b->_b, 0, &b->_shadow, 0, b->_b.size))
             [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                 userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer synchronization"}]];
@@ -5098,7 +5271,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         NVMTLBuffer *bb = t->_backBuf ? t->_backBuf : (t->_parent ? t->_parent->_backBuf : nil);
         if (bb && bb->_shadow.map) {
             [_cb->_resources addObject:bb];
-            __atomic_store_n(&bb->_zshadow, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&bb->_zshadow, 0, __ATOMIC_RELEASE); nvmtl_ud_gpu_written(bb);
             if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &bb->_b, 0, &bb->_shadow, 0, bb->_b.size))
                 [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                     userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer-texture synchronization"}]];
@@ -5172,6 +5345,8 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             (unsigned long)d.colorAttachments[0].storeAction, d.colorAttachments[0].clearColor.red, d.colorAttachments[0].clearColor.green,
             d.colorAttachments[0].clearColor.blue, d.colorAttachments[0].clearColor.alpha, d.depthAttachment.texture != nil);
         if (sr->_surf) {
+            e->_cenSlot = nvmtl_cen_pass_slot(sr);
+            nvmtl_cen_note(sr, NVC_PASS, 1); if (d.colorAttachments[0].loadAction == MTLLoadActionClear) nvmtl_cen_note(sr, NVC_PASS_CLEAR, 1);
             if (d.colorAttachments[0].loadAction == MTLLoadActionClear) nvmtl_surface_overwrite_recorded(self, sr);
             else nvmtl_surface_in_for_cb(self, sr);
             nvmtl_surf_dirty(self, sr); } }
@@ -5230,7 +5405,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     }
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];
-        nvmtl_surf_dirty(self, _present);
+        nvmtl_surf_dirty(self, _present); nvmtl_cen_note(_present, NVC_PRESENT, 1);
     }
     if (!_presentations) _presentations = [NSMutableArray new];
     [_presentations addObject:[action copy]];
@@ -5905,7 +6080,7 @@ static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
 static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
 {
     if (b && b->_shadow.map) {
-        if (b->_syncOut) { b->_syncOut = 0; __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE);
+        if (b->_syncOut) { b->_syncOut = 0; __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE); nvmtl_ud_gpu_written(b);
             if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_b.size)) nvlog("commit: managed sync-out of %zu bytes FAILED", b->_b.size); }
         return;
     }

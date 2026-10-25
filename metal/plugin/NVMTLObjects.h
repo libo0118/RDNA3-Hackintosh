@@ -20,7 +20,9 @@ static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
     void *_hostPtr; size_t _hostLen; id _hostDealloc;
     NVMTLHeap *_subHeap; NSUInteger _subCharge; BOOL _aliased;
     nvk_buffer _shadow; int _syncOut; int _zshadow;
-    NSUInteger _dirtyLo, _dirtyHi, _dirtyN; } @end
+    NSUInteger _dirtyLo, _dirtyHi, _dirtyN;
+    /* NVMTL_MANAGED_CHECK (N50 undeclared-write detector): the shadow as the last scan saw it, the buffer's own hit count, the newest hit not yet seen declared */
+    uint8_t *_mirror; int _mirrorOff; uint32_t _udLogged; NSUInteger _udPendLo, _udPendHi; unsigned long long _udPendBytes; } @end
 #include <sched.h>
 static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
     if (!__atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE)) return;
@@ -260,12 +262,12 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLCommandBuffer () { @public NSMutableSet *_bufCopied; } @end
 /* the frame trace (nvmtl_trace.h, NVMTLTrace.m): ids and times only, read by no decision */
 @interface NVMTLCommandBuffer () { @public uint32_t _trId; uint64_t _trCommitAbs; } @end
-@interface NVMTLRenderCommandEncoder () { @public uint32_t _trPass, _trSurf, _trW, _trH, _trSets0; uint64_t _trT0; } @end
+@interface NVMTLRenderCommandEncoder () { @public uint32_t _trPass, _trSurf, _trW, _trH, _trSets0; uint64_t _trT0; void *_cenSlot; } @end   /* _cenSlot: the surface census slot of the pass's colour target (NVMTLTrace.m) */
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end
 @interface NVMTLComputePipelineState () { @public NSString *_label; } @end
 @interface NVMTLComputePipelineState () { @public uint64_t _resid; NSUInteger _attrT, _askT; } @end
-@interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
+@interface NVMTLRenderPipelineState () { @public uint64_t _resid; int _cenBlit; } @end   /* _cenBlit: 0 unknown, 1 not Apple's buffer_image_blit pipeline, 2 it is */
 @interface NVMTLIndirectCommandBuffer () { @public uint64_t _resid; } @end
 @interface NVMTLIndirectCommand () - (void)nvmtlCopyFrom:(NVMTLIndirectCommand *)o; @end
 NSUInteger nvmtl_air_max_tg(NVMTLFunction *fn);

@@ -1202,11 +1202,10 @@ One run instead of one report per switch (autoreport.sh `ladder_run`, boot-arg `
 by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder`). Seven rungs: `baseline`, `radv`
 (`NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`), `sync` (`NVMTL_ASYNC_COMMIT=0`), `managed` (`NVMTL_MANAGED_CHECK=1` + `NVMTL_MANAGED_SNAPSHOT=1`),
 `alignguard` (`NVMTL_NO_ALIGN_GUARD=1`), `paranoid` (`NVMTL_PARANOID=1`), `loadbarrier` (`NVMTL_LOAD_BARRIER=1`). Per rung the run opens Terminal (a colour
-listing, then a tick line every second) and Chess as NEW instances with that rung's switches in their environment
+listing, then a tick line every second in one fixed colour, bright white, and every 4th second a line of mixed glyphs) and Chess as NEW instances with that rung's switches in their environment
 (`open -n -a Terminal --env NVMTL_X=1`: the plugin reads its switches from the process's environment as well as from the conf file, the environment wins),
-waits 25 s, takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
-by rung), after asking the two instances to quit (System Events, by unix id: a graceful quit runs the plugin's exit `SUMMARY`; macOS may ask once whether `osascript` may control
-System Events - allow it; whatever is still running after 8 s gets SIGTERM). The instances that were already running when the run began (the Terminal you started it from,
+waits 25 s (Terminal is opened with `-ApplePersistenceIgnoreState YES`: no window restored from the previous rung), takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
+by rung), after ending the two instances with SIGINT, then SIGTERM, then SIGKILL (a wait after each; no System Events: that needs the owner's Automation consent, which card run 2026-10-25f never got, `quit: still running after 8s` in every rung). `41-ladder.txt` has a line per instance (`quit: pid N ended by SIGINT after 1s`), the triage row `ladder quit` counts them. A signal skips the plugin's exit `SUMMARY`; the 10 s time-based lines (`vk: ab: SUMMARY`, `managed: SUMMARY`, `census: SUMMARY`) are the evidence, and each rung waits 12 s before it quits. The instances that were already running when the run began (the Terminal you started it from,
 your own Chess) are never touched. `rdna3mtl.conf` is not written and WindowServer is not restarted: the
 switch reaches the two apps only, which is where the artefacts show. At the desktop, the run asks nothing; from a Terminal (`--standalone --ladder`) it asks `y` (picture right) /
 `n` (broken) / Enter per rung (20 s each) and the answers go into the table.
@@ -1222,6 +1221,95 @@ Evidence: `ladder.txt` (archive member `41-ladder.txt`, uploaded after every run
 process has a key the rung did NOT ask for ("not default: X", also a conf line left over in the baseline), WARN when a process printed no SUMMARY; the counters of the slice, the look count, your answer) and a `ladder` row: "the baseline picture was broken and the
 picture was RIGHT with: X" names the discriminator. Reading it: a rung whose WARN says the switch did not reach the plugin proves nothing (the `--env` was not
 taken: check `34-metal-conf.txt` and `26-log-metal-plugin.txt`); without your answers, compare `ladder-<rung>h` pictures by eye (the text is the quickest test).
+
+**The glyph verdict (automatic).** Each rung's 1280-wide look (`<report>-scanoutladder-<rung>h-pipe<N>.ppm`, next to the archive) is read by `tools/glyph_verdict.py`
+(pure Python; the triage prints it in the `ladder <rung>` row as `glyphs (automatic, tools/glyph_verdict.py): ...`, and the `ladder glyphs` row says which rungs made the baseline's
+broken text clean). Terminal prints a tick line a second that ends in the same text, in one colour; drawn right, two such lines are the same picture, drawn wrong (random
+strokes) every line is different. The tool finds stacks of at least 8 text lines of an even pitch in the look (colour agnostic, no knowledge of the window's place), keeps the
+lines that end at the same column (a log window, a listing: ragged ends, never taken for tick lines), cuts the right half of each (after the time stamp) as a black-and-white
+strip and counts the lines that have a TWIN (another line within 12 % of its ink; the 1920 -> 1280 sampling drops one row in three, so lines fall into three classes of
+rows seen and each class has several lines). `CLEAN` = at least 80 % of the lines have a twin, `BROKEN` = at most 50 %, `unclear` between, `none` = no tick stack (the text window was not
+on a screen: the rung proves nothing). Every stack on the screens is judged and the WORST decides: a window that Terminal restored from its saved state shows the text of the
+previous rung, static and drawn clean, next to the live one (the ladder now opens Terminal with `-ApplePersistenceIgnoreState YES`, but a look of an older run has them). Read the numbers:
+live broken text 9 to 30 % of the lines have a twin; static (restored) text 95 to 100 %. Checked on the card run 2026-10-25f's looks (`tests/test_glyph_verdict.py`, also on synthetic looks).
+
+**Card run 2026-10-25f, read with it.** All seven rungs' LIVE windows are broken: baseline 5 of 23 lines have a twin, radv 2 of 23, sync 2 of 23, managed 2 of 23, alignguard 2 of 21,
+**paranoid 2 of 23**, loadbarrier 7 of 23. The one clean-looking `paranoid` picture (the montage of the rungs' looks) is the window Terminal restored from the `alignguard` rung
+(ticks of 14:03:2x to 14:03:38, 19 of 19 lines with a twin, static text); the live `paranoid` window (ticks 14:04:21 to 14:04:43 on pipe 0, `...paranoidh-pipe0.ppm`) is as broken as the baseline
+(the glyphs from the eighth letter of the alphabet on are random strokes). So NVMTL_PARANOID does not cure the text, and none of its 15 switches can be the cure by itself. What the
+logs add (Terminal, baseline slice): no buffer was parked or reused, no texture was made from a heap, no buffer-backed texture was made, the residency pager never ran, nothing was
+purged, a single submit was ever in flight; the code of NVMTL_NO_BUFREUSE, NO_HEAPTEX_PLACE / RECYCLE, NO_BUFTEX_RECYCLE, NO_RES2, NO_PURGE_RECLAIM and GSUB_INFLIGHT=1 never ran or changed nothing there
+(the earlier `ladder-paranoid` run, replaced by `ladder-glyphs`, had a `ladder knobs` row for that). The managed rung ran with the snapshot on (121 of 121 uploads snapshotted, 119 checked, 0 changed): the CPU did
+not rewrite a managed range while its copy was in flight. Static text is drawn right and live text is not: look at what changes per frame (the per-frame uploads, the framebuffer-fetch
+blend over the LOAD of the window's surface), not at what the knobs reuse.
+
+#### The glyph hunt in one run: `rdna3vm step ladder-glyphs`
+
+Card run 2026-10-25f: the live text of Terminal is broken in every rung, `paranoid` included; text drawn as a whole window (restored by the next Terminal) is clean. `ladder-glyphs`
+(`rdna3ladder=3`, `--ladder-glyphs`, 13 rungs of about 95 s, 25 minutes; the former `ladder-paranoid` is gone, its rungs are in commit 90da0d0) tests the suspects that are left. Hypotheses:
+A = the app writes managed-buffer bytes outside its `didModifyRange` (Apple's drivers copy whole pages, ours is byte-exact); B = the incremental path (managed buffer, then Apple's
+`buffer_image_blit_*` shader or a framebuffer-fetch draw into the retained window surface) is wrong where the whole-window path is right; C = the CPU/GPU coherency of the window
+IOSurface shared with WindowServer fails (page-off, surface-in seed); D = a copy with one image on both sides (fixed, see below). Each rung's knob is read by the plugin with the value the
+rung gives (the host test compares them with the source). What a CLEAN rung (baseline BROKEN) means is printed by the triage as `ladder glyphs <rung>`:
+
+| Rung (knob) | Clean means |
+|---|---|
+| `managed-whole` (`NVMTL_MANAGED_WHOLE=1`) | the GPU needs bytes the app did not declare (A). Run `managed-pages` and read `undeclared writes` |
+| `managed-check` (`NVMTL_MANAGED_CHECK=1`) | the detector (hash + mirror at the flush) changed the timing: a race between the CPU and the upload |
+| `no-surface-share` (`NVMTL_NO_SURFACE_SHARE=1`) | the window surface shared in family VRAM is where it breaks (C) |
+| `no-surface-pageoff` (`NVMTL_NO_SURFACE_PAGEOFF=1`) | the VRAM-newest / page-off protocol is where it breaks (C) |
+| `fbfetch-zero` (`NVMTL_FBFETCH_ZERO=1`) | the framebuffer-fetch draw is the source of the strokes (B). A clean zero-fetch text has no half-blended edges, so also read the picture |
+| `managed-pages` (`NVMTL_MANAGED_PAGES=1`) | whole 4 KiB pages are enough: the undeclared bytes lie in pages the declared ranges touch (A, Apple's page granularity) |
+| `managed-eager-zero` (`NVMTL_MANAGED_EAGER_ZERO=1`; `=1` is the OLD memset + upload at creation) | the creation-time clear of managed buffers matters |
+| `no-texbuf`, `no-bindless`, `dontcare-clears` (`NVMTL_DONTCARE_CLEARS=1`), `skip-empty-0` (`NVMTL_SKIP_EMPTY=0`) | that path is the cause |
+| `paranoid` | the NEGATIVE control. Clean here = the run is not comparable (`ladder glyphs control` WARN): the live-window identification or the artefact is unstable |
+
+The verdict of a rung looks at the window that CHANGED between its two 1280-wide looks (`...h` and `...h2`, three seconds apart; the text script prints a line a second): a tick-line window
+that did not change (a restored one, another rung's, a frozen screen) is listed as `STATIC ... ignored` and never decides; no live window at all is `none` (`ladder glyphs none` names the rungs).
+
+**A rung only counts if its knob was ENGAGED.** A key that reached the plugin (`vk: ab switches`) can still change nothing: the feature was already off, or the app never uses it. The triage compares the Terminal's
+effective-state lines and counters with the baseline's and says `knob engaged (...)` or **`KNOB NOT ENGAGED: <why>`** (WARN; "engagement could not be shown" when a line is missing): `no-surface-share` / `no-surface-pageoff` / `managed-eager-zero` /
+`no-texbuf` / `no-bindless` / `skip-empty-0` (the `item 7: ...`, `after a GPU write ...`, `zero-fill: ...`, `texture buffers ON/OFF`, `bindless textures ON/OFF`, `commit: empty submission parts ...` lines, and
+`commit: N empty submission parts NOT submitted` in the baseline), `managed-whole` / `managed-pages` (`widened_uploads` > 0 or `ud_whole_marks` > 0), `managed-check` (scans > 0), `fbfetch-zero` (`zr_forced` > 0 in
+`vk: fbfetch: SUMMARY`), `dontcare-clears` (`dontcare_cleared` > 0 in `vk: ab: SUMMARY`; `dontcare_seen` counts every don't-care attachment), `paranoid` (the profile line). A clean rung that did not engage is a WARN, not a cure,
+and the "no knob is the cure" sentence lists the engaged rungs and says the others exclude nothing. Every rung, the baseline too, must also show that ITS Terminal (the pid in `pids:`) logged `vk: ab switches` in the slice, otherwise the
+rung "proves nothing"; a missing log slice, a Terminal that did not start, a look whose `exit:` was not 0, a log slice cut at 600000 bytes (the END is kept), ppm files that were not sent (`push: N ppm file(s) not sent`), a run ended by
+a signal (`ABORTED by SIGx at rung N`) and a tick text script of an earlier run still running are all WARN rows. A rung with a hires look and no glyph verdict is WARNed (never left out).
+
+**The detector's blind spot and what WHOLE covers.** The detector watches a managed buffer from its first `didModifyRange` or its first `-contents` call (the only way an app can write a buffer without ever declaring a range), so a buffer
+written only through a cached `contents` pointer is watched too, from the moment it was first read. A buffer that was neither declared nor read is not watched: `ud_managed` counts the managed buffers made, the triage row says how
+many were never watched, and softens "hypothesis A is not supported" to "NOT excluded" when a third or more were blind. `NVMTL_MANAGED_WHOLE=1` also covers the buffers that never declare a range: at every submit a watched buffer whose
+shadow differs from the mirror is marked dirty and uploaded whole (`ud_whole_marks`), as Apple's copy of "everything" would. `NVMTL_MANAGED_PAGES=1` only widens the ranges the app DID declare (Apple copies what is modified, in pages;
+a buffer with no declared range is not copied there either). **The detector perturbs timing**: with `NVMTL_MANAGED_CHECK` (and `NVMTL_MANAGED_WHOLE`) every flush hashes the uploaded range and compares/copies the whole shadow against the mirror, every
+submit scans every watched buffer; a Terminal at 256 KB x 3 buffers pays tens of microseconds per submit. A rung that comes out clean with `managed-check` alone means a race the timing hides, not a missing declaration.
+
+**Summaries are timer-driven.** One 10 s timer (armed when the device is made) prints `managed:`, `census:`, `vk: ab:` and `vk: fbfetch:` (the surface-in cache has its own), each only when a counter moved; the last tick before a signal is the
+last evidence (a signal skips atexit). The surface-in SUMMARY is two lines (`SUMMARY` and `SUMMARY2` with the same `seq`; nvlog cuts at 1023 characters); the triage merges them. Rows carry the process and pid (`Terminal[907]`).
+
+**What the new counters say** (all in the plugin log of the process; the triage prints a row for each):
+
+| Line / row | Meaning | Action |
+|---|---|---|
+| `managed: SUMMARY ... whole=W pages=P decl_bytes=.. up_bytes=.. widened_uploads=..` ; row `managed upload` (WARN while whole/pages is on) | bytes the app declared against bytes uploaded; `widened_uploads` = uploads that carried more than declared | with the knob off, `up_bytes` == `decl_bytes` |
+| `managed: SUMMARY ... ud_scans ud_idle_scans ud_hits ud_idle_hits ud_bytes ud_samepage_hits ud_late_bytes ud_buffers ud_gpu_off ud_nomirror ud_mirrors ud_mirror_bytes` (needs `NVMTL_MANAGED_CHECK=1`); row `undeclared writes` | the detector keeps a mirror of each managed buffer's shadow as the last scan saw it (zero at creation); at every flush it compares the shadow OUTSIDE the declared range with it, and at every submit it scans the buffers that have no range at all. `ud_bytes` = bytes that changed without a `didModifyRange`; `ud_late_bytes` of them were declared at the NEXT flush (another thread's submit saw them first: a race, not a missing declaration); `ud_samepage_hits` = hits in a page the declared range touches; `ud_gpu_off` = buffers the GPU writes back (left out); `ud_nomirror` = buffers over 8 MiB or past 64 MiB of mirrors | `ud_bytes - ud_late_bytes` > 0: A is real, the upload leaves those bytes stale in VRAM; `managed-whole` / `managed-pages` rungs say whether the GPU needs them. 0 with thousands of scans: A is excluded for these buffers |
+| `managed: UNDECLARED CPU write in a N-byte buffer (scan at the flush / at a submit): K byte(s) changed outside the declared range, at offsets A..B, the nearest D byte(s) from it` | the first 4 hits of a buffer (64 lines per process) | the offsets say which part of Terminal's 256 KB buffers is written without being declared |
+| `vk: same-image copy WxHxD fmt F from (x,y,z) level L slice S to (...): no overlap, both sides in GENERAL / OVERLAP, through a scratch image` | the first 8 (then every 1024th) copies with one image on both sides; `vk: ab: SUMMARY ... same_image_copies same_image_overlap same_image_general same_image_tmp same_image_tmpfail same_image_unsafe`; row `same-image copy` (WARN when an overlapping copy had to run in place) | `same_image_overlap` > 0 in Terminal: it copies a region of its window onto itself (a scroll), see the fix below |
+| `census: SUMMARY seq=.. t_ms=.. surfaces=.. sin_up_vram sin_up_priv sin_up_mb sin_skip sin_fail pass pass_clear draws draw_blit draw_fbf blitenc replace compute present out_dirty out_copy out_fail top=ID:WxH:V|P:u..,P..` ; row `surface census` | what touched the process's IOSurface render targets: surface-in uploads (`u` family VRAM, `U` private; the CPU copy was newer than the VRAM tag, i.e. a CPU lock, a window capture or the display pipe moved the seed - the only trace of a page-off this process sees), skips `s`, render passes `P` (cleared `c`), draws `D`, Apple's `buffer_image_blit` draws `B`, framebuffer-fetch draws `F`, blit-encoder copies `E`, `replaceRegion` `R`, compute writes `X`, presents `T`, GPU writes published as a dirty mark `O` (VRAM newest: the next CPU lock pages it off) or copied out `C`. `V` = the surface lives in family VRAM, `P` private | Terminal's window: `B` and `F` with `u` > 0 on the same surface means the CPU copy was uploaded between GPU draws (the mix of C and B); `u` = 0 and `O` high means the CPU never touched it |
+| `ladder quit` row, `quit: pid N ended by SIGINT/SIGTERM/SIGKILL after Ns` | how every instance ended; WARN when one survived SIGKILL | |
+
+**Reading it.** (1) The control `paranoid` must stay broken, the baseline broken (else the run proves nothing). (2) `undeclared writes` in the baseline Terminal: bytes > 0 and `managed-whole` clean = A,
+confirmed; bytes > 0 and `managed-whole` still broken = the undeclared bytes are not what the GPU lacks (the app does write them, Apple's copy would carry them, and the picture does not need them);
+bytes = 0 over many scans = A excluded for these buffers. (3) `no-surface-share` / `no-surface-pageoff` clean = C. (4) Everything broken: the cause is none of these knobs; the census says whether the CPU
+ever touched the window surface between GPU draws (`u` on a V surface), `fence early` says whether the kernel's fence completed before the GPU's writes were visible (WindowServer 5 times in 91994
+witnessed submits, worst 867 us late, Chess once, in 25f: a CPU readback right after a fence, e.g. a page-off copy, could see stale bytes - a kernel visibility suspect that no rung here switches;
+`NVMTL_ASYNC_COMMIT=0` / the `sync` rung of `ladder` is the nearest plugin-side check, and the count of early fences per process is the number to watch), and the host probe
+`tests/vk_same_image_probe.c` / `tests/vk_meta_probe.c` say what RADV does on the dev host.
+
+**The same-image copy (fixed in `nvmtl_vk_cmd_copy_image_sub3`).** A copy with one VkImage on both sides moved the image to TRANSFER_SRC and then to TRANSFER_DST and recorded `vkCmdCopyImage` with
+TRANSFER_SRC for the source, and an overlapping region (a scroll by N rows) is undefined in Vulkan. Host probe `tests/vk_same_image_probe.c` on the RX 7800 XT (RADV 26.2.5, DCC on and
+`RADV_DEBUG=nodcc`, 1024x768 RGBA8, 400 to 800 random copies per mode): disjoint copies are right even with the old layouts, an OVERLAPPING copy in place (old layouts or GENERAL) leaves wrong regions (dozens to
+thousands of pixels) in several readbacks of every run tried (seeds 2 to 7, 1 to 16 operations per command buffer, DCC on and off), and the new sequence (GENERAL on both sides when the regions are disjoint, a scratch image when they overlap) never. If Terminal scrolls its
+window by copying it onto itself (the `same_image_overlap` counter of its `vk: ab: SUMMARY` says), scrolled text was a candidate; it does not explain the progress Terminal (`tail -f`, not yet scrolling) or the glyphs of card runs 25..25c, which stay open.
 
 Encode time (kind 17 records, `tools/plugin_trace.py`, the same report): WindowServer, 3948 render encoders and 26152 draws in `101618`: 4256 ms in
 encoders, of which the surface-in checks are 1605 ms (38 %, 104 us per call; 81 % of it in 205 encoders that include a real upload, 465 uploads of 856 us

@@ -118,9 +118,9 @@ const char *nvmtl_log_path(void) {
     return path;
 }
 static void nvlog_emit(const char *fmt, uint64_t rep, va_list a) {
-    char b[768];
+    char b[1024];   /* (the summary lines are long: they were cut at 767 characters)  */
     vsnprintf(b, sizeof b, fmt, a);
-    char t[900];
+    char t[1200];
     if (rep) snprintf(t, sizeof t, "%s   [logged %llu times now]", b, (unsigned long long)rep);
     else     snprintf(t, sizeof t, "%s", b);
 #if NVMTL_RELEASE
@@ -176,6 +176,8 @@ static void nvmtl_alloc_failed(const char *what) {
 @end
 #import "NVMTLObjects.h"
 #import "NVMTLTrace.m"
+static void nvmtl_ud_managed_created(void);   /* DRIVER-PLAN N50: the undeclared-write detector counts the managed buffers it could watch */
+static void nvmtl_summary_timer_arm(void);   /* the shared 10 s timer of the plugin's SUMMARY lines */
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -496,6 +498,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
        submitter to go to. If Vulkan then fails the device is refused and the queue stays, idle, until the process exits. */
     nvmtl_gpu_time_queue_open(self, port);
     nvlog("MTLIOAccelDevice's initWithAcceleratorPort: -> %p", (__bridge void *)self);
+    nvmtl_summary_timer_arm();
     gNVMTLMainDevice = self;
     nvmtl_install_hw_resource_pools(self);
     [self nvmtlProbeGPUPass];
@@ -589,6 +592,7 @@ static __thread int gZeroSkip;
         if (nvmtl_vk_buffer_create(len, 1, &b->_b)) { nvmtl_alloc_failed("newBufferWithLength"); return nil; }
     }
     if (!gZeroSkip) nvmtl_zero_new_buffer(b, len);
+    if (b->_shadow.map) nvmtl_ud_managed_created();
     nvlog("newBufferWithLength:%lu storage %d -> %p%s", (unsigned long)len, (int)b->_storage, (__bridge void *)b, b->_b.map ? "" : " VRAM"); return b; }
 
 - (id<MTLBuffer>)newBufferWithBytes:(const void *)bytes length:(NSUInteger)len options:(MTLResourceOptions)opt {

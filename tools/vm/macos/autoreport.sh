@@ -26,12 +26,13 @@ fi
 # rdna3bisect=1 / 2 / 4 asks for it (rdna3vm step bisect / bisect-plugin /
 # bisect-agdc).
 BISECT=; BISECT_HAND=
-# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws;
-# in the VM the boot-arg rdna3ladder=1 / 2 (rdna3vm step ladder / ladder-ws)
+# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws | --ladder-glyphs;
+# in the VM the boot-arg rdna3ladder=1 / 2 / 3 (rdna3vm step ladder / ladder-ws / ladder-glyphs)
 LADDER=
 case "${1:-}" in
     --ladder) LADDER=1; BISECT_HAND=1; shift ;;
     --ladder-ws) LADDER=2; BISECT_HAND=1; shift ;;
+    --ladder-glyphs) LADDER=3; BISECT_HAND=1; shift ;;
 esac
 case "${1:-}" in
     --bisect) BISECT=1; BISECT_HAND=1; shift ;;
@@ -1086,6 +1087,18 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
 # tools/triage_reports.py (tools/triage_glyphs.py ladder_rows) prints one row per rung.
 LADDER_RUNGS="baseline radv sync managed alignguard paranoid loadbarrier"
 LADDER_WS_RUNGS="radv-ws paranoid-ws"
+# variant 3 (`rdna3vm step ladder-glyphs`, rdna3ladder=3): the glyph hunt of DRIVER-PLAN N50 after card run 2026-10-25f, where NVMTL_PARANOID did not cure Terminal's text. Strongest
+# first (a run cut short keeps them): `baseline`; the managed-buffer rungs (hypothesis A: the app writes bytes outside its didModifyRange, Apple's drivers copy whole pages):
+# `managed-whole` (every flush uploads the whole buffer), `managed-check` (the undeclared-write detector, no behaviour change); the IOSurface coherency rungs (hypothesis C):
+# `no-surface-share` (the window is a private image, not the family's VRAM), `no-surface-pageoff` (a GPU write is copied out eagerly, no VRAM-newest mark); then `fbfetch-zero`
+# (framebuffer fetch returns zero: if the text then has no half-blended strokes, the fetch path is where it breaks), `managed-pages` (ranges widened to 4 KiB pages),
+# `managed-eager-zero` (=1: the OLD behaviour, a new managed buffer is memset and uploaded; the default clears the VRAM copy on the GPU), `no-texbuf` (no texel-buffer views),
+# `no-bindless`, `dontcare-clears` (a don't-care load action is a clear), `skip-empty-0` (empty encoders are not skipped), and `paranoid`, the NEGATIVE control (card run
+# 2026-10-25f: it does not clean the text; if it does here, the run is not comparable). Each rung's knob is the code's own (checked against getenv in metal/plugin): the value is the one the code reads
+# (NO_SURFACE_SHARE / NO_SURFACE_PAGEOFF / MANAGED_EAGER_ZERO test the first character for '1', NO_BINDLESS likewise, NO_TEXBUF is set-or-not, SKIP_EMPTY is on unless it starts with '0').
+# This variant takes a SECOND hi-res look a few seconds after the first (`h2`): the verdict (tools/glyph_verdict.py) only counts the tick-line window that CHANGED between the two,
+# the rung's own live text, never a window that stands still (a restored one, another rung's, a frozen screen).
+LADDER_GLYPHS_RUNGS="baseline managed-whole managed-check no-surface-share no-surface-pageoff fbfetch-zero managed-pages managed-eager-zero no-texbuf no-bindless dontcare-clears skip-empty-0 paranoid"
 ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
     case $1 in
         baseline) ;;
@@ -1095,6 +1108,17 @@ ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
         alignguard) echo "NVMTL_NO_ALIGN_GUARD=1" ;;
         paranoid|paranoid-ws) echo "NVMTL_PARANOID=1" ;;
         loadbarrier) echo "NVMTL_LOAD_BARRIER=1" ;;
+        managed-whole) echo "NVMTL_MANAGED_WHOLE=1" ;;
+        managed-check) echo "NVMTL_MANAGED_CHECK=1" ;;
+        no-surface-share) echo "NVMTL_NO_SURFACE_SHARE=1" ;;
+        no-surface-pageoff) echo "NVMTL_NO_SURFACE_PAGEOFF=1" ;;
+        fbfetch-zero) echo "NVMTL_FBFETCH_ZERO=1" ;;
+        managed-pages) echo "NVMTL_MANAGED_PAGES=1" ;;
+        managed-eager-zero) echo "NVMTL_MANAGED_EAGER_ZERO=1" ;;
+        no-texbuf) echo "NVMTL_NO_TEXBUF=1" ;;
+        no-bindless) echo "NVMTL_NO_BINDLESS=1" ;;
+        dontcare-clears) echo "NVMTL_DONTCARE_CLEARS=1" ;;
+        skip-empty-0) echo "NVMTL_SKIP_EMPTY=0" ;;
         *) return 1 ;;
     esac
 }
@@ -1102,9 +1126,12 @@ ladder_env_args() {   # "A=1 B=2" -> "--env A=1 --env B=2"
     for _le in $1; do printf '%s %s ' --env "$_le"; done
 }
 ladder_w() { printf '%s\n' "$*" >> "$LF"; }
-ladder_text_script() {   # the Terminal's text: a colored listing, ANSI colors, then a line a second so that the window draws all the time
+ladder_text_script() {   # the Terminal's text: a colored listing and fox lines, then a tick line a second in ONE fixed colour (bright white) and, every 4th second, a line of mixed glyphs
     # made once per run, as root, in a directory of its own that mktemp creates (a fixed name in the sticky /Users/Shared could be a planted link);
     # ladder_restore removes it. LADDER_TEXT stands in for it in the host test.
+    # The tick lines are the glyph check's evidence (tools/glyph_verdict.py): the text after the time stamp is the same on every line, and in one colour
+    # every line is drawn the same when the glyphs are drawn right, so a line that has no twin is a broken line. The mixed line (digits, upper case, punctuation)
+    # is for the eye; it ends differently from the tick lines and the verdict leaves it out.
     if [ -n "${LADDER_TEXT:-}" ]; then _lt=$LADDER_TEXT
     else
         if [ -z "${_LADDER_TEXTDIR:-}" ]; then
@@ -1121,7 +1148,13 @@ echo "RDNA3 ladder: text for the glyph check (do not close, this window is close
 CLICOLOR_FORCE=1 ls -laG /System/Library /usr/bin 2>/dev/null | head -n 70
 i=0
 while [ $i -lt 8 ]; do printf '\033[%sm The quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ \033[0m\n' $((31 + i)); i=$((i + 1)); done
-while :; do i=$((i + 1)); printf '\033[1;3%sm %s  rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz\033[0m\n' $((i % 7 + 1)) "$(date +%T)"; sleep 1; done
+i=0
+while :; do
+    i=$((i + 1))
+    printf '\033[97m %s  rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz\033[0m\n' "$(date +%T)"
+    [ $((i % 4)) -eq 0 ] && printf '\033[97m          ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 !#$%%&()*+,-./:;<=>?@[]^_{|}~\033[0m\n'
+    sleep 1
+done
 TXT
     chmod 755 "$_lt" 2>/dev/null
     _LADDER_TEXT=$_lt   # (a global: this is not called inside $( ), where _LADDER_TEXTDIR would be lost)
@@ -1159,15 +1192,27 @@ ladder_look_hires() {   # ladder_look_hires NAME: the 1280-wide look (small text
     grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep' "$LD/look.out" | cut -c1-140 >> "$LF"
     ladder_w "exit: $_lr"
 }
-ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began
+ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began (the LAST 600000 bytes: a flood keeps the end, where the SUMMARY lines are)
     _ls_start=$(date -r "$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d "@$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
     _ls_pred='(eventMessage CONTAINS "NVMTL" OR eventMessage CONTAINS "NullMoth:") AND ('
     _ls_or=
     for _lp in $3; do _ls_pred="$_ls_pred${_ls_or}processID == $_lp"; _ls_or=" OR "; done
     _ls_pred="$_ls_pred)"
-    : > "$LD/$1.log"
-    with_limit 90 sh -c "log show --start \"$_ls_start\" --info --style compact --predicate '$_ls_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery | head -c 600000" > "$LD/$1.log" 2>/dev/null
-    ladder_w "log: $1.log ($(wc -l < "$LD/$1.log" | tr -d ' ') lines, pids $3, since $_ls_start)"
+    : > "$LD/$1.full"
+    with_limit 90 sh -c "log show --start \"$_ls_start\" --info --style compact --predicate '$_ls_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery > \"$LD/$1.full\"" 2>/dev/null
+    _ls_rc=$?
+    _ls_sz=$(wc -c < "$LD/$1.full" | tr -d ' ')
+    _ls_note=
+    # a log show killed by the 90 s limit ends mid-stream: its end is not the rung's end (the last SUMMARY lines may be missing)
+    [ "$_ls_rc" = 0 ] || _ls_note=", log show did not finish in 90 s (exit $_ls_rc): the slice ends early"
+    if [ "${_ls_sz:-0}" -gt 600000 ]; then
+        tail -c 600000 "$LD/$1.full" > "$LD/$1.log"
+        _ls_note="$_ls_note, slice truncated: kept the last 600000 of $_ls_sz bytes"
+    else
+        cp "$LD/$1.full" "$LD/$1.log"
+    fi
+    rm -f "$LD/$1.full"
+    ladder_w "log: $1.log ($(wc -l < "$LD/$1.log" | tr -d ' ') lines, pids $3, since $_ls_start$_ls_note)"
 }
 ladder_ws_conf() {   # ladder_ws_conf "<NAME=value ...>": rdna3mtl.conf = the run's original without these keys, then these lines (the original stays in the backup)
     bisect_plugin_save
@@ -1182,34 +1227,36 @@ ladder_ws_conf() {   # ladder_ws_conf "<NAME=value ...>": rdna3mtl.conf = the ru
         true
     } > "$BISECT_CONF.new" && bisect_own "$BISECT_CONF.new" && mv -f "$BISECT_CONF.new" "$BISECT_CONF"
 }
+ladder_quit_w() { [ -n "${LF:-}" ] && ladder_w "$*"; return 0; }   # (the restore path of a run that died before its evidence file existed has nowhere to write)
 ladder_quit() {   # ladder_quit "<pids>" [graceful]: the instances this rung started, and only those
-    if [ "${2:-}" = graceful ]; then
-        # ask each one to quit (System Events, by unix id: the instance, not the app name, which would also hit the owner's own), so that it runs its atexit
-        # (the plugin's last `vk: ab: SUMMARY`); whatever is still there after LADDER_QUITGRACE s gets SIGTERM, then SIGKILL
-        # end the text script first: Terminal asks "terminate running processes?" on a quit while it runs, and the TERM below would skip the atexit
-        [ -n "${_LADDER_TEXT:-}" ] && pkill -f "$_LADDER_TEXT" 2>/dev/null && sleep 1
-        for _qp in $1; do
-            with_limit 15 as_user osascript -e "tell application \"System Events\" to tell (first process whose unix id is $_qp) to quit" >/dev/null 2>&1
-        done
+    # SIGINT, then SIGTERM, then SIGKILL, each followed by a wait, and a line per instance saying how it ended. No System Events: that needs the user's consent (Automation), which
+    # card run 2026-10-25f never got (`quit: still running after 8s` in every rung). A signal ends a GUI process without its atexit, so the plugin's exit SUMMARY is lost; its 10 s
+    # time-based lines are the evidence (the rung waits LADDER_TAIL s before it quits). The restore path of an interrupted run skips the polite INT.
+    _qleft=$1
+    [ -n "$_qleft" ] || return 0
+    # end the text script first: Terminal asks "terminate running processes?" on a quit while it runs
+    if [ "${2:-}" = graceful ] && [ -n "${_LADDER_TEXT:-}" ]; then pkill -f "$_LADDER_TEXT" 2>/dev/null; sleep 1; fi
+    for _qsig in INT TERM KILL; do
+        [ -n "$_qleft" ] || break
+        if [ "$_qsig" = INT ] && [ "${2:-}" != graceful ]; then continue; fi
+        case $_qsig in INT) _qlim=${LADDER_QUITGRACE:-4} ;; TERM) _qlim=${LADDER_QUITTERM:-3} ;; *) _qlim=${LADDER_QUITWAIT:-2} ;; esac
+        kill -"$_qsig" $_qleft 2>/dev/null
         _qw=0
-        while [ "$_qw" -lt "${LADDER_QUITGRACE:-8}" ]; do
-            _qa=
-            for _qp in $1; do kill -0 "$_qp" 2>/dev/null && _qa=1; done
-            [ -z "$_qa" ] && break
+        while :; do
+            _qn=
+            for _qp in $_qleft; do
+                if kill -0 "$_qp" 2>/dev/null; then _qn="$_qn $_qp"; else ladder_quit_w "quit: pid $_qp ended by SIG$_qsig after ${_qw}s"; fi
+            done
+            _qleft=${_qn# }
+            if [ -z "$_qleft" ] || [ "$_qw" -ge "$_qlim" ]; then break; fi
             sleep 1; _qw=$((_qw + 1))
         done
-        _ql=
-        for _qp in $1; do kill -0 "$_qp" 2>/dev/null && _ql="$_ql $_qp"; done
-        # a pid still here did not quit (Automation denied or not answered, or a dialog): its last SUMMARY is lost, say so
-        [ -n "$_ql" ] && ladder_w "quit: still running after ${LADDER_QUITGRACE:-8}s, TERM:$_ql"
-    fi
-    kill -TERM $1 2>/dev/null
-    sleep "${LADDER_QUITWAIT:-2}"
-    kill -KILL $1 2>/dev/null
+    done
+    [ -z "$_qleft" ] || ladder_quit_w "quit: pid(s) $_qleft SURVIVED SIGKILL"
     return 0
 }
 ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
-    _rn=$1; _rs=$2
+    _rn=$1; _rs=$2; _LADDER_CUR=$_rn
     _renv=$(ladder_rung_env "$_rn") || { ladder_w "== rung $_rn: unknown"; return 1; }
     ladder_w "== rung $_rn"
     ladder_w "scope: $_rs"
@@ -1230,7 +1277,9 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     # each app's instances are listed right before its own open and polled for right after it: the window in which another instance could be taken for ours
     _tb=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
-    as_user open -n -a Terminal $_rargs "$_LADDER_TEXT" >/dev/null 2>&1
+    # -ApplePersistenceIgnoreState: a new Terminal instance restores the windows the previous one had saved (card run 2026-10-25f: the text of the rung before,
+    # static and drawn clean, next to the live window, which looked like a clean picture in one rung); without it the only text on screen is this rung's
+    as_user open -n -a Terminal $_rargs "$_LADDER_TEXT" --args -ApplePersistenceIgnoreState YES >/dev/null 2>&1
     _tp=$(ladder_wait_new Terminal "$_tb")
     _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
@@ -1242,7 +1291,15 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     sleep "${LADDER_SETTLE:-25}"
     bisect_look "ladder-${_rn}a" 12
     ladder_look_hires "ladder-${_rn}h"
-    ladder_w "looks: ladder-${_rn}a ladder-${_rn}h"
+    _rlooks="ladder-${_rn}a ladder-${_rn}h"
+    if [ "${_LADDER_V:-1}" = 3 ]; then
+        # the glyph hunt: a second hi-res look a few seconds later. The text script prints a line a second, so the rung's own window CHANGES between the two looks and
+        # a window that does not (restored, another rung's, a frozen screen) is not the rung's text (tools/glyph_verdict.py verdict_files(later=...))
+        sleep "${LADDER_LOOK2GAP:-3}"
+        ladder_look_hires "ladder-${_rn}h2"
+        _rlooks="$_rlooks ladder-${_rn}h2"
+    fi
+    ladder_w "looks: $_rlooks"
     _rwait=
     if [ -n "${_btty:-}" ]; then
         bisect_say "LADDER rung $_rn: is the picture right? y / n / Enter (20 s)"
@@ -1252,7 +1309,7 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     ladder_w "answer: $_rans"
     sleep "${LADDER_TAIL:-12}"   # the plugin's counters go out every 10 s while something moved (`vk: ab: SUMMARY`, `managed: SUMMARY`)
     _lwp=$([ "$_rs" = windowserver ] && pgrep -x WindowServer 2>/dev/null | tr '\n' ' ')
-    ladder_quit "$_tp$_cp" graceful   # first: a quit runs the plugin's atexit, whose last SUMMARY the slice below should hold
+    ladder_quit "$_tp$_cp" graceful   # SIGINT, TERM, KILL (no consent needed); the slice below holds the last 10 s SUMMARY of each process (a signal skips the exit one)
     _LADDER_PIDS=
     sleep "${LADDER_AFTERQUIT:-2}"
     ladder_log_slice "$_rn" "$_rt0" "$_tp$_cp$_lwp"
@@ -1260,15 +1317,20 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     ladder_push
     return 0
 }
-ladder_push() {   # up to the host after every rung: a run cut short keeps what it did
+ladder_push() {   # up to the host after every rung: a run cut short keeps what it did. A file that did not go up is counted in ladder.txt (the triage then cannot judge that rung's glyphs)
     [ -n "$HOST" ] || return 0
-    curl -sf --max-time 10 -T "$LF" "$HOST/reports/$base-ladder.txt" >/dev/null 2>&1
+    _pu_miss=0
     for _pp in "$HOME"/rdna3-scanout/ladder-*/scanout-pipe*.ppm; do
         [ -f "$_pp" ] || continue
         [ -f "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")" ] && continue
-        curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1 &&
+        if curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1; then
             : > "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")"
+        else
+            _pu_miss=$((_pu_miss + 1))
+        fi
     done
+    [ "$_pu_miss" = 0 ] || ladder_w "push: $_pu_miss ppm file(s) not sent to the host (curl failed): their rungs have no glyph verdict in the report"
+    curl -sf --max-time 10 -T "$LF" "$HOST/reports/$base-ladder.txt" >/dev/null 2>&1
     return 0
 }
 ladder_restore() {   # the plugin's conf and allow list exactly as the run found them; the instances still running are quit
@@ -1281,16 +1343,25 @@ ladder_restore() {   # the plugin's conf and allow list exactly as the run found
     if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
     return 0
 }
-ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer rungs; 0 when every rung ran
-    _lv=$1
+ladder_abort() {   # ladder_abort SIGNAME EXITCODE: the run is ending because of a signal
+    trap '' INT TERM HUP   # a second signal must not run the restore and the push again
+    ladder_w "ABORTED by SIG$1 at rung ${_LADDER_CUR:-none} ($(date +%T)): the rungs after it did not run"
+    ladder_restore
+    ladder_push
+    trap - EXIT
+    exit "$2"
+}
+ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServer rungs, 3 = the glyph hunt (ladder-glyphs); 0 when every rung ran
+    _lv=$1; _LADDER_V=$1
+    _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_GLYPHS_RUNGS
     LD=${LADDER_OUT:-$HOME/rdna3-ladder}; LF=$LD/ladder.txt; BD=$LD; BF=$LF
     rm -rf "$LD"; mkdir -p "$LD" || { echo "== ladder: cannot make $LD"; return 1; }
     _btty=
     if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
-    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=
+    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=; _LADDER_CUR=
     ladder_w "# rdna3 ladder v1"
-    ladder_w "variant: $_lv ($([ "$_lv" = 2 ] && echo ladder-ws || echo ladder))"
+    ladder_w "variant: $_lv ($(case $_lv in 2) echo ladder-ws ;; 3) echo ladder-glyphs ;; *) echo ladder ;; esac))"
     ladder_w "started: $(date +%T)"
     ladder_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
     ladder_w "console_user: $(bisect_console_user)"
@@ -1305,18 +1376,23 @@ ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer
         ladder_w "ABORT: nobody logged in after $_w s: no app can be opened"
         bisect_say "LADDER: NOBODY LOGGED IN - nothing ran"
         return 1 ;; esac
+    # a signal ends the run with a line that says so, the evidence pushed and the conf put back. HUP too (the Terminal this was started from was closed), except in the WindowServer
+    # variant, where the restart of WindowServer closes that Terminal on purpose and the run must go on
     trap 'ladder_restore' EXIT
-    trap 'ladder_restore; exit 130' INT
-    trap 'ladder_restore; exit 143' TERM
-    [ "$_lv" = 2 ] && trap '' HUP   # a WindowServer restart closes the Terminal this was started from
+    trap 'ladder_abort INT 130' INT
+    trap 'ladder_abort TERM 143' TERM
+    if [ "$_lv" = 2 ]; then trap '' HUP; else trap 'ladder_abort HUP 129' HUP; fi
     # the instances that were there before the run: never ours to quit
     _LADDER_BASE_Terminal=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' '); _LADDER_BASE_Chess=$(pgrep -x Chess 2>/dev/null | tr '\n' ' '); _LADDER_BASE_SET=1
     ladder_w "baseline_pids: Terminal=${_LADDER_BASE_Terminal:-none}Chess=${_LADDER_BASE_Chess:-none}"
-    ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM; return 1; }
+    # tick windows that were already there: the text script of an earlier run still printing its lines in some Terminal. They are live too, so the glyph verdict could judge them as well as ours
+    _old_ticks=$(pgrep -f 'rdna3-ladder-text\.' 2>/dev/null | tr '\n' ' ')
+    [ -z "$_old_ticks" ] || ladder_w "WARN: the text script of an earlier run is still running (pids $_old_ticks): its Terminal window shows tick lines too and is as live as this run's; close it and run again if a verdict says STATIC/live windows"
+    ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM HUP; return 1; }
     caffeinate -u -t 5 >/dev/null 2>&1 &
-    notify "ladder: $(echo $LADDER_RUNGS | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
+    notify "ladder: $(echo $_lrungs | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
     _lfail=0
-    for _lr in $LADDER_RUNGS; do ladder_rung "$_lr" apps || _lfail=1; done
+    for _lr in $_lrungs; do ladder_rung "$_lr" apps || _lfail=1; done
     if [ "$_lv" = 2 ]; then
         for _lr in $LADDER_WS_RUNGS; do ladder_rung "$_lr" windowserver || { _lfail=1; break; }; done
     fi
@@ -1327,7 +1403,7 @@ ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer
     ladder_w "finished: $(date +%T)"
     ladder_w "== end"
     ladder_push
-    trap - EXIT INT TERM
+    trap - EXIT INT TERM HUP
     [ -n "$STANDALONE" ] && trap 'restore_sleep' EXIT && trap 'restore_sleep; exit 130' INT && trap 'restore_sleep; exit 143' TERM
     echo "LADDER: $_lv, $([ "$_lfail" = 0 ] && echo "every rung ran" || echo "A RUNG DID NOT RUN"); ladder.txt in the report"
     bisect_say "LADDER done: the report has the table (41-ladder.txt)"
@@ -1565,10 +1641,11 @@ case " $args " in
     *" rdna3bisect=4 "*) [ -n "$BISECT" ] || BISECT=4 ;;   # rdna3vm step bisect-agdc: the kernel's switches on the agdc profile
 esac
 [ -n "$BISECT" ] && label="bisect-$BISECT"
-# rdna3ladder=1 / 2 (rdna3vm step ladder / ladder-ws): only the A/B ladder runs (a standalone run takes the flag)
+# rdna3ladder=1 / 2 / 3 (rdna3vm step ladder / ladder-ws / ladder-glyphs): only the A/B ladder runs (a standalone run takes the flag)
 case " $args " in
     *" rdna3ladder=1 "*) [ -n "$LADDER" ] || LADDER=1 ;;
     *" rdna3ladder=2 "*) [ -n "$LADDER" ] || LADDER=2 ;;
+    *" rdna3ladder=3 "*) [ -n "$LADDER" ] || LADDER=3 ;;
 esac
 [ -n "$LADDER" ] && [ -z "$BISECT" ] && label="ladder-$LADDER"
 # rdna3bisect=3 (rdna3vm args "rdna3bisect=3" --stay): nothing runs at boot, so the bisect can be started by hand in

@@ -112,6 +112,30 @@ int main(void)
       while ((n = nvmtl_ab_switch_chunk(c, sizeof c, &next, fake_env)) != 0) { total += n; chunks++; CHECK(strlen(c) < sizeof c); CHECK(chunks < 10); }
       CHECK(total == 5 && chunks >= 3); }
 
+    /* NVMTL_MANAGED_WHOLE / PAGES: the range a flush uploads */
+    { size_t a, b;
+      nvmtl_managed_widen(262144, 100, 164, 0, 0, &a, &b); CHECK(a == 100 && b == 164);                 /* byte exact, as before */
+      nvmtl_managed_widen(262144, 100, 164, 0, 1, &a, &b); CHECK(a == 0 && b == 4096);                  /* the page */
+      nvmtl_managed_widen(262144, 4096, 8192, 0, 1, &a, &b); CHECK(a == 4096 && b == 8192);             /* already whole pages */
+      nvmtl_managed_widen(262144, 4095, 4097, 0, 1, &a, &b); CHECK(a == 0 && b == 8192);                /* a range that straddles two */
+      nvmtl_managed_widen(10000, 9000, 9900, 0, 1, &a, &b); CHECK(a == 8192 && b == 10000);             /* clipped to the buffer */
+      nvmtl_managed_widen(262144, 100, 164, 1, 1, &a, &b); CHECK(a == 0 && b == 262144);               /* WHOLE wins */
+      nvmtl_managed_widen(262144, 100, 999999, 0, 0, &a, &b); CHECK(a == 100 && b == 262144);          /* a range past the end is cut */ }
+    /* the undeclared-write detector */
+    { static uint8_t prev[16384], cur[16384]; nvmtl_undecl u;
+      memset(prev, 0, sizeof prev); memcpy(cur, prev, sizeof cur);
+      cur[5000] = 7; cur[5001] = 7;                                         /* declared: [4096, 6000) */
+      CHECK(!nvmtl_undeclared_scan(cur, prev, sizeof cur, 4096, 6000, &u) && u.bytes == 0);
+      cur[6100] = 1;                                                         /* 101 bytes after the range, in the next page */
+      CHECK(nvmtl_undeclared_scan(cur, prev, sizeof cur, 4096, 6000, &u) && u.bytes == 1 && u.first == 6100 && u.last == 6100 && u.nearest == 101 && u.samepage);
+      cur[100] = 1; cur[16000] = 1;                                          /* far away, other pages */
+      CHECK(nvmtl_undeclared_scan(cur, prev, sizeof cur, 4096, 6000, &u) && u.bytes == 3 && u.first == 100 && u.last == 16000 && u.nearest == 101);
+      memcpy(prev, cur, sizeof cur); cur[6000] = 9;                          /* the byte right after the range: distance 1, same page */
+      CHECK(nvmtl_undeclared_scan(cur, prev, sizeof cur, 4096, 6000, &u) && u.bytes == 1 && u.nearest == 1 && u.samepage);
+      memcpy(prev, cur, sizeof cur); cur[12000] = 3;
+      CHECK(nvmtl_undeclared_scan(cur, prev, sizeof cur, 4096, 6000, &u) && u.bytes == 1 && !u.samepage && u.nearest == 6001);
+      CHECK(!nvmtl_undeclared_scan(cur, cur, sizeof cur, 0, sizeof cur, &u));      /* the whole buffer declared: nothing is outside */ }
+
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("test_ab_switch: ok\n");
     return 0;

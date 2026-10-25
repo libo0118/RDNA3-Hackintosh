@@ -74,6 +74,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void **rvs; unsigned nrv, caprv;
                  uint32_t fbin, fbf_bad, fbf_layers, fbf_noset;   /* input attachments the pass in progress declares; of them the ones that cannot be served; its layer count */
                  void *fbf_set; uint32_t fbf_ready;     /* the pass's descriptor set (set NVMTL_FBF_SET) and whether it was built (or failed) */
+                 nvk_image *tmpimg; unsigned ntmpimg;     /* scratch images the recording made (a copy inside one image goes through one); destroyed with the command buffer */
                  nvk_fbf_att fbf_att[NVMTL_NCOL];
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
@@ -195,6 +196,8 @@ int  nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
 #define nvmtl_vk_submit_begin(c, f) nvmtl_vk_submit_begin_at((c), (f), __func__)
 int  nvmtl_vk_submit_finish(nvmtl_inflight *f);
 void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n);
+void nvmtl_vk_note_dontcare(int cleared);   /* a render pass attachment with a don't-care load action (cleared = NVMTL_DONTCARE_CLEARS turned it into a clear) */
+void nvmtl_vk_summaries(void);              /* print the `vk: ab:` and `vk: fbfetch:` SUMMARY lines when a counter moved (the shared timer) */
 int nvmtl_vk_pre_open(void);
 int nvmtl_vk_pre_copy(nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
 int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word);
