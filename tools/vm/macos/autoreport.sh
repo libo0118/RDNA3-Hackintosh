@@ -26,12 +26,13 @@ fi
 # rdna3bisect=1 / 2 / 4 asks for it (rdna3vm step bisect / bisect-plugin /
 # bisect-agdc).
 BISECT=; BISECT_HAND=
-# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws;
-# in the VM the boot-arg rdna3ladder=1 / 2 (rdna3vm step ladder / ladder-ws)
+# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws | --ladder-paranoid;
+# in the VM the boot-arg rdna3ladder=1 / 2 / 3 (rdna3vm step ladder / ladder-ws / ladder-paranoid)
 LADDER=
 case "${1:-}" in
     --ladder) LADDER=1; BISECT_HAND=1; shift ;;
     --ladder-ws) LADDER=2; BISECT_HAND=1; shift ;;
+    --ladder-paranoid) LADDER=3; BISECT_HAND=1; shift ;;
 esac
 case "${1:-}" in
     --bisect) BISECT=1; BISECT_HAND=1; shift ;;
@@ -1086,6 +1087,13 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
 # tools/triage_reports.py (tools/triage_glyphs.py ladder_rows) prints one row per rung.
 LADDER_RUNGS="baseline radv sync managed alignguard paranoid loadbarrier"
 LADDER_WS_RUNGS="radv-ws paranoid-ws"
+# variant 3 (`rdna3vm step ladder-paranoid`, rdna3ladder=3): which knob of NVMTL_PARANOID's composition (metal/plugin/NVMTLObjects.m, 15 switches) matters, in
+# one run. The positive control and the combinations first (a run cut short keeps them), then one rung per knob except RADV and ASYNC_COMMIT, which the
+# first ladder ran alone. Halves: -a = the memory side (reuse, recycling, placement, paging, caches) + RADV's flags, -b = the submission side (async commit,
+# submit-ahead, the pre-submit prologue, dirty-only bindings, the encoder and barrier folds). -minus-radv-sync = the whole profile but RADV's flags and the
+# async commit: an explicit knob wins over the profile (the plugin sets a profile switch only when it is not in the environment: setenv without
+# overwrite), so the two are given an empty / a default value (the plugin takes an empty NVMTL_RADV_DEBUG as "no flags" and logs it REJECTED, ASYNC_COMMIT=1 is the default).
+LADDER_PARANOID_RUNGS="baseline paranoid paranoid-minus-radv-sync paranoid-a paranoid-b gsub-inflight no-prologue no-pool-reuse no-bufreuse no-buftex-recycle no-heaptex-recycle no-heaptex-place no-dirtyonly enc78-off g79-off no-res2 no-purge-reclaim no-surfin-cache"
 ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
     case $1 in
         baseline) ;;
@@ -1095,6 +1103,22 @@ ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
         alignguard) echo "NVMTL_NO_ALIGN_GUARD=1" ;;
         paranoid|paranoid-ws) echo "NVMTL_PARANOID=1" ;;
         loadbarrier) echo "NVMTL_LOAD_BARRIER=1" ;;
+        paranoid-minus-radv-sync) echo "NVMTL_PARANOID=1 NVMTL_RADV_DEBUG= NVMTL_ASYNC_COMMIT=1" ;;
+        paranoid-a) echo "NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears NVMTL_NO_POOL_REUSE=1 NVMTL_NO_BUFREUSE=1 NVMTL_NO_BUFTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_PLACE=1 NVMTL_NO_RES2=1 NVMTL_NO_PURGE_RECLAIM=1 NVMTL_NO_SURFIN_CACHE=1" ;;
+        paranoid-b) echo "NVMTL_ASYNC_COMMIT=0 NVMTL_GSUB_INFLIGHT=1 NVMTL_PRESUBMIT_PROLOGUE=0 NVMTL_NO_DIRTYONLY=1 NVMTL_ENC78_OFF=all NVMTL_G79_OFF=all" ;;
+        gsub-inflight) echo "NVMTL_GSUB_INFLIGHT=1" ;;
+        no-prologue) echo "NVMTL_PRESUBMIT_PROLOGUE=0" ;;
+        no-pool-reuse) echo "NVMTL_NO_POOL_REUSE=1" ;;
+        no-bufreuse) echo "NVMTL_NO_BUFREUSE=1" ;;
+        no-buftex-recycle) echo "NVMTL_NO_BUFTEX_RECYCLE=1" ;;
+        no-heaptex-recycle) echo "NVMTL_NO_HEAPTEX_RECYCLE=1" ;;
+        no-heaptex-place) echo "NVMTL_NO_HEAPTEX_PLACE=1" ;;
+        no-dirtyonly) echo "NVMTL_NO_DIRTYONLY=1" ;;
+        enc78-off) echo "NVMTL_ENC78_OFF=all" ;;
+        g79-off) echo "NVMTL_G79_OFF=all" ;;
+        no-res2) echo "NVMTL_NO_RES2=1" ;;
+        no-purge-reclaim) echo "NVMTL_NO_PURGE_RECLAIM=1" ;;
+        no-surfin-cache) echo "NVMTL_NO_SURFIN_CACHE=1" ;;
         *) return 1 ;;
     esac
 }
@@ -1102,9 +1126,12 @@ ladder_env_args() {   # "A=1 B=2" -> "--env A=1 --env B=2"
     for _le in $1; do printf '%s %s ' --env "$_le"; done
 }
 ladder_w() { printf '%s\n' "$*" >> "$LF"; }
-ladder_text_script() {   # the Terminal's text: a colored listing, ANSI colors, then a line a second so that the window draws all the time
+ladder_text_script() {   # the Terminal's text: a colored listing and fox lines, then a tick line a second in ONE fixed colour (bright white) and, every 4th second, a line of mixed glyphs
     # made once per run, as root, in a directory of its own that mktemp creates (a fixed name in the sticky /Users/Shared could be a planted link);
     # ladder_restore removes it. LADDER_TEXT stands in for it in the host test.
+    # The tick lines are the glyph check's evidence (tools/glyph_verdict.py): the text after the time stamp is the same on every line, and in one colour
+    # every line is drawn the same when the glyphs are drawn right, so a line that has no twin is a broken line. The mixed line (digits, upper case, punctuation)
+    # is for the eye; it ends differently from the tick lines and the verdict leaves it out.
     if [ -n "${LADDER_TEXT:-}" ]; then _lt=$LADDER_TEXT
     else
         if [ -z "${_LADDER_TEXTDIR:-}" ]; then
@@ -1121,7 +1148,13 @@ echo "RDNA3 ladder: text for the glyph check (do not close, this window is close
 CLICOLOR_FORCE=1 ls -laG /System/Library /usr/bin 2>/dev/null | head -n 70
 i=0
 while [ $i -lt 8 ]; do printf '\033[%sm The quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ \033[0m\n' $((31 + i)); i=$((i + 1)); done
-while :; do i=$((i + 1)); printf '\033[1;3%sm %s  rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz\033[0m\n' $((i % 7 + 1)) "$(date +%T)"; sleep 1; done
+i=0
+while :; do
+    i=$((i + 1))
+    printf '\033[97m %s  rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz\033[0m\n' "$(date +%T)"
+    [ $((i % 4)) -eq 0 ] && printf '\033[97m          ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 !#$%%&()*+,-./:;<=>?@[]^_{|}~\033[0m\n'
+    sleep 1
+done
 TXT
     chmod 755 "$_lt" 2>/dev/null
     _LADDER_TEXT=$_lt   # (a global: this is not called inside $( ), where _LADDER_TEXTDIR would be lost)
@@ -1230,7 +1263,9 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     # each app's instances are listed right before its own open and polled for right after it: the window in which another instance could be taken for ours
     _tb=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
-    as_user open -n -a Terminal $_rargs "$_LADDER_TEXT" >/dev/null 2>&1
+    # -ApplePersistenceIgnoreState: a new Terminal instance restores the windows the previous one had saved (card run 2026-10-25f: the text of the rung before,
+    # static and drawn clean, next to the live window, which looked like a clean picture in one rung); without it the only text on screen is this rung's
+    as_user open -n -a Terminal $_rargs "$_LADDER_TEXT" --args -ApplePersistenceIgnoreState YES >/dev/null 2>&1
     _tp=$(ladder_wait_new Terminal "$_tb")
     _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
@@ -1281,8 +1316,9 @@ ladder_restore() {   # the plugin's conf and allow list exactly as the run found
     if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
     return 0
 }
-ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer rungs; 0 when every rung ran
+ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServer rungs, 3 = the PARANOID profile's knobs one by one; 0 when every rung ran
     _lv=$1
+    _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_PARANOID_RUNGS
     LD=${LADDER_OUT:-$HOME/rdna3-ladder}; LF=$LD/ladder.txt; BD=$LD; BF=$LF
     rm -rf "$LD"; mkdir -p "$LD" || { echo "== ladder: cannot make $LD"; return 1; }
     _btty=
@@ -1290,7 +1326,7 @@ ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
     _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=
     ladder_w "# rdna3 ladder v1"
-    ladder_w "variant: $_lv ($([ "$_lv" = 2 ] && echo ladder-ws || echo ladder))"
+    ladder_w "variant: $_lv ($(case $_lv in 2) echo ladder-ws ;; 3) echo ladder-paranoid ;; *) echo ladder ;; esac))"
     ladder_w "started: $(date +%T)"
     ladder_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
     ladder_w "console_user: $(bisect_console_user)"
@@ -1314,9 +1350,9 @@ ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer
     ladder_w "baseline_pids: Terminal=${_LADDER_BASE_Terminal:-none}Chess=${_LADDER_BASE_Chess:-none}"
     ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM; return 1; }
     caffeinate -u -t 5 >/dev/null 2>&1 &
-    notify "ladder: $(echo $LADDER_RUNGS | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
+    notify "ladder: $(echo $_lrungs | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
     _lfail=0
-    for _lr in $LADDER_RUNGS; do ladder_rung "$_lr" apps || _lfail=1; done
+    for _lr in $_lrungs; do ladder_rung "$_lr" apps || _lfail=1; done
     if [ "$_lv" = 2 ]; then
         for _lr in $LADDER_WS_RUNGS; do ladder_rung "$_lr" windowserver || { _lfail=1; break; }; done
     fi
@@ -1565,10 +1601,11 @@ case " $args " in
     *" rdna3bisect=4 "*) [ -n "$BISECT" ] || BISECT=4 ;;   # rdna3vm step bisect-agdc: the kernel's switches on the agdc profile
 esac
 [ -n "$BISECT" ] && label="bisect-$BISECT"
-# rdna3ladder=1 / 2 (rdna3vm step ladder / ladder-ws): only the A/B ladder runs (a standalone run takes the flag)
+# rdna3ladder=1 / 2 / 3 (rdna3vm step ladder / ladder-ws / ladder-paranoid): only the A/B ladder runs (a standalone run takes the flag)
 case " $args " in
     *" rdna3ladder=1 "*) [ -n "$LADDER" ] || LADDER=1 ;;
     *" rdna3ladder=2 "*) [ -n "$LADDER" ] || LADDER=2 ;;
+    *" rdna3ladder=3 "*) [ -n "$LADDER" ] || LADDER=3 ;;
 esac
 [ -n "$LADDER" ] && [ -z "$BISECT" ] && label="ladder-$LADDER"
 # rdna3bisect=3 (rdna3vm args "rdna3bisect=3" --stay): nothing runs at boot, so the bisect can be started by hand in

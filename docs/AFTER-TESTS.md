@@ -1187,9 +1187,9 @@ One run instead of one report per switch (autoreport.sh `ladder_run`, boot-arg `
 by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder`). Seven rungs: `baseline`, `radv`
 (`NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`), `sync` (`NVMTL_ASYNC_COMMIT=0`), `managed` (`NVMTL_MANAGED_CHECK=1` + `NVMTL_MANAGED_SNAPSHOT=1`),
 `alignguard` (`NVMTL_NO_ALIGN_GUARD=1`), `paranoid` (`NVMTL_PARANOID=1`), `loadbarrier` (`NVMTL_LOAD_BARRIER=1`). Per rung the run opens Terminal (a colour
-listing, then a tick line every second) and Chess as NEW instances with that rung's switches in their environment
+listing, then a tick line every second in one fixed colour, bright white, and every 4th second a line of mixed glyphs) and Chess as NEW instances with that rung's switches in their environment
 (`open -n -a Terminal --env NVMTL_X=1`: the plugin reads its switches from the process's environment as well as from the conf file, the environment wins),
-waits 25 s, takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
+waits 25 s (Terminal is opened with `-ApplePersistenceIgnoreState YES`: no window restored from the previous rung), takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
 by rung), after asking the two instances to quit (System Events, by unix id: a graceful quit runs the plugin's exit `SUMMARY`; macOS may ask once whether `osascript` may control
 System Events - allow it; whatever is still running after 8 s gets SIGTERM). The instances that were already running when the run began (the Terminal you started it from,
 your own Chess) are never touched. `rdna3mtl.conf` is not written and WindowServer is not restarted: the
@@ -1207,6 +1207,39 @@ Evidence: `ladder.txt` (archive member `41-ladder.txt`, uploaded after every run
 process has a key the rung did NOT ask for ("not default: X", also a conf line left over in the baseline), WARN when a process printed no SUMMARY; the counters of the slice, the look count, your answer) and a `ladder` row: "the baseline picture was broken and the
 picture was RIGHT with: X" names the discriminator. Reading it: a rung whose WARN says the switch did not reach the plugin proves nothing (the `--env` was not
 taken: check `34-metal-conf.txt` and `26-log-metal-plugin.txt`); without your answers, compare `ladder-<rung>h` pictures by eye (the text is the quickest test).
+
+**The glyph verdict (automatic).** Each rung's 1280-wide look (`<report>-scanoutladder-<rung>h-pipe<N>.ppm`, next to the archive) is read by `tools/glyph_verdict.py`
+(pure Python; the triage prints it in the `ladder <rung>` row as `glyphs (automatic, tools/glyph_verdict.py): ...`, and the `ladder glyphs` row says which rungs made the baseline's
+broken text clean). Terminal prints a tick line a second that ends in the same text, in one colour; drawn right, two such lines are the same picture, drawn wrong (random
+strokes) every line is different. The tool finds stacks of at least 8 text lines of an even pitch in the look (colour agnostic, no knowledge of the window's place), keeps the
+lines that end at the same column (a log window, a listing: ragged ends, never taken for tick lines), cuts the right half of each (after the time stamp) as a black-and-white
+strip and counts the lines that have a TWIN (another line within 12 % of its ink; the 1920 -> 1280 sampling drops one row in three, so lines fall into three classes of
+rows seen and each class has several lines). `CLEAN` = at least 80 % of the lines have a twin, `BROKEN` = at most 50 %, `unclear` between, `none` = no tick stack (the text window was not
+on a screen: the rung proves nothing). Every stack on the screens is judged and the WORST decides: a window that Terminal restored from its saved state shows the text of the
+previous rung, static and drawn clean, next to the live one (the ladder now opens Terminal with `-ApplePersistenceIgnoreState YES`, but a look of an older run has them). Read the numbers:
+live broken text 9 to 30 % of the lines have a twin; static (restored) text 95 to 100 %. Checked on the card run 2026-10-25f's looks (`tests/test_glyph_verdict.py`, also on synthetic looks).
+
+**Card run 2026-10-25f, read with it.** All seven rungs' LIVE windows are broken: baseline 5 of 23 lines have a twin, radv 2 of 23, sync 2 of 23, managed 2 of 23, alignguard 2 of 21,
+**paranoid 2 of 23**, loadbarrier 7 of 23. The one clean-looking `paranoid` picture (the montage of the rungs' looks) is the window Terminal restored from the `alignguard` rung
+(ticks of 14:03:2x to 14:03:38, 19 of 19 lines with a twin, static text); the live `paranoid` window (ticks 14:04:21 to 14:04:43 on pipe 0, `...paranoidh-pipe0.ppm`) is as broken as the baseline
+(the glyphs from the eighth letter of the alphabet on are random strokes). So NVMTL_PARANOID does not cure the text, and none of its 15 switches can be the cure by itself. What the
+logs add (Terminal, baseline slice): no buffer was parked or reused, no texture was made from a heap, no buffer-backed texture was made, the residency pager never ran, nothing was
+purged, a single submit was ever in flight; the code of NVMTL_NO_BUFREUSE, NO_HEAPTEX_PLACE / RECYCLE, NO_BUFTEX_RECYCLE, NO_RES2, NO_PURGE_RECLAIM and GSUB_INFLIGHT=1 never ran or changed nothing there
+(the `ladder knobs` row of a `ladder-paranoid` run says that from its own baseline). The managed rung ran with the snapshot on (121 of 121 uploads snapshotted, 119 checked, 0 changed): the CPU did
+not rewrite a managed range while its copy was in flight. Static text is drawn right and live text is not: look at what changes per frame (the per-frame uploads, the framebuffer-fetch
+blend over the LOAD of the window's surface), not at what the knobs reuse.
+
+#### The PARANOID profile's knobs in one run: `rdna3vm step ladder-paranoid`
+
+Only when a glyph verdict says the `paranoid` rung is CLEAN (and `baseline` BROKEN): which of its 15 switches matters, in the same run (`rdna3ladder=3`, `--ladder-paranoid`, 18 rungs
+of about 70 s, 30 minutes). `baseline`, `paranoid` (control), `paranoid-minus-radv-sync` (the profile with `NVMTL_RADV_DEBUG` given an empty value and `NVMTL_ASYNC_COMMIT=1`: an explicit knob wins
+over the profile, the plugin takes the empty RADV value as "no flags" and logs `vk: NVMTL_RADV_DEBUG="" REJECTED: empty value`; the triage checks the plugin's own `conf: NVMTL_PARANOID` line
+for it: a WARN says the profile set the two itself, the override was dropped by `open --env`), `paranoid-a` (RADV flags + pool reuse, buffer park, buffer-texture / heap-texture recycling and placement,
+residency paging and purging, surface-in cache) and `paranoid-b` (async commit, GSUB_INFLIGHT, the pre-submit prologue, dirty-only bindings, ENC78, G79), then one rung per knob (13).
+Reading it: `ladder glyphs` names the rungs that came out CLEAN; control broken = stop (the row says so); control clean and `-minus-radv-sync` clean = RADV and the async commit are not needed;
+exactly one single-knob rung clean = that knob; no single-knob rung clean but `-a` or `-b` clean = a combination inside that half (bisect it by hand with `rdna3mtl.conf` lines of its knobs);
+`-a` and `-b` both broken but the control clean = a combination across the halves or one that needs RADV / the async commit as well. A `ladder <rung>` row that says `this rung CANNOT differ from the
+baseline` names a knob whose code never ran in Terminal's baseline: its picture proves nothing about that knob.
 
 Encode time (kind 17 records, `tools/plugin_trace.py`, the same report): WindowServer, 3948 render encoders and 26152 draws in `101618`: 4256 ms in
 encoders, of which the surface-in checks are 1605 ms (38 %, 104 us per call; 81 % of it in 205 encoders that include a real upload, 465 uploads of 856 us

@@ -233,11 +233,55 @@ check(r["surface-in cache"][0][0] == "INFO" and "no `vk: surfin: SUMMARY`" in r[
 r = rows_of(L("WindowServer", 208, 'vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)'))
 check(r["surface-in cache"][0][0] == "WARN" and "timer" in r["surface-in cache"][0][1], "WindowServer without the SUMMARY is a WARN, %r" % r)
 
+# ---- DRIVER-PLAN N50, the PARANOID ladder (variant 3), the automatic glyph verdict and the knob evidence
+check(len(tg.LADDER_PARANOID_RUNGS) == 18 and tg.LADDER_PARANOID_RUNGS[:3] == ("baseline", "paranoid", "paranoid-minus-radv-sync"), "the paranoid ladder has 18 rungs, the control and the combinations first")
+check(set(tg.PARANOID_A) | set(tg.PARANOID_B) == set(tg.PARANOID_KEYS) and not set(tg.PARANOID_A) & set(tg.PARANOID_B), "the halves partition the profile's composition")
+BASE_T = (L("Terminal", 907, "commit: G-SUB 32 parts submitted ahead, peak 1 in flight | NVK G-SUB ABSENT submits 0") + L("Terminal", 907, "managed: SUMMARY check=0 snapshot=0 flushes=46 uploads=113 prologue_uploads=113 sync_uploads=0 checked=0 changed_exact=0")
+          + L("Terminal", 907, "vk: surfin: SUMMARY seq=5 t_ms=50598 cache=1 cimg_on=1 verify=0 calls=136 sin_us_total=14948 fast=109 miss_unsynced=4 miss_seed=0 miss_gen=0 bufcopy=0 cimg_new=0 cimg_recycled=0")
+          + L("Chess", 908, "buffer park (reuse): 4 parked, 4 reused, 0 evicted, 0 drained; 3 held, 9 bytes"))
+ev = tg.knob_evidence(BASE_T)
+check(ev["no-prologue"][0] is True and "113" in ev["no-prologue"][1], "knob evidence: the prologue carried uploads, %r" % (ev.get("no-prologue"),))
+check(ev["gsub-inflight"][0] is False and "at most 1 part" in ev["gsub-inflight"][1], "knob evidence: a cap of 1 changes nothing when the peak is 1, %r" % (ev.get("gsub-inflight"),))
+check(all(ev[k][0] is False for k in ("no-bufreuse", "no-heaptex-place", "no-heaptex-recycle", "no-buftex-recycle", "no-res2", "no-purge-reclaim", "no-surfin-cache")),
+      "knob evidence: code that never ran in Terminal is False (Chess's park line is not Terminal's), %r" % ev)
+check(tg.knob_evidence(L("Chess", 908, "buffer park (reuse): 4 parked, 4 reused")) == {}, "knob evidence: no Terminal log, no claim")
+ev2 = tg.knob_evidence(BASE_T + L("Terminal", 907, "buffer park (park): 1 parked, 0 reused, 0 evicted, 0 drained; 1 held, 1 bytes") + L("Terminal", 907, "heap texture (placed): 1 placed new, 0 recycled")
+                       + L("Terminal", 907, "residency (res2): evict-batch 1: 3 textures copied in ONE submission") + L("Terminal", 907, "residency (res1): the wall is 5 MB short"))
+check(all(ev2[k][0] is True for k in ("no-bufreuse", "no-heaptex-place", "no-res2", "no-purge-reclaim")), "knob evidence: park / heap / res2 / res1 lines count, %r" % ev2)
+
+PLOG = L("Terminal", 907, 'vk: ab switches [1]: NVMTL_PARANOID="1"') + L("Terminal", 907, "vk: ab: SUMMARY wit_ok=3 wit_early=0")
+P3 = {n: {"conf": [], "scope": "apps", "looks": ["ladder-%sa" % n, "ladder-%sh" % n], "verdict": None, "cut": False, "warn": [], "log": ""} for n in tg.LADDER_PARANOID_RUNGS}
+P3["baseline"]["log"] = BASE_T
+glyphs = {"baseline": {"verdict": "broken", "text": "BROKEN: 5 of 23 tick lines have a twin (22 %)"}, "paranoid": {"verdict": "broken", "text": "BROKEN: 2 of 23 tick lines have a twin (9 %)"},
+          "no-prologue": {"verdict": "clean", "text": "CLEAN: 22 of 23 tick lines have a twin (96 %)"}}
+rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), glyphs)}
+check("ladder no-bufreuse" in rows and "CANNOT differ from the baseline" in rows["ladder no-bufreuse"][1], "a knob rung whose code never ran in Terminal says so, %r" % (rows.get("ladder no-bufreuse"),))
+check("CANNOT differ" not in rows["ladder no-prologue"][1] and "glyphs (automatic, tools/glyph_verdict.py): CLEAN: 22 of 23" in rows["ladder no-prologue"][1], "the rung that ran says what the verdict was, %r" % (rows["ladder no-prologue"],))
+check("CLEAN with: no-prologue" in rows["ladder glyphs"][1] and "BROKEN and" in rows["ladder glyphs"][1], "the ladder glyph row names the clean rung, %r" % (rows.get("ladder glyphs"),))
+check("ladder knobs" in rows and "no-bufreuse" in rows["ladder knobs"][1] and "no-prologue" not in rows["ladder knobs"][1], "the dead rungs are listed once, %r" % (rows.get("ladder knobs"),))
+# PARANOID itself broken = the control fails and the ladder says so
+g2 = {"baseline": glyphs["baseline"], "paranoid": glyphs["paranoid"], "no-prologue": {"verdict": "broken", "text": "BROKEN: 3 of 22 tick lines have a twin (14 %)"}}
+rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), g2)}
+check("no rung made them clean" in rows["ladder glyphs"][1] and "positive control" in rows["ladder glyphs"][1] and "none of the knobs" in rows["ladder glyphs"][1], "a failed control is said, %r" % (rows["ladder glyphs"],))
+# baseline clean / nothing found
+rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), {"baseline": {"verdict": "clean", "text": "CLEAN: 20 of 20 tick lines have a twin (100 %)"}})}
+check("did not show" in rows["ladder glyphs"][1], "a clean baseline: the other rungs prove nothing, %r" % (rows["ladder glyphs"],))
+rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), {"baseline": {"verdict": "none", "text": "no stack of >= 8 tick lines in the looks"}})}
+check(rows["ladder glyphs"][0] == "WARN" and "no tick lines" in rows["ladder glyphs"][1], "no tick lines anywhere is a WARN, %r" % (rows["ladder glyphs"],))
+check("ladder glyphs" not in {name for lvl, name, text in tg.ladder_rows(P3, 3, (), None)}, "no looks, no glyph row")
+# glyph_verdicts: the files next to the archive, a rung with no look is left out, a bad file is a `none`, never an exception
+import tempfile  # noqa: E402
+td = tempfile.mkdtemp(prefix="tgg")
+open(os.path.join(td, "r-scanoutladder-baselineh-pipe0.ppm"), "wb").write(b"P6\n3 3\n255\n" + bytes(27))
+gv = tg.glyph_verdicts({"baseline": {"looks": ["ladder-baselinea", "ladder-baselineh"]}, "radv": {"looks": ["ladder-radva", "ladder-radvh"]}, "sync": {"looks": []}}, os.path.join(td, "r"))
+check(list(gv) == ["baseline"] and gv["baseline"]["verdict"] == "none" and "no look could be read" in gv["baseline"]["text"], "glyph_verdicts: only the rung with a look file, a bad one is none, %r" % (gv,))
+
 # the hook in triage_reports.py
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
 check("from triage_glyphs import n50_plugin_rows" in src and "n50_plugin_rows(" in src, "triage_reports.py calls n50_plugin_rows")
 check("tools/triage_glyphs.py is missing" in src, "triage_reports.py says so loudly when the module is missing")
 check("41-ladder.txt" in src and "parse_ladder" in src and "ladder_rows(" in src, "triage_reports.py reads the archive's 41-ladder members")
+check("glyph_verdicts(lr_," in src and "endswith('.tar.gz')" in src.replace('"', "'"), "triage_reports.py hands the rungs' looks to the glyph check")
 check("except Exception as e_:" in src[src.index("parse_ladder, ladder_rows"):][:900] and "ladder_rows_ = [(\"WARN\", \"ladder\", \"tools/triage_glyphs.py FAILED" in src, "triage_reports.py survives any error of the ladder module with a loud WARN")
 check("n50_rows_ = [(\"WARN\", \"plugin A/B\", \"tools/triage_glyphs.py FAILED" in src, "triage_reports.py survives any error of n50_plugin_rows with a loud WARN")
 

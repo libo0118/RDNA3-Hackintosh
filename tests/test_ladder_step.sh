@@ -7,6 +7,10 @@
 #    rdna3mtl.conf is not touched and WindowServer is not restarted
 #  - the WindowServer rungs (variant 2): the conf holds the rung's lines (the others kept, a same-named line replaced) when WindowServer is
 #    restarted, and is EXACTLY the original afterwards - also with no conf file at all, after an interrupt (SIGTERM in a rung), after a dead run
+#  - variant 3 (ladder-paranoid): 18 rungs in the order the triage expects, each with exactly its switches (one knob per rung; the halves partition the
+#    PARANOID profile's composition in NVMTLObjects.m; the minus rung gives NVMTL_RADV_DEBUG an EMPTY value and ASYNC_COMMIT=1), the triage reads it and
+#    finds the minus rung's override in the plugin's own `conf: NVMTL_PARANOID` line
+#  - the text script (one colour for the tick lines, the mixed-glyph line) and the persistence flag of the Terminal open
 #  - nobody logged in: aborts with a line, touches nothing
 #  - an app that does not start is reported; tty mode: the owner's y / n per rung reaches ladder.txt
 #  - tools/triage_glyphs.py reads what the block wrote (parse_ladder + ladder_rows)
@@ -29,11 +33,13 @@ sed -n '/^# LADDER-BEGIN/,/^# LADDER-END/p' "$AR" > "$T/ladder.sh"
 # ---- the rung list = the triage's
 RUNGS=$(sed -n 's/^LADDER_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
 WSRUNGS=$(sed -n 's/^LADDER_WS_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
+PRUNGS=$(sed -n 's/^LADDER_PARANOID_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
 PY=$(python3 -I -c "
 import sys; sys.path.insert(0, '$ROOT/tools')
 import triage_glyphs as t
-print(' '.join(t.LADDER_RUNGS)); print(' '.join(t.LADDER_WS_RUNGS))")
+print(' '.join(t.LADDER_RUNGS)); print(' '.join(t.LADDER_WS_RUNGS)); print(' '.join(t.LADDER_PARANOID_RUNGS))")
 [ "$RUNGS" = "$(echo "$PY" | sed -n 1p)" ] && [ "$WSRUNGS" = "$(echo "$PY" | sed -n 2p)" ] || fail "rungs: autoreport.sh [$RUNGS] [$WSRUNGS] vs triage_glyphs.py [$PY]"
+[ "$PRUNGS" = "$(echo "$PY" | sed -n 3p)" ] && [ "$(echo $PRUNGS | wc -w | tr -d ' ')" = 18 ] || fail "paranoid rungs: autoreport.sh [$PRUNGS] vs triage_glyphs.py [$(echo "$PY" | sed -n 3p)]"
 
 # ---- the stubs
 mkdir -p "$T/bin" "$T/sys" "$T/D/bin" "$T/home"
@@ -59,15 +65,31 @@ exit 0
 EOF
 cat > "$T/bin/log" <<'EOF'
 #!/bin/sh
-# log show --start T --info --style compact --predicate '... processID == N OR ...': the plugin's switch line of each pid
+# log show --start T --info --style compact --predicate '... processID == N OR ...': the plugin's lines of each pid, as the plugin writes them
+# (vk: ab switches, the RADV line, the NVMTL_PARANOID profile line with what it set and what it found set, a SUMMARY)
 echo "log $*" >> "$STUBLOG"
 pred=
 while [ $# -gt 0 ]; do [ "$1" = --predicate ] && pred=$2; shift; done
+PKEYS="NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears NVMTL_ASYNC_COMMIT=0 NVMTL_GSUB_INFLIGHT=1 NVMTL_PRESUBMIT_PROLOGUE=0 NVMTL_NO_POOL_REUSE=1 NVMTL_NO_BUFREUSE=1 NVMTL_NO_BUFTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_PLACE=1 NVMTL_NO_DIRTYONLY=1 NVMTL_ENC78_OFF=all NVMTL_G79_OFF=all NVMTL_NO_RES2=1 NVMTL_NO_PURGE_RECLAIM=1 NVMTL_NO_SURFIN_CACHE=1"
 for p in $(echo "$pred" | sed -n 's/processID == \([0-9]*\)/\1/gp' | tr -cs '0-9' ' '); do
     ev=$(tr '\n' ' ' < "$STUBDIR/env-$p" 2>/dev/null)
+    sw=; set_by=; kept=; nset=0; radv=unset
+    for kv in $ev; do
+        sw="$sw ${kv%%=*}=\"${kv#*=}\""
+        [ "${kv%%=*}" = NVMTL_RADV_DEBUG ] && [ -n "${kv#*=}" ] && radv="\"${kv#*=}\""
+    done
+    case " $ev " in *" NVMTL_PARANOID=1 "*)
+        for pk in $PKEYS; do
+            case " $ev " in
+                *" ${pk%%=*}="*) kept="$kept${kept:+ }${pk%%=*}" ;;
+                *) set_by="$set_by${set_by:+ }$pk"; nset=$((nset + 1)); sw="$sw ${pk%%=*}=\"${pk#*=}\""
+                   [ "${pk%%=*}" = NVMTL_RADV_DEBUG ] && radv="\"${pk#*=}\"" ;;
+            esac
+        done
+        echo "2026-10-25 12:00:00.500 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: $nset switch(es) set by it (${set_by:-none})${kept:+, already set and kept: $kept}; no async commit, no recycling" ;;
+    esac
     if [ -n "$ev" ]; then
-        sw=
-        for kv in $ev; do sw="$sw ${kv%%=*}=\"${kv#*=}\""; done
+        echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: RADV_DEBUG=$radv RADV_PERFTEST=unset (NVMTL_RADV_DEBUG=unset, NVMTL_RADV_PERFTEST=unset)"
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab switches [1]:$sw"
     else
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab switches: none set (x)"
@@ -186,15 +208,22 @@ for SH in sh bash dash; do
             paranoid) want="--env NVMTL_PARANOID=1" ;;
             loadbarrier) want="--env NVMTL_LOAD_BARRIER=1" ;;
         esac
-        got=$(envs_of $n | sed -E 's/^open -n -a (Terminal|Chess) ?//; s#(^| )[^ ]*text\.command$##; s/ +$//' | sort -u)
+        got=$(envs_of $n | sed -E 's/^open -n -a (Terminal|Chess) ?//; s# ?[^ ]*text\.command --args -ApplePersistenceIgnoreState YES$##; s/ +$//' | sort -u)
         [ "$(echo "$got" | wc -l | tr -d ' ')" = 1 ] || fail "$SH: rung $r: Terminal and Chess got different switches: $got"
         [ "$got" = "$want" ] || fail "$SH: rung $r opened its apps with [$got], expected [$want]"
         [ -f "$T/apps/$r.log" ] || fail "$SH: rung $r has no log slice"
         grep -q "^== rung $r\$" "$L" && grep -q "^looks: ladder-${r}a ladder-${r}h\$" "$L" || fail "$SH: rung $r: looks line"
         [ -f "$T/home/rdna3-scanout/ladder-${r}a/scanout-pipe0.ppm" ] && [ -f "$T/home/rdna3-scanout/ladder-${r}h/scanout-pipe0.ppm" ] || fail "$SH: rung $r: both looks' pictures"
     done
-    grep -q "^open -n -a Terminal .*$T/text.command\$" "$T/stub.log" || fail "$SH: the Terminal is not opened with the text script"
+    grep -q "^open -n -a Terminal .*$T/text.command --args -ApplePersistenceIgnoreState YES\$" "$T/stub.log" || fail "$SH: the Terminal is not opened with the text script and without state restoration"
+    [ "$(grep -c '^open -n -a Terminal ' "$T/stub.log")" = "$(grep -c -e '^open -n -a Terminal .*-ApplePersistenceIgnoreState YES$' "$T/stub.log")" ] || fail "$SH: a Terminal was opened that restores the last rung's windows"
+    ! grep -q '^open -n -a Chess .*--args' "$T/stub.log" || fail "$SH: Chess was opened with --args (only the Terminal's restored windows are a problem)"
     [ -x "$T/text.command" ] && grep -q 'ls -laG' "$T/text.command" || fail "$SH: the text script"
+    # the text script: the tick lines in ONE fixed colour (bright white, no colour from the counter), a line of mixed glyphs now and then, valid sh
+    sh -n "$T/text.command" || fail "$SH: the text script does not parse"
+    [ "$(grep -c 'rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz' "$T/text.command")" = 1 ] && grep 'rdna3 ladder tick' "$T/text.command" | grep -q '\\033\[97m' || fail "$SH: the tick line is not in one fixed colour"
+    ! grep 'rdna3 ladder tick' "$T/text.command" | grep -q 'i % 7' || fail "$SH: the tick line still takes its colour from the counter"
+    grep -q 'ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 !#\$%%&' "$T/text.command" || fail "$SH: the mixed-glyph line is missing"
     [ "$(grep -c '^drminfo --scanout-hires ' "$T/stub.log")" = 7 ] && [ "$(grep -c '^drminfo --scanout ' "$T/stub.log")" = 7 ] || fail "$SH: looks: $(grep -c drminfo "$T/stub.log")"
     grep -q '^log show --start ' "$T/stub.log" && grep -q 'processID == 1000' "$T/stub.log" || fail "$SH: the log slice is not by pid"
     # only the pids this run started are quit; the owner's Terminal (500) is not
@@ -287,9 +316,100 @@ PYEOF
     # the text script is made in a directory of mktemp's and removed at the end (no fixed name in /Users/Shared)
     fresh
     run 1 mk LADDER_TEXT=
-    grep -q '^rc=0$' "$T/mk.out" && grep -q '^mktemp ' "$T/stub.log" && grep -q '^open -n -a Terminal .*/textdir\.[0-9]*/text.command$' "$T/stub.log" || fail "$SH: the text script's directory: $(grep -e mktemp -e 'open -n -a Terminal' "$T/stub.log" | head -3)"
+    grep -q '^rc=0$' "$T/mk.out" && grep -q '^mktemp ' "$T/stub.log" && grep -q "^open -n -a Terminal .*/textdir\.[0-9]*/text.command --args -ApplePersistenceIgnoreState YES\$" "$T/stub.log" || fail "$SH: the text script's directory: $(grep -e mktemp -e 'open -n -a Terminal' "$T/stub.log" | head -3)"
     [ -z "$(ls -d "$T"/sys/textdir.* 2>/dev/null)" ] || fail "$SH: the text script's directory was left behind"
     ! grep -q 'Users/Shared' "$T/stub.log" || fail "$SH: a fixed /Users/Shared name is used"
+
+    # ------------------------------------------------------------ variant 3: the PARANOID profile's knobs, one rung each
+    fresh
+    run 3 par
+    L=$T/par/ladder.txt
+    grep -q '^rc=0$' "$T/par.out" || fail "$SH: variant 3 rc: $(tail -5 "$T/par.out")"
+    grep -q '^variant: 3 (ladder-paranoid)$' "$L" || fail "$SH: variant 3 header: $(grep '^variant' "$L")"
+    [ "$(grep -c '^== rung ' "$L")" = 18 ] && [ "$(grep -c '^== end rung ' "$L")" = 18 ] || fail "$SH: not 18 rungs: $(grep -c '^== rung ' "$L")"
+    [ "$(grep '^== rung ' "$L" | sed 's/^== rung //' | tr '\n' ' ' | sed 's/ $//')" = "$PRUNGS" ] || fail "$SH: variant 3 rungs ran in a different order: $(grep '^== rung ' "$L" | tr '\n' ' ')"
+    [ "$(grep -c '^open -n -a ' "$T/stub.log")" = 36 ] || fail "$SH: variant 3: expected 36 open calls: $(grep -c '^open' "$T/stub.log")"
+    n=0
+    for r in $PRUNGS; do
+        n=$((n + 1))
+        case $r in
+            baseline) want="" ;;
+            paranoid) want="--env NVMTL_PARANOID=1" ;;
+            paranoid-minus-radv-sync) want="--env NVMTL_PARANOID=1 --env NVMTL_RADV_DEBUG= --env NVMTL_ASYNC_COMMIT=1" ;;
+            paranoid-a) want="--env NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears --env NVMTL_NO_POOL_REUSE=1 --env NVMTL_NO_BUFREUSE=1 --env NVMTL_NO_BUFTEX_RECYCLE=1 --env NVMTL_NO_HEAPTEX_RECYCLE=1 --env NVMTL_NO_HEAPTEX_PLACE=1 --env NVMTL_NO_RES2=1 --env NVMTL_NO_PURGE_RECLAIM=1 --env NVMTL_NO_SURFIN_CACHE=1" ;;
+            paranoid-b) want="--env NVMTL_ASYNC_COMMIT=0 --env NVMTL_GSUB_INFLIGHT=1 --env NVMTL_PRESUBMIT_PROLOGUE=0 --env NVMTL_NO_DIRTYONLY=1 --env NVMTL_ENC78_OFF=all --env NVMTL_G79_OFF=all" ;;
+            gsub-inflight) want="--env NVMTL_GSUB_INFLIGHT=1" ;;
+            no-prologue) want="--env NVMTL_PRESUBMIT_PROLOGUE=0" ;;
+            no-pool-reuse) want="--env NVMTL_NO_POOL_REUSE=1" ;;
+            no-bufreuse) want="--env NVMTL_NO_BUFREUSE=1" ;;
+            no-buftex-recycle) want="--env NVMTL_NO_BUFTEX_RECYCLE=1" ;;
+            no-heaptex-recycle) want="--env NVMTL_NO_HEAPTEX_RECYCLE=1" ;;
+            no-heaptex-place) want="--env NVMTL_NO_HEAPTEX_PLACE=1" ;;
+            no-dirtyonly) want="--env NVMTL_NO_DIRTYONLY=1" ;;
+            enc78-off) want="--env NVMTL_ENC78_OFF=all" ;;
+            g79-off) want="--env NVMTL_G79_OFF=all" ;;
+            no-res2) want="--env NVMTL_NO_RES2=1" ;;
+            no-purge-reclaim) want="--env NVMTL_NO_PURGE_RECLAIM=1" ;;
+            no-surfin-cache) want="--env NVMTL_NO_SURFIN_CACHE=1" ;;
+            *) fail "$SH: the test does not know rung $r" ;;
+        esac
+        got=$(envs_of $n | sed -E 's/^open -n -a (Terminal|Chess) ?//; s# ?[^ ]*text\.command --args -ApplePersistenceIgnoreState YES$##; s/ +$//' | sort -u)
+        [ "$(echo "$got" | wc -l | tr -d ' ')" = 1 ] && [ "$got" = "$want" ] || fail "$SH: variant 3 rung $r opened its apps with [$got], expected [$want]"
+        [ -f "$T/par/$r.log" ] && grep -q "^looks: ladder-${r}a ladder-${r}h\$" "$L" || fail "$SH: variant 3 rung $r: log slice or looks"
+    done
+    cmp -s "$T/conf" "$T/conf.orig" && [ ! -e "$T/conf.bak" ] && ! grep -q '^killall' "$T/stub.log" || fail "$SH: variant 3 touched rdna3mtl.conf or WindowServer"
+    # the halves are a partition of the profile's composition in the plugin's source, with the profile's own values; the triage's lists say the same
+    python3 -I - "$L" "$ROOT" <<'PYEOF' || fail "$SH: variant 3: the halves / the triage"
+import re, sys, os
+L, root = sys.argv[1], sys.argv[2]
+sys.path.insert(0, root + "/tools")
+import triage_glyphs as t
+src = open(root + "/metal/plugin/NVMTLObjects.m").read()
+blk = src[src.index("static const char *const kv[][2]"):]
+blk = blk[:blk.index("};")]
+prof = dict(re.findall(r'\{ "(NVMTL_\w+)", "([^"]*)" \}', blk))
+assert len(prof) == 15 and tuple(prof) == t.PARANOID_KEYS, (len(prof), list(prof), t.PARANOID_KEYS)
+conf = {}
+cur = None
+for line in open(L):
+    m = re.match(r"^== rung (\S+)", line)
+    if m: cur = m.group(1)
+    m = re.match(r"^conf: (.*)$", line)
+    if m and cur: conf[cur] = dict(kv.split("=", 1) for kv in m.group(1).split() if "=" in kv)
+a, b = conf["paranoid-a"], conf["paranoid-b"]
+assert not set(a) & set(b), set(a) & set(b)
+assert {**a, **b} == prof, ({**a, **b}, prof)
+assert tuple(a) == t.PARANOID_A and tuple(b) == t.PARANOID_B, (tuple(a), tuple(b))
+singles = {r: c for r, c in conf.items() if r not in ("baseline", "paranoid", "paranoid-a", "paranoid-b", "paranoid-minus-radv-sync")}
+assert len(singles) == 13 and all(len(c) == 1 for c in singles.values()), singles
+assert {k for c in singles.values() for k in c} == set(prof) - set(t.MINUS_KEYS), "the single-knob rungs are the profile without RADV and ASYNC_COMMIT"
+assert all(prof[k] == v for c in singles.values() for k, v in c.items()), "a single-knob rung has a value that is not the profile's"
+assert conf["paranoid-minus-radv-sync"] == {"NVMTL_PARANOID": "1", "NVMTL_RADV_DEBUG": "", "NVMTL_ASYNC_COMMIT": "1"}, conf["paranoid-minus-radv-sync"]
+PYEOF
+    # the triage reads it: no WARN, the minus rung's override is verified from the plugin's own profile line, a profile that set the flags itself is caught
+    python3 -I - "$L" "$T/par" <<'PYEOF' || fail "$SH: variant 3: tools/triage_glyphs.py does not read the ladder"
+import sys, os
+sys.path.insert(0, os.environ["ROOT"] + "/tools")
+import triage_glyphs as t
+text = open(sys.argv[1]).read()
+logs = {r: open(os.path.join(sys.argv[2], r + ".log")).read() for r in t.LADDER_PARANOID_RUNGS}
+v, rungs, probs = t.parse_ladder(text, logs)
+assert v == 3 and not probs and list(rungs) == list(t.LADDER_PARANOID_RUNGS), (v, probs, list(rungs))
+rows = t.ladder_rows(rungs, v, probs)
+bad = [r for r in rows if r[0] != "INFO"]
+assert not bad, bad
+assert [r[1] for r in rows if r[1].startswith("ladder ")][:3] == ["ladder baseline", "ladder paranoid", "ladder paranoid-minus-radv-sync"], rows[:3]
+m = [r for r in rows if r[1] == "ladder paranoid-minus-radv-sync"][0]
+assert "NVMTL_RADV_DEBUG=" in m[2] and "NVMTL_ASYNC_COMMIT=1" in m[2], m
+# `open --env NVMTL_RADV_DEBUG=` dropped: the plugin's profile then sets the flags and the async commit itself
+bad_log = logs["paranoid-minus-radv-sync"].replace("NVMTL: conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: 13 switch(es) set by it (",
+                                                   "NVMTL: conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: 15 switch(es) set by it (NVMTL_RADV_DEBUG=nodcc NVMTL_ASYNC_COMMIT=0 ")
+assert bad_log != logs["paranoid-minus-radv-sync"], "the stub's profile line is not what the test expects"
+rows2 = t.ladder_rows(dict(rungs, **{"paranoid-minus-radv-sync": dict(rungs["paranoid-minus-radv-sync"], log=bad_log)}), v, probs)
+m2 = [r for r in rows2 if r[1] == "ladder paranoid-minus-radv-sync"][0]
+assert m2[0] == "WARN" and "set NVMTL_ASYNC_COMMIT, NVMTL_RADV_DEBUG itself" in m2[2], m2
+PYEOF
+    echo "test_ladder_step: ok PARANOID knobs ($SH)"
 
     # ------------------------------------------------------------ nobody logged in; an app that does not start; tty answers
     fresh
@@ -317,8 +437,8 @@ PYEOF
 done
 
 # ---- the wiring
-grep -q -- '--ladder) LADDER=1' "$AR" && grep -q -- '--ladder-ws) LADDER=2' "$AR" || fail "autoreport.sh: --ladder / --ladder-ws"
-grep -q 'rdna3ladder=1 "\*) \[ -n "\$LADDER" \] || LADDER=1' "$AR" && grep -q 'rdna3ladder=2 "\*) \[ -n "\$LADDER" \] || LADDER=2' "$AR" || fail "autoreport.sh: boot-args rdna3ladder=1 / 2"
+grep -q -- '--ladder) LADDER=1' "$AR" && grep -q -- '--ladder-ws) LADDER=2' "$AR" && grep -q -- '--ladder-paranoid) LADDER=3' "$AR" || fail "autoreport.sh: --ladder / --ladder-ws / --ladder-paranoid"
+grep -q 'rdna3ladder=1 "\*) \[ -n "\$LADDER" \] || LADDER=1' "$AR" && grep -q 'rdna3ladder=2 "\*) \[ -n "\$LADDER" \] || LADDER=2' "$AR" && grep -q 'rdna3ladder=3 "\*) \[ -n "\$LADDER" \] || LADDER=3' "$AR" || fail "autoreport.sh: boot-args rdna3ladder=1 / 2 / 3"
 grep -q 'ladder_run "\$LADDER"' "$AR" || fail "autoreport.sh: ladder_run is not called"
 grep -q '\[ -z "\$BISECT" \] && \[ -z "\$PLAY" \] && \[ -z "\$LADDER" \]' "$AR" || fail "autoreport.sh: the other tests still run in a ladder run"
 grep -q 'rdna3-ladder/ladder.txt' "$AR" || fail "autoreport.sh: ladder.txt is not sent"
@@ -327,11 +447,15 @@ grep -q '^ladder .* rdna3ladder=1$' "$ROOT/tools/ladder-steps.txt" && grep -q '^
 play=$(awk '$1 == "play" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 lad=$(awk '$1 == "ladder" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 [ "$lad" = "${play% rdna3play=1} rdna3ladder=1" ] || fail "ladder-steps.txt: ladder is [$lad], expected the play step's boot-args + rdna3ladder=1"
-[ "$(grep -c 'play-agdcscaler ladder ladder-ws' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: ladder is not in both step lists"
+[ "$(grep -c 'play-agdcscaler ladder ladder-ws ladder-paranoid' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: ladder / ladder-ws / ladder-paranoid are not in both step lists"
+par=$(awk '$1 == "ladder-paranoid" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
+[ "$par" = "${play% rdna3play=1} rdna3ladder=3" ] || fail "ladder-steps.txt: ladder-paranoid is [$par], expected the play step's boot-args + rdna3ladder=3"
 sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
 m1=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$lad")
 m2=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "${lad%1}2")
+m3=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$par")
 mp=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$play")
 [ "$m1" -ge 20 ] && [ "$m1" -lt 40 ] && [ "$m2" -ge 40 ] && [ "$m2" -lt 60 ] && [ "$mp" = 30 ] || fail "rdna3vm: auto_limit ladder $m1, ladder-ws $m2, play $mp (expected 20..39, 40..59, 30)"
+[ "$m3" -ge 35 ] && [ "$m3" -lt 60 ] || fail "rdna3vm: auto_limit ladder-paranoid $m3 (18 rungs of ~70 s need 25 min of rungs: expected 35..59)"
 grep -q '41-ladder.txt' "$ROOT/tools/triage_reports.py" && grep -q 'parse_ladder' "$ROOT/tools/triage_reports.py" || fail "triage_reports.py: the ladder is not read"
 echo "test_ladder_step: ok"

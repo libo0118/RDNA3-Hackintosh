@@ -4,6 +4,8 @@ The plugin gained a set of A/B switches and counters for those artefacts; this m
 process names may contain blanks: "Activity Monitor"), so that a report says which profile it was taken with and what the counters saw.
 Kept in a module of its own so that tools/triage_reports.py only gains one call. docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"
 explains every line. Also per-rung summaries of the ladder (`parse_ladder` + `ladder_rows`, tools/vm/macos/autoreport.sh ladder_run: 41-ladder.txt, 41-ladder-<rung>.log)."""
+import glob
+import os
 import re
 
 _LINE = re.compile(r"^\S+ \S+ +\S+ +(.+?)\[(\d+):([0-9a-f]+)\] \(RDNA3MTLDriver\) NVMTL: (.*)$")
@@ -288,6 +290,16 @@ def n50_plugin_rows(text=""):
 # autoreport.sh's LADDER_RUNGS / LADDER_WS_RUNGS (tests/test_ladder_step.sh compares them)
 LADDER_RUNGS = ("baseline", "radv", "sync", "managed", "alignguard", "paranoid", "loadbarrier")
 LADDER_WS_RUNGS = ("radv-ws", "paranoid-ws")
+# variant 3 (`rdna3vm step ladder-paranoid`): the knobs of NVMTL_PARANOID's composition (the same list in autoreport.sh's LADDER_PARANOID_RUNGS; the test compares)
+LADDER_PARANOID_RUNGS = ("baseline", "paranoid", "paranoid-minus-radv-sync", "paranoid-a", "paranoid-b", "gsub-inflight", "no-prologue", "no-pool-reuse", "no-bufreuse",
+                         "no-buftex-recycle", "no-heaptex-recycle", "no-heaptex-place", "no-dirtyonly", "enc78-off", "g79-off", "no-res2", "no-purge-reclaim", "no-surfin-cache")
+# rung -> the knobs it sets (the halves partition PARANOID_KEYS; tests/test_ladder_step.sh compares these with autoreport.sh's table)
+PARANOID_A = ("NVMTL_RADV_DEBUG", "NVMTL_NO_POOL_REUSE", "NVMTL_NO_BUFREUSE", "NVMTL_NO_BUFTEX_RECYCLE", "NVMTL_NO_HEAPTEX_RECYCLE", "NVMTL_NO_HEAPTEX_PLACE",
+              "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM", "NVMTL_NO_SURFIN_CACHE")
+PARANOID_B = ("NVMTL_ASYNC_COMMIT", "NVMTL_GSUB_INFLIGHT", "NVMTL_PRESUBMIT_PROLOGUE", "NVMTL_NO_DIRTYONLY", "NVMTL_ENC78_OFF", "NVMTL_G79_OFF")
+# the rung that overrides two of the profile's switches by giving them an explicit value: the profile must then NOT have set them itself
+MINUS_RUNG = "paranoid-minus-radv-sync"
+MINUS_KEYS = ("NVMTL_RADV_DEBUG", "NVMTL_ASYNC_COMMIT")
 
 
 def ab_summary_keys(text):
@@ -333,6 +345,9 @@ def parse_ladder(text, logs=None):
             elif k == "pids": cur["pids"] = v
             elif k == "log": cur["logline"] = v
             continue
+        if line.startswith("quit: still running after"):
+            cur["quit_failed"] = True   # the graceful quit (System Events) did not end the apps: TERM, the plugin's exit SUMMARY is lost
+            continue
         if line.startswith("WARN:") or line.startswith("failed:") or line.startswith("NOT TAKEN:"):
             cur["warn"].append(line[:200])
     for name, r in rungs.items():
@@ -342,12 +357,112 @@ def parse_ladder(text, logs=None):
     return variant, rungs, problems
 
 
-def ladder_rows(rungs, variant=1, problems=()):
+def _minus_rung_problems(log):
+    """paranoid-minus-radv-sync must be the profile WITHOUT its RADV flags and async commit: the plugin's `conf: NVMTL_PARANOID=1 - ... set by it (...)` line must
+    not name them, and RADV_DEBUG must have stayed unset (an explicit empty NVMTL_RADV_DEBUG that `open --env` dropped would put the flags back)"""
+    out, seen, radv_on = [], False, set()
+    for proc, pid, tid, msg in _lines(log):
+        m = _PARANOID.match(msg)
+        if m:
+            seen = True
+            by = {t.split("=", 1)[0] for t in (m.group(3) or "").split() if "=" in t}
+            bad = sorted(k for k in MINUS_KEYS if k in by)
+            if bad:
+                out.append("%s: the profile set %s itself, the explicit override did not reach the process (this rung is the whole profile)" % (proc, ", ".join(bad)))
+            continue
+        m = _RADV.match(msg)
+        if m and (_unq(m.group(1)) or _unq(m.group(2))):
+            radv_on.add(proc)
+    if not seen:
+        out.append("no `conf: NVMTL_PARANOID=...` line in the slice: the profile was not on")
+    if radv_on:
+        out.append("RADV flags were set in %s although this rung must not have them" % ", ".join(sorted(radv_on)))
+    return out
+
+
+_PARK = re.compile(r"^buffer park \((?:park|reuse)\): (\d+) parked, (\d+) reused")
+_HEAPTEX = re.compile(r"^heap texture(?: config:| \()")
+_BUFTEX = re.compile(r"^buffer texture(?: \((?:new|recycled)\)|: dres R3)")
+_RES2 = re.compile(r"^residency \(res2\): (?:evict-batch|waited)")
+_RES1 = re.compile(r"^residency \(res1\): the wall is")
+_GSUB = re.compile(r"^commit: G-SUB (\d+) parts submitted ahead, peak (\d+) in flight")
+
+
+def knob_evidence(log, proc="Terminal"):
+    """{rung: (exercised, text)} for the single-knob rungs of the PARANOID ladder, from the plugin log of a rung that ran WITHOUT the knob (the baseline): did the
+    code the knob switches off run in `proc` at all? A knob whose code never ran in the process cannot change its picture (False); None = the log cannot tell."""
+    park = heap = buftex = res2 = res1 = 0
+    peak = 0
+    mg, sin = {}, {}
+    for p, pid, tid, msg in _lines(log):
+        if p != proc:
+            continue
+        m = _PARK.match(msg)
+        if m:
+            park = max(park, int(m.group(1)) + int(m.group(2)))
+        heap += bool(_HEAPTEX.match(msg)); buftex += bool(_BUFTEX.match(msg)); res2 += bool(_RES2.match(msg)); res1 += bool(_RES1.match(msg))
+        m = _GSUB.match(msg)
+        if m:
+            peak = max(peak, int(m.group(2)))
+        m = _SUM_MG.match(msg)
+        if m:
+            mg = _kv(m.group(1))
+        m = _SUM_SIN.match(msg)
+        if m:
+            sin = _kv(m.group(1))
+    seen = bool(mg or sin or peak or heap or buftex or park)   # a Terminal log at all
+    if not seen:
+        return {}
+
+    def ev(flag, yes, no):
+        return (flag, yes if flag else no)
+    up = mg.get("prologue_uploads", 0)
+    out = {
+        "no-prologue": ev(up > 0, "%d managed upload(s) rode a submit's prologue" % up, "no managed upload rode a prologue"),
+        "gsub-inflight": ev(peak > 1, "up to %d parts were in flight" % peak, "at most 1 part was ever in flight, so a cap of 1 changes nothing"),
+        "no-bufreuse": ev(park > 0, "%d buffer(s) parked or reused" % park, "no buffer was ever parked or reused (no `buffer park (...)` line)"),
+        "no-heaptex-place": ev(heap > 0, "a heap texture was made", "no texture was ever made from a heap (no `heap texture` line)"),
+        "no-heaptex-recycle": ev(heap > 0, "a heap texture was made", "no texture was ever made from a heap (no `heap texture` line)"),
+        "no-buftex-recycle": ev(buftex > 0 or sin.get("cimg_new", 0) + sin.get("cimg_recycled", 0) > 0, "a buffer-backed texture was made",
+                                "no texture was ever made over a buffer (no `buffer texture (new|recycled)` line)"),
+        "no-res2": ev(res2 > 0, "the pager moved textures", "the pager never ran (no `evict-batch` line)"),
+        "no-purge-reclaim": ev(res1 > 0, "textures were purged under VRAM pressure", "no purge under VRAM pressure ever happened (no `the wall is` line)"),
+        "no-surfin-cache": ev(sin.get("bufcopy", 0) + sin.get("cimg_new", 0) > 0 or sin.get("miss_seed", 0) + sin.get("miss_gen", 0) > 0,
+                              "the cache decided something", "no buffer texture was refreshed and no cached decision was ever missed: the cache only answered the probe"),
+    }
+    return out
+
+
+def glyph_verdicts(rungs, prefix):
+    """{rung: {"verdict", "text"}} of the automatic glyph check (tools/glyph_verdict.py) on the rung's hires look(s): `<prefix>-scanout<look>-pipe<N>.ppm`, prefix
+    = the report's path without .tar.gz. A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
+    try:
+        import glyph_verdict as gv
+    except ImportError:
+        return {n: {"verdict": "none", "text": "tools/glyph_verdict.py is missing next to triage_glyphs.py: the glyphs were NOT checked"} for n in rungs}
+    out = {}
+    for name, r in rungs.items():
+        files = []
+        for look in r.get("looks") or []:
+            if look.endswith("h"):
+                files += sorted(glob.glob(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*.ppm"))
+        if not files:
+            continue
+        try:
+            out[name] = gv.verdict_files(files)
+        except Exception as e:  # noqa: BLE001  (one bad picture must not take the triage down)
+            out[name] = {"verdict": "none", "text": "the glyph check FAILED (%s: %s)" % (type(e).__name__, e)}
+    return out
+
+
+def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
     """rungs: {rung name: {"conf": [lines], "scope": "apps"|"windowserver", "log": plugin log slice, "looks": [file names], "verdict": "y"|"n"|None}}.
     One row per rung: what it set, which processes show it in the log (the plugin's own `vk: ab switches` line), the load pass / fence / managed counters
     of the slice, and the owner's verdict when one was given. [(level, name, text)]."""
     rows = [("WARN", "ladder", p) for p in problems]
-    names = LADDER_RUNGS + (LADDER_WS_RUNGS if variant == 2 else ())
+    names = LADDER_PARANOID_RUNGS if variant == 3 else LADDER_RUNGS + (LADDER_WS_RUNGS if variant == 2 else ())
+    glyphs = glyphs or {}
+    evid = knob_evidence((rungs.get("baseline") or {}).get("log", "")) if variant == 3 else {}
     for name in names:
         r = rungs.get(name)
         if r is None:
@@ -379,7 +494,15 @@ def ladder_rows(rungs, variant=1, problems=()):
         txt = "set %s (%s); %d look(s); %s%s" % (", ".join(r.get("conf") or []) or "nothing", r.get("scope", "?"), len(looks),
                                                  ("verdict " + {"y": "PICTURE RIGHT", "n": "picture broken"}.get(v, str(v))) if v else "no verdict (the owner was not asked or did not answer)",
                                                  ("; counters: " + " | ".join(warn)[:200]) if warn else "")
+        gl = glyphs.get(name)
+        if gl:
+            txt += "; glyphs (automatic, tools/glyph_verdict.py): " + gl["text"]
+        ev = evid.get(name)
+        if ev:
+            txt += "; in the baseline Terminal " + ev[1] + ("" if ev[0] else " - this rung CANNOT differ from the baseline")
         extra = problems_ + list(r.get("warn") or [])
+        if name == MINUS_RUNG:
+            extra += _minus_rung_problems(r.get("log", ""))
         if warn:
             extra.append("a counter or conf WARN in the slice")
         if r.get("cut"):
@@ -389,6 +512,32 @@ def ladder_rows(rungs, variant=1, problems=()):
         if extra:
             txt += "; " + "; ".join(extra)[:240]
         rows.append(("INFO" if not extra else "WARN", "ladder " + name, txt))
+    nq = [n for n in names if (rungs.get(n) or {}).get("quit_failed")]
+    if nq:
+        rows.append(("INFO", "ladder quit", "%d of %d rung(s): the apps did not quit when asked through System Events and were TERMed after 8 s (macOS may be waiting for the one-time Automation "
+                     "prompt for osascript, or the Terminal asks to terminate its running process); the plugin's exit SUMMARY is lost there, its 10 s counters are not" % (len(nq), len(names))))
+    # the automatic glyph verdict: which rung made the text clean
+    gv_ = {n: glyphs[n]["verdict"] for n in names if n in glyphs}
+    if gv_ and all(v == "none" for v in gv_.values()):
+        rows.append(("WARN", "ladder glyphs", "the automatic glyph check found no tick lines in any rung's look (the text.command window was not on a screen, or the looks are missing): %s" % next(iter(glyphs.values()))["text"]))
+    elif gv_:
+        clean = [n for n in names if gv_.get(n) == "clean"]
+        if gv_.get("baseline") == "broken" and clean:
+            rows.append(("INFO", "ladder glyphs", "the baseline glyphs were BROKEN and CLEAN with: %s (tools/glyph_verdict.py: identical tick lines are drawn identically)" % ", ".join(clean)))
+        elif gv_.get("baseline") == "broken":
+            tail = ""
+            if variant == 3 and gv_.get("paranoid") != "clean":
+                tail = ("; the positive control (paranoid, every knob of the profile) is NOT clean either, so none of the knobs of this ladder is the cure and the single-knob "
+                        "rungs say nothing - the cause is outside what NVMTL_PARANOID changes (docs/AFTER-TESTS.md)")
+            rows.append(("INFO", "ladder glyphs", "the baseline glyphs were BROKEN and no rung made them clean%s" % tail))
+        elif gv_.get("baseline") == "clean":
+            rows.append(("INFO", "ladder glyphs", "the baseline glyphs were CLEAN in this run: the artefact did not show, the other rungs prove nothing"))
+        else:
+            rows.append(("INFO", "ladder glyphs", "the baseline's glyphs could not be judged (%s)" % (gv_.get("baseline") or "no look")))
+    if variant == 3 and evid:
+        dead = [n for n in LADDER_PARANOID_RUNGS if n in evid and not evid[n][0]]
+        if dead:
+            rows.append(("INFO", "ladder knobs", "rungs whose switch has no code to switch off in the baseline Terminal (they cannot differ from the baseline): %s" % ", ".join(dead)))
     # the verdict of the whole ladder: which rung made the picture right
     ans = {n: rungs[n].get("verdict") for n in names if n in rungs}
     if ans.get("baseline") == "n":
