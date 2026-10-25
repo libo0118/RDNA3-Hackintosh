@@ -133,11 +133,17 @@ jobs:
       # declared, kpi.unsupported (tools/ci/data). No kmutil = an error, not a pass.
       - name: KPI guard (kmutil libraries) for the kexts kmutil links
         run: |
-          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Framebuffer.kext build/RDNA3Accelerator.kext \
-            build/RDNA3AGDC.kext
-          # the macOS 26 layout of the accelerator: a symbol only 26 exports
-          # would not resolve on this runner's older collections (a warning)
-          python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3AcceleratorTahoe.kext
+          # each accelerator layout links only against its own macOS: the one
+          # for this runner's Darwin is blocking, the other one only warns
+          # about imports this runner's collections lack (Forgejo run 42: the
+          # Mac runner's kmutil had no IOAccelSurface::set_shape & co, the
+          # Sequoia layout's 15-only symbols)
+          darwin=$(uname -r | cut -d. -f1)
+          if [ "$darwin" -ge 25 ]; then native=build/RDNA3AcceleratorTahoe.kext; other=build/RDNA3Accelerator.kext
+          else native=build/RDNA3Accelerator.kext; other=build/RDNA3AcceleratorTahoe.kext; fi
+          echo "runner Darwin $darwin: blocking check of $native, warnings only for $other"
+          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Framebuffer.kext "$native" build/RDNA3AGDC.kext
+          python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved "$other"
       # the core is injected by OpenCore, whose prelinker binds kernel
       # symbols kmutil would refuse (26.4.1: IOMemoryDescriptor::doMap /
       # doUnmap through RDNA3BoMemory's vtable, DRIVER-PLAN N47): reported,
