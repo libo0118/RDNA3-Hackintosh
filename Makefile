@@ -205,7 +205,10 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '1 pipe(s) lit'
 	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '^  TX problems: none$$'
 	$(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q '1 pipe(s) lit'
+	# the hires look is 1280x720 (not the default 320 wide) and the host triage turns it into a PNG of that size
+	test "$$(sed -n 2p $(BUILD)/scanout-pipe0.ppm)" = '1280 720'
 	python3 tools/triage_reports.py --picture $(BUILD)/scanout-pipe0.ppm | grep -q 'png'
+	python3 -c "import struct,sys; d=open(sys.argv[1],'rb').read(); sys.exit(0 if struct.unpack('>II', d[16:24]) == (1280, 720) else 1)" $(BUILD)/scanout-pipe0.png
 	# two jobs in one process each get their own VA (card run 2026-10-12)
 	! $(BUILD)/rdna3_drminfo_host --dma-test --gfx-test 2>&1 | grep -q 'GEM_VA'
 	tests/test_oc_install.sh

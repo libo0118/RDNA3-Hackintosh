@@ -88,7 +88,7 @@ static int lb_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32
  * report's picture path run on the host */
 static int lb_scanout(void *c, struct rd_xnu_scanout *s)
 {
-    uint32_t r, x;
+    uint32_t r, x, per_call, out_w = RD_XNU_SCANOUT_W;
     (void)c;
     if (s->pipe > 3)
         return -RD_EINVAL;
@@ -103,16 +103,24 @@ static int lb_scanout(void *c, struct rd_xnu_scanout *s)
     s->address = s->inuse = 0x8000000000ull;
     s->det_segs = 18;
     s->dispclk_khz = s->dppclk_khz = 165384;
-    s->out_w = RD_XNU_SCANOUT_W;
-    s->out_h = 1080 * RD_XNU_SCANOUT_W / 1920;
+    /* the kext's RDNA3Accel::displayScanout: RD_XNU_SCANOUT_HIRES samples
+     * RD_XNU_SCANOUT_HIRES_W wide (at most the surface), as many rows per
+     * call as rgb[] holds */
+    if ((s->flags & RD_XNU_SCANOUT_HIRES) && s->width > RD_XNU_SCANOUT_W)
+        out_w = s->width < RD_XNU_SCANOUT_HIRES_W ? s->width : RD_XNU_SCANOUT_HIRES_W;
+    per_call = (uint32_t)(sizeof(s->rgb) / ((size_t)out_w * 3));
+    s->out_w = out_w;
+    s->out_h = 1080 * out_w / 1920;
     s->nrows = s->row0 < s->out_h ? s->out_h - s->row0 : 0;
-    if (s->nrows > RD_XNU_SCANOUT_ROWS)
-        s->nrows = RD_XNU_SCANOUT_ROWS;
+    if (s->nrows > per_call)
+        s->nrows = per_call;
     for (r = 0; r < s->nrows; r++)
         for (x = 0; x < s->out_w; x++) {
             uint32_t y = s->row0 + r;
             uint8_t *o = s->rgb + (r * s->out_w + x) * 3;
-            int box = x >= 140 && x < 180 && y >= 70 && y < 110;
+            /* the white box covers the same part of the picture at any width */
+            uint32_t bx = x * RD_XNU_SCANOUT_W / s->out_w, by = y * 180 / s->out_h;
+            int box = bx >= 140 && bx < 180 && by >= 70 && by < 110;
             o[0] = box ? 255 : 0;
             o[1] = box ? 255 : (uint8_t)(y * 255 / s->out_h);
             o[2] = box ? 255 : (uint8_t)(x * 255 / s->out_w);

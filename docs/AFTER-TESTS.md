@@ -103,6 +103,12 @@ exactly what to run next. One round = one report batch → one fix → one retes
    prints the per-pipe state ("screens") and writes the PNGs next to them:
    **look at them** (the user is often not at the screen) before asking
    what the monitors showed.
+   The looks are 320 wide; one look per report is 1280 wide
+   (`--scanout-hires`: `<report>-scanout3h-pipe<N>` in a normal run,
+   `-scanoutplay5h-` / `-scanoutplay10h-` in the play step, `m6*` in M6) for
+   small text-cell rectangles and broken glyphs. Its PNG is 1280x720 for a
+   1080p panel (sampled 2 of 3 pixels: the kext's ioctl returns one row per
+   call at that width; true 1920 needs a larger `rgb[]` in the UAPI).
    Exit 1 = a check failed. The first `FAIL` (in ladder order) is your target.
 3. From step 2 on, check discovery once:
    ```sh

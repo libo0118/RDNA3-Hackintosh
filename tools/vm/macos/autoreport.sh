@@ -1542,6 +1542,15 @@ play_looks() {   # play_looks <minute>: three scanout looks 20 s apart, the coun
         done_ $?
         [ "$_pk" = c ] || sleep 20
     done
+    # one 1280-wide look per report (the three above stay 320 wide, the
+    # triage's checks read them): small text-cell rectangles and broken
+    # glyphs are too small to see at 320. The pictures go up as PPMs; the
+    # host's triage makes the PNGs (tools/triage_reports.py ppm_to_png)
+    mkdir -p "$HOME/rdna3-scanout/play${1}h"
+    hdr "rdna3_drminfo --scanout-hires (look play${1}h)"
+    if [ -x "$D/bin/rdna3_drminfo" ]; then with_limit 90 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/play${1}h" 2>&1
+    else echo "play: no rdna3_drminfo in $D/bin: no hires look"; fi
+    done_ $?
     echo "== display pipe and AGDC counters (play, minute $1)"
     sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
     a3_sysctls
@@ -1662,6 +1671,12 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             done_ $?
             [ $k = 3 ] || sleep 20
         done
+        # one 1280-wide look (look 3h) beside the three 320-wide ones: small
+        # text-cell rectangles and broken glyphs are too small at 320
+        mkdir -p "$HOME/rdna3-scanout/3h"
+        hdr "rdna3_drminfo --scanout-hires (look 3h)"
+        with_limit 90 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/3h" 2>&1
+        done_ $?
         # A3: another process's IOSurface must stay out of reach (ENOENT)
         hdr "rdna3_drminfo --surface-xproc"
         with_limit 30 "$D/bin/rdna3_drminfo" --surface-xproc 2>&1
