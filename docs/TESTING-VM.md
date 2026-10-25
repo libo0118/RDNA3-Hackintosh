@@ -660,14 +660,14 @@ switch values this boot ran, the per-type `asked/answered` text) and
 (`sudo sysctl debug.rdna3agdc_ib=3`) count only from the next WindowServer
 start, so a boot-arg step is the clean A/B.
 
-### The A/B ladder (steps `ladder`, `ladder-ws` and `ladder-paranoid`)
+### The A/B ladder (steps `ladder`, `ladder-ws` and `ladder-glyphs`)
 
 DRIVER-PLAN N50 (broken glyphs in Terminal / Maps, tile-shaped blocks in Chess; card run 2026-10-25e). One run replaces five reports with a switch each:
 
 ```sh
 rdna3vm step ladder       # the app rungs: about 26 minutes
 rdna3vm step ladder-ws    # and the two WindowServer rungs: about 45 minutes, you log in after each restart
-rdna3vm step ladder-paranoid   # the PARANOID profile's knobs one by one: 18 rungs, about 30 minutes (only if the glyph verdict of `ladder` says PARANOID cleans the text)
+rdna3vm step ladder-glyphs     # the glyph hunt: 13 rungs, about 25 minutes (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...)
 ```
 
 The step is the `play` profile (the desktop on the Metal plugin) with `rdna3ladder=1` / `2` instead of `rdna3play=1`; no other test runs. Per rung
@@ -682,20 +682,21 @@ like a clean `paranoid` rung). The report's triage reads each rung's 1280-wide l
 In the guest's Terminal, by hand (a tty: it also asks y / n / Enter per rung):
 
 ```sh
-sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder      # or --ladder-ws or --ladder-paranoid
+sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder      # or --ladder-ws or --ladder-glyphs
 ```
 
 `ladder-ws` edits `rdna3mtl.conf` and restarts WindowServer for `radv-ws` and `paranoid-ws`, and puts the conf back exactly (also on Ctrl-C and, after a dead run,
 at the next start of `autoreport.sh`). The report: `41-ladder.txt`, `41-ladder-<rung>.log`, the looks `scanoutladder-<rung>[a|h]-pipe*.ppm`; the triage prints a row per
 rung (docs/AFTER-TESTS.md, "The whole ladder in one card run"). The host tests are `tests/test_ladder_step.sh` and `tests/test_glyph_verdict.py`.
 
-`ladder-paranoid` (`rdna3ladder=3`, `--ladder-paranoid`, 18 rungs of about 70 s) is for the day a first run says the PARANOID profile makes the text clean: it finds which of its
-knobs does it, in the same run. Rungs: `baseline`; `paranoid` (the profile, the positive control); `paranoid-minus-radv-sync` (the profile with RADV's flags and the async commit left at
-their defaults, so it says whether the two rungs `radv` and `sync` already ran alone are needed); `paranoid-a` (the memory side: RADV flags, pool reuse, buffer park, buffer-texture and
-heap-texture recycling and placement, residency paging and purging, the surface-in cache) and `paranoid-b` (the submission side: synchronous commit, one submit in flight, no pre-submit
-prologue, no dirty-only bindings, the encoder and barrier folds off); then one rung per knob: `gsub-inflight`, `no-prologue`, `no-pool-reuse`, `no-bufreuse`, `no-buftex-recycle`,
-`no-heaptex-recycle`, `no-heaptex-place`, `no-dirtyonly`, `enc78-off`, `g79-off`, `no-res2`, `no-purge-reclaim`, `no-surfin-cache`. The first five rungs come first, so a run cut short keeps
-them. If the triage's `ladder glyphs` row says the positive control is not clean either, stop: none of the knobs is the cure.
+`ladder-glyphs` (`rdna3ladder=3`, `--ladder-glyphs`, 13 rungs of about 95 s) is the glyph hunt after card run 2026-10-25f, where NVMTL_PARANOID did not cure Terminal's text
+(it replaced the earlier `ladder-paranoid`, which was for the day PARANOID did). Rungs, the strongest suspect first so that a run cut short keeps them: `baseline`;
+`managed-whole` (`NVMTL_MANAGED_WHOLE=1`: every managed-buffer flush uploads the whole buffer, not the declared range); `managed-check` (`NVMTL_MANAGED_CHECK=1`: the undeclared-write
+detector, no behaviour change); `no-surface-share` (the window is a private image, not the shared family VRAM); `no-surface-pageoff` (a GPU write is copied out eagerly, no VRAM-newest
+mark); `fbfetch-zero` (framebuffer fetch returns zero); `managed-pages` (ranges widened to 4 KiB pages); `managed-eager-zero` (`=1` is the OLD behaviour: a new managed buffer is memset and
+uploaded); `no-texbuf`; `no-bindless`; `dontcare-clears`; `skip-empty-0` (`NVMTL_SKIP_EMPTY=0`); `paranoid`, the NEGATIVE control. Each rung takes a second 1280-wide look three seconds after the
+first (`...h2`): the glyph verdict only counts the tick-line window that CHANGED between them, the rung's own live text.
+Apps are quit with SIGINT, then SIGTERM, then SIGKILL (no System Events, no Automation prompt); `41-ladder.txt` says how each instance ended.
 
 ### Tests that already passed
 

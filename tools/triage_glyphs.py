@@ -23,6 +23,7 @@ _TOKEN = re.compile(r'(NVMTL_[A-Z0-9_]+)=("(?:[^"\\]|\\.)*")')
 _SUM_AB = re.compile(r"^vk: ab: SUMMARY (.*)$")
 _SUM_MG = re.compile(r"^managed: SUMMARY (.*)$")
 _SUM_SIN = re.compile(r"^vk: surfin: SUMMARY (.*)$")
+_SUM_CEN = re.compile(r"^census: SUMMARY (.*)$")
 _KV = re.compile(r"(\w+)=([\d,]+)")
 _WIT = re.compile(r"^vk: keep witness (\d+) landed only (\d+) us AFTER the flush returned")
 _POOL_OFF = re.compile(r"^vk: pool reuse OFF")
@@ -75,6 +76,77 @@ def ab_switch_keys(text):
     return out
 
 
+def _ud_rows(mg):
+    """rows for the managed buffers' undeclared-write detector (NVMTL_MANAGED_CHECK) and the widened uploads (NVMTL_MANAGED_WHOLE / NVMTL_MANAGED_PAGES)"""
+    rows = []
+    for key, d in sorted(mg.items()):
+        if d.get("whole") or d.get("pages"):
+            decl, up = d.get("decl_bytes", 0), d.get("up_bytes", 0)
+            rows.append(("WARN", "managed upload", "%s: NVMTL_MANAGED_%s is on, this run does not show the default plugin: %d flush range(s) declared %d byte(s), %d byte(s) were uploaded (%.1fx), %d of "
+                         "%d uploads widened" % (key[0], "WHOLE" if d.get("whole") else "PAGES", d.get("uploads", 0), decl, up, (up / decl) if decl else 0.0, d.get("widened_uploads", 0), d.get("uploads", 0))))
+        if not d.get("check"):
+            continue
+        scans, idle = d.get("ud_scans", 0), d.get("ud_idle_scans", 0)
+        hits, ub, late = d.get("ud_hits", 0), d.get("ud_bytes", 0), d.get("ud_late_bytes", 0)
+        tail = []
+        if d.get("ud_nomirror"): tail.append("%d buffer(s) over 8 MiB or past the 64 MiB of mirrors were not watched" % d["ud_nomirror"])
+        if d.get("ud_gpu_off"): tail.append("%d buffer(s) the GPU writes back (synchronize) were left out" % d["ud_gpu_off"])
+        if "ud_scans" not in d:
+            rows.append(("WARN", "undeclared writes", "%s: NVMTL_MANAGED_CHECK is on and the managed SUMMARY has no ud_* counters: an older plugin, the detector did not run" % key[0]))
+        elif not (scans or idle):
+            rows.append(("INFO", "undeclared writes", "%s: the detector is on and no managed buffer was scanned (no managed upload in that process)%s" % (key[0], ("; " + "; ".join(tail)) if tail else "")))
+        elif hits:
+            real = max(ub - late, 0)
+            rows.append(("WARN", "undeclared writes", "%s: the CPU wrote managed-buffer bytes it did NOT declare with didModifyRange: %d scan(s) of %d (+%d idle) found %d changed byte(s) in %d buffer(s) "
+                         "[%d of them declared at the NEXT flush (a race, not a missing declaration), %d never], %d hit(s) in a page the declared range touches (a page-granular copy would have carried them); "
+                         "a byte-exact upload leaves them stale in VRAM - hypothesis A of the glyph artefacts: the picture right with NVMTL_MANAGED_WHOLE / NVMTL_MANAGED_PAGES confirms it%s" % (
+                             key[0], hits, scans, idle, ub, d.get("ud_buffers", 0), late, real, d.get("ud_samepage_hits", 0), ("; " + "; ".join(tail)) if tail else "")))
+        else:
+            rows.append(("INFO", "undeclared writes", "%s: %d flush scan(s) + %d idle scan(s) of %d mirrored buffer(s) (%.1f KB): no byte was written outside a declared range - hypothesis A (undeclared CPU "
+                         "writes) is NOT supported by this run%s" % (key[0], scans, idle, d.get("ud_mirrors", 0), d.get("ud_mirror_bytes", 0) / 1024.0, ("; " + "; ".join(tail)) if tail else "")))
+    return rows
+
+
+def _same_image_rows(ab):
+    rows = []
+    for key, d in sorted(ab.items()):
+        n = d.get("same_image_copies", 0)
+        if not n:
+            continue
+        ov, gen, tmp, bad, unsafe = d.get("same_image_overlap", 0), d.get("same_image_general", 0), d.get("same_image_tmp", 0), d.get("same_image_tmpfail", 0), d.get("same_image_unsafe", 0)
+        txt = ("%s: %d copy(ies) with one image on both sides (%d disjoint, recorded GENERAL -> GENERAL; %d overlapping, %d of them through a scratch image). Before DRIVER-PLAN N50 the layouts were wrong and an "
+               "overlapping copy ran in place, which RADV 26.2.5 gets wrong in tile-shaped regions (tests/vk_same_image_probe.c)" % (key[0], n, gen, ov, tmp))
+        if bad or unsafe:
+            rows.append(("WARN", "same-image copy", txt + "; %d overlapping copy(ies) could NOT use the scratch image (%d scratch allocation(s) failed, %d of a shape it does not cover: 3D, depth, multisample, compressed) "
+                         "and ran in place (undefined)" % (bad + unsafe, bad, unsafe)))
+        else:
+            rows.append(("INFO", "same-image copy", txt))
+    return rows
+
+
+_CEN_LETTERS = {"u": "surface-in uploads (family VRAM)", "U": "surface-in uploads (private image)", "s": "surface-in skips", "!": "surface-in failures", "P": "render passes", "c": "cleared passes",
+                "D": "draws", "B": "buffer_image_blit draws", "F": "framebuffer-fetch draws", "E": "blit-encoder copies", "R": "replaceRegion writes", "X": "compute writes", "T": "presents",
+                "O": "GPU writes published as a dirty mark", "C": "GPU writes copied out", "?": "publish failures"}
+
+
+def _census_rows(cen):
+    """one INFO row per process that printed `census: SUMMARY`: what touched its IOSurface render targets and how (metal/plugin/nvmtl_surf_census.h)"""
+    rows = []
+    for key, (d, top) in sorted(cen.items()):
+        if not d:
+            continue
+        txt = ("%s (SUMMARY #%d after %.0f s): %d surface(s)%s; surface-in uploads %d into family VRAM + %d into private images (%d MB), %d skipped, %d failed; render passes %d (%d cleared), draws %d "
+               "(%d buffer_image_blit, %d framebuffer fetch); blit-encoder copies %d, replaceRegion %d, compute writes %d, presents %d; GPU writes published: %d dirty mark(s), %d copied out, %d failed" % (
+                   key[0], d.get("seq", 0), d.get("t_ms", 0) / 1000.0, d.get("surfaces", 0), (" (+%d event(s) on surfaces past the 128-slot table)" % d["overflow"]) if d.get("overflow") else "",
+                   d.get("sin_up_vram", 0), d.get("sin_up_priv", 0), d.get("sin_up_mb", 0), d.get("sin_skip", 0), d.get("sin_fail", 0), d.get("pass", 0), d.get("pass_clear", 0), d.get("draws", 0),
+                   d.get("draw_blit", 0), d.get("draw_fbf", 0), d.get("blitenc", 0), d.get("replace", 0), d.get("compute", 0), d.get("present", 0), d.get("out_dirty", 0), d.get("out_copy", 0), d.get("out_fail", 0)))
+        if top:
+            txt += "; busiest surfaces (id:WxH:V=family VRAM|P=private:counters): " + top[:300]
+        lvl = "WARN" if d.get("sin_fail") or d.get("out_fail") else "INFO"
+        rows.append((lvl, "surface census", txt))
+    return rows
+
+
 def n50_plugin_rows(text=""):
     """[(level, name, text)]. WARN: a debug / diagnostic profile or switch was on (the run does not show the default plugin), a flag was refused or a conf
     line skipped, the fence returned before the GPU's last write was visible, the CPU rewrote a managed buffer's range while its copy was in flight, a
@@ -86,7 +158,7 @@ def n50_plugin_rows(text=""):
     paranoid, paranoid_off = {}, []
     conf_set, conf_skip = {}, []
     switches, switch_procs, switch_none = {}, set(), set()
-    ab, mg, sin = {}, {}, {}   # key -> newest SUMMARY dict
+    ab, mg, sin, cen = {}, {}, {}, {}   # key -> newest SUMMARY dict (cen: (dict, the top= list))
     wit_lines = {}             # key -> (lines, worst) when there is no SUMMARY (an older plugin)
     pool_off = set()
     mg_on = set()
@@ -133,6 +205,13 @@ def n50_plugin_rows(text=""):
             # a timer tick and the exit line can reach the log out of order: keep the highest seq
             if key not in sin or _seq(kv) >= _seq(sin[key]):
                 sin[key] = kv
+            continue
+        m = _SUM_CEN.match(msg)
+        if m:
+            body, _sep, top = m.group(1).partition(" top=")   # (top= holds "id:WxH:V:u1,P2;..." - not key=value numbers)
+            kv = _kv(body)
+            if key not in cen or _seq(kv) >= _seq(cen[key][0]):
+                cen[key] = (kv, top.strip())
             continue
         m = _WIT.match(msg)
         if m:
@@ -237,6 +316,10 @@ def n50_plugin_rows(text=""):
             rows.append(("WARN", "managed shadow", "%s: %s" % (key[0], "; ".join(bad))))
         elif snap and d.get("snapped", 0):
             rows.append(("INFO", "managed shadow", "%s: %d upload(s) read a private snapshot" % (key[0], d["snapped"])))
+    # N50: the undeclared-write detector, the widened uploads (NVMTL_MANAGED_WHOLE / PAGES), same-image copies and the surface census
+    rows.extend(_ud_rows(mg))
+    rows.extend(_same_image_rows(ab))
+    rows.extend(_census_rows(cen))
     # N51: the surface-in cache (docs/AFTER-TESTS.md "Surface-in cost and the cache")
     for key, d in sorted(sin.items()):
         calls, fast, br = d.get("calls", 0), d.get("fast", 0), d.get("bufcopy", 0)
@@ -290,16 +373,25 @@ def n50_plugin_rows(text=""):
 # autoreport.sh's LADDER_RUNGS / LADDER_WS_RUNGS (tests/test_ladder_step.sh compares them)
 LADDER_RUNGS = ("baseline", "radv", "sync", "managed", "alignguard", "paranoid", "loadbarrier")
 LADDER_WS_RUNGS = ("radv-ws", "paranoid-ws")
-# variant 3 (`rdna3vm step ladder-paranoid`): the knobs of NVMTL_PARANOID's composition (the same list in autoreport.sh's LADDER_PARANOID_RUNGS; the test compares)
-LADDER_PARANOID_RUNGS = ("baseline", "paranoid", "paranoid-minus-radv-sync", "paranoid-a", "paranoid-b", "gsub-inflight", "no-prologue", "no-pool-reuse", "no-bufreuse",
-                         "no-buftex-recycle", "no-heaptex-recycle", "no-heaptex-place", "no-dirtyonly", "enc78-off", "g79-off", "no-res2", "no-purge-reclaim", "no-surfin-cache")
-# rung -> the knobs it sets (the halves partition PARANOID_KEYS; tests/test_ladder_step.sh compares these with autoreport.sh's table)
-PARANOID_A = ("NVMTL_RADV_DEBUG", "NVMTL_NO_POOL_REUSE", "NVMTL_NO_BUFREUSE", "NVMTL_NO_BUFTEX_RECYCLE", "NVMTL_NO_HEAPTEX_RECYCLE", "NVMTL_NO_HEAPTEX_PLACE",
-              "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM", "NVMTL_NO_SURFIN_CACHE")
-PARANOID_B = ("NVMTL_ASYNC_COMMIT", "NVMTL_GSUB_INFLIGHT", "NVMTL_PRESUBMIT_PROLOGUE", "NVMTL_NO_DIRTYONLY", "NVMTL_ENC78_OFF", "NVMTL_G79_OFF")
-# the rung that overrides two of the profile's switches by giving them an explicit value: the profile must then NOT have set them itself
-MINUS_RUNG = "paranoid-minus-radv-sync"
-MINUS_KEYS = ("NVMTL_RADV_DEBUG", "NVMTL_ASYNC_COMMIT")
+# variant 3 (`rdna3vm step ladder-glyphs`): the glyph hunt (the same list in autoreport.sh's LADDER_GLYPHS_RUNGS; the test compares). The knob of each rung (tests compare these
+# with autoreport.sh's table too); `paranoid` is the NEGATIVE control (card run 2026-10-25f: it does not clean the text)
+LADDER_GLYPHS_RUNGS = ("baseline", "managed-whole", "managed-check", "no-surface-share", "no-surface-pageoff", "fbfetch-zero", "managed-pages", "managed-eager-zero", "no-texbuf",
+                       "no-bindless", "dontcare-clears", "skip-empty-0", "paranoid")
+GLYPHS_CONTROL = "paranoid"
+# what a rung that came out CLEAN (with the baseline BROKEN) points at
+GLYPHS_MEANING = {
+    "managed-whole": "the app writes managed-buffer bytes outside its didModifyRange and the GPU needs them (hypothesis A); look at the `undeclared writes` row and run managed-pages",
+    "managed-pages": "a page-granular copy is enough: the undeclared bytes sit in the pages the declared ranges touch (hypothesis A, Apple copies whole pages)",
+    "no-surface-share": "the window surface shared with WindowServer in family VRAM is where the text breaks (hypothesis C): the private copy path is right",
+    "no-surface-pageoff": "the VRAM-newest / page-off protocol is where it breaks (hypothesis C): a plain copy-out is right",
+    "fbfetch-zero": "the framebuffer-fetch draw is where the strokes come from (a fetch of zero draws clean glyphs)",
+    "managed-eager-zero": "the creation-time clear of managed buffers matters (the old memset + upload is right)",
+    "no-texbuf": "the texel-buffer views (the window as a buffer texture) are the cause",
+    "no-bindless": "the bindless descriptor path is the cause",
+    "dontcare-clears": "a don't-care load action must clear",
+    "skip-empty-0": "an encoder with no draws must still be submitted",
+    "managed-check": "the detector changed the timing (it hashes and mirrors the shadow at the flush): a race between the CPU and the upload; run managed-whole next",
+}
 
 
 def ab_summary_keys(text):
@@ -346,7 +438,14 @@ def parse_ladder(text, logs=None):
             elif k == "log": cur["logline"] = v
             continue
         if line.startswith("quit: still running after"):
-            cur["quit_failed"] = True   # the graceful quit (System Events) did not end the apps: TERM, the plugin's exit SUMMARY is lost
+            cur["quit_failed"] = True   # (runs before the glyph hunt) the graceful quit (System Events) did not end the apps: TERM, the plugin's exit SUMMARY is lost
+            continue
+        m = re.match(r"^quit: pid (\d+) ended by SIG(INT|TERM|KILL) after (\d+)s", line)
+        if m:
+            cur.setdefault("quit_ends", []).append((m.group(2), int(m.group(3))))   # how each instance ended (SIGINT, then SIGTERM, then SIGKILL; no System Events)
+            continue
+        if line.startswith("quit: pid(s) ") and "SURVIVED" in line:
+            cur["quit_survived"] = line[:120]
             continue
         if line.startswith("WARN:") or line.startswith("failed:") or line.startswith("NOT TAKEN:"):
             cur["warn"].append(line[:200])
@@ -357,99 +456,27 @@ def parse_ladder(text, logs=None):
     return variant, rungs, problems
 
 
-def _minus_rung_problems(log):
-    """paranoid-minus-radv-sync must be the profile WITHOUT its RADV flags and async commit: the plugin's `conf: NVMTL_PARANOID=1 - ... set by it (...)` line must
-    not name them, and RADV_DEBUG must have stayed unset (an explicit empty NVMTL_RADV_DEBUG that `open --env` dropped would put the flags back)"""
-    out, seen, radv_on = [], False, set()
-    for proc, pid, tid, msg in _lines(log):
-        m = _PARANOID.match(msg)
-        if m:
-            seen = True
-            by = {t.split("=", 1)[0] for t in (m.group(3) or "").split() if "=" in t}
-            bad = sorted(k for k in MINUS_KEYS if k in by)
-            if bad:
-                out.append("%s: the profile set %s itself, the explicit override did not reach the process (this rung is the whole profile)" % (proc, ", ".join(bad)))
-            continue
-        m = _RADV.match(msg)
-        if m and (_unq(m.group(1)) or _unq(m.group(2))):
-            radv_on.add(proc)
-    if not seen:
-        out.append("no `conf: NVMTL_PARANOID=...` line in the slice: the profile was not on")
-    if radv_on:
-        out.append("RADV flags were set in %s although this rung must not have them" % ", ".join(sorted(radv_on)))
-    return out
-
-
-_PARK = re.compile(r"^buffer park \((?:park|reuse)\): (\d+) parked, (\d+) reused")
-_HEAPTEX = re.compile(r"^heap texture(?: config:| \()")
-_BUFTEX = re.compile(r"^buffer texture(?: \((?:new|recycled)\)|: dres R3)")
-_RES2 = re.compile(r"^residency \(res2\): (?:evict-batch|waited)")
-_RES1 = re.compile(r"^residency \(res1\): the wall is")
-_GSUB = re.compile(r"^commit: G-SUB (\d+) parts submitted ahead, peak (\d+) in flight")
-
-
-def knob_evidence(log, proc="Terminal"):
-    """{rung: (exercised, text)} for the single-knob rungs of the PARANOID ladder, from the plugin log of a rung that ran WITHOUT the knob (the baseline): did the
-    code the knob switches off run in `proc` at all? A knob whose code never ran in the process cannot change its picture (False); None = the log cannot tell."""
-    park = heap = buftex = res2 = res1 = 0
-    peak = 0
-    mg, sin = {}, {}
-    for p, pid, tid, msg in _lines(log):
-        if p != proc:
-            continue
-        m = _PARK.match(msg)
-        if m:
-            park = max(park, int(m.group(1)) + int(m.group(2)))
-        heap += bool(_HEAPTEX.match(msg)); buftex += bool(_BUFTEX.match(msg)); res2 += bool(_RES2.match(msg)); res1 += bool(_RES1.match(msg))
-        m = _GSUB.match(msg)
-        if m:
-            peak = max(peak, int(m.group(2)))
-        m = _SUM_MG.match(msg)
-        if m:
-            mg = _kv(m.group(1))
-        m = _SUM_SIN.match(msg)
-        if m:
-            sin = _kv(m.group(1))
-    seen = bool(mg or sin or peak or heap or buftex or park)   # a Terminal log at all
-    if not seen:
-        return {}
-
-    def ev(flag, yes, no):
-        return (flag, yes if flag else no)
-    up = mg.get("prologue_uploads", 0)
-    out = {
-        "no-prologue": ev(up > 0, "%d managed upload(s) rode a submit's prologue" % up, "no managed upload rode a prologue"),
-        "gsub-inflight": ev(peak > 1, "up to %d parts were in flight" % peak, "at most 1 part was ever in flight, so a cap of 1 changes nothing"),
-        "no-bufreuse": ev(park > 0, "%d buffer(s) parked or reused" % park, "no buffer was ever parked or reused (no `buffer park (...)` line)"),
-        "no-heaptex-place": ev(heap > 0, "a heap texture was made", "no texture was ever made from a heap (no `heap texture` line)"),
-        "no-heaptex-recycle": ev(heap > 0, "a heap texture was made", "no texture was ever made from a heap (no `heap texture` line)"),
-        "no-buftex-recycle": ev(buftex > 0 or sin.get("cimg_new", 0) + sin.get("cimg_recycled", 0) > 0, "a buffer-backed texture was made",
-                                "no texture was ever made over a buffer (no `buffer texture (new|recycled)` line)"),
-        "no-res2": ev(res2 > 0, "the pager moved textures", "the pager never ran (no `evict-batch` line)"),
-        "no-purge-reclaim": ev(res1 > 0, "textures were purged under VRAM pressure", "no purge under VRAM pressure ever happened (no `the wall is` line)"),
-        "no-surfin-cache": ev(sin.get("bufcopy", 0) + sin.get("cimg_new", 0) > 0 or sin.get("miss_seed", 0) + sin.get("miss_gen", 0) > 0,
-                              "the cache decided something", "no buffer texture was refreshed and no cached decision was ever missed: the cache only answered the probe"),
-    }
-    return out
-
-
 def glyph_verdicts(rungs, prefix):
     """{rung: {"verdict", "text"}} of the automatic glyph check (tools/glyph_verdict.py) on the rung's hires look(s): `<prefix>-scanout<look>-pipe<N>.ppm`, prefix
-    = the report's path without .tar.gz. A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
+    = the report's path without .tar.gz; the `h2` look of the glyph hunt is the second look that identifies the live window. A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
     try:
         import glyph_verdict as gv
     except ImportError:
         return {n: {"verdict": "none", "text": "tools/glyph_verdict.py is missing next to triage_glyphs.py: the glyphs were NOT checked"} for n in rungs}
     out = {}
     for name, r in rungs.items():
-        files = []
-        for look in r.get("looks") or []:
+        files, later = [], []
+        looks_ = r.get("looks") or []
+        for look in looks_:
             if look.endswith("h"):
                 files += sorted(glob.glob(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*.ppm"))
+            elif look.endswith("h2"):
+                later += sorted(glob.glob(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*.ppm"))
         if not files:
             continue
         try:
-            out[name] = gv.verdict_files(files)
+            # a rung with a second look (the glyph hunt) is judged on the window that changed between the two, its own live text
+            out[name] = gv.verdict_files(files, later=later) if any(l.endswith("h2") for l in looks_) else gv.verdict_files(files)
         except Exception as e:  # noqa: BLE001  (one bad picture must not take the triage down)
             out[name] = {"verdict": "none", "text": "the glyph check FAILED (%s: %s)" % (type(e).__name__, e)}
     return out
@@ -460,9 +487,8 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
     One row per rung: what it set, which processes show it in the log (the plugin's own `vk: ab switches` line), the load pass / fence / managed counters
     of the slice, and the owner's verdict when one was given. [(level, name, text)]."""
     rows = [("WARN", "ladder", p) for p in problems]
-    names = LADDER_PARANOID_RUNGS if variant == 3 else LADDER_RUNGS + (LADDER_WS_RUNGS if variant == 2 else ())
+    names = LADDER_GLYPHS_RUNGS if variant == 3 else LADDER_RUNGS + (LADDER_WS_RUNGS if variant == 2 else ())
     glyphs = glyphs or {}
-    evid = knob_evidence((rungs.get("baseline") or {}).get("log", "")) if variant == 3 else {}
     for name in names:
         r = rungs.get(name)
         if r is None:
@@ -497,12 +523,11 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
         gl = glyphs.get(name)
         if gl:
             txt += "; glyphs (automatic, tools/glyph_verdict.py): " + gl["text"]
-        ev = evid.get(name)
-        if ev:
-            txt += "; in the baseline Terminal " + ev[1] + ("" if ev[0] else " - this rung CANNOT differ from the baseline")
+        for lvl_, nm_, t_ in sub:   # the rung's own detector result (the glyph hunt's managed-check / managed-whole rungs)
+            if nm_ == "undeclared writes":
+                txt += "; undeclared writes: " + t_[:220]
+                break
         extra = problems_ + list(r.get("warn") or [])
-        if name == MINUS_RUNG:
-            extra += _minus_rung_problems(r.get("log", ""))
         if warn:
             extra.append("a counter or conf WARN in the slice")
         if r.get("cut"):
@@ -514,8 +539,17 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
         rows.append(("INFO" if not extra else "WARN", "ladder " + name, txt))
     nq = [n for n in names if (rungs.get(n) or {}).get("quit_failed")]
     if nq:
-        rows.append(("INFO", "ladder quit", "%d of %d rung(s): the apps did not quit when asked through System Events and were TERMed after 8 s (macOS may be waiting for the one-time Automation "
+        rows.append(("INFO", "ladder quit", "%d of %d rung(s) (an older run): the apps did not quit when asked through System Events and were TERMed after 8 s (macOS may be waiting for the one-time Automation "
                      "prompt for osascript, or the Terminal asks to terminate its running process); the plugin's exit SUMMARY is lost there, its 10 s counters are not" % (len(nq), len(names))))
+    ends = [e for n in names for e in (rungs.get(n) or {}).get("quit_ends", [])]
+    surv = [n for n in names if (rungs.get(n) or {}).get("quit_survived")]
+    if ends or surv:
+        by = {}
+        for sig, secs in ends:
+            by.setdefault(sig, []).append(secs)
+        txt = "; ".join("%d instance(s) ended by SIG%s (after %s s)" % (len(v), k, "/".join(str(x) for x in sorted(set(v)))) for k, v in sorted(by.items(), key=lambda kv: ("INT", "TERM", "KILL").index(kv[0])))
+        rows.append(("WARN" if surv else "INFO", "ladder quit", "%s%s; a signal ends a GUI process without its exit handlers, so the plugin's exit SUMMARY is lost: the counters are the last 10 s tick of each process" % (
+            txt, ("; STILL ALIVE after SIGKILL in: " + ", ".join(surv)) if surv else "")))
     # the automatic glyph verdict: which rung made the text clean
     gv_ = {n: glyphs[n]["verdict"] for n in names if n in glyphs}
     if gv_ and all(v == "none" for v in gv_.values()):
@@ -526,18 +560,25 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
             rows.append(("INFO", "ladder glyphs", "the baseline glyphs were BROKEN and CLEAN with: %s (tools/glyph_verdict.py: identical tick lines are drawn identically)" % ", ".join(clean)))
         elif gv_.get("baseline") == "broken":
             tail = ""
-            if variant == 3 and gv_.get("paranoid") != "clean":
-                tail = ("; the positive control (paranoid, every knob of the profile) is NOT clean either, so none of the knobs of this ladder is the cure and the single-knob "
-                        "rungs say nothing - the cause is outside what NVMTL_PARANOID changes (docs/AFTER-TESTS.md)")
+            if variant == 3:
+                tail = ("; no knob of this glyph hunt is the cure by itself (managed uploads whole or in pages, the shared window surface, page-off, framebuffer fetch, texel buffers, bindless, "
+                        "clears, empty encoders): read the `undeclared writes`, `surface census`, `same-image copy` and `fence early` rows of the baseline rung for what is left (docs/AFTER-TESTS.md)")
             rows.append(("INFO", "ladder glyphs", "the baseline glyphs were BROKEN and no rung made them clean%s" % tail))
         elif gv_.get("baseline") == "clean":
             rows.append(("INFO", "ladder glyphs", "the baseline glyphs were CLEAN in this run: the artefact did not show, the other rungs prove nothing"))
         else:
             rows.append(("INFO", "ladder glyphs", "the baseline's glyphs could not be judged (%s)" % (gv_.get("baseline") or "no look")))
-    if variant == 3 and evid:
-        dead = [n for n in LADDER_PARANOID_RUNGS if n in evid and not evid[n][0]]
-        if dead:
-            rows.append(("INFO", "ladder knobs", "rungs whose switch has no code to switch off in the baseline Terminal (they cannot differ from the baseline): %s" % ", ".join(dead)))
+    if variant == 3 and gv_:
+        if gv_.get(GLYPHS_CONTROL) == "clean":
+            rows.append(("WARN", "ladder glyphs control", "the negative control (%s) came out CLEAN here, though card run 2026-10-25f says it does not clean Terminal's text: either the live-window "
+                         "identification picked another window, or the artefact is intermittent - the other rungs of this run are not comparable" % GLYPHS_CONTROL))
+        if gv_.get("baseline") == "broken":
+            fixers = [n for n in names if gv_.get(n) == "clean" and n != GLYPHS_CONTROL and n in GLYPHS_MEANING]
+            for n in fixers:
+                rows.append(("INFO", "ladder glyphs " + n, "CLEAN while the baseline was BROKEN: " + GLYPHS_MEANING[n]))
+        unjudged = [n for n in names if n in glyphs and gv_.get(n) == "none"]
+        if unjudged and len(unjudged) < len(gv_):
+            rows.append(("INFO", "ladder glyphs none", "no live tick window was found in the look of: %s (the Terminal did not come up on a screen in that rung, or the screen did not change between the two looks)" % ", ".join(unjudged)))
     # the verdict of the whole ladder: which rung made the picture right
     ans = {n: rungs[n].get("verdict") for n in names if n in rungs}
     if ans.get("baseline") == "n":

@@ -7,9 +7,9 @@
 #    rdna3mtl.conf is not touched and WindowServer is not restarted
 #  - the WindowServer rungs (variant 2): the conf holds the rung's lines (the others kept, a same-named line replaced) when WindowServer is
 #    restarted, and is EXACTLY the original afterwards - also with no conf file at all, after an interrupt (SIGTERM in a rung), after a dead run
-#  - variant 3 (ladder-paranoid): 18 rungs in the order the triage expects, each with exactly its switches (one knob per rung; the halves partition the
-#    PARANOID profile's composition in NVMTLObjects.m; the minus rung gives NVMTL_RADV_DEBUG an EMPTY value and ASYNC_COMMIT=1), the triage reads it and
-#    finds the minus rung's override in the plugin's own `conf: NVMTL_PARANOID` line
+#  - variant 3 (ladder-glyphs): 13 rungs in the order the triage expects, each with exactly its switches (one knob per rung, each a knob the plugin reads
+#    with the value it reads), two hi-res looks per rung (the second identifies the live window), the triage reads it
+#  - the quit: SIGINT first, then SIGTERM, then SIGKILL, a line per instance saying how it ended, never System Events (no consent needed)
 #  - the text script (one colour for the tick lines, the mixed-glyph line) and the persistence flag of the Terminal open
 #  - nobody logged in: aborts with a line, touches nothing
 #  - an app that does not start is reported; tty mode: the owner's y / n per rung reaches ladder.txt
@@ -33,13 +33,13 @@ sed -n '/^# LADDER-BEGIN/,/^# LADDER-END/p' "$AR" > "$T/ladder.sh"
 # ---- the rung list = the triage's
 RUNGS=$(sed -n 's/^LADDER_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
 WSRUNGS=$(sed -n 's/^LADDER_WS_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
-PRUNGS=$(sed -n 's/^LADDER_PARANOID_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
+PRUNGS=$(sed -n 's/^LADDER_GLYPHS_RUNGS="\(.*\)"$/\1/p' "$T/ladder.sh")
 PY=$(python3 -I -c "
 import sys; sys.path.insert(0, '$ROOT/tools')
 import triage_glyphs as t
-print(' '.join(t.LADDER_RUNGS)); print(' '.join(t.LADDER_WS_RUNGS)); print(' '.join(t.LADDER_PARANOID_RUNGS))")
+print(' '.join(t.LADDER_RUNGS)); print(' '.join(t.LADDER_WS_RUNGS)); print(' '.join(t.LADDER_GLYPHS_RUNGS))")
 [ "$RUNGS" = "$(echo "$PY" | sed -n 1p)" ] && [ "$WSRUNGS" = "$(echo "$PY" | sed -n 2p)" ] || fail "rungs: autoreport.sh [$RUNGS] [$WSRUNGS] vs triage_glyphs.py [$PY]"
-[ "$PRUNGS" = "$(echo "$PY" | sed -n 3p)" ] && [ "$(echo $PRUNGS | wc -w | tr -d ' ')" = 18 ] || fail "paranoid rungs: autoreport.sh [$PRUNGS] vs triage_glyphs.py [$(echo "$PY" | sed -n 3p)]"
+[ "$PRUNGS" = "$(echo "$PY" | sed -n 3p)" ] && [ "$(echo $PRUNGS | wc -w | tr -d ' ')" = 13 ] || fail "glyph rungs: autoreport.sh [$PRUNGS] vs triage_glyphs.py [$(echo "$PY" | sed -n 3p)]"
 
 # ---- the stubs
 mkdir -p "$T/bin" "$T/sys" "$T/D/bin" "$T/home"
@@ -105,14 +105,6 @@ n=$(cat "$STUBDIR/ws" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUBDIR/
 cp "$BISECT_CONF" "$STUBDIR/conf-at-ws-$n" 2>/dev/null || echo "(absent)" > "$STUBDIR/conf-at-ws-$n"
 exit 0
 EOF
-cat > "$T/bin/osascript" <<'STUBEND'
-#!/bin/sh
-# tell application "System Events" to tell (first process whose unix id is N) to quit: the instance quits (unless OSA_NOQUIT)
-echo "osascript $*" >> "$STUBLOG"
-n=$(echo "$*" | sed -n 's/.*unix id is \([0-9]*\)).*/\1/p')
-[ -n "$n" ] && [ -z "${OSA_NOQUIT:-}" ] && for f in "$STUBDIR"/pids-*; do [ -f "$f" ] && { grep -vx "$n" "$f" > "$f.n" || true; mv -f "$f.n" "$f"; }; done
-exit 0
-STUBEND
 cat > "$T/bin/mktemp" <<'STUBEND'
 #!/bin/sh
 # mktemp -d /Users/Shared/rdna3-ladder-text.XXXXXX -> a directory in the stub dir
@@ -143,9 +135,12 @@ hdr() { echo "== $*"; }
 with_limit() { shift; "$@"; }
 restore_sleep() { :; }
 as_user() { "$@"; }
-kill() {   # the real kill is not wanted: the fake instances are forgotten, the line is kept; -0 asks whether the instance is still there
+kill() {   # the real kill is not wanted: the fake instances are forgotten, the line is kept; -0 asks whether the instance is still there. IGNORE_INT / IGNORE_TERM / IGNORE_KILL: an
+    # instance that survives that signal (a Terminal that shrugs off SIGINT, one that cannot be killed)
     if [ "$1" = -0 ]; then cat "$STUBDIR"/pids-* 2>/dev/null | grep -qx "$2"; return $?; fi
     echo "kill $*" >> "$STUBLOG"
+    sig=$1
+    case $sig in -INT) [ -n "${IGNORE_INT:-}" ] && return 0 ;; -TERM) [ -n "${IGNORE_TERM:-}" ] && return 0 ;; -KILL) [ -n "${IGNORE_KILL:-}" ] && return 0 ;; esac
     for a in "$@"; do
         case $a in -*) ;; *) for f in "$STUBDIR"/pids-*; do [ -f "$f" ] && { grep -vx "$a" "$f" > "$f.n" || true; mv -f "$f.n" "$f"; }; done ;; esac
     done
@@ -228,6 +223,12 @@ for SH in sh bash dash; do
     grep -q '^log show --start ' "$T/stub.log" && grep -q 'processID == 1000' "$T/stub.log" || fail "$SH: the log slice is not by pid"
     # only the pids this run started are quit; the owner's Terminal (500) is not
     ! grep -q '^kill .*500' "$T/stub.log" || fail "$SH: the owner's Terminal was killed"
+    # the quit needs no consent: SIGINT first (no System Events), and the evidence file says how every instance ended
+    ! grep -q 'osascript\|System Events' "$T/stub.log" || fail "$SH: the quit goes through System Events/osascript"
+    [ "$(grep -c '^kill -INT ' "$T/stub.log")" = 7 ] && [ "$(grep -c '^quit: pid [0-9]* ended by SIGINT after ' "$L")" = 14 ] || fail "$SH: the quit by SIGINT: $(grep -c '^kill -INT' "$T/stub.log") kills, $(grep -c '^quit: pid' "$L") lines"
+    ! grep -q '^kill -TERM' "$T/stub.log" || fail "$SH: an instance that quit on SIGINT was TERMed too"
+    [ "$(grep -n '^kill -INT' "$T/stub.log" | head -1 | cut -d: -f1)" -lt "$(grep -n '^log show' "$T/stub.log" | head -1 | cut -d: -f1)" ] || fail "$SH: the log slice is taken before the apps are asked to quit"
+    grep -q '^pkill -f ' "$T/stub.log" || fail "$SH: the text script was not ended before the quit"
     [ "$(cat "$T/sys/pids-Terminal")" = 500 ] || fail "$SH: instances left running: $(cat "$T/sys/pids-Terminal" "$T/sys/pids-Chess" 2>/dev/null | tr '\n' ' ')"
     [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: Chess instances left running"
     # the app rungs touch neither the conf nor WindowServer
@@ -305,14 +306,30 @@ PYEOF
     grep -q '^rc=143$' "$T/base.out" && grep -q '^baseline_pids: Terminal=500 Chess=600 *$' "$T/base/ladder.txt" || fail "$SH: baseline_pids: $(grep baseline "$T/base/ladder.txt"; tail -2 "$T/base.out")"
     grep -q '^kill -TERM 1999' "$T/stub.log" && grep -q '^sweep: Chess instance(s) 1999' "$T/base/ladder.txt" || fail "$SH: a missed instance was not swept"
     ! grep -q '^kill .*\b600\b' "$T/stub.log" && ! grep -q 'unix id is 600' "$T/stub.log" && [ "$(cat "$T/sys/pids-Chess")" = 600 ] || fail "$SH: the owner's Chess was touched: $(cat "$T/sys/pids-Chess")"
-    # the apps are asked to quit first (by unix id), then the log slice is taken; one that ignores it is TERMed
+    # an instance that shrugs off SIGINT is TERMed, one that shrugs off both is KILLed, one that survives even that is reported; each line says how it ended
     fresh
-    run 1 quit
-    [ "$(grep -c '^osascript .*System Events.*unix id is' "$T/stub.log")" = 14 ] || fail "$SH: the graceful quit: $(grep -c '^osascript' "$T/stub.log") osascript calls, expected 14"
-    [ "$(grep -n '^osascript' "$T/stub.log" | head -1 | cut -d: -f1)" -lt "$(grep -n '^log show' "$T/stub.log" | head -1 | cut -d: -f1)" ] || fail "$SH: the log slice is taken before the apps are asked to quit"
+    run 1 stubborn IGNORE_INT=1
+    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1000' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores SIGINT is not TERMed"
+    [ "$(grep -c '^quit: pid [0-9]* ended by SIGTERM after ' "$T/stubborn/ladder.txt")" = 14 ] && ! grep -q 'ended by SIGINT' "$T/stubborn/ladder.txt" || fail "$SH: how the instances ended (TERM): $(grep '^quit' "$T/stubborn/ladder.txt" | sort | uniq -c | head -3)"
     fresh
-    run 1 stubborn OSA_NOQUIT=1 LADDER_QUITGRACE=2
-    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1000' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores the quit request is not TERMed"
+    run 1 killed IGNORE_INT=1 IGNORE_TERM=1
+    [ "$(grep -c '^quit: pid [0-9]* ended by SIGKILL after ' "$T/killed/ladder.txt")" = 14 ] && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores INT and TERM is not KILLed: $(grep '^quit' "$T/killed/ladder.txt" | head -3)"
+    fresh
+    run 1 immortal IGNORE_INT=1 IGNORE_TERM=1 IGNORE_KILL=1
+    grep -q '^quit: pid(s) .* SURVIVED SIGKILL$' "$T/immortal/ladder.txt" || fail "$SH: an instance that survives SIGKILL is not reported: $(grep '^quit' "$T/immortal/ladder.txt" | head -3)"
+    python3 -I - "$T/immortal/ladder.txt" "$T/killed/ladder.txt" "$T/apps/ladder.txt" "$T/stubborn/ladder.txt" <<'PYEOF' || fail "$SH: the triage does not read how the instances ended"
+import sys, os
+sys.path.insert(0, os.environ["ROOT"] + "/tools")
+import triage_glyphs as t
+def quit_row(path):
+    v, rungs, probs = t.parse_ladder(open(path).read(), {})
+    return [r for r in t.ladder_rows(rungs, v, probs) if r[1] == "ladder quit"]
+imm, kil, ok, stub = (quit_row(a) for a in sys.argv[1:5])
+assert imm and imm[0][0] == "WARN" and "STILL ALIVE after SIGKILL" in imm[0][2], imm
+assert kil and kil[0][0] == "INFO" and "ended by SIGKILL" in kil[0][2], kil
+assert ok and ok[0][0] == "INFO" and "14 instance(s) ended by SIGINT" in ok[0][2], ok
+assert stub and "ended by SIGTERM" in stub[0][2], stub
+PYEOF
     # the text script is made in a directory of mktemp's and removed at the end (no fixed name in /Users/Shared)
     fresh
     run 1 mk LADDER_TEXT=
@@ -320,96 +337,87 @@ PYEOF
     [ -z "$(ls -d "$T"/sys/textdir.* 2>/dev/null)" ] || fail "$SH: the text script's directory was left behind"
     ! grep -q 'Users/Shared' "$T/stub.log" || fail "$SH: a fixed /Users/Shared name is used"
 
-    # ------------------------------------------------------------ variant 3: the PARANOID profile's knobs, one rung each
+    # ------------------------------------------------------------ variant 3: the glyph hunt, one knob per rung, two hi-res looks per rung
     fresh
     run 3 par
     L=$T/par/ladder.txt
     grep -q '^rc=0$' "$T/par.out" || fail "$SH: variant 3 rc: $(tail -5 "$T/par.out")"
-    grep -q '^variant: 3 (ladder-paranoid)$' "$L" || fail "$SH: variant 3 header: $(grep '^variant' "$L")"
-    [ "$(grep -c '^== rung ' "$L")" = 18 ] && [ "$(grep -c '^== end rung ' "$L")" = 18 ] || fail "$SH: not 18 rungs: $(grep -c '^== rung ' "$L")"
+    grep -q '^variant: 3 (ladder-glyphs)$' "$L" || fail "$SH: variant 3 header: $(grep '^variant' "$L")"
+    [ "$(grep -c '^== rung ' "$L")" = 13 ] && [ "$(grep -c '^== end rung ' "$L")" = 13 ] || fail "$SH: not 13 rungs: $(grep -c '^== rung ' "$L")"
     [ "$(grep '^== rung ' "$L" | sed 's/^== rung //' | tr '\n' ' ' | sed 's/ $//')" = "$PRUNGS" ] || fail "$SH: variant 3 rungs ran in a different order: $(grep '^== rung ' "$L" | tr '\n' ' ')"
-    [ "$(grep -c '^open -n -a ' "$T/stub.log")" = 36 ] || fail "$SH: variant 3: expected 36 open calls: $(grep -c '^open' "$T/stub.log")"
+    [ "$(grep -c '^open -n -a ' "$T/stub.log")" = 26 ] || fail "$SH: variant 3: expected 26 open calls: $(grep -c '^open' "$T/stub.log")"
+    [ "$(grep -c '^drminfo --scanout-hires ' "$T/stub.log")" = 26 ] && [ "$(grep -c '^drminfo --scanout ' "$T/stub.log")" = 13 ] || fail "$SH: variant 3 looks: $(grep -c '^drminfo --scanout-hires' "$T/stub.log") hires (two per rung), $(grep -c '^drminfo --scanout ' "$T/stub.log") small"
     n=0
     for r in $PRUNGS; do
         n=$((n + 1))
         case $r in
             baseline) want="" ;;
+            managed-whole) want="--env NVMTL_MANAGED_WHOLE=1" ;;
+            managed-check) want="--env NVMTL_MANAGED_CHECK=1" ;;
+            no-surface-share) want="--env NVMTL_NO_SURFACE_SHARE=1" ;;
+            no-surface-pageoff) want="--env NVMTL_NO_SURFACE_PAGEOFF=1" ;;
+            fbfetch-zero) want="--env NVMTL_FBFETCH_ZERO=1" ;;
+            managed-pages) want="--env NVMTL_MANAGED_PAGES=1" ;;
+            managed-eager-zero) want="--env NVMTL_MANAGED_EAGER_ZERO=1" ;;
+            no-texbuf) want="--env NVMTL_NO_TEXBUF=1" ;;
+            no-bindless) want="--env NVMTL_NO_BINDLESS=1" ;;
+            dontcare-clears) want="--env NVMTL_DONTCARE_CLEARS=1" ;;
+            skip-empty-0) want="--env NVMTL_SKIP_EMPTY=0" ;;
             paranoid) want="--env NVMTL_PARANOID=1" ;;
-            paranoid-minus-radv-sync) want="--env NVMTL_PARANOID=1 --env NVMTL_RADV_DEBUG= --env NVMTL_ASYNC_COMMIT=1" ;;
-            paranoid-a) want="--env NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears --env NVMTL_NO_POOL_REUSE=1 --env NVMTL_NO_BUFREUSE=1 --env NVMTL_NO_BUFTEX_RECYCLE=1 --env NVMTL_NO_HEAPTEX_RECYCLE=1 --env NVMTL_NO_HEAPTEX_PLACE=1 --env NVMTL_NO_RES2=1 --env NVMTL_NO_PURGE_RECLAIM=1 --env NVMTL_NO_SURFIN_CACHE=1" ;;
-            paranoid-b) want="--env NVMTL_ASYNC_COMMIT=0 --env NVMTL_GSUB_INFLIGHT=1 --env NVMTL_PRESUBMIT_PROLOGUE=0 --env NVMTL_NO_DIRTYONLY=1 --env NVMTL_ENC78_OFF=all --env NVMTL_G79_OFF=all" ;;
-            gsub-inflight) want="--env NVMTL_GSUB_INFLIGHT=1" ;;
-            no-prologue) want="--env NVMTL_PRESUBMIT_PROLOGUE=0" ;;
-            no-pool-reuse) want="--env NVMTL_NO_POOL_REUSE=1" ;;
-            no-bufreuse) want="--env NVMTL_NO_BUFREUSE=1" ;;
-            no-buftex-recycle) want="--env NVMTL_NO_BUFTEX_RECYCLE=1" ;;
-            no-heaptex-recycle) want="--env NVMTL_NO_HEAPTEX_RECYCLE=1" ;;
-            no-heaptex-place) want="--env NVMTL_NO_HEAPTEX_PLACE=1" ;;
-            no-dirtyonly) want="--env NVMTL_NO_DIRTYONLY=1" ;;
-            enc78-off) want="--env NVMTL_ENC78_OFF=all" ;;
-            g79-off) want="--env NVMTL_G79_OFF=all" ;;
-            no-res2) want="--env NVMTL_NO_RES2=1" ;;
-            no-purge-reclaim) want="--env NVMTL_NO_PURGE_RECLAIM=1" ;;
-            no-surfin-cache) want="--env NVMTL_NO_SURFIN_CACHE=1" ;;
             *) fail "$SH: the test does not know rung $r" ;;
         esac
         got=$(envs_of $n | sed -E 's/^open -n -a (Terminal|Chess) ?//; s# ?[^ ]*text\.command --args -ApplePersistenceIgnoreState YES$##; s/ +$//' | sort -u)
         [ "$(echo "$got" | wc -l | tr -d ' ')" = 1 ] && [ "$got" = "$want" ] || fail "$SH: variant 3 rung $r opened its apps with [$got], expected [$want]"
-        [ -f "$T/par/$r.log" ] && grep -q "^looks: ladder-${r}a ladder-${r}h\$" "$L" || fail "$SH: variant 3 rung $r: log slice or looks"
+        [ -f "$T/par/$r.log" ] && grep -q "^looks: ladder-${r}a ladder-${r}h ladder-${r}h2\$" "$L" || fail "$SH: variant 3 rung $r: log slice or looks: $(grep '^looks' "$L" | sed -n ${n}p)"
+        [ -f "$T/home/rdna3-scanout/ladder-${r}h/scanout-pipe0.ppm" ] && [ -f "$T/home/rdna3-scanout/ladder-${r}h2/scanout-pipe0.ppm" ] || fail "$SH: variant 3 rung $r: the two hires pictures"
     done
     cmp -s "$T/conf" "$T/conf.orig" && [ ! -e "$T/conf.bak" ] && ! grep -q '^killall' "$T/stub.log" || fail "$SH: variant 3 touched rdna3mtl.conf or WindowServer"
-    # the halves are a partition of the profile's composition in the plugin's source, with the profile's own values; the triage's lists say the same
-    python3 -I - "$L" "$ROOT" <<'PYEOF' || fail "$SH: variant 3: the halves / the triage"
-import re, sys, os
+    # the default ladder takes ONE hires look per rung (unchanged), only the glyph hunt takes the second
+    [ "$(grep -c 'h2$' "$T/apps/ladder.txt")" = 0 ] || fail "$SH: variant 1 took a second hires look"
+    # every knob of a rung is one the plugin reads, with the value it reads (the plugin's source is the authority), and is on the list `vk: ab switches` shows
+    python3 -I - "$L" "$ROOT" <<'PYEOF' || fail "$SH: variant 3: the knobs against the plugin's source"
+import re, sys, glob
 L, root = sys.argv[1], sys.argv[2]
-sys.path.insert(0, root + "/tools")
-import triage_glyphs as t
-src = open(root + "/metal/plugin/NVMTLObjects.m").read()
-blk = src[src.index("static const char *const kv[][2]"):]
-blk = blk[:blk.index("};")]
-prof = dict(re.findall(r'\{ "(NVMTL_\w+)", "([^"]*)" \}', blk))
-assert len(prof) == 15 and tuple(prof) == t.PARANOID_KEYS, (len(prof), list(prof), t.PARANOID_KEYS)
-conf = {}
-cur = None
+src = "".join(open(f).read() for f in glob.glob(root + "/metal/plugin/*.[mch]"))
+conf, cur = {}, None
 for line in open(L):
     m = re.match(r"^== rung (\S+)", line)
     if m: cur = m.group(1)
     m = re.match(r"^conf: (.*)$", line)
     if m and cur: conf[cur] = dict(kv.split("=", 1) for kv in m.group(1).split() if "=" in kv)
-a, b = conf["paranoid-a"], conf["paranoid-b"]
-assert not set(a) & set(b), set(a) & set(b)
-assert {**a, **b} == prof, ({**a, **b}, prof)
-assert tuple(a) == t.PARANOID_A and tuple(b) == t.PARANOID_B, (tuple(a), tuple(b))
-singles = {r: c for r, c in conf.items() if r not in ("baseline", "paranoid", "paranoid-a", "paranoid-b", "paranoid-minus-radv-sync")}
-assert len(singles) == 13 and all(len(c) == 1 for c in singles.values()), singles
-assert {k for c in singles.values() for k in c} == set(prof) - set(t.MINUS_KEYS), "the single-knob rungs are the profile without RADV and ASYNC_COMMIT"
-assert all(prof[k] == v for c in singles.values() for k, v in c.items()), "a single-knob rung has a value that is not the profile's"
-assert conf["paranoid-minus-radv-sync"] == {"NVMTL_PARANOID": "1", "NVMTL_RADV_DEBUG": "", "NVMTL_ASYNC_COMMIT": "1"}, conf["paranoid-minus-radv-sync"]
+assert len(conf) == 13 and conf["baseline"] == {}, conf
+assert all(len(c) == 1 for r, c in conf.items() if r != "baseline"), "one knob per rung"
+for r, c in conf.items():
+    for k, v in c.items():
+        assert 'getenv("%s")' % k in src, "%s: the plugin never reads %s" % (r, k)
+        assert '"%s"' % k in src[src.index("nvmtl_ab_knobs[]"):][:3000], "%s: %s is not on the list `vk: ab switches` shows" % (r, k)
+# the values mean what the rung says: =1 for the knobs that test the first character / presence, SKIP_EMPTY=0 turns the default off
+assert conf["skip-empty-0"] == {"NVMTL_SKIP_EMPTY": "0"} and all(v == "1" for r, c in conf.items() if r != "skip-empty-0" for v in c.values())
+assert 'on = !(e && e[0] == \'0\')' in src[src.index('"NVMTL_SKIP_EMPTY"') - 60:src.index('"NVMTL_SKIP_EMPTY"') + 120], "SKIP_EMPTY is on unless it starts with 0"
+assert 'on = !(e && e[0] == \'1\')' in src[src.index('"NVMTL_MANAGED_EAGER_ZERO"') - 60:src.index('"NVMTL_MANAGED_EAGER_ZERO"') + 120], "MANAGED_EAGER_ZERO=1 is the old behaviour"
 PYEOF
-    # the triage reads it: no WARN, the minus rung's override is verified from the plugin's own profile line, a profile that set the flags itself is caught
+    # the triage reads it: no WARN, the rungs in order, a rung that did not reach the plugin is caught
     python3 -I - "$L" "$T/par" <<'PYEOF' || fail "$SH: variant 3: tools/triage_glyphs.py does not read the ladder"
 import sys, os
 sys.path.insert(0, os.environ["ROOT"] + "/tools")
 import triage_glyphs as t
 text = open(sys.argv[1]).read()
-logs = {r: open(os.path.join(sys.argv[2], r + ".log")).read() for r in t.LADDER_PARANOID_RUNGS}
+logs = {r: open(os.path.join(sys.argv[2], r + ".log")).read() for r in t.LADDER_GLYPHS_RUNGS}
 v, rungs, probs = t.parse_ladder(text, logs)
-assert v == 3 and not probs and list(rungs) == list(t.LADDER_PARANOID_RUNGS), (v, probs, list(rungs))
+assert v == 3 and not probs and list(rungs) == list(t.LADDER_GLYPHS_RUNGS), (v, probs, list(rungs))
+assert all(r["looks"] == ["ladder-%sa" % n, "ladder-%sh" % n, "ladder-%sh2" % n] for n, r in rungs.items()), [r["looks"] for r in rungs.values()][:2]
 rows = t.ladder_rows(rungs, v, probs)
 bad = [r for r in rows if r[0] != "INFO"]
 assert not bad, bad
-assert [r[1] for r in rows if r[1].startswith("ladder ")][:3] == ["ladder baseline", "ladder paranoid", "ladder paranoid-minus-radv-sync"], rows[:3]
-m = [r for r in rows if r[1] == "ladder paranoid-minus-radv-sync"][0]
-assert "NVMTL_RADV_DEBUG=" in m[2] and "NVMTL_ASYNC_COMMIT=1" in m[2], m
-# `open --env NVMTL_RADV_DEBUG=` dropped: the plugin's profile then sets the flags and the async commit itself
-bad_log = logs["paranoid-minus-radv-sync"].replace("NVMTL: conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: 13 switch(es) set by it (",
-                                                   "NVMTL: conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: 15 switch(es) set by it (NVMTL_RADV_DEBUG=nodcc NVMTL_ASYNC_COMMIT=0 ")
-assert bad_log != logs["paranoid-minus-radv-sync"], "the stub's profile line is not what the test expects"
-rows2 = t.ladder_rows(dict(rungs, **{"paranoid-minus-radv-sync": dict(rungs["paranoid-minus-radv-sync"], log=bad_log)}), v, probs)
-m2 = [r for r in rows2 if r[1] == "ladder paranoid-minus-radv-sync"][0]
-assert m2[0] == "WARN" and "set NVMTL_ASYNC_COMMIT, NVMTL_RADV_DEBUG itself" in m2[2], m2
+assert [r[1] for r in rows if r[1].startswith("ladder ")][:3] == ["ladder baseline", "ladder managed-whole", "ladder managed-check"], rows[:3]
+m = [r for r in rows if r[1] == "ladder no-texbuf"][0]
+assert "NVMTL_NO_TEXBUF" in m[2], m
+# a log in which the knob never reached the plugin is a WARN
+rows2 = t.ladder_rows(dict(rungs, **{"managed-pages": dict(rungs["managed-pages"], log=logs["baseline"])}), v, probs)
+m2 = [r for r in rows2 if r[1] == "ladder managed-pages"][0]
+assert m2[0] == "WARN" and "did not reach the plugin" in m2[2], m2
 PYEOF
-    echo "test_ladder_step: ok PARANOID knobs ($SH)"
+    echo "test_ladder_step: ok glyph hunt ($SH)"
 
     # ------------------------------------------------------------ nobody logged in; an app that does not start; tty answers
     fresh
@@ -437,7 +445,7 @@ PYEOF
 done
 
 # ---- the wiring
-grep -q -- '--ladder) LADDER=1' "$AR" && grep -q -- '--ladder-ws) LADDER=2' "$AR" && grep -q -- '--ladder-paranoid) LADDER=3' "$AR" || fail "autoreport.sh: --ladder / --ladder-ws / --ladder-paranoid"
+grep -q -- '--ladder) LADDER=1' "$AR" && grep -q -- '--ladder-ws) LADDER=2' "$AR" && grep -q -- '--ladder-glyphs) LADDER=3' "$AR" || fail "autoreport.sh: --ladder / --ladder-ws / --ladder-glyphs"
 grep -q 'rdna3ladder=1 "\*) \[ -n "\$LADDER" \] || LADDER=1' "$AR" && grep -q 'rdna3ladder=2 "\*) \[ -n "\$LADDER" \] || LADDER=2' "$AR" && grep -q 'rdna3ladder=3 "\*) \[ -n "\$LADDER" \] || LADDER=3' "$AR" || fail "autoreport.sh: boot-args rdna3ladder=1 / 2 / 3"
 grep -q 'ladder_run "\$LADDER"' "$AR" || fail "autoreport.sh: ladder_run is not called"
 grep -q '\[ -z "\$BISECT" \] && \[ -z "\$PLAY" \] && \[ -z "\$LADDER" \]' "$AR" || fail "autoreport.sh: the other tests still run in a ladder run"
@@ -447,15 +455,15 @@ grep -q '^ladder .* rdna3ladder=1$' "$ROOT/tools/ladder-steps.txt" && grep -q '^
 play=$(awk '$1 == "play" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 lad=$(awk '$1 == "ladder" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 [ "$lad" = "${play% rdna3play=1} rdna3ladder=1" ] || fail "ladder-steps.txt: ladder is [$lad], expected the play step's boot-args + rdna3ladder=1"
-[ "$(grep -c 'play-agdcscaler ladder ladder-ws ladder-paranoid' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: ladder / ladder-ws / ladder-paranoid are not in both step lists"
-par=$(awk '$1 == "ladder-paranoid" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
-[ "$par" = "${play% rdna3play=1} rdna3ladder=3" ] || fail "ladder-steps.txt: ladder-paranoid is [$par], expected the play step's boot-args + rdna3ladder=3"
+[ "$(grep -c 'play-agdcscaler ladder ladder-ws ladder-glyphs' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: ladder / ladder-ws / ladder-glyphs are not in both step lists"
+par=$(awk '$1 == "ladder-glyphs" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
+[ "$par" = "${play% rdna3play=1} rdna3ladder=3" ] || fail "ladder-steps.txt: ladder-glyphs is [$par], expected the play step's boot-args + rdna3ladder=3"
 sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
 m1=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$lad")
 m2=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "${lad%1}2")
 m3=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$par")
 mp=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$play")
 [ "$m1" -ge 20 ] && [ "$m1" -lt 40 ] && [ "$m2" -ge 40 ] && [ "$m2" -lt 60 ] && [ "$mp" = 30 ] || fail "rdna3vm: auto_limit ladder $m1, ladder-ws $m2, play $mp (expected 20..39, 40..59, 30)"
-[ "$m3" -ge 35 ] && [ "$m3" -lt 60 ] || fail "rdna3vm: auto_limit ladder-paranoid $m3 (18 rungs of ~70 s need 25 min of rungs: expected 35..59)"
+[ "$m3" -ge 35 ] && [ "$m3" -lt 60 ] || fail "rdna3vm: auto_limit ladder-glyphs $m3 (13 rungs of ~95 s need 21 min of rungs: expected 35..59)"
 grep -q '41-ladder.txt' "$ROOT/tools/triage_reports.py" && grep -q 'parse_ladder' "$ROOT/tools/triage_reports.py" || fail "triage_reports.py: the ladder is not read"
 echo "test_ladder_step: ok"

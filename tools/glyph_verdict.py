@@ -21,6 +21,7 @@ Pure Python (no PIL, no numpy): the report host's triage must run anywhere. Chec
 broken live one. Limits: a text window that is not on a screen is `none` (the rung proves nothing); text that is wrong in the SAME way on every line
 (a constant wrong glyph) would pass, the eye and the owner's y / n are the check for that."""
 import itertools
+import re
 from collections import Counter
 
 MIN_BANDS = 8        # a stack of fewer lines proves nothing
@@ -225,28 +226,93 @@ def analyze_ppm(data, tol=TWIN_TOL):
 
 _ORDER = {"broken": 0, "unclear": 1, "clean": 2}
 
+LIVE_STEP = 60       # luminance step between two looks that counts as a changed pixel
+LIVE_MIN = 150       # changed pixels in a stack's rectangle (grown to where the next lines appear) that make it LIVE
 
-def verdict_files(paths, tol=TWIN_TOL):
-    """the look files of one rung (its pipes): {"verdict": clean|broken|unclear|none, "text": one line for the triage, "stacks": [...]}. The worst stack
-    decides: broken text anywhere on the screen is broken text (a window Terminal restored from its saved state shows static text, drawn clean, next
-    to the live one). `none` also when no file could be read; the text says which."""
-    stacks, errs = [], []
+
+def _lum(pix, w, y, x0, x1):
+    r = pix[(y * w + x0) * 3:(y * w + x1) * 3]
+    return [(a + b + c) // 3 for a, b, c in zip(r[0::3], r[1::3], r[2::3])]
+
+
+def changed_pixels(data_a, data_b, rect):
+    """pixels of `rect` (x0, y0, x1, y1, grown right and down: the next tick lines appear below and the window is wider than its text) whose luminance differs
+    by more than LIVE_STEP between two looks of the same screen; ValueError when the two are not the same size"""
+    wa, ha, pa = parse_ppm(data_a)
+    wb, hb, pb = parse_ppm(data_b)
+    if (wa, ha) != (wb, hb):
+        raise ValueError("the two looks differ in size (%dx%d against %dx%d)" % (wa, ha, wb, hb))
+    x0, y0, x1, y1 = rect
+    pitch = max((y1 - y0) // 20, 8)
+    x0, x1, y0, y1 = max(x0 - 20, 0), min(x1 + 60, wa), max(y0 - 4, 0), min(y1 + 8 * pitch, ha)
+    n = 0
+    for y in range(y0, y1):
+        la, lb = _lum(pa, wa, y, x0, x1), _lum(pb, wb, y, x0, x1)
+        n += sum(1 for a, b in zip(la, lb) if abs(a - b) > LIVE_STEP)
+    return n
+
+
+def _pipe_of(path):
+    m = re.search(r"-pipe(\d+)\.ppm$", path.replace("\\", "/"))
+    return m.group(1) if m else None
+
+
+def verdict_files(paths, tol=TWIN_TOL, later=None):
+    """the look files of one rung (its pipes): {"verdict": clean|broken|unclear|none, "text": one line for the triage, "stacks": [...]}.
+
+    Without `later` the worst stack decides: broken text anywhere on the screen is broken text (a window Terminal restored from its saved state shows static
+    text, drawn clean, next to the live one).
+    With `later` (the second look of each pipe, taken a few seconds after the first, same file names with another look name) only a LIVE stack counts: the text
+    script prints a line a second, so the window that holds the rung's own text CHANGES between the two looks, and a window that does not (a restored one, another
+    rung's, a frozen screen) is listed as static and left out of the verdict. No live stack = `none`. `none` also when no file could be read; the text says which."""
+    stacks, errs, static = [], [], []
+    partner = {}
+    if later is not None:
+        for q in later:
+            partner[_pipe_of(q)] = q
     for p in paths:
         try:
             with open(p, "rb") as f:
-                for r in analyze_ppm(f.read(), tol):
-                    r["file"] = p
-                    stacks.append(r)
+                data = f.read()
+            found = analyze_ppm(data, tol)
+            other = None
+            if later is not None:
+                q = partner.get(_pipe_of(p))
+                if q is None:
+                    errs.append("%s: no second look of this pipe" % p.replace("\\", "/").rsplit("/", 1)[-1])
+                    continue
+                with open(q, "rb") as f:
+                    other = f.read()
+            for r in found:
+                r["file"] = p
+                if other is not None:
+                    r["changed"] = changed_pixels(data, other, r["rect"])
+                    r["live"] = r["changed"] >= LIVE_MIN
+                    if not r["live"]:
+                        static.append(r)
+                        continue
+                stacks.append(r)
         except (OSError, ValueError) as e:
             errs.append("%s: %s" % (p.replace("\\", "/").rsplit("/", 1)[-1], e))
+    live_note = ""
+    if later is not None and static:
+        live_note = "; %d STATIC tick stack(s) ignored (unchanged between the two looks: %s)" % (
+            len(static), ", ".join("%d/%d %s" % (r["twinned"], r["lines"], r["verdict"]) for r in static[:4]))
     if not stacks:
-        why = "no look could be read (%s)" % "; ".join(errs)[:200] if errs and len(errs) == len(paths) else \
-              "no stack of >= %d tick lines in the look%s" % (MIN_BANDS, "" if len(paths) == 1 else "s")
-        return {"verdict": "none", "text": why, "stacks": []}
+        if errs and len(errs) == len(paths):
+            why = "no look could be read (%s)" % "; ".join(errs)[:200]
+        elif later is not None and static:
+            why = "no LIVE tick stack: the %d tick stack(s) on the screens did not change between the two looks (restored or frozen text, not the rung's own)" % len(static)
+        else:
+            why = "no stack of >= %d tick lines in the look%s" % (MIN_BANDS, "" if len(paths) == 1 else "s")
+        return {"verdict": "none", "text": why, "stacks": [], "static": static}
     worst = min(stacks, key=lambda r: (_ORDER[r["verdict"]], r["share"]))
     text = "%s: %d of %d tick lines have a twin (%.0f %%)" % (worst["verdict"].upper(), worst["twinned"], worst["lines"], 100.0 * worst["share"])
+    if later is not None:
+        text += " in the live window"
     if len(stacks) > 1:
         text += "; %d tick stack(s) on the screens: %s" % (len(stacks), ", ".join("%d/%d %s" % (r["twinned"], r["lines"], r["verdict"]) for r in stacks[:4]))
+    text += live_note
     if errs:
         text += "; unreadable: " + "; ".join(errs)[:120]
-    return {"verdict": worst["verdict"], "text": text, "stacks": stacks}
+    return {"verdict": worst["verdict"], "text": text, "stacks": stacks, "static": static}

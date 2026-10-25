@@ -233,36 +233,76 @@ check(r["surface-in cache"][0][0] == "INFO" and "no `vk: surfin: SUMMARY`" in r[
 r = rows_of(L("WindowServer", 208, 'vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)'))
 check(r["surface-in cache"][0][0] == "WARN" and "timer" in r["surface-in cache"][0][1], "WindowServer without the SUMMARY is a WARN, %r" % r)
 
-# ---- DRIVER-PLAN N50, the PARANOID ladder (variant 3), the automatic glyph verdict and the knob evidence
-check(len(tg.LADDER_PARANOID_RUNGS) == 18 and tg.LADDER_PARANOID_RUNGS[:3] == ("baseline", "paranoid", "paranoid-minus-radv-sync"), "the paranoid ladder has 18 rungs, the control and the combinations first")
-check(set(tg.PARANOID_A) | set(tg.PARANOID_B) == set(tg.PARANOID_KEYS) and not set(tg.PARANOID_A) & set(tg.PARANOID_B), "the halves partition the profile's composition")
-BASE_T = (L("Terminal", 907, "commit: G-SUB 32 parts submitted ahead, peak 1 in flight | NVK G-SUB ABSENT submits 0") + L("Terminal", 907, "managed: SUMMARY check=0 snapshot=0 flushes=46 uploads=113 prologue_uploads=113 sync_uploads=0 checked=0 changed_exact=0")
-          + L("Terminal", 907, "vk: surfin: SUMMARY seq=5 t_ms=50598 cache=1 cimg_on=1 verify=0 calls=136 sin_us_total=14948 fast=109 miss_unsynced=4 miss_seed=0 miss_gen=0 bufcopy=0 cimg_new=0 cimg_recycled=0")
-          + L("Chess", 908, "buffer park (reuse): 4 parked, 4 reused, 0 evicted, 0 drained; 3 held, 9 bytes"))
-ev = tg.knob_evidence(BASE_T)
-check(ev["no-prologue"][0] is True and "113" in ev["no-prologue"][1], "knob evidence: the prologue carried uploads, %r" % (ev.get("no-prologue"),))
-check(ev["gsub-inflight"][0] is False and "at most 1 part" in ev["gsub-inflight"][1], "knob evidence: a cap of 1 changes nothing when the peak is 1, %r" % (ev.get("gsub-inflight"),))
-check(all(ev[k][0] is False for k in ("no-bufreuse", "no-heaptex-place", "no-heaptex-recycle", "no-buftex-recycle", "no-res2", "no-purge-reclaim", "no-surfin-cache")),
-      "knob evidence: code that never ran in Terminal is False (Chess's park line is not Terminal's), %r" % ev)
-check(tg.knob_evidence(L("Chess", 908, "buffer park (reuse): 4 parked, 4 reused")) == {}, "knob evidence: no Terminal log, no claim")
-ev2 = tg.knob_evidence(BASE_T + L("Terminal", 907, "buffer park (park): 1 parked, 0 reused, 0 evicted, 0 drained; 1 held, 1 bytes") + L("Terminal", 907, "heap texture (placed): 1 placed new, 0 recycled")
-                       + L("Terminal", 907, "residency (res2): evict-batch 1: 3 textures copied in ONE submission") + L("Terminal", 907, "residency (res1): the wall is 5 MB short"))
-check(all(ev2[k][0] is True for k in ("no-bufreuse", "no-heaptex-place", "no-res2", "no-purge-reclaim")), "knob evidence: park / heap / res2 / res1 lines count, %r" % ev2)
-
-PLOG = L("Terminal", 907, 'vk: ab switches [1]: NVMTL_PARANOID="1"') + L("Terminal", 907, "vk: ab: SUMMARY wit_ok=3 wit_early=0")
-P3 = {n: {"conf": [], "scope": "apps", "looks": ["ladder-%sa" % n, "ladder-%sh" % n], "verdict": None, "cut": False, "warn": [], "log": ""} for n in tg.LADDER_PARANOID_RUNGS}
-P3["baseline"]["log"] = BASE_T
-glyphs = {"baseline": {"verdict": "broken", "text": "BROKEN: 5 of 23 tick lines have a twin (22 %)"}, "paranoid": {"verdict": "broken", "text": "BROKEN: 2 of 23 tick lines have a twin (9 %)"},
-          "no-prologue": {"verdict": "clean", "text": "CLEAN: 22 of 23 tick lines have a twin (96 %)"}}
+# ---- DRIVER-PLAN N50, the glyph hunt (variant 3), the automatic glyph verdict, the undeclared-write detector, the same-image copy and the surface census
+check(len(tg.LADDER_GLYPHS_RUNGS) == 13 and tg.LADDER_GLYPHS_RUNGS[:3] == ("baseline", "managed-whole", "managed-check") and tg.LADDER_GLYPHS_RUNGS[-1] == "paranoid" == tg.GLYPHS_CONTROL,
+      "the glyph hunt has 13 rungs, the strongest first, the negative control last")
+check(set(tg.GLYPHS_MEANING) <= set(tg.LADDER_GLYPHS_RUNGS) - {"baseline", "paranoid"}, "every meaning belongs to a rung of the hunt")
+P3 = {n: {"conf": [], "scope": "apps", "looks": ["ladder-%sa" % n, "ladder-%sh" % n, "ladder-%sh2" % n], "verdict": None, "cut": False, "warn": [], "log": ""} for n in tg.LADDER_GLYPHS_RUNGS}
+glyphs = {"baseline": {"verdict": "broken", "text": "BROKEN: 5 of 23 tick lines have a twin (22 %) in the live window"}, "paranoid": {"verdict": "broken", "text": "BROKEN: 2 of 23 tick lines have a twin (9 %)"},
+          "managed-whole": {"verdict": "clean", "text": "CLEAN: 22 of 23 tick lines have a twin (96 %) in the live window"}, "no-texbuf": {"verdict": "none", "text": "no LIVE tick stack"}}
 rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), glyphs)}
-check("ladder no-bufreuse" in rows and "CANNOT differ from the baseline" in rows["ladder no-bufreuse"][1], "a knob rung whose code never ran in Terminal says so, %r" % (rows.get("ladder no-bufreuse"),))
-check("CANNOT differ" not in rows["ladder no-prologue"][1] and "glyphs (automatic, tools/glyph_verdict.py): CLEAN: 22 of 23" in rows["ladder no-prologue"][1], "the rung that ran says what the verdict was, %r" % (rows["ladder no-prologue"],))
-check("CLEAN with: no-prologue" in rows["ladder glyphs"][1] and "BROKEN and" in rows["ladder glyphs"][1], "the ladder glyph row names the clean rung, %r" % (rows.get("ladder glyphs"),))
-check("ladder knobs" in rows and "no-bufreuse" in rows["ladder knobs"][1] and "no-prologue" not in rows["ladder knobs"][1], "the dead rungs are listed once, %r" % (rows.get("ladder knobs"),))
-# PARANOID itself broken = the control fails and the ladder says so
-g2 = {"baseline": glyphs["baseline"], "paranoid": glyphs["paranoid"], "no-prologue": {"verdict": "broken", "text": "BROKEN: 3 of 22 tick lines have a twin (14 %)"}}
+check("glyphs (automatic, tools/glyph_verdict.py): CLEAN: 22 of 23" in rows["ladder managed-whole"][1], "the rung says what the verdict was, %r" % (rows["ladder managed-whole"],))
+check("CLEAN with: managed-whole" in rows["ladder glyphs"][1] and "BROKEN and" in rows["ladder glyphs"][1], "the ladder glyph row names the clean rung, %r" % (rows.get("ladder glyphs"),))
+check("ladder glyphs managed-whole" in rows and "hypothesis A" in rows["ladder glyphs managed-whole"][1], "a clean rung says what it points at, %r" % (rows.get("ladder glyphs managed-whole"),))
+check("ladder glyphs none" in rows and "no-texbuf" in rows["ladder glyphs none"][1], "a rung with no live window is named, %r" % (rows.get("ladder glyphs none"),))
+check("ladder glyphs control" not in rows, "the control stayed broken: no control row")
+# the control clean = the run is not comparable
+g2 = dict(glyphs, paranoid={"verdict": "clean", "text": "CLEAN: 20 of 20 tick lines have a twin (100 %)"})
 rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), g2)}
-check("no rung made them clean" in rows["ladder glyphs"][1] and "positive control" in rows["ladder glyphs"][1] and "none of the knobs" in rows["ladder glyphs"][1], "a failed control is said, %r" % (rows["ladder glyphs"],))
+check(rows["ladder glyphs control"][0] == "WARN" and "not comparable" in rows["ladder glyphs control"][1], "a clean negative control is a WARN, %r" % (rows.get("ladder glyphs control"),))
+# nothing cleans the text
+g3 = {"baseline": glyphs["baseline"], "paranoid": glyphs["paranoid"], "managed-whole": {"verdict": "broken", "text": "BROKEN: 3 of 22 tick lines have a twin (14 %)"}}
+rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), g3)}
+check("no rung made them clean" in rows["ladder glyphs"][1] and "no knob of this glyph hunt is the cure" in rows["ladder glyphs"][1] and "undeclared writes" in rows["ladder glyphs"][1], "a hunt with no cure says what to read next, %r" % (rows["ladder glyphs"],))
+# a rung's own detector result rides on its row
+MGL = L("Terminal", 907, 'vk: ab switches [1]: NVMTL_MANAGED_CHECK="1"') + L("Terminal", 907, "vk: ab: SUMMARY wit_ok=3 wit_early=0")
+P3["managed-check"]["conf"] = ["NVMTL_MANAGED_CHECK=1"]
+P3["managed-check"]["log"] = MGL + L("Terminal", 907, "managed: SUMMARY check=1 snapshot=0 flushes=40 uploads=80 prologue_uploads=80 sync_uploads=0 checked=80 changed_exact=0 changed_env=0 check_skipped=0 snapped=0 "
+                                    "snap_failed=0 snap_skipped_big=0 snap_skipped_noshadow=0 whole=0 pages=0 decl_bytes=9000 up_bytes=9000 widened_uploads=0 ud_scans=80 ud_idle_scans=300 ud_hits=3 ud_idle_hits=1 "
+                                    "ud_bytes=60 ud_samepage_hits=2 ud_late_bytes=10 ud_buffers=1 ud_gpu_off=0 ud_nomirror=0 ud_mirrors=3 ud_mirror_bytes=786432")
+rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), glyphs)}
+check("undeclared writes: Terminal: the CPU wrote managed-buffer bytes it did NOT declare" in rows["ladder managed-check"][1], "the rung row carries the detector, %r" % (rows["ladder managed-check"],))
+
+# the detector rows themselves
+def mgsum(**kw):
+    base = dict(check=1, snapshot=0, flushes=40, uploads=80, prologue_uploads=80, sync_uploads=0, checked=80, changed_exact=0, changed_env=0, check_skipped=0, snapped=0, snap_failed=0, snap_skipped_big=0,
+                snap_skipped_noshadow=0, whole=0, pages=0, decl_bytes=9000, up_bytes=9000, widened_uploads=0, ud_scans=80, ud_idle_scans=300, ud_hits=0, ud_idle_hits=0, ud_bytes=0, ud_samepage_hits=0,
+                ud_late_bytes=0, ud_buffers=0, ud_gpu_off=0, ud_nomirror=0, ud_mirrors=3, ud_mirror_bytes=786432)
+    base.update(kw)
+    return L("Terminal", 907, "managed: SUMMARY " + " ".join("%s=%d" % kv for kv in base.items()))
+r = rows_of(mgsum())
+check(r["undeclared writes"][0][0] == "INFO" and "NOT supported" in r["undeclared writes"][0][1] and "80 flush scan(s) + 300 idle" in r["undeclared writes"][0][1], "no undeclared write: INFO, %r" % (r.get("undeclared writes"),))
+r = rows_of(mgsum(ud_hits=4, ud_idle_hits=1, ud_bytes=96, ud_samepage_hits=3, ud_late_bytes=16, ud_buffers=2, ud_nomirror=1, ud_gpu_off=2))
+t_ = r["undeclared writes"][0]
+check(t_[0] == "WARN" and "96 changed byte(s) in 2 buffer(s)" in t_[1] and "16 of them declared at the NEXT flush" in t_[1] and "80 never" in t_[1] and "3 hit(s) in a page" in t_[1]
+      and "1 buffer(s) over 8 MiB" in t_[1] and "2 buffer(s) the GPU writes back" in t_[1] and "NVMTL_MANAGED_WHOLE" in t_[1], "undeclared writes: WARN with the numbers, %r" % (t_,))
+r = rows_of(mgsum(ud_scans=0, ud_idle_scans=0))
+check(r["undeclared writes"][0][0] == "INFO" and "no managed buffer was scanned" in r["undeclared writes"][0][1], "nothing scanned, %r" % (r.get("undeclared writes"),))
+old_mg = L("Terminal", 907, "managed: SUMMARY check=1 snapshot=0 flushes=4 uploads=8 prologue_uploads=8 sync_uploads=0 checked=8 changed_exact=0 changed_env=0 check_skipped=0")
+check(rows_of(old_mg)["undeclared writes"][0][0] == "WARN" and "older plugin" in rows_of(old_mg)["undeclared writes"][0][1], "an older plugin's SUMMARY with the check on says the detector did not run")
+r = rows_of(mgsum(check=0, whole=1, decl_bytes=1000, up_bytes=262144, widened_uploads=70))
+check(r["managed upload"][0][0] == "WARN" and "NVMTL_MANAGED_WHOLE is on" in r["managed upload"][0][1] and "70 of 80 uploads widened" in r["managed upload"][0][1], "a widened upload is a WARN, %r" % (r.get("managed upload"),))
+check("undeclared writes" not in rows_of(mgsum(check=0)), "the detector off: no row")
+
+# the same-image copy counters
+ABS = "vk: ab: SUMMARY load_colour_all=0 wit_early=0 wit_ok=2 wit_blind=0 wit_worst_us=0 same_image_copies=%d same_image_overlap=%d same_image_general=%d same_image_tmp=%d same_image_tmpfail=%d same_image_unsafe=%d"
+r = rows_of(L("Terminal", 907, ABS % (30, 22, 8, 22, 0, 0)))
+check(r["same-image copy"][0][0] == "INFO" and "30 copy(ies)" in r["same-image copy"][0][1] and "22 overlapping, 22 of them through a scratch image" in r["same-image copy"][0][1], "same-image copies: INFO, %r" % (r.get("same-image copy"),))
+r = rows_of(L("Terminal", 907, ABS % (30, 22, 8, 19, 1, 2)))
+check(r["same-image copy"][0][0] == "WARN" and "3 overlapping copy(ies) could NOT use the scratch image" in r["same-image copy"][0][1], "a copy that could not use the scratch image is a WARN, %r" % (r.get("same-image copy"),))
+check("same-image copy" not in rows_of(L("Terminal", 907, ABS % (0, 0, 0, 0, 0, 0))), "no same-image copy: no row")
+
+# the surface census
+CEN = ("census: SUMMARY seq=4 t_ms=41234 surfaces=2 overflow=0 sin_up_vram=1 sin_up_priv=0 sin_up_mb=0 sin_skip=4 sin_fail=0 pass=40 pass_clear=2 draws=90 draw_blit=40 draw_fbf=22 blitenc=0 replace=0 "
+       "compute=0 present=0 out_dirty=38 out_copy=0 out_fail=0 top=325:640x353:V:u1,s4,P40,c2,D90,B40,F22,O38;7:100x50:P:R1")
+r = rows_of(L("Terminal", 907, "census: SUMMARY seq=1 t_ms=1000 surfaces=1 overflow=0 sin_up_vram=0 sin_up_priv=0 sin_up_mb=0 sin_skip=0 sin_fail=0 pass=1 pass_clear=0 draws=0 draw_blit=0 draw_fbf=0 blitenc=0 replace=0 compute=0 present=0 out_dirty=0 out_copy=0 out_fail=0 top=325:1x1:V:P1")
+            + L("Terminal", 907, CEN))
+t_ = r["surface census"]
+check(len(t_) == 1 and t_[0][0] == "INFO" and "SUMMARY #4 after 41 s" in t_[0][1] and "render passes 40 (2 cleared), draws 90 (40 buffer_image_blit, 22 framebuffer fetch)" in t_[0][1]
+      and "325:640x353:V:u1,s4,P40,c2,D90,B40,F22,O38" in t_[0][1] and "38 dirty mark(s)" in t_[0][1], "the census row: the newest line, the numbers and the busiest surface, %r" % (t_,))
+r = rows_of(L("Terminal", 907, CEN.replace("sin_fail=0", "sin_fail=3")))
+check(r["surface census"][0][0] == "WARN", "a failed surface-in is a WARN")
+
 # baseline clean / nothing found
 rows = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(P3, 3, (), {"baseline": {"verdict": "clean", "text": "CLEAN: 20 of 20 tick lines have a twin (100 %)"}})}
 check("did not show" in rows["ladder glyphs"][1], "a clean baseline: the other rungs prove nothing, %r" % (rows["ladder glyphs"],))
@@ -275,6 +315,10 @@ td = tempfile.mkdtemp(prefix="tgg")
 open(os.path.join(td, "r-scanoutladder-baselineh-pipe0.ppm"), "wb").write(b"P6\n3 3\n255\n" + bytes(27))
 gv = tg.glyph_verdicts({"baseline": {"looks": ["ladder-baselinea", "ladder-baselineh"]}, "radv": {"looks": ["ladder-radva", "ladder-radvh"]}, "sync": {"looks": []}}, os.path.join(td, "r"))
 check(list(gv) == ["baseline"] and gv["baseline"]["verdict"] == "none" and "no look could be read" in gv["baseline"]["text"], "glyph_verdicts: only the rung with a look file, a bad one is none, %r" % (gv,))
+# a rung with an h2 look is judged on the second look as well (the glyph hunt): a missing second look is said, not guessed
+open(os.path.join(td, "r-scanoutladder-managed-wholeh-pipe0.ppm"), "wb").write(b"P6\n3 3\n255\n" + bytes(27))
+gv = tg.glyph_verdicts({"managed-whole": {"looks": ["ladder-managed-wholea", "ladder-managed-wholeh", "ladder-managed-wholeh2"]}}, os.path.join(td, "r"))
+check(gv["managed-whole"]["verdict"] == "none", "glyph_verdicts: a rung with an h2 look and no readable files is none, %r" % (gv,))
 
 # the hook in triage_reports.py
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()

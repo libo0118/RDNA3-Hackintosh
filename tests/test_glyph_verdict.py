@@ -161,6 +161,50 @@ check(v["verdict"] == "clean" and "unreadable" in v["text"], "one unreadable loo
 v = gv.verdict_files([os.path.join(tmp, "nope.ppm")])
 check(v["verdict"] == "none" and "no look could be read" in v["text"], "nothing readable: %r" % (v["text"],))
 
+# ---- the second look: only the LIVE window counts (the text script prints a line a second; a restored / frozen window does not change)
+def look(path, windows, seed=3):
+    open(path, "wb").write(render(windows, seed=seed))
+
+
+a1, a2, b1, b2 = (os.path.join(tmp, n) for n in ("a1-pipe0.ppm", "a2-pipe0.ppm", "b1-pipe0.ppm", "b2-pipe0.ppm"))
+static_clean = Window(300, 200, 80, 16, tick_lines(14, seed=2, first=7))
+# a live BROKEN window with a static CLEAN one beside it (the 25f picture): the verdict is the live one's, the static one is named and ignored
+look(a1, [Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, seed=5)), static_clean])
+look(a2, [Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, seed=6, first=3)), static_clean])
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "broken" and len(v["stacks"]) == 1 and len(v["static"]) == 1 and "STATIC" in v["text"] and "in the live window" in v["text"],
+      "live broken + static clean: %r" % (v["text"],))
+check(v["static"][0]["verdict"] == "clean" and v["stacks"][0]["live"] and v["stacks"][0]["changed"] >= gv.LIVE_MIN, "the static one is the clean one, the live one changed a lot")
+# a live CLEAN window with a static BROKEN one: clean (the restored text of another rung does not decide)
+look(a1, [Window(1100, 330, 80, 24, tick_lines(22, seed=5)), Window(300, 200, 80, 16, tick_lines(14, broken_from=37, seed=2, first=7))])
+look(a2, [Window(1100, 330, 80, 24, tick_lines(22, seed=6, first=3)), Window(300, 200, 80, 16, tick_lines(14, broken_from=37, seed=2, first=7))])
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "clean" and len(v["static"]) == 1, "live clean + static broken: %r" % (v["text"],))
+# the window's lines grow downwards between the looks (the window is not full yet): still live
+look(a1, [Window(1100, 330, 80, 24, tick_lines(10, seed=5))])
+look(a2, [Window(1100, 330, 80, 24, tick_lines(13, seed=5))])
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "clean" and not v["static"], "a stack that grew downwards is live: %r" % (v["text"],))
+# nothing changes (a frozen screen, only a restored window): none, with the reason
+look(a1, [static_clean]); look(a2, [static_clean])
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "none" and "no LIVE tick stack" in v["text"] and len(v["static"]) == 1, "only static text: %r" % (v["text"],))
+# no tick stack at all, and a missing / differently sized second look
+look(a1, [Window(1100, 330, 80, 24, ragged_lines(22))]); look(a2, [Window(1100, 330, 80, 24, ragged_lines(22, seed=12))])
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "none" and "no stack of >= 8" in v["text"], "no tick lines: %r" % (v["text"],))
+v = gv.verdict_files([a1], later=[])
+check(v["verdict"] == "none" and "no second look of this pipe" in v["text"], "no second look: %r" % (v["text"],))
+open(b1, "wb").write(render([static_clean], w=1280, h=720)); open(b2, "wb").write(render([static_clean], w=640, h=360))
+v = gv.verdict_files([b1], later=[b2])
+check(v["verdict"] == "none" and "differ in size" in v["text"], "looks of two sizes: %r" % (v["text"],))
+# two pipes: each is paired with its own second look
+p0a, p0b, p1a, p1b = (os.path.join(tmp, n) for n in ("p0a-pipe0.ppm", "p0b-pipe0.ppm", "p1a-pipe1.ppm", "p1b-pipe1.ppm"))
+look(p0a, [static_clean]); look(p0b, [static_clean])
+look(p1a, [Window(1100, 330, 80, 24, tick_lines(22, seed=5))]); look(p1b, [Window(1100, 330, 80, 24, tick_lines(22, seed=6, first=3))])
+v = gv.verdict_files([p0a, p1a], later=[p1b, p0b])
+check(v["verdict"] == "clean" and len(v["stacks"]) == 1 and len(v["static"]) == 1, "two pipes: %r" % (v["text"],))
+
 # ---- PPM parsing
 for bad, why in ((b"P5\n1 1\n255\n\0", "not P6"), (b"P6\n1280 720\n255\n\0\0", "truncated"), (b"P6\n1280 720\n65535\n" + bytes(10), "16 bit"), (b"", "empty")):
     try:
