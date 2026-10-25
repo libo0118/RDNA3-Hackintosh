@@ -23,7 +23,7 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
 # user to allow every new binary (Auxiliary KC), so the binary may change
 # only when the framebuffer itself does (tools/triage_reports.py computes
 # the same hash)
-FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h ../common/rdna3_bootargs.h ../common/rdna3_vbl_irq.h | shasum | cut -c1-10)
+FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h ../common/rdna3_bootargs.h ../common/rdna3_vbl_irq.h ../common/rdna3_tcall.h | shasum | cut -c1-10)
 CXXFLAGS += -DFB_COMMIT='"$(FB_SRC_HASH)"'
 # the leaf class IOKit instantiates (DRIVER-PLAN N44): Info.plist's two
 # IOClass strings must name it (checked when the bundle is built)
@@ -33,7 +33,8 @@ LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -
 .PHONY: all check clean
 all: $(BUNDLE)
 
-$(OBJDIR)/rdna3-fb.o: rdna3-fb.cpp ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h ../common/rdna3_bootargs.h
+$(OBJDIR)/rdna3-fb.o: rdna3-fb.cpp ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h ../common/rdna3_bootargs.h \
+                      ../common/rdna3_vbl_irq.h ../common/rdna3_tcall.h
 	mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

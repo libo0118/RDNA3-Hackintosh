@@ -191,7 +191,7 @@ void RDNA3Bringup::stopAndFree()
     teardownInterrupt();   /* no handler may touch fIh / the rings past here */
     if (fSmuIrqCall) {
         fSmuIrqStop = true;
-        rd3_thread_call_drain_free(fSmuIrqCall);
+        rd3_tcall_free(fSmuIrqCall);
         fSmuIrqCall = nullptr;
     }
 
@@ -205,20 +205,20 @@ void RDNA3Bringup::stopAndFree()
     if (fGfxOffCall) {
         IOLock *l = fOwner->drmLock();
         fGfxOffStop = true;
-        rd3_thread_call_drain(fGfxOffCall);
+        rd3_tcall_drain(fGfxOffCall);
         if (l)
             IOLockLock(l);
         gfxOffHold();
         if (l)
             IOLockUnlock(l);
-        rd3_thread_call_drain_free(fGfxOffCall);
+        rd3_tcall_free(fGfxOffCall);
         fGfxOffCall = nullptr;
     }
     /* vcn_v4_0_hw_fini / jpeg_v4_0_hw_fini: gate the video block, the PMFW
      * powers it down */
     if (fVcnIdleCall) {
         fVcnStop = true;
-        rd3_thread_call_drain_free(fVcnIdleCall);
+        rd3_tcall_free(fVcnIdleCall);
         fVcnIdleCall = nullptr;
     }
     /* amdgpu_device_ip_fini_early / amdgpu_device_ip_fini: hw_fini, then
@@ -1309,7 +1309,7 @@ bool RDNA3Bringup::hwInit()
          * gfx_v11_0_set_powergating_state (GC 11.0.3) -> amdgpu_gfx_off_ctrl:
          * the bring-up's own hold goes, GFXOFF is allowed 100 ms later */
         if (!ret && fGfxOffWanted && fPmUp && fSmu) {
-            fGfxOffCall = thread_call_allocate((thread_call_func_t)gfxOffTick, this);
+            fGfxOffCall = rd3_tcall_alloc("core.gfxOffTick", (thread_call_func_t)gfxOffTick, this);
             if (fGfxOffCall) {
                 RD3DrmScope lk(fOwner);
                 gfxOffRelease();
@@ -1480,7 +1480,7 @@ void RDNA3Bringup::vcnStart()
         publishString("RDNA3,VCN", "failed");
     }
     if (!fVcnIdleCall)
-        fVcnIdleCall = thread_call_allocate((thread_call_func_t)vcnIdleTick, this);
+        fVcnIdleCall = rd3_tcall_alloc("core.vcnIdleTick", (thread_call_func_t)vcnIdleTick, this);
     vcnIdleSchedule();   /* amdgpu_vcn_ring_end_use after the tests: gate in 1 s */
 }
 
@@ -1510,7 +1510,7 @@ void RDNA3Bringup::vcnSuspend()
         return;
     fVcnSuspended = true;   /* vcnIdleTick leaves the block alone from here */
     if (fVcnIdleCall)
-        thread_call_cancel(fVcnIdleCall);   /* no wait: the tick needs the DRM lock held here */
+        rd3_tcall_cancel(fVcnIdleCall);   /* no wait: the tick needs the DRM lock held here */
     for (k = 0; k < 100; k++) {
         bool busy = false;
         for (i = 0; i < RD_VCN_MAX_INST; i++)
@@ -1566,7 +1566,7 @@ void RDNA3Bringup::vcnShutdown()
         return;
     fVcnStop = true;
     if (fVcnIdleCall)
-        thread_call_cancel_wait(fVcnIdleCall);
+        rd3_tcall_drain(fVcnIdleCall);
     if (l)
         IOLockLock(l);
     if (fDev && fVcn->sw_ready && !fVcnSuspended) {
@@ -1585,7 +1585,7 @@ void RDNA3Bringup::vcnIdleSchedule()
     if (!fVcnIdleCall || fVcnStop)
         return;
     clock_interval_to_deadline(RD_VCN_IDLE_TIMEOUT_MS, kMillisecondScale, &deadline);
-    thread_call_enter_delayed(fVcnIdleCall, deadline);
+    rd3_tcall_enter_delayed(fVcnIdleCall, deadline);
 }
 
 /* amdgpu_vcn_idle_work_handler / amdgpu_jpeg_idle_work_handler: gate what
@@ -1780,7 +1780,7 @@ void RDNA3Bringup::pmInit()
     if (fAmdgpuExact) {
         /* smu_v13_0_register_irq_handler: the IVs reach smuIrq */
         if (!fSmuIrqCall)
-            fSmuIrqCall = thread_call_allocate((thread_call_func_t)smuIrqTick, this);
+            fSmuIrqCall = rd3_tcall_alloc("core.smuIrqTick", (thread_call_func_t)smuIrqTick, this);
         publish("RDNA3,PMThermalAlert", fSmu->irq_enabled ? 1 : 0);
         publish("RDNA3,PMPcieLevels", fSmu->pcie_levels);
         BLOG("PM: rdna3amdgpu=1: %u PCIe levels sent, thermal alert at %u C, %s",
@@ -2058,7 +2058,7 @@ void RDNA3Bringup::gfxOffRelease()
     if (fGfxOffHolds && --fGfxOffHolds == 0 && fGfxOffCall && !fGfxOffStop) {
         uint64_t dl;
         clock_interval_to_deadline(100, kMillisecondScale, &dl);
-        thread_call_enter_delayed(fGfxOffCall, dl);
+        rd3_tcall_enter_delayed(fGfxOffCall, dl);
     }
 }
 
@@ -4051,7 +4051,7 @@ void RDNA3Bringup::smuIrq(const rdna3_iv *iv)
     if (iv->client_id == RD_IH_CLIENT_THM && iv->src_id == RD_THM_SRCID_DIG_THERM_L2H)
         delay = 50;   /* AMDGPU_SWCTF_EXTRA_DELAY */
     clock_interval_to_deadline(delay, kMillisecondScale, &deadline);
-    thread_call_enter_delayed(fSmuIrqCall, deadline);
+    rd3_tcall_enter_delayed(fSmuIrqCall, deadline);
 }
 
 void RDNA3Bringup::smuIrqTick(void *owner, void *)

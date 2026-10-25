@@ -460,8 +460,7 @@ int RDNA3Accel::drmTxState(void *ctx, struct rd_xnu_txstate *t)
 void RDNA3Accel::displayStateFree()
 {
     if (fWakeCall) {
-        thread_call_cancel_wait(fWakeCall);
-        thread_call_free(fWakeCall);
+        rd3_tcall_free(fWakeCall);   /* a wake work still running finishes first */
         fWakeCall = nullptr;
     }
     /* under the display lock: a screen look (RD_NR_XNU_TXSTATE) reads both;
@@ -682,9 +681,9 @@ void RDNA3Accel::displayDidWake()
     if (!fDispAsleep)
         return;   /* the first power-on at registration, or no sleep */
     if (!fWakeCall)
-        fWakeCall = thread_call_allocate((thread_call_func_t)displayWakeWork, this);
+        fWakeCall = rd3_tcall_alloc("core.displayWakeWork", (thread_call_func_t)displayWakeWork, this);
     if (fWakeCall)
-        thread_call_enter(fWakeCall);
+        rd3_tcall_enter(fWakeCall);
 }
 
 /* amdgpu_device_resume, as far as this driver gets: detection first */

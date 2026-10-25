@@ -53,22 +53,13 @@ extern "C" {
 
 /* Stopping a thread call whose function re-arms itself (or that a racing
  * kick may enter once more): its stop flag is set first; a run that read
- * the flag before that re-arms while thread_call_cancel_wait waits for it
- * (and that wait returns false), so cancel again until nothing was queued.
- * thread_call_free refuses a queued call, so the free retries the same way. */
-static inline void rd3_thread_call_drain(thread_call_t c)
-{
-    __sync_synchronize();   /* the stop flag before the cancel */
-    thread_call_cancel_wait(c);
-    while (thread_call_cancel_wait(c)) {
-    }
-}
-static inline void rd3_thread_call_drain_free(thread_call_t c)
-{
-    rd3_thread_call_drain(c);
-    while (!thread_call_free(c))
-        thread_call_cancel_wait(c);
-}
+ * the flag before that re-arms while the stop waits for it, so the stop
+ * cancels again until nothing is queued or running. rd3_tcall_drain /
+ * rd3_tcall_free (common/rdna3_tcall.h) do that with public KPIs only:
+ * thread_call_cancel_wait is com.apple.kpi.private on macOS 26 (card run
+ * 2026-10-25b, DRIVER-PLAN N47); the core linked it only because OpenCore
+ * does not enforce the KPI exports. */
+#include "rdna3_tcall.h"
 
 class RDNA3Bringup;
 class IOBufferMemoryDescriptor;
@@ -355,7 +346,7 @@ private:
     uint64_t      fSleepAssertion = 0;        /* IOPMDriverAssertionID: no idle sleep (no resume yet) */
     /* PerformanceStatistics (what AMD's drivers publish; read by Activity
      * Monitor-style tools), refreshed every 2 s from the SMU metrics */
-    struct thread_call *fStatsCall = nullptr;
+    struct rd3_tcall *fStatsCall = nullptr;
     volatile bool fStatsStop = false;
     uint32_t      fStatsTicks = 0;
     static void   statsTick(void *owner, void *);
@@ -367,7 +358,7 @@ private:
     void          displayMirrorDisable(struct rdna3_dmub *dm);
     bool          displayCloneSinkPresent();
     struct rdna3_dmub *volatile fMirrorDm = nullptr;   /* the DMCUB the mirror uses (bring-up's) */
-    struct thread_call *fHotplugCall = nullptr;
+    struct rd3_tcall *fHotplugCall = nullptr;
     volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
     uint32_t      fHotplugEvents = 0;
     volatile uint32_t fHpdIrqs = 0;           /* N42: HPD interrupts claimed */
@@ -432,7 +423,7 @@ private:
     struct rdna3_pstate_ctx  *fPowerCtxMin = nullptr;   /* the same without SubVP (minimal transition) */
     bool          fPowerOn     = false;
     volatile bool fPowerStop   = false;
-    struct thread_call *fPowerIdleCall = nullptr;
+    struct rd3_tcall *fPowerIdleCall = nullptr;
     uint32_t      fPowerUpdates = 0, fPowerIdles = 0;
     volatile uint32_t fPowerFlips = 0;
     uint32_t      fPowerFlipsSeen = 0;
@@ -496,7 +487,7 @@ private:
     volatile bool fDispAsleep = false;        /* system sleep until the wake work ran */
     bool          fShuttingDown = false;
     uint32_t      fSleeps = 0, fWakes = 0;
-    struct thread_call *fWakeCall = nullptr;
+    struct rd3_tcall *fWakeCall = nullptr;
     static void   displayWakeWork(void *owner, void *);
     const struct rdna3_display_path *displayHeadPath(uint32_t head);
     uint32_t      displayHeadPclk(uint32_t head, const struct rdna3_display_path *p);

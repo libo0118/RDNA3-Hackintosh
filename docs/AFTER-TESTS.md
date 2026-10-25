@@ -3079,3 +3079,31 @@ times during it and once 4 s after. About 25 s; every other step prints one
 | `WARN memory load: MEMBW: NOT MEASURED ...` | no device-local memory for two buffers (even 16 MiB each), no queue, or the pool/fence setup failed | the line says which; VRAM exhaustion: `vm_*` counters |
 | `FAIL memory load: MEMBW: FAILED ...` | a submit or the fence failed under the load | the kernel log for a GPU reset / ring timeout around the run; same as any `rdna3_vktest` failure |
 | `WARN memory load: no memory load in this report although rdna3pm=2 and the Vulkan test ran` | an autoreport.sh older than N43, or the report was cut before the step | rebuild / reinstall the VM's tools |
+
+### Kexts kmutil refuses, thread call stops (macOS 26, card run 2026-10-25b, DRIVER-PLAN N47)
+
+On macOS 26 the framebuffer, the accelerator and the AGDC go into the Auxiliary
+KC through kmutil, which binds every import only to a library the kext's
+`OSBundleLibraries` declares and never to `com.apple.kpi.private`; the core is
+injected by OpenCore, whose prelinker binds kernel symbols kmutil would refuse.
+CI's `KPI guard` step runs `tools/ci/kmutil_kpi_guard.py` on every build: kmutil
+libraries + nm -u on the runner (macOS 15), and every import against
+xnu-12377.101.15's (macOS 26.4) export lists in `tools/ci/data/` (what the
+runner's kmutil cannot see); `make test` scans the kext sources against the
+same lists. The kexts stop their thread calls with `common/rdna3_tcall.h`
+(public KPIs; thread_call_cancel_wait is private on 26), which, like
+thread_call_cancel_wait, waits for the last run however long it takes and logs
+`RDNA3-tcall: <call>: ...` when a stop waits long.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| only RDNA3Accel and RDNA3AGDC loaded; the install log or `kmutil log` says `Failed to bind '_<symbol>' ... could not find a kext which exports this symbol` | that kext imports a symbol its declared libraries do not export on this macOS (26: kpi.private only) | `python3 tools/ci/kmutil_kpi_guard.py /Library/Extensions/<kext>.kext` on the VM (read-only; it runs `kmutil libraries -p ... --undef-symbols`): it names the symbol and the libraries; replace a private one with public KPIs, declare the library (`com.apple.kpi.unsupported` for kauth_cred_issuser); if the lists in `tools/ci/data/` missed it, the VM's macOS is newer than them: regenerate (`tools/ci/gen_xnu_kpi_lists.py --tag <xnu of uname -v>`) |
+| CI `KPI guard ...: FAIL <kext>: _X is exported only by com.apple.kpi.private` (runner) / `... only by com.apple.kpi.private in xnu-12377...` (the 26 lists) / `... only by com.apple.kpi.unsupported in xnu-...: declare ...` / `... which Info.plist's OSBundleLibraries does not declare` / `... exported by no kext` | the same, caught at build time | as above; `exported by no kext` on the Tahoe accelerator is a WARN with a count (a 26-only symbol on the macOS 15 runner), elsewhere a real missing export |
+| CI `KPI guard ...: ERROR ... the KPI check did NOT run` | kmutil or nm missing or failing on the runner, a kmutil output line the parser does not know (a new macOS), no `For extension` line, the xnu lists missing, or the guard crashed | the message names it; for a new format add the captured output to `tests/data/kmutil/` and the parser (never make the step pass without the check) |
+| CI `KPI guard for the core (advisory)` failing | the core imports symbols kmutil would refuse (26.4.1: `IOMemoryDescriptor::doMap` / `doUnmap` through RDNA3BoMemory's vtable); harmless while OpenCore injects the core | DRIVER-PLAN N47 (open): needed only before the core is installed through kmutil |
+| triage `thread call stop: FAIL <call>: a stop still waiting N s ... when the log ends` (`RDNA3-tcall: <call>: the stop has waited N ms ... still waiting`, every 30 s) | a run of that thread call does not end: its function hangs, or waits for a lock the stopping thread holds; the stop waits for ever (as thread_call_cancel_wait), so the machine's stop / sleep / shutdown hangs there | the kernel log before it: what the call's function does (`fb.vbl` vblFire, `core.displayWakeWork` the wake, `core.hotplugTick` the HPD look ...) and which lock the stop path holds; the counts are log lines ("at least") |
+| triage `thread call stop: WARN <call>: the stop waited at least N s ... drained after M ms` | a run was slow at the stop | usually benign (the wake work, a modeset in the hotplug work); repeated or growing: the function's own log lines around it |
+| triage `thread call stop: FAIL <call>: thread call allocation failed (...)` | IOMalloc or thread_call_allocate* returned NULL: the work that call runs never happens (statistics, hotplug, wake, VCN idle, GFXOFF, the IOP flip ...) | memory pressure at start; the kext's own line after it says what it does without the call |
+| triage `thread call stop: FAIL <call>: freed from inside its own run` | a free of the thread call from inside its own function (refused, left allocated): a driver bug | move the free to the stop path |
+| triage `thread call stop: WARN ... stopped from inside its own run` / `WARN ... thread_call_free refused` / `INFO ... enter(s) refused during its stop` | a drain inside the call's own run (not waited for; cancel_wait would have panicked), a free racing a run that keeps re-queueing, a kick racing the stop (no run queued) | the call path; harmless unless repeated |
+| triage `thread call stop: INFO no kernel log` | neither 20-log-rdna3.txt nor a serial log | nothing to judge; collect the serial log |

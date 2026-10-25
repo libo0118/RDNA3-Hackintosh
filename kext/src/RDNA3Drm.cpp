@@ -603,7 +603,7 @@ void RDNA3Accel::statsTick(void *owner, void *)
     if (!a->fStatsStop && a->fStatsCall) {
         uint64_t dl;
         clock_interval_to_deadline(2000, kMillisecondScale, &dl);
-        thread_call_enter_delayed(a->fStatsCall, dl);
+        rd3_tcall_enter_delayed(a->fStatsCall, dl);
     }
 }
 
@@ -630,16 +630,16 @@ void RDNA3Accel::statsStart()
 {
     fStatsStop = false;
     if (!fStatsCall)
-        fStatsCall = thread_call_allocate((thread_call_func_t)statsTick, this);
+        fStatsCall = rd3_tcall_alloc("core.statsTick", (thread_call_func_t)statsTick, this);
     if (fStatsCall)
-        thread_call_enter(fStatsCall);
+        rd3_tcall_enter(fStatsCall);
 }
 
 void RDNA3Accel::statsStop()
 {
     fStatsStop = true;
     if (fStatsCall) {
-        rd3_thread_call_drain_free(fStatsCall);
+        rd3_tcall_free(fStatsCall);
         fStatsCall = nullptr;
     }
 }

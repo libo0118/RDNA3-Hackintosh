@@ -69,6 +69,9 @@ $(BUILD)/test_swap_front: tests/test_swap_front.c common/rdna3_swap_front.h comm
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
 # DRIVER-PLAN N42: IOGraphics' VBL from the vblank interrupt, the poll as fallback
+$(BUILD)/test_tcall: tests/test_tcall.c common/rdna3_tcall.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_tcall.c
+
 $(BUILD)/test_vbl_irq: tests/test_vbl_irq.c common/rdna3_vbl_irq.h common/rdna3_fb_policy.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_vbl_irq.c
 # DRIVER-PLAN N38: a head's presents without blocking WindowServer (the flip queue)
@@ -150,7 +153,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -167,6 +170,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	$(BUILD)/test_swap_front
 	$(BUILD)/test_flip_latch
 	$(BUILD)/test_vbl_irq
+	$(BUILD)/test_tcall
 	$(BUILD)/test_flip_queue
 	$(BUILD)/test_fb_policy
 	$(BUILD)/test_swap_copy
@@ -195,6 +199,8 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	python3 -I -B tests/test_triage_agdc_n48.py
 	python3 -I -B tests/test_triage_pairing.py
 	python3 -I -B tests/test_kext_kpi_versions.py
+	python3 -I -B tests/test_kmutil_kpi_guard.py
+	python3 -I -B tests/test_triage_tcall.py
 	tests/test_coredisplay_prefs.sh
 	tests/test_prune_traces.sh
 	tests/test_membw_load.sh
