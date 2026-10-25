@@ -6,6 +6,9 @@ IOAccelFindAccelerator(fb) reads from each IOFramebuffer.
  - IOAccelTypes / IOAccelRevision / IOAccelIndex missing, another accelerator named, another revision: WARN;
  - a head with RDNA3,Connected = No is not judged; none connected: INFO; no framebuffer at all: WARN;
  - no 16-ioaccel-pairing.txt (an older report), an empty one or collect.sh's wrapper only: INFO;
+ - the kernel's IOAccelTypes leaves out the platform expert device (MacBookPro16,1) that `ioreg -p IOService` shows
+   below the root: card run 2026-10-25c (macOS 26.4.1) paired, and the row said WARN "not a registered one";
+   the compare tolerates one extra leading component on either side;
  - present_mode_lines carries the rows from a report archive;
  - collect.sh packs the file and pairing_report() prints what the triage reads (a fake ioreg).
 Run: python3 -I -B tests/test_triage_pairing.py"""
@@ -83,6 +86,24 @@ check(levels(r) == ["PASS"] and "registered accelerator RDNA3Accelerator" in r[0
 two = ACCEL + "accelerator: IOService:/MacPro/PCI0/GFX1@0/RDNA3Accel/RDNA3Accelerator\n"
 r = tr.pairing_rows(pfile(fb(1, types=other), accel=two))
 check(levels(r) == ["PASS"] and "registered accelerator IOService:/MacPro/PCI0/GFX1@0" in r[0][2], "second accelerator: %r" % r)
+# card run 2026-10-25c, macOS 26.4.1, the real strings: the accelerator path (collect.sh before the fix) has the
+# platform expert device, IOAccelTypes (the kernel's getPath) does not
+REAL_TYPES = '"IOAccelTypes" = "IOService:/AppleACPIPlatformExpert/PCI0/AppleACPIPCI/S80@10/RDNA3Accelerator"\n'
+REAL_ACCEL = "accelerator: IOService:/MacBookPro16,1/AppleACPIPlatformExpert/PCI0/AppleACPIPCI/S80@10/RDNA3Accelerator\n"
+r = tr.pairing_rows(pfile(fb(1, types=REAL_TYPES), fb(2, types=REAL_TYPES), accel=REAL_ACCEL))
+check(levels(r) == ["PASS", "PASS"] and "registered accelerator IOService:/MacBookPro16,1/" in r[0][2],
+      "26.4.1 strings (extra leading component in the accelerator path): %r" % r)
+# the fixed collect.sh prints the path without it: equal
+r = tr.pairing_rows(pfile(fb(1, types=REAL_TYPES), accel=REAL_ACCEL.replace("MacBookPro16,1/", "")))
+check(levels(r) == ["PASS"], "26.4.1 strings (collect.sh without the root component): %r" % r)
+# the extra component on the other side tolerated too; a different PCI location is still not the accelerator
+r = tr.pairing_rows(pfile(fb(1, types=REAL_TYPES.replace("IOService:/", "IOService:/MacBookPro16,1/")),
+                          accel=REAL_ACCEL.replace("MacBookPro16,1/", "")))
+check(levels(r) == ["PASS"], "extra component in IOAccelTypes: %r" % r)
+r = tr.pairing_rows(pfile(fb(1, types=REAL_TYPES.replace("S80@10", "S81@11")), accel=REAL_ACCEL))
+check(levels(r) == ["WARN"] and "not a registered one" in r[0][2], "another slot: %r" % r)
+r = tr.pairing_rows(pfile(fb(1, types=REAL_TYPES.replace("PCI0/", "")), accel=REAL_ACCEL))
+check(levels(r) == ["WARN"], "a component missing in the middle is no match: %r" % r)
 # no accelerator path printed: the class name in the value has to do
 r = tr.pairing_rows(pfile(fb(1), accel="(no RDNA3Accelerator in the IOService plane)\n"))
 check(levels(r) == ["PASS"] and "registered accelerator" not in r[0][2], "no registered list: %r" % r)
@@ -137,11 +158,13 @@ case "$*" in
 *"-p IOService"*)
 cat <<'EOT'
 +-o Root  <class IORegistryEntry, id 0x100000100, retain 9>
-  +-o MacPro  <class IOPlatformExpertDevice, id 0x100000113, registered, matched, active, busy 0 (8328 ms), retain 52>
-    +-o PCI0  <class IOPCIBridge, id 0x100000120, registered, matched, active, busy 0, retain 20>
-    | +-o GFX0@0  <class IOPCIDevice, id 0x100000130, registered, matched, active, busy 0, retain 20>
-    |   +-o RDNA3Accel  <class RDNA3Accel, id 0x100000140, registered, matched, active, busy 0, retain 20>
-    |     +-o RDNA3Accelerator  <class RDNA3Accelerator, id 0x100000150, registered, matched, active, busy 0, retain 10>
+  +-o MacBookPro16,1  <class IOPlatformExpertDevice, id 0x100000113, registered, matched, active, busy 0 (8439 ms), retain 52>
+    +-o AppleACPIPlatformExpert  <class AppleACPIPlatformExpert, id 0x100000114, registered, matched, active, busy 0 (7125 ms), retain 46>
+    | +-o IOPMrootDomain  <class IOPMrootDomain, id 0x100000119, registered, matched, active, busy 0 (1 ms), retain 110>
+    | +-o PCI0  <class AppleACPIPCI, id 0x100000120, registered, matched, active, busy 0, retain 20>
+    |   +-o AppleACPIPCI  <class AppleACPIPCI, id 0x100000121, registered, matched, active, busy 0, retain 20>
+    |     +-o S80@10  <class IOPCIDevice, id 0x100000130, registered, matched, active, busy 0, retain 20>
+    |       +-o RDNA3Accelerator  <class RDNA3Accelerator, id 0x100000150, registered, matched, active, busy 0, retain 10>
     +-o USB0  <class IOUSBHostDevice, id 0x100000160, registered, matched, active, busy 0, retain 3>
 EOT
 ;;
@@ -151,7 +174,7 @@ cat <<'EOT'
   | {
   |   "IOFBIntegrated" = Yes
   |   "RDNA3,Connected" = Yes
-  |   "IOAccelTypes" = "IOService:/MacPro/PCI0/GFX0@0/RDNA3Accel/RDNA3Accelerator"
+  |   "IOAccelTypes" = "IOService:/AppleACPIPlatformExpert/PCI0/AppleACPIPCI/S80@10/RDNA3Accelerator"
   |   "IOAccelIndex" = 0
   |   "IOAccelRevision" = 2
   | }
@@ -176,8 +199,9 @@ with tempfile.TemporaryDirectory() as d:
         res = subprocess.run(["sh", "-c", fn.group(0) + "\npairing_report"], env=env, capture_output=True, text=True)
         out = res.stdout
         check(res.returncode == 0, "pairing_report exit %d: %s" % (res.returncode, res.stderr))
-        check("accelerator: IOService:/MacPro/PCI0/GFX0@0/RDNA3Accel/RDNA3Accelerator\n" in out,
+        check("accelerator: IOService:/AppleACPIPlatformExpert/PCI0/AppleACPIPCI/S80@10/RDNA3Accelerator\n" in out,
               "accelerator path: %r" % out)
+        check("MacBookPro16,1" not in out, "the platform expert device is left out of the path (as the kernel's getPath): %r" % out)
         check("IOFBIntegrated" not in out, "only the pairing keys are printed: %r" % out)
         rows = tr.pairing_rows("$ pairing_report\n" + out + "[exit 0]\n")
         check("RDNA3,Head" not in out and "IOFBIntegrated" not in out, "only the pairing keys are printed: %r" % out)

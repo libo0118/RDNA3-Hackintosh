@@ -1506,7 +1506,7 @@ cache_keep() {   # cache_keep EXIT: after done_, the test's output kept when it 
 membw_load() {
     _mo=/tmp/rdna3-membw.txt; _mp=/tmp/rdna3-membw-pm.txt
     rm -f "$_mo" "$_mp"
-    DYLD_LIBRARY_PATH="$D/bin" "$D/bin/rdna3_vktest" --membw=10 "$D/bin/libvulkan_radeon.dylib" > "$_mo" 2>&1 &
+    DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup "$D/bin/rdna3_vktest" --membw=10 "$D/bin/libvulkan_radeon.dylib" > "$_mo" 2>&1 &
     _mb=$!
     ( sleep 40; kill -9 "$_mb" 2>/dev/null ) & _mw=$!
     # the buffers are allocated and the load starts when it has printed its first MEMBW: line
@@ -1975,7 +1975,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         done_ 0
         if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
             hdr "probe: Vulkan WSI (V3)"
-            DYLD_LIBRARY_PATH="$D/bin" with_limit 60 "$D/bin/rdna3_vktest" --wsi "$D/bin/libvulkan_radeon.dylib" > /tmp/rdna3-v3.txt 2>&1
+            DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup with_limit 60 "$D/bin/rdna3_vktest" --wsi "$D/bin/libvulkan_radeon.dylib" > /tmp/rdna3-v3.txt 2>&1
             r=$?
             cat /tmp/rdna3-v3.txt
             # RADV has no present path on macOS (no headless/Metal surface,

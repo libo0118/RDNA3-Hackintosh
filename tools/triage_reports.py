@@ -15,6 +15,7 @@ The pictures of what each display pipe scanned (<report>-scanout-pipe<N>.ppm,
 rdna3_drminfo --scanout) are turned into PNGs next to them.
 Exit status: 0 all reached checks pass, 1 something failed.
 """
+import contextlib
 import glob
 import io
 import os
@@ -3170,6 +3171,12 @@ def _gpu_vendor_cd_rows(cd, planes, iop_amd, prefs_off):
                  "(CoreDisplay's IOPresentment gate, DRIVER-PLAN N44) is not known")]
     seen = gpu_vendors(cd)
     if not seen:
+        # card run 2026-10-25c (macOS 26.4.1): the line is Info level and ages out of the log buffer; planes in
+        # IOPresentment transactions (debug.rdna3accel_iop_ok > 0) prove the gate was open, so it is no warning
+        if planes is True:
+            return [("INFO", label, "no 'GetSystemGPUVendors_block_invoke' line in the CoreDisplay log (Info level, "
+                     "aged out of the log buffer?), but planes arrive in IOPresentment transactions "
+                     "(debug.rdna3accel_iop_ok > 0): the gate was open")]
         return [("WARN", label, "no 'GetSystemGPUVendors_block_invoke' line in the CoreDisplay log: the framebuffers' "
                  "GPU vendor (CoreDisplay's IOPresentment gate, DRIVER-PLAN N44) is not known")]
     out = []
@@ -3236,6 +3243,25 @@ def _pairing_blocks(txt):
     return out
 
 
+def _pairing_comps(path):
+    p = path.strip().strip('"')
+    if p.startswith("IOService:"):
+        p = p[len("IOService:"):]
+    return [c for c in p.split("/") if c]
+
+
+def _pairing_same_path(accel, types):
+    """the same registry path, tolerating one extra leading component on either side: the kernel's getPath
+    (IOAccelTypes) leaves out the platform expert device (named after the Mac model, e.g. MacBookPro16,1) that
+    `ioreg -p IOService` shows below the root (card run 2026-10-25c, macOS 26.4.1: IOAccelTypes
+    IOService:/AppleACPIPlatformExpert/PCI0/AppleACPIPCI/S80@10/RDNA3Accelerator against
+    IOService:/MacBookPro16,1/AppleACPIPlatformExpert/PCI0/...)"""
+    a, t = _pairing_comps(accel), _pairing_comps(types)
+    if not a or not t:
+        return False
+    return a == t or (len(a) == len(t) + 1 and a[1:] == t) or (len(t) == len(a) + 1 and t[1:] == a)
+
+
 def pairing_rows(txt):
     """[(level, label, text)]: does each lit head's framebuffer name our accelerator the way
     IOAccelFindAccelerator reads it? PASS: IOAccelTypes names RDNA3Accelerator, IOAccelRevision 2 and an
@@ -3271,7 +3297,7 @@ def pairing_rows(txt):
         elif accels:
             # IOAccelTypes is the registry path of an accelerator (or, bare, its class name): it has to be one
             # of the accelerators this report registered, not just any string containing the class name
-            matched = next((a for a in accels if a in f["types"]), None)
+            matched = next((a for a in accels if a in f["types"] or _pairing_same_path(a, f["types"])), None)
             if matched is None and f["types"].strip().strip('"') == PAIRING_ACCEL:
                 matched = PAIRING_ACCEL
             if matched is None:
@@ -3293,6 +3319,101 @@ def pairing_rows(txt):
             out.append(("PASS", label, "%s: %s: WindowServer can pair the display with the accelerator%s" % (
                 who, have, " (registered accelerator %s)" % matched if matched else "")))
     return out
+
+
+# Crash reports of the boot (card run 2026-10-25c: Chess crashed three times on macOS 26.4.1 and nothing was
+# collected). collect.sh's crash_reports() lists every *.ips newer than the boot in /Library/Logs/DiagnosticReports
+# and /Users/*/Library/Logs/DiagnosticReports (40-app-crashes.txt, the files in 40-crash-ips/), one block each:
+#   == crash: <path> / mtime: .. / size: .. / copy: 40-crash-ips/.. / process: Chess / pid: 412 /
+#   exception: EXC_BAD_ACCESS (SIGSEGV) KERN_INVALID_ADDRESS at 0x.. / termination: {..} /
+#   crashed thread: 0 (com.apple.main-thread) / frame 0: libobjc.A.dylib  objc_msgSend + 32 ... / crashes: N
+CRASH_MEMBER = "40-app-crashes.txt"
+
+
+def _crash_blocks(txt):
+    out = []
+    for blk in re.split(r"(?m)^== crash: ", txt)[1:]:
+        g = lambda k: (re.search(r"^%s: (.*?)\s*$" % re.escape(k), blk, re.M) or [None, None])[1]
+        # the grep fallback prints "key":value pairs instead of the summary
+        fb = lambda k: (re.search(r'"%s" *: *"?([^",}\n]*)' % k, blk) or [None, None])[1]
+        exc = g("exception")
+        if exc is None:
+            m = re.search(r'"exception" *: *\{[^}]*"type" *: *"([^"]*)"(?:[^}]*"signal" *: *"([^"]*)")?', blk)
+            exc = (m.group(1) + (" (%s)" % m.group(2) if m.group(2) else "")) if m else None
+        term = g("termination") or ""
+        ind = re.search(r'"indicator" *: *"([^"]*)"', term + blk)
+        out.append({"path": blk.split("\n", 1)[0].strip(), "process": g("process") or fb("procName") or fb("app_name") or "?",
+                    "pid": g("pid") or fb("pid") or "?", "exception": exc, "indicator": ind.group(1) if ind else None,
+                    "frame": g("frame 0"), "thread": g("crashed thread"), "copy": g("copy"),
+                    "unreadable": g("unreadable")})
+    return out
+
+
+def crash_rows(txt, nocard=False):
+    """[(level, label, text)] "app crashes": WARN per crashed process (exception + top frame of the crashed thread +
+    how many reports), INFO when the boot has none. INFO: no 40-app-crashes.txt (a collect.sh older than card run
+    2026-10-25c); WARN: the listing did not finish (no 'crashes: N' line) or a report is unreadable.
+    nocard: a boot without the card (no_card_boot): every row INFO"""
+    label = "app crashes"
+    lines = [l for l in (txt or "").splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]
+    if not lines:
+        return [("INFO", label, "no %s in the report (a collect.sh older than card run 2026-10-25c): user app crashes "
+                 "are not known" % CRASH_MEMBER)]
+    lv = (lambda x: "INFO") if nocard else (lambda x: x)
+    tail = "" if not nocard else " (no-card boot: not about the driver)"
+    done = re.search(r"^crashes: (\d+)\s*$", txt, re.M)
+    if not done:
+        return [(lv("WARN"), label, "%s has no 'crashes: N' line: the crash listing did not finish (killed at the "
+                 "45 s limit?), so crashes of this boot may be missing%s" % (CRASH_MEMBER, tail))]
+    blocks = _crash_blocks(txt)
+    if not blocks:
+        return [("INFO", label, "no crash report (*.ips) newer than the boot in /Library/Logs/DiagnosticReports or "
+                 "/Users/*/Library/Logs/DiagnosticReports")]
+    out = []
+    byproc = {}
+    for b in blocks:                         # newest first (collect.sh sorts them)
+        if b["unreadable"]:
+            out.append((lv("WARN"), label, "crash report %s unreadable: %s%s" % (b["path"], b["unreadable"], tail)))
+            continue
+        byproc.setdefault(b["process"], []).append(b)
+    for proc, bl in byproc.items():
+        b = bl[0]
+        out.append((lv("WARN"), label, "%s crashed %d time(s) since the boot (newest pid %s): %s%s; top frame of the "
+                    "crashed thread: %s; %s%s" % (
+                        proc, len(bl), b["pid"], b["exception"] or "no exception in the report",
+                        "; " + b["indicator"] if b["indicator"] else "", b["frame"] or "not in the report",
+                        "copy " + b["copy"] if b["copy"] else b["path"], tail)))
+    return out
+
+
+def no_card_boot(path):
+    """None, or why this report is of a boot WITHOUT the card: 04-pci.txt was dumped (it lists devices) and has no
+    AMD 1002:747e device, and the boot-args do not ask for the driver (rdna3...=). A boot that asked for the
+    driver and lost the card is a real failure and is not demoted. Card run 2026-10-25c:
+    rdna3-report-default-profile-20261025-023935 (the VM's default profile: no card)"""
+    pci = read_tar_member(path, "04-pci.txt")
+    # only a complete device list counts (collect.sh's AMD section and the ioreg run's exit line): an ioreg
+    # killed at the time limit before it reached the card must not demote a real card report
+    if "vendor-id" not in pci or "== AMD devices" not in pci:
+        return None
+    for blk in re.split(r"(?m)^[ |]*\+-o ", pci):
+        v = re.search(r'"vendor-id" = <([0-9a-fA-F]{8})>', blk)
+        d = re.search(r'"device-id" = <([0-9a-fA-F]{8})>', blk)
+        if v and d and v.group(1).lower() == "02100000" and d.group(1).lower() == "7e740000":
+            return None
+    args = read_tar_member(path, "01-boot-args.txt")
+    if re.search(r"\brdna3[a-z0-9_]*=", args):
+        return None
+    return "no AMD 1002:747e device in 04-pci.txt and the boot-args do not ask for the driver"
+
+
+NOCARD_LEVEL_RE = re.compile(r"(?m)^(\s*)(FAIL|WARN|CRITICAL)\b")
+
+
+def demote_nocard(text):
+    """a no-card boot's printed rows: every FAIL / WARN / CRITICAL row leads with INFO"""
+    return NOCARD_LEVEL_RE.sub(r"\1INFO", text)
+
 
 
 def present_mode_lines(path, txt="", args="", host=None):
@@ -4081,6 +4202,13 @@ def report(path, show_all):
     print(os.path.basename(path))
     print("boot-args:", args or "?")
     if "RDNA3Accel" not in kexts and not props:
+        nc = no_card_boot(path)
+        if nc:
+            # card run 2026-10-25c: the VM's default-profile boot has no card; main() prints the rest of this
+            # report's rows as INFO and does not count it as a failure
+            print("   INFO no-card boot: %s: this boot ran without the card, so its present-mode, RADV, Metal, "
+                  "display sleep/wake and frame-trace rows are INFO, not results about the driver" % nc)
+            return False
         print("!! RDNA3Accel not loaded (03-kexts.txt) -> AFTER-TESTS step 0")
         amd = pci.split("\n== AMD devices", 1)[1] if "\n== AMD devices" in pci else ""
         ids = [l.strip(" |") for l in amd.splitlines()
@@ -4529,6 +4657,9 @@ def summary(path, serial=None):
     out = []
     m = re.search(r"rdna3lvl=\S+.*", args)
     out.append(("boot-args", m.group(0)[:150] if m else "?"))
+    nocard = no_card_boot(path)
+    if nocard:
+        out.append(("no-card boot", "INFO %s: every row below is INFO (nothing here is a result about the driver)" % nocard))
     if os.path.exists(path):
         for lv, label, t in present_mode_lines(path, txt, args):
             out.append(("present: " + label, "%s %s" % (lv, t[:300])))
@@ -4536,6 +4667,9 @@ def summary(path, serial=None):
             out.append(("fb N40: " + label, "%s %s" % (lv, t[:300])))
         for lv, label, t in dispirq_lines(path, txt, args):
             out.append(("N42: " + label, "%s %s" % (lv, t[:300])))
+        # card run 2026-10-25c: user app crashes of the boot (INFO none, WARN per crashed process)
+        for lv, label, t in crash_rows(read_tar_member(path, CRASH_MEMBER), bool(nocard)):
+            out.append((label, "%s %s" % (lv, t[:300])))
         # DRIVER-PLAN N41 (ECC review): its WARN / FAIL rows, and MOOT when the page-off wait was not exercised
         for lv, label, t in n41_lines(path, args):
             if lv in ("WARN", "FAIL") or t.startswith("MOOT"):
@@ -4766,6 +4900,11 @@ def summary(path, serial=None):
     caps = [l for l in log.splitlines() if "GFXCLK capped" in l]
     if caps:
         out.append(("idle cap", "%d cap(s), e.g. %s" % (len(caps), caps[0][caps[0].find("PM:"):][:80])))
+    if nocard:   # a boot without the card: the Vulkan / Metal / screens / trace rows are not about the driver
+        out = [(k, v) if k in ("boot-args", "no-card boot") else
+               (k, NOCARD_LEVEL_RE.sub(r"\1INFO", v) if re.match(r"(?:FAIL|WARN|CRITICAL|INFO|PASS)\b", v)
+                else "INFO (no-card boot) " + v)
+               for k, v in out]
     print("=" * 78)
     print("SUMMARY of the newest report (%s)" % os.path.basename(path))
     for k, v in out:
@@ -4816,7 +4955,9 @@ def main():
             hl = (hl[0], "matched", "", hl[3])    # no report to match by: the newest log is the run
         for lv, label, t in present_host_rows(*hl):
             print("   %s present mode, %s: %s" % (lv, label, t))
-    for p in reports:
+    def one_report(p):
+        global STALE_KEXTS_SHOWN
+        nonlocal failed
         if os.path.exists(p):
             failed |= report(p, show_all)
         else:
@@ -4844,6 +4985,9 @@ def main():
             # DRIVER-PLAN N42: the core's vblank / pflip / HPD interrupts
             for lv, label, t in dispirq_lines(p, ttxt):
                 print("   %s N42, %s: %s" % (lv, label, t))
+            # card run 2026-10-25c: user app crashes (collect.sh's 40-app-crashes.txt)
+            for lv, label, t in crash_rows(read_tar_member(p, CRASH_MEMBER), bool(no_card_boot(p))):
+                print("   %s %s: %s" % (lv, label, t))
         else:
             # tests only: the archive's CoreDisplay / ioreg logs are missing, the host log still answers
             targs = (re.search(r"^boot-args: (.*)$", ttxt, re.M) or [None, ""])[1]
@@ -5114,6 +5258,20 @@ def main():
                         print("     " + l[:150])
                 if "plugin not installed" not in mt and not re.search(r"^METAL: ALL PASSED", mt, re.M):
                     failed = True
+    for p in reports:
+        if not no_card_boot(p):
+            one_report(p)
+            continue
+        # a boot without the card: its rows are printed as INFO and it does not fail the run
+        before, stale_before, buf = failed, STALE_KEXTS_SHOWN, io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                one_report(p)
+        finally:
+            # the rows printed before an exception are not lost; a no-card report neither fails the run nor
+            # uses up the one STALE KEXTS FAIL a later real report must still print
+            failed, STALE_KEXTS_SHOWN = before, stale_before
+            sys.stdout.write(demote_nocard(buf.getvalue()))
     serials = sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)
     hosts = sorted(glob.glob(os.path.join(d, "host-*.log")), key=os.path.getmtime)
     for s in serials:
