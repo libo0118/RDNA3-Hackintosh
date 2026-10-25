@@ -89,7 +89,7 @@ static int download(VkCommandBuffer cb, VkImage img, VkFormat fmt, uint32_t samp
                     uint32_t x, uint32_t y, uint32_t w, uint32_t h, Buf *buf, size_t off, uint64_t row, nvmtl_msdl_plan *plan, unsigned *nwords_out)
 {
     const char *why = 0;
-    if (nvmtl_msdl_plan_make(fmt, samples, 4, 1, 1, 0, 0, aspect_opt, IW, IH, x, y, w, h, row, off, buf->size, plan, &why)) { printf("  plan refused: %s\n", why); return -1; }
+    if (nvmtl_msdl_plan_make(fmt, samples, 4, 1, 1, 0, 0, aspect_opt, IW, IH, x, y, w, h, row, off, buf->size, buf->size, plan, &why)) { printf("  plan refused: %s\n", why); return -1; }
     VkImageViewCreateInfo vc = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 0, 0, img, VK_IMAGE_VIEW_TYPE_2D, (VkFormat)plan->view_fmt, { 0 }, { plan->aspect, 0, 1, 0, 1 } };
     VkImageView view; CK(vkCreateImageView(dev, &vc, 0, &view));
     VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, 0, dpool, 1, &dsl }; VkDescriptorSet set; CK(vkAllocateDescriptorSets(dev, &ai, &set));
@@ -273,7 +273,8 @@ static void test_color(VkFormat fmt, const char *name, uint32_t samples, size_t 
     VkDeviceMemory m; VkImage im = mkimg(fmt, samples, IW, IH, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &m);
     nvmtl_msu_plan up; const char *why = 0;
     if (nvmtl_msu_plan_make(fmt, samples, 4, 1, 1, 0, 0, 0, IW, IH, RX, RY, RW, RH, 0, 0, 1u << 30, &up, &why)) { printf("B. %s: upload plan refused (%s)\n", name, why); total_bad++; return; }
-    const uint32_t bpp = up.bpp; const uint64_t row = nvmtl_msbuf_used(RW, samples, bpp) + 12;
+    if (!up.inter) { printf("B. %s: the plan chose the flat layout for an interleaved row\n", name); total_bad++; return; }
+    const uint32_t bpp = up.bpp; const uint64_t row = nvmtl_msbuf_used(RW, samples, bpp) + 3u * samples * bpp;   /* padded, still a whole number of pixels' samples: the plan keeps it interleaved */
     Buf src = mkbuf(soff + nvmtl_msbuf_span(row, RH, RW, samples, bpp) + 64);
     srand(7 + samples); for (size_t i = 0; i < src.size; i++) src.map[i] = (uint8_t)rand();
     Buf dst = mkbuf(doff + nvmtl_msbuf_span(row, RH, RW, samples, bpp) + 64); fillbuf(&dst, 0xAA);

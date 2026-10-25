@@ -1,6 +1,7 @@
 /* Which buffer -> multisample texture uploads the plugin carries (metal/plugin/nvmtl_msupload.h).
  * SPDX-License-Identifier: MIT */
 #include <stdio.h>
+#include <string.h>
 #include "nvmtl_msupload.h"
 
 static int failures;
@@ -45,12 +46,23 @@ int main(void)
     CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 5, 2, 0, 0, 80, &p) != 0);
     CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 5, 1, 0, 0, 79, &p) != 0);
     /* the exact fit and one byte less */
-    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 100, 0, 164, &p) == 0 && p.inter == 1);   /* 100 + 4 px * 4 samples * 4 B */
-    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 100, 0, 163, &p) != 0);
-    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 100, 1, 164, &p) != 0);
+    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 96, 0, 160, &p) == 0 && p.inter == 1 && !p.wide);   /* 96 + 4 px * 4 samples * 4 B */
+    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 96, 0, 159, &p) != 0);
+    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 96, 1, 160, &p) != 0);
     CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 60, 0, 76, &p) == 0 && p.inter == 0);   /* a short row: 60 + 4 px * 4 B */
     CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 60, 0, 75, &p) != 0);
     CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 1, 16, 0, 16, &p) == 0);
+    /* the layout rule (ECC round 1): interleaved only for a row that is a whole number of pixels' samples and holds a full row of the region;
+     * anything else is the flat layout, with the reason; a row more than 255 B beyond the region's own is flagged wide */
+    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 100, 0, 1000, &p) == 0 && p.inter == 0 && p.flat_why && strstr(p.flat_why, "multiple"));   /* 100 % 16 != 0 */
+    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 60, 0, 1000, &p) == 0 && p.inter == 0 && p.flat_why && strstr(p.flat_why, "shorter"));
+    CHECK(mk(44, 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 2, 0, 0, 1000, &p) == 0 && p.inter == 1 && p.flat_why == NULL && p.row == 64);
+    CHECK(mk(13, 4, 4, 1, 1, 0, 0, 0, 971, 680, 0, 0, 971, 680, 3884, 0, 4194304, &p) == 0 && p.inter == 1 && !p.wide);   /* Chess: exactly one row */
+    CHECK(mk(13, 4, 4, 1, 1, 0, 0, 0, 971, 680, 0, 0, 971, 680, 3884 + 255, 0, 4139u * 700, &p) == 0 && p.inter == 0);   /* +255 is not a multiple of 4 */
+    CHECK(mk(13, 4, 4, 1, 1, 0, 0, 0, 971, 680, 0, 0, 10, 8, 3884, 0, 3884u * 8, &p) == 0 && p.inter == 1 && p.wide);   /* a 10-pixel region under a full-width pitch: ambiguous */
+    CHECK(mk(13, 4, 4, 1, 1, 0, 0, 0, 971, 680, 0, 0, 10, 8, 40 + 255, 0, 4000, &p) == 0 && p.inter == 0 && p.flat_why);   /* 295 % 4 != 0 */
+    CHECK(mk(13, 4, 4, 1, 1, 0, 0, 0, 971, 680, 0, 0, 10, 8, 40 + 256, 0, 4000, &p) == 0 && p.inter == 1 && p.wide);   /* 296: a multiple, 256 B beyond */
+    CHECK(mk(13, 4, 4, 1, 1, 0, 0, 0, 971, 680, 0, 0, 10, 8, 40 + 252, 0, 4000, &p) == 0 && p.inter == 1 && !p.wide);   /* 292: 252 B beyond */
     /* sample counts */
     CHECK(mk(44, 1, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 4, 16, 0, 64, &p) != 0);
     CHECK(mk(44, 3, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 4, 16, 0, 64, &p) != 0);

@@ -110,6 +110,10 @@ int main(void)
     /* a release build keeps the line either way (the syslog filter), opened as well as failed */
     CHECK(nvmtl_log_failure("GPU time queue: IOAccelCommandQueue opened for Chess (pid 812; connection 0x2a03)"));
     CHECK(nvmtl_log_failure("GPU time queue: off (NVMTL_GPUTIME_QUEUE=0) for Maps (pid 903)"));
+    /* the multisample copy passes' totals reach a release build's syslog (DRIVER-PLAN N52) */
+    CHECK(nvmtl_log_failure("msdl: SUMMARY done=4 d_colour=0 d_depth=0 d_stencil=4 refused=0"));
+    CHECK(nvmtl_log_failure("msupload: SUMMARY done=4 done_int=4 inter=4 flat=0 wide=0 up_inter_13=4"));
+    CHECK(!nvmtl_log_failure("msdl: STENCIL 4-sample image 971x680 -> buffer (vk format 130)"));
 
     /* every step has a name for the log line */
     for (int s = NVMTL_GPUQ_OPENED; s <= NVMTL_GPUQ_ADD_FAILED; s++) CHECK(nvmtl_gpuq_step_name(s)[0] != '?');

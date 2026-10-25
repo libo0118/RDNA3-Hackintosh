@@ -5010,7 +5010,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
       for (NSUInteger zi = 0; zi < nz && !rc; zi++)
           rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&_cb->_c, &b->_b, so + zi * per, (uint32_t)row, [t nvi],
                                       (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)size.width, (uint32_t)size.height, (uint32_t)dl + t->_baseLevel, (uint32_t)(vol ? dof.z + zi : ds + t->_baseSlice));
-      if (rc) nvlog("blit copyFromBuffer:toTexture: FAILED (level %lu slice %lu)", (unsigned long)dl, (unsigned long)ds);
+      if (rc) nvlog("blit copyFromBuffer:toTexture: FAILED (level %lu slice %lu): %s", (unsigned long)dl, (unsigned long)ds, nvmtl_vk_copy_reason()[0] ? nvmtl_vk_copy_reason() : "no reason recorded (see the lines above)");
       else if (overwrite) nvmtl_surface_overwrite_recorded(_cb, t); }
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so sourceBytesPerRow:(NSUInteger)row
@@ -5063,7 +5063,7 @@ destinationBytesPerImage:(NSUInteger)img {
       for (NSUInteger zi = 0; zi < nz && !rc; zi++)
           rc = nvmtl_vk_cmd_copy_image_to_buffer_level_layer(&_cb->_c, [t nvi], (uint32_t)so.x, (uint32_t)so.y,
                                       (uint32_t)size.width, (uint32_t)size.height, &b->_b, dof + zi * per, (uint32_t)row, (uint32_t)sl + t->_baseLevel, (uint32_t)(vol ? so.z + zi : ss + t->_baseSlice));
-      if (rc) nvlog("blit copyFromTexture:toBuffer: FAILED (level %lu slice %lu)", (unsigned long)sl, (unsigned long)ss); }
+      if (rc) nvlog("blit copyFromTexture:toBuffer: FAILED (level %lu slice %lu): %s", (unsigned long)sl, (unsigned long)ss, nvmtl_vk_copy_reason()[0] ? nvmtl_vk_copy_reason() : "no reason recorded (see the lines above)"); }
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
            sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)size toBuffer:(id<MTLBuffer>)dst
