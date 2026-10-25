@@ -39,7 +39,7 @@ m=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "rdna3l
 grep -q '\*" rdna3play=1 "\*)' "$AR" || fail "autoreport.sh: no rdna3play=1 case"
 grep -q '\*" rdna3swapab=1 "\*)' "$AR" || fail "autoreport.sh: the swap A/B is not opt-in (rdna3swapab=1)"
 grep -q '== swap A/B: NOT ASKED' "$AR" || fail "autoreport.sh: no 'swap A/B: NOT ASKED' line"
-grep -q 'if \[ -z "\$BISECT" \] && \[ -z "\$PLAY" \]; then' "$AR" || fail "autoreport.sh: the tests are not skipped under play"
+grep -q 'if \[ -z "\$BISECT" \] && \[ -z "\$PLAY" \] && \[ -z "\$LADDER" \]; then' "$AR" || fail "autoreport.sh: the tests are not skipped under play"
 grep -q 'if \[ -n "\$PLAY" \]; then play_second; exit 0; fi' "$AR" || fail "autoreport.sh: play does not stay up after the second report"
 
 # ---- the play functions, on the host

@@ -1135,6 +1135,86 @@ decoder is taught): `dur_us` encoder begin -> end, `rc` pipeline-state variants 
 `a2` descriptor writes us, `a3` surface-in checks us over `a4` calls, `a5` / `a6` the slowest single draw's lookup / descriptor writes us
 (raw fields of `nvt_rec`; `seed0` is the traced pass id). The accumulators are per thread (an encoder is encoded by one thread; one encoded from two would be undercounted) and run only between a render encoder's creation and its endEncoding; `tools/plugin_trace.py` prints the line `encoder cb N: D draw(s) in ...` and an `encode-time split` summary block.
 
+## Rendering artefacts: the A/B ladder (N50)
+
+Card run 2026-10-25e (macOS 26.4.1, `step play`), after the framebuffer fetch fix: Terminal and Maps still show glyphs that are random unreadable
+strokes inside their cell (selecting the text redraws it right); Chess (GL over the plugin) shows square tile-shaped blocks of wrong colour on
+the board (they move from photo to photo, so they are per frame, not in the board's texture) and cyan streaks on pieces. The root cause is NOT
+established; what the report excludes and what stays open:
+
+| Hypothesis | Verdict from the 2026-10-25e report | Why |
+|---|---|---|
+| H2a: no-copy buffers copied whole before each submission and back after | excluded for Terminal, Chess and WindowServer | `newBufferWithBytesNoCopy: COPIED ...` is logged once per process and is in no log; WindowServer logs `IMPORTED ... zero copy`, Terminal and Chess never call it (neither line) |
+| H2c: Terminal's atlas buffer texture | the line is not an atlas | `buffer texture: 608x353 VkFormat 44 pitch 2560 ... DRM linear` is the window's IOSurface (`item 7: surface 294 608x353 pitch 2560 -> the family's VRAM`), linear, no compression, never written by the CPU (`hash=EMPTY` in the trace) |
+| H2b: `replaceRegion` uploads | not shown either way for Terminal | Terminal logs no plain `newTextureWithDescriptor:` line at all (the plugin logs every plain texture, the first 8 per literal), but its textures may be heap textures, whose lines the collector used to filter out (`heap texture`; now only `heap texture: ` per-texture lines are, the census lines `heap texture (placed): N placed new, ...` reach 26-log-metal-plugin.txt), and it has too few submissions for a submit census line; the census of the others: `nvmtl_vk_image_write_region_level_layer` Chess 249 in 16k submits, WindowServer 91 and constant |
+| compression metadata (DCC / HTILE / FMASK) uninitialised or stale | **not reproduced** on the dev host's RADV 26.2.5 | `tests/vk_meta_probe.c`: plugin-style sequences (LOAD passes declared TRANSFER_SRC whatever the image rests in, first use as a LOAD pass, replaceRegion-style rectangle uploads, compute writes through an rgba8 / an R32_UINT view, sampling through an R32_UINT view, an sRGB image rendered through a UNORM view with fast clears, 4x multisample + resolve), 1920x1080 / 1024x1024 / 971x680 images (DCC on: the allocation is bigger than with `RADV_DEBUG=nodcc`), memory filled with 0xCD first, 1 to 32 operations per command buffer: no wrong pixel. Its negative control (`NOC2C=1`, no barrier between two compute dispatches) fails with 16x16-tile-shaped wrong regions, so the probe can see such a thing |
+| a managed upload read while the CPU rewrites it | open, a counter and a switch | Terminal's pixels come from 3 managed buffers of 256 KB (`newBufferWithLength:262144 storage 1`) read by Apple's `buffer_image_blit_frag_lpf` shader by device address; the plugin's upload is a GPU copy from the CPU shadow that reads the shadow when the GPU runs it, and `scheduled` is signalled at submit, not at execution |
+| the fence returns before the GPU's last write is visible | seen once | Chess: `keep witness 3313 landed only 14 us AFTER the flush returned` (a CPU read of GPU output right after a fence wait can see stale bytes; every consumer in the plugin waits for the completion witness, anything outside is exposed) |
+
+The switches (all in `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`, one `NAME=value` per line, `sudo` to edit; a process reads the file when it loads
+the plugin, so quit the app, and for WindowServer log out and in). Every one is logged by the process that uses it, and triage prints a WARN row while a
+profile is on, so a profile left in the file cannot hide in a report:
+
+| Line in rdna3mtl.conf | What it does | Reading |
+|---|---|---|
+| `NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears` | Mesa RADV's compression metadata (DCC, HiZ/HTILE, FMASK, fast clears) off for every process (`NVMTL_RADV_PERFTEST=` the same for RADV_PERFTEST; only `a-z 0-9 _ ,`) | blocks / strokes gone = compression metadata; unchanged = not metadata |
+| `NVMTL_ASYNC_COMMIT=0` | command buffers are submitted at commit and waited for (no submit-ahead) | gone = an ordering race of the async worker |
+| `NVMTL_MANAGED_CHECK=1` | hashes each managed upload's shadow range at the flush and again when the GPU is done | triage `managed shadow` WARN with a count = the CPU rewrote the range while the copy was in flight |
+| `NVMTL_MANAGED_SNAPSHOT=1` | a managed upload's GPU copy reads a private copy of the shadow range made at the flush (ranges up to 1 MiB) instead of the shadow itself | gone = the app rewrites the range after didModifyRange / commit and the GPU copy read a mix (`tests/vk_cpu_write_probe.c` shows the window on the dev host: a copy reads its CPU source when the GPU runs it, here 73 ms after the rewrite) |
+| `NVMTL_LOAD_BARRIER=1` | makes the declared initial layout of every LOAD pass true (a barrier from the tracked layout) | gone = the layout lie matters on the plugin's Mesa (it does not on the dev host's) |
+| `NVMTL_NO_ALIGN_GUARD=1` | (older) the translator's SAFE module variants (built for shaders whose buffer reads rest on a promised 16-byte alignment: Terminal logs `align guard: 4 render module(s) built SAFE ... (bindings 0x2) 427 accesses`) are not used | the strokes go away = the SAFE lowering reads wrong bytes at the offsets the dirty rectangles land on (not in `NVMTL_PARANOID`: it removes a safety, not an optimisation) |
+| `NVMTL_FBFETCH_ZERO=1` | (N48) every framebuffer fetch read is a zero vector | the pattern changes = the fetch is in the picture |
+| `NVMTL_PARANOID=1` | the RADV flags above, `NVMTL_ASYNC_COMMIT=0`, plus: no pool / address-page reuse, no buffer / buffer-texture / heap-texture recycling or placement, no descriptor-set reuse or dirty-only copies, no barrier folding (`ENC78_OFF=all`, `G79_OFF=all`), no pre-submit prologue, no residency paging, one part in flight (14 switches; the log line lists the ones it set and the ones it found set already and kept: a knob of its own, in the file or the environment, wins over the profile). NOT in it: `NVMTL_MANAGED_CHECK` / `NVMTL_MANAGED_SNAPSHOT` (they live in the pre-submit prologue it removes, so they would log ON and do nothing: the managed rung is its own), `NVMTL_NO_ALIGN_GUARD`, `NVMTL_LOAD_BARRIER`, `NVMTL_FBFETCH_ZERO` | still broken = it is not the plugin's scheduling or reuse: the kernel side (cache / coherency of CPU-written system memory, fences) or the translator / RADV build |
+
+Lines and rows (`tools/triage_glyphs.py`, `tests/test_triage_glyphs.py`):
+
+| Line | Meaning | Triage row |
+|---|---|---|
+| `vk: RADV_DEBUG=<v> RADV_PERFTEST=<v> (NVMTL_RADV_DEBUG=..., NVMTL_RADV_PERFTEST=...)` | once per process, before the driver opens: the flags RADV starts with (the plugin puts its own into the environment only while RADV reads them at instance creation, then puts the process's own back; a flag name RADV does not know is refused, `vk: NVMTL_RADV_DEBUG=... REJECTED`) | `radv debug`: INFO unset, WARN set (or no such line at all = a plugin older than N50) |
+| `conf: set <NAME=value ...>`, `conf: line N skipped: ...`, `conf: K knob(s) applied from rdna3mtl.conf and the profile ...` | what the conf file (and the profile) really applied in this process; a line that is not a knob, has no `=`, is a duplicate or was already set by the environment is named, not dropped silently | `plugin conf`: INFO the applied list, WARN per skipped line. `collect.sh` also packs the file itself as `34-metal-conf.txt` |
+| `vk: ab switches [N]: NVMTL_X="v" ...` or `vk: ab switches: none set` | once per process: every diagnostic / optimisation switch that is SET in its environment, whatever set it (conf line, `open --env`, the profile) | `plugin switch`: WARN naming the switches, INFO none set |
+| `conf: NVMTL_PARANOID=1 - the diagnostic profile is ON: N switch(es) set by it (...), already set and kept: ...` | the profile is on (always printed, also when it set nothing) | `paranoid profile` WARN |
+| `vk: ab: SUMMARY load_colour_all=... load_colour_mismatch=... load_colour_inrp=... load_colour_barriers=... (the same for depth) colour_by_layout=a,b,... (UNDEFINED GENERAL COLOR DS DSRO SRO SRC DST PREINIT other) wit_early=... wit_ok=... wit_blind=... wit_worst_us=...` | a TIME-based line (`nvlog_uncapped`: at most every 10 s while a counter moved, at the first event and at exit; the capped `vk: load pass ...` lines are only the first 8 per process): how many LOAD passes began on an image whose tracked layout is not the declared one (depth: judged against the declared depth OR stencil load op), how many of them were seen with a render pass already open (not counted), how many a barrier fixed, and the fence witness totals | `load pass layouts` INFO with the counts, `fence early` WARN / INFO. A process the OS ends with SIGTERM prints no exit line: the last tick (10 s) is what survives; the plugin also ticks from the witness-OK path and at the start of every render pass, so a clean process prints its totals too. A process that told its switches (`vk: ab switches`) and printed no SUMMARY gets the INFO row `ab summary`: its counters are UNKNOWN, `no early fence` / `no mismatch` say nothing about it |
+| `vk: keep witness N landed only X us AFTER the flush returned ...` | first lines only; the count and the worst value are in `vk: ab: SUMMARY` (`wit_early`, `wit_worst_us`) | `fence early` WARN; INFO "pool reuse is OFF there" when `NVMTL_NO_POOL_REUSE` took the witness away ("no early fence" is then no evidence) |
+| `managed: SUMMARY check=C snapshot=S flushes=... uploads=... prologue_uploads=... sync_uploads=... checked=... changed_exact=... changed_env=... check_skipped=... snapped=... snap_failed=... snap_skipped_big=... snap_skipped_noshadow=...` and `managed: the CPU shadow of a N-byte buffer CHANGED at bytes A..B ...` | `NVMTL_MANAGED_CHECK=1` / `NVMTL_MANAGED_SNAPSHOT=1`: the totals (time-based, like the line above); `sync_uploads` are uploads of a synchronous submit, where both switches are INERT | `managed shadow`: WARN changed_exact > 0, WARN sync_uploads > 0 (INERT), WARN skipped / failed counts, INFO checked clean |
+
+The order to try: `NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`; `NVMTL_ASYNC_COMMIT=0`; `NVMTL_MANAGED_CHECK=1` and `NVMTL_MANAGED_SNAPSHOT=1`;
+`NVMTL_NO_ALIGN_GUARD=1`; `NVMTL_PARANOID=1`; `NVMTL_LOAD_BARRIER=1`. If `PARANOID` does not change the picture the cause is not in anything the plugin schedules or reuses.
+
+### The whole ladder in one card run: `rdna3vm step ladder`
+
+One run instead of one report per switch (autoreport.sh `ladder_run`, boot-arg `rdna3ladder=1`; the profile of the `play` step, nothing else runs, about 26 minutes;
+by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder`). Seven rungs: `baseline`, `radv`
+(`NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`), `sync` (`NVMTL_ASYNC_COMMIT=0`), `managed` (`NVMTL_MANAGED_CHECK=1` + `NVMTL_MANAGED_SNAPSHOT=1`),
+`alignguard` (`NVMTL_NO_ALIGN_GUARD=1`), `paranoid` (`NVMTL_PARANOID=1`), `loadbarrier` (`NVMTL_LOAD_BARRIER=1`). Per rung the run opens Terminal (a colour
+listing, then a tick line every second) and Chess as NEW instances with that rung's switches in their environment
+(`open -n -a Terminal --env NVMTL_X=1`: the plugin reads its switches from the process's environment as well as from the conf file, the environment wins),
+waits 25 s, takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
+by rung), after asking the two instances to quit (System Events, by unix id: a graceful quit runs the plugin's exit `SUMMARY`; macOS may ask once whether `osascript` may control
+System Events - allow it; whatever is still running after 8 s gets SIGTERM). The instances that were already running when the run began (the Terminal you started it from,
+your own Chess) are never touched. `rdna3mtl.conf` is not written and WindowServer is not restarted: the
+switch reaches the two apps only, which is where the artefacts show. At the desktop, the run asks nothing; from a Terminal (`--standalone --ladder`) it asks `y` (picture right) /
+`n` (broken) / Enter per rung (20 s each) and the answers go into the table.
+
+`rdna3vm step ladder-ws` (`rdna3ladder=2`, `--ladder-ws`, about 45 minutes) adds `radv-ws` and `paranoid-ws`: the same switches for WindowServer itself. These
+edit `rdna3mtl.conf` (the file's other lines stay, a same-named line is replaced), restart WindowServer (log in at the login window; Terminal and Chess then open under it)
+and put the conf back exactly (also with no conf file at all, on Ctrl-C / SIGTERM, and at the next start of autoreport.sh after a dead run); the desktop is restarted once more at the end so that it
+runs with the default conf. Run `ladder-ws` only when the app rungs say the switch matters.
+
+Evidence: `ladder.txt` (archive member `41-ladder.txt`, uploaded after every rung as `<report>-ladder.txt`), each rung's `41-ladder-<rung>.log` and the looks
+`<report>-scanoutladder-<rung>[a|h]-pipe<P>.ppm`. `tools/triage_reports.py` prints one row per rung (`ladder <rung>`: what it set, whether the plugin's own
+`vk: ab switches` line in that rung's log shows the switch: WARN when a key the rung set is missing in one of the processes ("did not reach the plugin") or when the
+process has a key the rung did NOT ask for ("not default: X", also a conf line left over in the baseline), WARN when a process printed no SUMMARY; the counters of the slice, the look count, your answer) and a `ladder` row: "the baseline picture was broken and the
+picture was RIGHT with: X" names the discriminator. Reading it: a rung whose WARN says the switch did not reach the plugin proves nothing (the `--env` was not
+taken: check `34-metal-conf.txt` and `26-log-metal-plugin.txt`); without your answers, compare `ladder-<rung>h` pictures by eye (the text is the quickest test).
+
+Encode time (kind 17 records, `tools/plugin_trace.py`, the same report): WindowServer, 3948 render encoders and 26152 draws in `101618`: 4256 ms in
+encoders, of which the surface-in checks are 1605 ms (38 %, 104 us per call; 81 % of it in 205 encoders that include a real upload, 465 uploads of 856 us
+each = 398 ms; in the 3533 encoders without a big upload the calls average 43 us: a lock, a seed query and a VRAM tag check per bound texture and draw), descriptor writes 99 ms (4 us per draw), pipeline lookup 27 ms
+(1 us per draw); the other 60 % is time the split does not cover (the app's own calls, the recording of passes, framebuffers, views, 32768 images
+made and destroyed in 13 minutes). Terminal's first encoders spend 95 to 350 us per draw in descriptor writes (the first draw of a process builds the
+pools and sets), later ones 4.5 us.
+
 ## Linux reference dump (`tools/linux/card_dump.sh`)
 
 `sudo bash tools/linux/card_dump.sh` on the Linux host (amdgpu, idle desktop)

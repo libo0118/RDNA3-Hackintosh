@@ -199,7 +199,7 @@ run 40-app-crashes.txt crash_reports
 run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
 # CoreDisplay / IOPresentment / GPUWrangler / the Metal plugin in
 # WindowServer, unfiltered: why a display pipe or Metal device failed
-run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\" OR eventMessage CONTAINS \"Invalid end point size\" OR eventMessage CONTAINS \"capabilities with no devices\" OR eventMessage CONTAINS \"device with no planes\" OR eventMessage CONTAINS \"Failed to get capabilities\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
+run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\" OR eventMessage CONTAINS \"Invalid end point size\" OR eventMessage CONTAINS \"capabilities with no devices\" OR eventMessage CONTAINS \"device with no planes\" OR eventMessage CONTAINS \"Failed to get capabilities\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture: '"
 # whole (card run 48 lost the plugin's start to a tail, run 49 the middle
 # where WindowServer restarted six times)
 # every WindowServer crash of this boot, its termination reason and the
@@ -208,7 +208,7 @@ run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --
 run 25-windowserver-exits.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -12); do echo \"== \$f\"; tr -d '\\n' < \"\$f\" | grep -o -E '\"(pid|procLaunch|termination|asi|exception)\" *: *(\\{[^}]*\\}|\"[^\"]*\"|[0-9]+)' | head -8; done; echo '== launchd about WindowServer'; log show --last boot --style compact --predicate 'process == \"launchd\" AND eventMessage CONTAINS \"WindowServer\"' 2>/dev/null | grep -i -E 'exit|crash|signal|spawn' | tail -40"
 # the Metal plugin in every other process (card run 51: Chess's plugin
 # log stopped where its lines no longer named RDNA3, before the failure)
-run 26-log-metal-plugin.txt sh -c "log show --last boot --info --style compact --predicate 'eventMessage CONTAINS \"NVMTL\" AND process != \"WindowServer\"' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
+run 26-log-metal-plugin.txt sh -c "log show --last boot --info --style compact --predicate 'eventMessage CONTAINS \"NVMTL\" AND process != \"WindowServer\"' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture: '"
 lim=45
 # card run 54 (stale regions, Chess, Maps): RD3Surface::submitCopyForward and
 # CoreDisplay's copy forward in one place, then each app's plugin warnings
@@ -308,6 +308,14 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
 if [ -s "$HOME/rdna3-bisect/bisect.txt" ]; then
     cp "$HOME/rdna3-bisect/bisect.txt" "$dir/39-bisect.txt" 2>/dev/null
 fi
+# DRIVER-PLAN N50: the A/B ladder (rdna3vm step ladder, autoreport.sh ladder_run): ladder.txt (one block per rung: the switches it ran with,
+# the looks, the owner's answer, the rung's log file) and each rung's plugin log slice; tools/triage_reports.py prints one row per rung
+if [ -s "$HOME/rdna3-ladder/ladder.txt" ]; then
+    cp "$HOME/rdna3-ladder/ladder.txt" "$dir/41-ladder.txt" 2>/dev/null
+    for _lf in "$HOME"/rdna3-ladder/*.log; do
+        [ -f "$_lf" ] && cp "$_lf" "$dir/41-ladder-$(basename "$_lf")" 2>/dev/null
+    done
+fi
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
 # every process that loaded it: "allow mode: <mode>; <process>: <reason>"
@@ -319,6 +327,12 @@ fi
     grep -h 'allow mode' "$dir/24-log-coredisplay.txt" "$dir/26-log-metal-plugin.txt" 2>/dev/null \
         | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -200
 } > "$dir/34-metal-allow.txt" 2>&1
+# N50: the plugin's conf file as the plugin reads it (the A/B profile of a run is in it: NVMTL_RADV_DEBUG, NVMTL_PARANOID, ...); the plugin also logs
+# `conf: set ...` and `vk: ab switches` per process, this is the file itself
+{
+    echo "== /Library/GPUBundles/rdna3mtl/rdna3mtl.conf"
+    cat /Library/GPUBundles/rdna3mtl/rdna3mtl.conf 2>&1 || echo "(no conf file: the defaults)"
+} > "$dir/34-metal-conf.txt" 2>&1
 # which source the Metal plugin and RADV in this machine were built from
 # (build_metal.sh / build_radv.sh write the stamps; tools/triage_reports.py
 # compares them with the checkout: STALE PLUGIN/RADV). The kext was current

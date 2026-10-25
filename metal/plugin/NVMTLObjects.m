@@ -11,6 +11,7 @@
 void nvlog(const char *fmt, ...);
 
 #import "NVMTLObjects.h"
+#include "nvmtl_ab_switch.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 static int nvmtl_trace_on(void);
@@ -76,6 +77,10 @@ static _Atomic uint64_t gRes2Tick;
 static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
+/* The conf file and the diagnostic profile (DRIVER-PLAN N50). What is applied is LOGGED: `conf: set KEY="value" ...` lists every knob taken from the
+ * file or the profile, one line per skipped line with the reason (not an NVMTL_/NVK_/NVRM_ key, the environment already has it, an earlier line of the
+ * file already set it: the first one wins), and `conf: NVMTL_PARANOID=...` always says what the profile did. Values lose leading blanks (` 0` is "0"). */
+static void nvmtl_conf_log_set(const char *what, const char *items, size_t n) { if (n) nvlog("conf: %s %s", what, items); }
 __attribute__((constructor)) static void nvmtl_conf_knobs(void)
 {
 #if NVMTL_RELEASE
@@ -97,31 +102,67 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
           free(dup); }
       unsetenv("NVMTL_CONF_SET"); }
     char recbuf[2048]; size_t recn = 0; recbuf[0] = 0;
+    char applied[640]; size_t appn = 0; applied[0] = 0;   /* `conf: set` is logged in chunks that fit one log line */
     FILE *f = fopen(RDNA3MTL_CONF, "r");
-    if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
     char line[512];
-    unsigned took = 0;
-    while (fgets(line, sizeof line, f)) {
-        char *p = line;
+    unsigned took = 0, skipped = 0, lineno = 0;
+    if (!f && forgot) nvlog("conf: forgot %u inherited knob(s); no conf file %s", forgot, RDNA3MTL_CONF);
+    while (f && fgets(line, sizeof line, f)) {
+        char *p = line; lineno++;
         while (*p == ' ' || *p == '\t') p++;
-        if (*p == '#' || *p == '\n' || !*p) continue;
+        if (*p == '#' || *p == '\n' || *p == '\r' || !*p) continue;
         char *eq = strchr(p, '=');
-        if (!eq) continue;
+        if (!eq) { if (skipped++ < 8) nvlog("conf: line %u skipped: no '=' (a knob is written NAME=value)", lineno); continue; }
         *eq = 0;
         char *key = p, *val = eq + 1;
         char *end = key + strlen(key);
         while (end > key && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
+        while (*val == ' ' || *val == '\t') val++;
         end = val + strlen(val);
         while (end > val && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
-        if (strncmp(key, "NVMTL_", 6) && strncmp(key, "NVK_", 4) && strncmp(key, "NVRM_", 5)) continue;
-        if (getenv(key)) continue;
+        if (strncmp(key, "NVMTL_", 6) && strncmp(key, "NVK_", 4) && strncmp(key, "NVRM_", 5)) {
+            if (skipped++ < 8) nvlog("conf: line %u skipped: \"%.40s\" is not an NVMTL_ / NVK_ / NVRM_ knob", lineno, key); continue; }
+        if (getenv(key)) {
+            if (skipped++ < 8) nvlog("conf: line %u skipped: %.60s is already set (an earlier line of the file, or the environment, wins)", lineno, key); continue; }
         if (setenv(key, val, 0) == 0) { took++;
             int k = snprintf(recbuf + recn, sizeof recbuf - recn, "%s%s=%s", recn ? ";" : "", key, val);
-            if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else recbuf[recn] = 0; }
+            if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else recbuf[recn] = 0;
+            char q[160]; nvmtl_ab_quote(q, sizeof q, val);
+            if (appn + strlen(key) + strlen(q) + 3 > sizeof applied) { nvmtl_conf_log_set("set", applied, appn); appn = 0; applied[0] = 0; }
+            appn += (size_t)snprintf(applied + appn, sizeof applied - appn, "%s%s=%s", appn ? " " : "", key, q);
+        }
     }
-    fclose(f);
+    if (f) fclose(f);
+    if (skipped > 8) nvlog("conf: ... and %u more line(s) skipped", skipped - 8);
+    /* DRIVER-PLAN N50: one line for the card's A/B run. NVMTL_PARANOID=1 (rdna3mtl.conf, or the environment of a development build) switches off
+     * every optimisation that moves work in time or shares / reuses memory (async commit and submit-ahead, the pre-submit prologue, buffer /
+     * buffer-texture / heap-texture recycling, command pool and address page reuse, descriptor set reuse and dirty-only copies, barrier folding,
+     * residency paging) and turns RADV's compression metadata off. A knob of its own (a line in the file, the environment) wins over the profile
+     * (setenv without overwrite); which knobs the profile set and which it found set are logged. Done also without a conf file. */
+    unsigned paranoid = 0; char kept[480]; size_t keptn = 0; kept[0] = 0;
+    { const char *pv = getenv("NVMTL_PARANOID");
+      if (pv && *pv && *pv != '0') {
+          static const char *const kv[][2] = { { "NVMTL_RADV_DEBUG", "nodcc,nohiz,nofmask,nofastclears" }, { "NVMTL_ASYNC_COMMIT", "0" }, { "NVMTL_GSUB_INFLIGHT", "1" },
+              { "NVMTL_PRESUBMIT_PROLOGUE", "0" }, { "NVMTL_NO_POOL_REUSE", "1" }, { "NVMTL_NO_BUFREUSE", "1" }, { "NVMTL_NO_BUFTEX_RECYCLE", "1" },
+              { "NVMTL_NO_HEAPTEX_RECYCLE", "1" }, { "NVMTL_NO_HEAPTEX_PLACE", "1" }, { "NVMTL_NO_DIRTYONLY", "1" }, { "NVMTL_ENC78_OFF", "all" },
+              { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" } };
+          /* MANAGED_CHECK / MANAGED_SNAPSHOT are not in the profile: they live in the pre-submit prologue, which PRESUBMIT_PROLOGUE=0 removes, so
+           * they would log ON and do nothing. They are rungs of their own. */
+          char setl[480]; size_t setn = 0; setl[0] = 0;
+          for (unsigned i = 0; i < sizeof kv / sizeof kv[0]; i++) {
+              if (getenv(kv[i][0])) { keptn += (size_t)snprintf(kept + keptn, sizeof kept - keptn, "%s%s", keptn ? " " : "", kv[i][0]); if (keptn >= sizeof kept) keptn = sizeof kept - 1; continue; }
+              if (setenv(kv[i][0], kv[i][1], 0) == 0) { paranoid++; took++;
+                  setn += (size_t)snprintf(setl + setn, sizeof setl - setn, "%s%s=%s", setn ? " " : "", kv[i][0], kv[i][1]); if (setn >= sizeof setl) setn = sizeof setl - 1;
+                  int k = snprintf(recbuf + recn, sizeof recbuf - recn, "%s%s=%s", recn ? ";" : "", kv[i][0], kv[i][1]);
+                  if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else recbuf[recn] = 0; }
+          }
+          nvlog("conf: NVMTL_PARANOID=%s - the diagnostic profile is ON: %u switch(es) set by it (%s)%s%s; no async commit, no recycling or reuse, no barrier "
+                "folding, no residency paging, RADV compression metadata off: this run does NOT show the default plugin", pv, paranoid, paranoid ? setl : "none",
+                keptn ? ", already set and kept: " : "", keptn ? kept : "");
+      } else if (pv) nvlog("conf: NVMTL_PARANOID=%s is not 1 - the profile is off", pv); }
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
-    if (took || forgot) nvlog("conf: %u knob(s) read from " RDNA3MTL_CONF ", %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
+    nvmtl_conf_log_set("set", applied, appn);
+    if (took || forgot) nvlog("conf: %u knob(s) applied from " RDNA3MTL_CONF " and the profile (%u line(s) skipped), %u inherited conf knob(s) forgotten first (the environment still wins)", took, skipped, forgot);
 }
 static int nvmtl_dontcare_clears(void) {
     static int on = -1;
@@ -577,40 +618,152 @@ static void nvmtl_purge_report(const char *why) {
           (unsigned long long)nemp, (unsigned long long)(bemp >> 20),
           (unsigned long long)atomic_load(&gPurgeAsks), (unsigned long long)(bemp >> 20));
 }
-static void nvmtl_pre_release(void *held) { @autoreleasepool { (void)CFBridgingRelease(held); } }
+/* DRIVER-PLAN N50, NVMTL_MANAGED_CHECK=1 (default off): a managed buffer's upload is a GPU copy from the CPU shadow into the VRAM copy that rides the next
+ * submit, so the GPU reads the shadow when it EXECUTES the copy, not when the app called didModifyRange: and an app that rewrites the range as soon as
+ * it believes the copy is queued (Apple's drivers may snapshot it) gives the GPU a mix. The flush hashes each uploaded range, the release of the
+ * prologue (after the GPU finished and before the app is told) hashes it again: a changed hash is a CPU write into the range while the copy was in flight.
+ * Both switches live in the pre-submit prologue (NVMTL_PRESUBMIT_PROLOGUE=0, a full pre-submit holder or a failed prologue begin make a flush a synchronous
+ * submit of its own, where there is no window): that case is COUNTED (`inert`) and said in the SUMMARY line, never silently. Every count reaches the report
+ * through `managed: SUMMARY` (nvlog_uncapped, at most every 10 s while one moved, at the first change / inert / skip and at exit): the capped nvlog lines
+ * only show the first 8 of each literal. */
+void nvlog_uncapped(const char *fmt, ...);
+static int nvmtl_managed_check_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_CHECK"); on = e && *e && *e != '0';
+        nvlog("managed: shadow check %s (NVMTL_MANAGED_CHECK=%s)", on ? "ON - each upload's shadow range is hashed at the flush and again when the GPU is done" : "off", e ? e : "unset"); }
+    return on;
+}
+static int nvmtl_managed_snap_on(void);
+static uint64_t nvmtl_range_hash(const uint8_t *p, size_t n) {
+    uint64_t h = 1469598103934665603ull; size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h = (h ^ w) * 1099511628211ull; h ^= h >> 29; }
+    for (; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+/* NVMTL_MANAGED_SNAPSHOT=1 (default off; DRIVER-PLAN N50): the copy that uploads a managed range reads a private copy of the shadow made at the flush
+ * (ranges up to 1 MiB), not the shadow itself when the GPU gets to it. What Apple's drivers do for small ranges is not documented; an app that rewrites a
+ * range right after didModifyRange:/commit (Terminal's 3 x 256 KB upload buffers) is safe with it and gets a mix of two states without it. */
+static int nvmtl_managed_snap_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_SNAPSHOT"); on = e && *e && *e != '0';
+        nvlog("managed: upload snapshot %s (NVMTL_MANAGED_SNAPSHOT=%s)", on ? "ON - the GPU copy reads a private copy of the shadow range made at the flush (ranges up to 1 MiB)" : "off - the GPU copy reads the shadow when it runs", e ? e : "unset"); }
+    return on;
+}
+static _Atomic unsigned long long gMgFlushes, gMgUploads, gMgPrologue, gMgSync, gMgChecked, gMgChangedExact, gMgChangedEnvelope, gMgCheckSkipped,
+                                  gMgSnapped, gMgSnapFailed, gMgSnapBig, gMgSnapNoShadow;
+static _Atomic uint64_t gMgSumNs; static unsigned long long gMgSumLast; static int gMgArmed;
+static void nvmtl_mg_summary(int force);
+static void nvmtl_mg_atexit(void) { nvmtl_mg_summary(1); }
+static void nvmtl_mg_summary(int force) {
+    if (!gMgArmed) { gMgArmed = 1; atexit(nvmtl_mg_atexit); }
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), last = atomic_load(&gMgSumNs);
+    if (!force && now - last < 10ull * 1000000000ull) return;
+    const unsigned long long fl = atomic_load(&gMgFlushes), up = atomic_load(&gMgUploads), pr = atomic_load(&gMgPrologue), sy = atomic_load(&gMgSync),
+        ck = atomic_load(&gMgChecked), ce = atomic_load(&gMgChangedExact), cv = atomic_load(&gMgChangedEnvelope), cs = atomic_load(&gMgCheckSkipped),
+        sn = atomic_load(&gMgSnapped), sf = atomic_load(&gMgSnapFailed), sb = atomic_load(&gMgSnapBig), sh = atomic_load(&gMgSnapNoShadow);
+    const unsigned long long total = fl + up + pr + sy + ck + ce + cv + cs + sn + sf + sb + sh;
+    if (!total || total == gMgSumLast) return;
+    if (!atomic_compare_exchange_strong(&gMgSumNs, (uint64_t *)&last, now) && !force) return;
+    gMgSumLast = total;
+    nvlog_uncapped("managed: SUMMARY check=%d snapshot=%d flushes=%llu uploads=%llu prologue_uploads=%llu sync_uploads=%llu checked=%llu changed_exact=%llu changed_env=%llu "
+                   "check_skipped=%llu snapped=%llu snap_failed=%llu snap_skipped_big=%llu snap_skipped_noshadow=%llu",
+                   nvmtl_managed_check_on(), nvmtl_managed_snap_on(), fl, up, pr, sy, ck, ce, cv, cs, sn, sf, sb, sh);
+}
+static void nvmtl_pre_release(void *held) {
+    @autoreleasepool {
+        NSArray *a = CFBridgingRelease(held);
+        if (!nvmtl_managed_check_on()) return;
+        for (id e in a) {
+            if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 5) continue;
+            NVMTLBuffer *b = [(NSArray *)e objectAtIndex:0]; if (!b->_shadow.map) { atomic_fetch_add(&gMgCheckSkipped, 1); continue; }
+            const NSUInteger lo = [[(NSArray *)e objectAtIndex:1] unsignedIntegerValue], hi = [[(NSArray *)e objectAtIndex:2] unsignedIntegerValue];
+            const uint64_t h1 = [[(NSArray *)e objectAtIndex:3] unsignedLongLongValue]; const NSUInteger marks = [[(NSArray *)e objectAtIndex:4] unsignedIntegerValue];
+            const unsigned long long n = atomic_fetch_add(&gMgChecked, 1) + 1;
+            if (nvmtl_range_hash((const uint8_t *)b->_shadow.map + lo, hi - lo) == h1) continue;
+            const char *snapnote = nvmtl_managed_snap_on() ? " - NVMTL_MANAGED_SNAPSHOT is on: a range up to 1 MiB was read from the snapshot, the GPU saw the state of the flush" : "";
+            if (marks == 1) {
+                const unsigned long long k = atomic_fetch_add(&gMgChangedExact, 1) + 1;
+                nvlog("managed: the CPU shadow of a %zu-byte buffer CHANGED at bytes %lu..%lu between the flush and the GPU's completion under ONE didModifyRange: the GPU copy may have read a mix of two states [%llu of %llu uploads checked]%s",
+                      (size_t)b->_b.size, (unsigned long)lo, (unsigned long)hi, k, n, snapnote);
+                if (k == 1 || !(k & (k - 1))) nvmtl_mg_summary(1);
+            } else {
+                const unsigned long long k = atomic_fetch_add(&gMgChangedEnvelope, 1) + 1;
+                nvlog("managed: the CPU shadow of a %zu-byte buffer changed at bytes %lu..%lu between the flush and the GPU's completion, an envelope of several didModifyRange ranges (the gap between them may legitimately change) [%llu of %llu uploads checked]%s",
+                      (size_t)b->_b.size, (unsigned long)lo, (unsigned long)hi, k, n, snapnote);
+                if (k == 1 || !(k & (k - 1))) nvmtl_mg_summary(1);
+            }
+        }
+        nvmtl_mg_summary(0);
+    }
+}
 static void nvmtl_managed_flush(void) {
     if (!atomic_load(&gManagedAny) || gManagedInFlush) return;
     gManagedInFlush = 1;
     NSMutableArray *todo = [NSMutableArray new];
+    const BOOL chk = nvmtl_managed_check_on();   /* before the lock: it logs once */
     os_unfair_lock_lock(&gManagedLock);
     for (NVMTLBuffer *b in gManagedDirty.allObjects) {
-        if (b->_dirtyHi > b->_dirtyLo) [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi)]];
-        b->_dirtyLo = b->_dirtyHi = 0;
+        if (b->_dirtyHi > b->_dirtyLo) {
+            if (chk && b->_shadow.map && b->_dirtyHi <= b->_b.size)
+                [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi), @(nvmtl_range_hash((const uint8_t *)b->_shadow.map + b->_dirtyLo, b->_dirtyHi - b->_dirtyLo)), @(b->_dirtyN)]];
+            else { if (chk) atomic_fetch_add(&gMgCheckSkipped, 1); [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi)]]; }
+        }
+        b->_dirtyLo = b->_dirtyHi = 0; b->_dirtyN = 0;
     }
     [gManagedDirty removeAllObjects]; atomic_store(&gManagedAny, 0);
     os_unfair_lock_unlock(&gManagedLock);
+    atomic_fetch_add(&gMgFlushes, 1); atomic_fetch_add(&gMgUploads, todo.count);
     if (todo.count && nvmtl_vk_pre_open()) {
+        atomic_fetch_add(&gMgPrologue, todo.count);
+        NSMutableArray *stages = nil; const BOOL snap = nvmtl_managed_snap_on();
         for (NSArray *t in todo) {
             NVMTLBuffer *b = t[0]; NSUInteger lo = [t[1] unsignedIntegerValue], n = [t[2] unsignedIntegerValue] - lo;
-            if (nvmtl_vk_pre_copy(&b->_shadow, lo, &b->_b, lo, n))
+            nvk_buffer *src = &b->_shadow; size_t soff = lo;
+            if (snap && !b->_shadow.map) atomic_fetch_add(&gMgSnapNoShadow, 1);
+            else if (snap && n > NVMTL_SNAP_MAX_BYTES) atomic_fetch_add(&gMgSnapBig, 1);
+            else if (nvmtl_snap_wanted(n, snap) && b->_shadow.map) {
+                NVMTLBuffer *st = [NVMTLBuffer new];
+                if (nvmtl_vk_buffer_create(n, 1, &st->_b) == 0 && st->_b.map) {
+                    memcpy(st->_b.map, (const uint8_t *)b->_shadow.map + lo, n); src = &st->_b; soff = 0;
+                    if (!stages) stages = [NSMutableArray new];
+                    [stages addObject:st];   /* released with the prologue, after the GPU is done with the copy */
+                    atomic_fetch_add(&gMgSnapped, 1);
+                } else {
+                    const unsigned long long k = atomic_fetch_add(&gMgSnapFailed, 1) + 1;
+                    nvlog("managed: the snapshot of %lu bytes could not be allocated - this upload reads the shadow itself [%llu so far]", (unsigned long)n, k);
+                    if (k == 1 || !(k & (k - 1))) nvmtl_mg_summary(1);
+                }
+            }
+            if (nvmtl_vk_pre_copy(src, soff, &b->_b, lo, n))
                 nvlog("managed: upload of %lu bytes at %lu FAILED - the GPU keeps the old bytes", (unsigned long)n, (unsigned long)lo);
         }
+        if (stages) [todo addObjectsFromArray:stages];
         nvmtl_pre_release_hook = nvmtl_pre_release;
         nvmtl_vk_pre_hold((__bridge_retained void *)todo);
-    } else
-    for (NSArray *t in todo) {
-        NVMTLBuffer *b = t[0]; NSUInteger lo = [t[1] unsignedIntegerValue], n = [t[2] unsignedIntegerValue] - lo;
-        if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_shadow, lo, &b->_b, lo, n))
-            nvlog("managed: upload of %lu bytes at %lu FAILED - the GPU keeps the old bytes", (unsigned long)n, (unsigned long)lo);
+    } else {
+        if (todo.count) {   /* a synchronous submit of its own: no window for a rewrite, and neither switch does anything */
+            atomic_fetch_add(&gMgSync, todo.count);
+            if (chk || nvmtl_managed_snap_on()) {
+                static _Atomic int said; const int sn = atomic_fetch_add(&said, 1);
+                if (sn < 8) nvlog("managed: NVMTL_MANAGED_CHECK / NVMTL_MANAGED_SNAPSHOT are INERT for this flush (%lu upload(s) as a synchronous submit: the pre-submit prologue is off, full or failed to begin)", (unsigned long)todo.count);
+                if (!(sn & (sn - 1))) nvmtl_mg_summary(1);
+            }
+        }
+        for (NSArray *t in todo) {
+            NVMTLBuffer *b = t[0]; NSUInteger lo = [t[1] unsignedIntegerValue], n = [t[2] unsignedIntegerValue] - lo;
+            if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_shadow, lo, &b->_b, lo, n))
+                nvlog("managed: upload of %lu bytes at %lu FAILED - the GPU keeps the old bytes", (unsigned long)n, (unsigned long)lo);
+        }
     }
+    nvmtl_mg_summary(0);
     gManagedInFlush = 0;
 }
 static void nvmtl_presubmit(void);
 static void nvmtl_managed_mark(NVMTLBuffer *b, NSUInteger lo, NSUInteger hi) {
     os_unfair_lock_lock(&gManagedLock);
     if (!gManagedDirty) gManagedDirty = [NSHashTable weakObjectsHashTable];
-    if (b->_dirtyHi <= b->_dirtyLo) { b->_dirtyLo = lo; b->_dirtyHi = hi; }
-    else { b->_dirtyLo = MIN(b->_dirtyLo, lo); b->_dirtyHi = MAX(b->_dirtyHi, hi); }
+    if (b->_dirtyHi <= b->_dirtyLo) { b->_dirtyLo = lo; b->_dirtyHi = hi; b->_dirtyN = 1; }
+    else { b->_dirtyLo = MIN(b->_dirtyLo, lo); b->_dirtyHi = MAX(b->_dirtyHi, hi); b->_dirtyN++; }
     @autoreleasepool { [gManagedDirty addObject:b]; } atomic_store(&gManagedAny, 1);
     nvmtl_pre_submit_hook = nvmtl_presubmit;
     os_unfair_lock_unlock(&gManagedLock);
@@ -3724,7 +3877,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     extern nvk_queue *nvmtl_device_queue(void);
     static int noPlace = -1, noRecycle = -1;
     if (noPlace < 0) { noPlace = getenv("NVMTL_NO_HEAPTEX_PLACE") != NULL; noRecycle = getenv("NVMTL_NO_HEAPTEX_RECYCLE") != NULL;
-        nvlog("heap texture: dres R1 placement %s, recycle %s", noPlace ? "OFF (NVMTL_NO_HEAPTEX_PLACE)" : "ON",
+        nvlog("heap texture config: dres R1 placement %s, recycle %s", noPlace ? "OFF (NVMTL_NO_HEAPTEX_PLACE)" : "ON",
               noRecycle ? "OFF (NVMTL_NO_HEAPTEX_RECYCLE)" : "ON"); }
     if (noPlace) return nil;
     if (_storage != MTLStorageModePrivate || d.storageMode != MTLStorageModePrivate
