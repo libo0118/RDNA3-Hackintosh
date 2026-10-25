@@ -72,6 +72,7 @@ for p in $(echo "$pred" | sed -n 's/processID == \([0-9]*\)/\1/gp' | tr -cs '0-9
     else
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab switches: none set (x)"
     fi
+    echo "2026-10-25 12:00:11.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab: SUMMARY wit_ok=3 wit_early=0 wit_blind=0 wit_worst_us=0"
 done
 exit 0
 EOF
@@ -82,7 +83,21 @@ n=$(cat "$STUBDIR/ws" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUBDIR/
 cp "$BISECT_CONF" "$STUBDIR/conf-at-ws-$n" 2>/dev/null || echo "(absent)" > "$STUBDIR/conf-at-ws-$n"
 exit 0
 EOF
-for c in caffeinate say afplay osascript sleep pkill; do printf '#!/bin/sh\necho "%s $*" >> "$STUBLOG"\nexit 0\n' "$c" > "$T/bin/$c"; done
+cat > "$T/bin/osascript" <<'STUBEND'
+#!/bin/sh
+# tell application "System Events" to tell (first process whose unix id is N) to quit: the instance quits (unless OSA_NOQUIT)
+echo "osascript $*" >> "$STUBLOG"
+n=$(echo "$*" | sed -n 's/.*unix id is \([0-9]*\)).*/\1/p')
+[ -n "$n" ] && [ -z "${OSA_NOQUIT:-}" ] && for f in "$STUBDIR"/pids-*; do [ -f "$f" ] && { grep -vx "$n" "$f" > "$f.n" || true; mv -f "$f.n" "$f"; }; done
+exit 0
+STUBEND
+cat > "$T/bin/mktemp" <<'STUBEND'
+#!/bin/sh
+# mktemp -d /Users/Shared/rdna3-ladder-text.XXXXXX -> a directory in the stub dir
+[ "$1" = -d ] && [ "$2" = /Users/Shared/rdna3-ladder-text.XXXXXX ] || { echo "mktemp: unexpected $*" >> "$STUBLOG"; exit 1; }
+d=$STUBDIR/textdir.$$; mkdir -p "$d"; echo "mktemp $d" >> "$STUBLOG"; echo "$d"
+STUBEND
+for c in caffeinate say afplay sleep pkill; do printf '#!/bin/sh\necho "%s $*" >> "$STUBLOG"\nexit 0\n' "$c" > "$T/bin/$c"; done
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/curl"
 cat > "$T/D/bin/rdna3_drminfo" <<'EOF'
 #!/bin/sh
@@ -106,7 +121,8 @@ hdr() { echo "== $*"; }
 with_limit() { shift; "$@"; }
 restore_sleep() { :; }
 as_user() { "$@"; }
-kill() {   # the real kill is not wanted: the fake instances are forgotten, the line is kept
+kill() {   # the real kill is not wanted: the fake instances are forgotten, the line is kept; -0 asks whether the instance is still there
+    if [ "$1" = -0 ]; then cat "$STUBDIR"/pids-* 2>/dev/null | grep -qx "$2"; return $?; fi
     echo "kill $*" >> "$STUBLOG"
     for a in "$@"; do
         case $a in -*) ;; *) for f in "$STUBDIR"/pids-*; do [ -f "$f" ] && { grep -vx "$a" "$f" > "$f.n" || true; mv -f "$f.n" "$f"; }; done ;; esac
@@ -114,8 +130,10 @@ kill() {   # the real kill is not wanted: the fake instances are forgotten, the 
     return 0
 }
 if [ -n "${STOP_AT:-}" ]; then   # an interrupt in the middle of a rung: the harness's own SIGTERM at the Nth hires look
-    ladder_look_hires() { n=$(cat "$STUBDIR/looks" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUBDIR/looks"; [ "$n" = "$STOP_AT" ] && command kill -TERM $$; return 0; }
+    ladder_look_hires() { n=$(cat "$STUBDIR/looks" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$STUBDIR/looks"
+        if [ "$n" = "$STOP_AT" ]; then [ -n "${STRAY:-}" ] && echo 1999 >> "$STUBDIR/pids-Chess"; command kill -TERM $$; fi; return 0; }
 fi
+if [ -n "${FAIL_WS:-}" ]; then bisect_restart_ws() { echo "bisect_restart_ws FAILED (stub)" >> "$STUBLOG"; return 1; }; fi
 STANDALONE=1; HOST=; base=rdna3-report-test; D=$HT/D; TS=$HT/ts; mkdir -p "$TS"
 HOME=$HT/home; export HOME
 ladder_run "$VARIANT"
@@ -127,6 +145,7 @@ run() {   # run <variant> <name> [env...]: the block under $SH with the stubs; o
     rm -rf "${T:?}/${name:?}" "${T:?}/home" "${T:?}/sys"; mkdir -p "$T/$name" "$T/home" "$T/sys"
     : > "$T/stub.log"; rm -f "$T/notify.log" "$T/prog.log"
     echo 500 > "$T/sys/pids-Terminal"   # the owner's own Terminal, which started this
+    [ -n "${OWNER_CHESS:-}" ] && echo 600 > "$T/sys/pids-Chess"   # and an owner's Chess that is there already
     echo 90 > "$T/sys/pids-WindowServer"
     env HT="$T" STUBLOG="$T/stub.log" STUBDIR="$T/sys" PATH="$T/bin:$PATH" VARIANT="$v" LADDER_OUT="$T/$name" LADDER_TEXT="$T/text.command" \
         LADDER_LAUNCHWAIT=0 LADDER_SETTLE=0 LADDER_TAIL=0 LADDER_QUITWAIT=0 BISECT_USER=tester BISECT_NOLOGINWAIT=1 \
@@ -136,7 +155,7 @@ run() {   # run <variant> <name> [env...]: the block under $SH with the stubs; o
 cat > "$T/conf.orig" <<'EOF'
 # the plugin's knobs
 NVMTL_TRACE_RING=262144
-NVMTL_RADV_DEBUG=hang
+  NVMTL_RADV_DEBUG = hang
 EOF
 printf 'mtlprobe\n@WindowServer\n%%apps\n' > "$T/allow.orig"
 fresh() { cp "$T/conf.orig" "$T/conf"; cp "$T/allow.orig" "$T/allow"; rm -f "$T/conf.bak" "$T/conf.bak.absent" "$T/allow.bak"; }
@@ -213,9 +232,9 @@ PYEOF
     [ ! -e "$T/conf.bak" ] && [ ! -e "$T/conf.bak.absent" ] && [ ! -e "$T/allow.bak" ] || fail "$SH: backups left behind"
     [ "$(grep -c '^killall -HUP WindowServer' "$T/stub.log")" = 3 ] || fail "$SH: WindowServer restarts: $(grep -c killall "$T/stub.log"), expected 3 (two rungs and the last one back)"
     c1=$T/sys/conf-at-ws-1; c2=$T/sys/conf-at-ws-2; c3=$T/sys/conf-at-ws-3
-    grep -q '^NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears$' "$c1" && ! grep -q '^NVMTL_RADV_DEBUG=hang$' "$c1" || fail "$SH: radv-ws: the conf at the restart: $(cat "$c1")"
+    grep -q '^NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears$' "$c1" && ! grep -q 'hang' "$c1" || fail "$SH: radv-ws: the conf at the restart: $(cat "$c1")"
     grep -q '^NVMTL_TRACE_RING=262144$' "$c1" || fail "$SH: radv-ws: the conf lost another line: $(cat "$c1")"
-    grep -q '^NVMTL_PARANOID=1$' "$c2" && grep -q '^NVMTL_RADV_DEBUG=hang$' "$c2" && ! grep -q 'nodcc' "$c2" || fail "$SH: paranoid-ws: the conf at the restart: $(cat "$c2")"
+    grep -q '^NVMTL_PARANOID=1$' "$c2" && grep -q '^  NVMTL_RADV_DEBUG = hang$' "$c2" && ! grep -q 'nodcc' "$c2" || fail "$SH: paranoid-ws: the conf at the restart: $(cat "$c2")"
     cmp -s "$c3" "$T/conf.orig" || fail "$SH: the last WindowServer restart did not run with the original conf: $(cat "$c3")"
     # the WindowServer rungs' log slice includes WindowServer's own pid
     grep -q 'processID == 90' "$T/stub.log" || fail "$SH: the WindowServer rungs' log slice does not name WindowServer"
@@ -242,6 +261,35 @@ PYEOF
     ( set +e; . "$T/bisect.sh"; BISECT_CONF="$T/conf" BISECT_ALLOW="$T/allow" BISECT_CONFBAK="$T/conf.bak" BISECT_ALLOWBAK="$T/allow.bak"; bisect_plugin_restore )
     cmp -s "$T/conf" "$T/conf.orig" || fail "$SH: bisect_plugin_restore after a dead ladder run"
     echo "test_ladder_step: ok WindowServer rungs, restore ($SH)"
+
+    # review round 2: a failed WindowServer restart still restores the conf and restarts WindowServer at the end
+    fresh
+    run 2 wsfail FAIL_WS=1
+    cmp -s "$T/conf" "$T/conf.orig" && [ ! -e "$T/conf.bak" ] || fail "$SH: after a failed WindowServer restart the conf is not as it was: $(cat "$T/conf")"
+    grep -q '^failed: WindowServer did not come back' "$T/wsfail/ladder.txt" && grep -q '^ws_restart: final' "$T/wsfail/ladder.txt" || fail "$SH: a failed restart: no note, or no final restart: $(grep -e failed -e ws_restart "$T/wsfail/ladder.txt")"
+    [ "$(grep -c '^bisect_restart_ws FAILED' "$T/stub.log")" = 2 ] || fail "$SH: expected the rung's restart and the final one: $(grep -c FAILED "$T/stub.log")"
+    # instances of the owner's that were there before the run are never quit; one the pid capture missed is (sweep), only without a WindowServer restart
+    fresh
+    OWNER_CHESS=1
+    run 1 base STOP_AT=2 STRAY=1
+    OWNER_CHESS=
+    grep -q '^rc=143$' "$T/base.out" && grep -q '^baseline_pids: Terminal=500 Chess=600 *$' "$T/base/ladder.txt" || fail "$SH: baseline_pids: $(grep baseline "$T/base/ladder.txt"; tail -2 "$T/base.out")"
+    grep -q '^kill -TERM 1999' "$T/stub.log" && grep -q '^sweep: Chess instance(s) 1999' "$T/base/ladder.txt" || fail "$SH: a missed instance was not swept"
+    ! grep -q '^kill .*\b600\b' "$T/stub.log" && ! grep -q 'unix id is 600' "$T/stub.log" && [ "$(cat "$T/sys/pids-Chess")" = 600 ] || fail "$SH: the owner's Chess was touched: $(cat "$T/sys/pids-Chess")"
+    # the apps are asked to quit first (by unix id), then the log slice is taken; one that ignores it is TERMed
+    fresh
+    run 1 quit
+    [ "$(grep -c '^osascript .*System Events.*unix id is' "$T/stub.log")" = 14 ] || fail "$SH: the graceful quit: $(grep -c '^osascript' "$T/stub.log") osascript calls, expected 14"
+    [ "$(grep -n '^osascript' "$T/stub.log" | head -1 | cut -d: -f1)" -lt "$(grep -n '^log show' "$T/stub.log" | head -1 | cut -d: -f1)" ] || fail "$SH: the log slice is taken before the apps are asked to quit"
+    fresh
+    run 1 stubborn OSA_NOQUIT=1 LADDER_QUITGRACE=2
+    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1000' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores the quit request is not TERMed"
+    # the text script is made in a directory of mktemp's and removed at the end (no fixed name in /Users/Shared)
+    fresh
+    run 1 mk LADDER_TEXT=
+    grep -q '^rc=0$' "$T/mk.out" && grep -q '^mktemp ' "$T/stub.log" && grep -q '^open -n -a Terminal .*/textdir\.[0-9]*/text.command$' "$T/stub.log" || fail "$SH: the text script's directory: $(grep -e mktemp -e 'open -n -a Terminal' "$T/stub.log" | head -3)"
+    [ -z "$(ls -d "$T"/sys/textdir.* 2>/dev/null)" ] || fail "$SH: the text script's directory was left behind"
+    ! grep -q 'Users/Shared' "$T/stub.log" || fail "$SH: a fixed /Users/Shared name is used"
 
     # ------------------------------------------------------------ nobody logged in; an app that does not start; tty answers
     fresh

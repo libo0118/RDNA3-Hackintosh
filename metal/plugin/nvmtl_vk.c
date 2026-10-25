@@ -2973,7 +2973,11 @@ static int nvmtl_keep_verdict(uint32_t s)
     if (!nvmtl_keep_on() || s == NVMTL_WSEQ_BLIND) return 0;
     if (s == 0) return 1;
     if (g_state != 1 || g_wit_state <= 0) return -1;
-    if (nvmtl_wit_read(s) == s) { __atomic_add_fetch(&g_wit_ok, 1, __ATOMIC_RELAXED); return 1; }
+    if (nvmtl_wit_read(s) == s) {
+        __atomic_add_fetch(&g_wit_ok, 1, __ATOMIC_RELAXED);
+        nvmtl_ab_summary(0);   /* a clean process must print its totals too (a time check: one clock read, a line at most every 10 s while a counter moved) */
+        return 1;
+    }
     static long wait_ms = -1; if (wait_ms < 0) { const char *e = getenv("NVMTL_WIT_WAIT_MS"); wait_ms = e ? atol(e) : 1000; }
     const uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     for (;;) {
@@ -5038,7 +5042,7 @@ static void nvmtl_ab_summary(int force)
     const unsigned long long we = __atomic_load_n(&g_wit_waited, __ATOMIC_RELAXED), wo = __atomic_load_n(&g_wit_ok, __ATOMIC_RELAXED),
                              ww = __atomic_load_n(&g_wit_skew_max, __ATOMIC_RELAXED), wb = __atomic_load_n(&g_wit_blind, __ATOMIC_RELAXED);
     const unsigned long long total = sum + we + wo + ww + wb;
-    if (!total || total == g_ab_sum_last) return;
+    if (!total || total == g_ab_sum_last) { if (!force) atomic_store(&g_ab_sum_ns, now); return; }   /* nothing new: look again in 10 s, not at every call */
     if (!atomic_compare_exchange_strong(&g_ab_sum_ns, (uint64_t *)&last, now) && !force) return;
     g_ab_sum_last = total;
     nvlog_uncapped("vk: ab: SUMMARY load_colour_all=%u load_colour_mismatch=%u load_colour_inrp=%u load_colour_barriers=%u "
@@ -5073,6 +5077,7 @@ static void nvmtl_load_layout(nvk_cmdbuf *c, nvk_image *img, int depth, uint32_t
 static void nvmtl_private_depth_layout(nvk_cmdbuf *, nvk_image *, VkImageLayout);
 int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
 {
+    nvmtl_ab_summary(0);   /* the totals of a process that is ended by a signal (no atexit): at most every 10 s while a counter moved */
     if (!p->rp || !ps->w || !ps->h) { nvlog("begin_render: apps2 no render pass or a %ux%u pass — pass REFUSED", ps->w, ps->h); return -1; }
     nvmtl_sample_pattern pattern = ps->sample_pattern;
     if (!pattern.count && nvmtl_sample_default(p->samples > 1 ? p->samples : 1, &pattern)) return -1;

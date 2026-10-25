@@ -108,9 +108,10 @@ check(r["managed shadow"][0][0] == "INFO" and "no managed upload was seen" in r[
 
 # the ladder, per rung
 conf = {"radv": ["NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears"], "sync": ["NVMTL_ASYNC_COMMIT=0"]}
-rungs = {"baseline": {"conf": [], "scope": "apps", "log": L("Terminal", 907, 'vk: ab switches: none set (x)'), "looks": ["a.png"], "verdict": "n"},
-         "radv": {"conf": conf["radv"], "scope": "apps", "log": L("Terminal", 907, on) + L("Terminal", 907, 'vk: ab switches [1]: NVMTL_RADV_DEBUG="nodcc,nohiz,nofmask,nofastclears"'), "looks": ["b.png", "c.png"], "verdict": "y"},
-         "sync": {"conf": conf["sync"], "scope": "apps", "log": L("Terminal", 907, 'vk: ab switches: none set (x)'), "looks": [], "verdict": None}}
+S0 = L("Terminal", 907, "vk: ab: SUMMARY load_colour_all=5 load_colour_mismatch=0 wit_ok=3 wit_early=0 wit_blind=0 wit_worst_us=0")
+rungs = {"baseline": {"conf": [], "scope": "apps", "log": L("Terminal", 907, 'vk: ab switches: none set (x)') + S0, "looks": ["a.png"], "verdict": "n"},
+         "radv": {"conf": conf["radv"], "scope": "apps", "log": L("Terminal", 907, on) + L("Terminal", 907, 'vk: ab switches [1]: NVMTL_RADV_DEBUG="nodcc,nohiz,nofmask,nofastclears"') + S0, "looks": ["b.png", "c.png"], "verdict": "y"},
+         "sync": {"conf": conf["sync"], "scope": "apps", "log": L("Terminal", 907, 'vk: ab switches: none set (x)') + S0, "looks": [], "verdict": None}}
 lr = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(rungs)}
 check(lr["ladder baseline"][0] == "INFO" and "picture broken" in lr["ladder baseline"][1], "baseline row, %r" % (lr["ladder baseline"],))
 check(lr["ladder radv"][0] == "INFO" and "PICTURE RIGHT" in lr["ladder radv"][1] and "2 look(s)" in lr["ladder radv"][1], "radv row, %r" % (lr["ladder radv"],))
@@ -118,6 +119,48 @@ check(lr["ladder sync"][0] == "WARN" and "did not reach the plugin" in lr["ladde
 check(lr["ladder paranoid"][0] == "WARN" and "did not run" in lr["ladder paranoid"][1], "a missing rung is WARNed")
 check([k for k in lr if k != "ladder"] == ["ladder " + n for n in tg.LADDER_RUNGS], "one row per rung, in order")
 check(lr["ladder"][0] == "INFO" and "RIGHT with: radv" in lr["ladder"][1] and "discriminator" in lr["ladder"][1], "the ladder's verdict names the rung that fixed it, %r" % (lr["ladder"],))
+
+# review round 2: a rung slice with a WARN counter row (a skipped conf line, an early fence) used to raise NameError
+bad = dict(rungs)
+bad["sync"] = dict(rungs["sync"], conf=["NVMTL_ASYNC_COMMIT=0"],
+                   log=L("Terminal", 907, 'conf: line 3 skipped: "FOO" is not an NVMTL_ / NVK_ / NVRM_ knob') + L("Terminal", 907, 'vk: ab switches [1]: NVMTL_ASYNC_COMMIT="0"') + S0 +
+                       L("Terminal", 907, "vk: ab: SUMMARY wit_early=4 wit_ok=9000 wit_blind=0 wit_worst_us=52"))
+try:
+    lr2 = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(bad)}
+    check(lr2["ladder sync"][0] == "WARN" and "counters:" in lr2["ladder sync"][1] and "conf line" in lr2["ladder sync"][1], "a WARN counter row in a slice is shown, %r" % (lr2["ladder sync"],))
+except Exception as e:  # noqa: BLE001
+    check(False, "ladder_rows raised %r on a slice with a WARN counter row" % (e,))
+# the keys of the slice's `vk: ab switches` against the rung's own: a missing one did not reach, an extra one is not default
+extra = dict(rungs)
+extra["baseline"] = dict(rungs["baseline"], log=L("Terminal", 907, 'vk: ab switches [1]: NVMTL_ASYNC_COMMIT="0"') + S0)
+extra["sync"] = dict(rungs["sync"], log=L("Terminal", 907, 'vk: ab switches [1]: NVMTL_ASYNC_COMMIT="0" NVMTL_NO_POOL_REUSE="1"') + S0)
+extra["radv"] = dict(rungs["radv"], log=L("Terminal", 907, 'vk: ab switches [1]: NVMTL_RADV_DEBUG="nodcc"') + L("Chess", 910, 'vk: ab switches: none set (x)') + S0 + L("Chess", 910, "vk: ab: SUMMARY wit_ok=1"))
+lr3 = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(extra)}
+check(lr3["ladder baseline"][0] == "WARN" and "not default: Terminal: NVMTL_ASYNC_COMMIT" in lr3["ladder baseline"][1], "a leftover switch in the baseline is WARNed, %r" % (lr3["ladder baseline"],))
+check(lr3["ladder sync"][0] == "WARN" and "not default: Terminal: NVMTL_NO_POOL_REUSE" in lr3["ladder sync"][1] and "did not reach" not in lr3["ladder sync"][1], "an extra key is WARNed, %r" % (lr3["ladder sync"],))
+check(lr3["ladder radv"][0] == "WARN" and "did not reach the plugin" in lr3["ladder radv"][1] and "Chess: NVMTL_RADV_DEBUG" in lr3["ladder radv"][1], "a process without the rung's key is WARNed by name, %r" % (lr3["ladder radv"],))
+# paranoid: its 14 switches are expected, anything else is not
+par = {"conf": ["NVMTL_PARANOID=1"], "scope": "apps", "looks": [], "verdict": None}
+allk = " ".join('%s="1"' % k for k in ("NVMTL_PARANOID",) + tg.PARANOID_KEYS)
+par["log"] = L("Terminal", 907, "vk: ab switches [1]: " + allk) + S0
+pr = tg.ladder_rows({"paranoid": par})
+check([x for x in pr if x[1] == "ladder paranoid"][0][0] == "INFO", "the paranoid rung expects the profile's own switches, %r" % (pr,))
+par["log"] = L("Terminal", 907, "vk: ab switches [1]: " + allk + ' NVMTL_LOAD_BARRIER="1"') + S0
+pr = tg.ladder_rows({"paranoid": par})
+check("not default: Terminal: NVMTL_LOAD_BARRIER" in [x for x in pr if x[1] == "ladder paranoid"][0][2], "a switch beyond the profile is WARNed, %r" % (pr,))
+# the SUMMARY is missing: counters unknown (plugin rows and the rung's row)
+r = rows_of(L("Terminal", 907, 'vk: ab switches: none set (x)'))
+check(r["ab summary"][0][0] == "INFO" and "UNKNOWN" in r["ab summary"][0][1], "no SUMMARY: counters unknown, %r" % r)
+r = rows_of(L("Terminal", 907, 'vk: ab switches: none set (x)') + S0)
+check("ab summary" not in r, "a SUMMARY: no such row, %r" % r)
+nosum = tg.ladder_rows({"baseline": dict(rungs["baseline"], log=L("Terminal", 907, 'vk: ab switches: none set (x)'))})
+check([x for x in nosum if x[1] == "ladder baseline"][0][0] == "WARN" and "no SUMMARY line from Terminal" in [x for x in nosum if x[1] == "ladder baseline"][0][2], "a rung without a SUMMARY is WARNed, %r" % (nosum,))
+# the profile's list is the plugin's
+src_m = open(os.path.join(ROOT, "metal", "plugin", "NVMTLObjects.m")).read()
+import re as _re  # noqa: E402
+blk = src_m[src_m.index("static const char *const kv[][2]"):]
+blk = blk[:blk.index("};")]
+check(tuple(_re.findall(r'\{ "(NVMTL_\w+)",', blk)) == tg.PARANOID_KEYS, "PARANOID_KEYS equals the plugin's profile list, %r" % (_re.findall(r'\{ "(NVMTL_\w+)",', blk),))
 
 # ladder.txt as autoreport.sh's ladder_run writes it
 LT = '''# rdna3 ladder v1
@@ -165,6 +208,8 @@ src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
 check("from triage_glyphs import n50_plugin_rows" in src and "n50_plugin_rows(" in src, "triage_reports.py calls n50_plugin_rows")
 check("tools/triage_glyphs.py is missing" in src, "triage_reports.py says so loudly when the module is missing")
 check("41-ladder.txt" in src and "parse_ladder" in src and "ladder_rows(" in src, "triage_reports.py reads the archive's 41-ladder members")
+check("except Exception as e_:" in src[src.index("parse_ladder, ladder_rows"):][:900] and "ladder_rows_ = [(\"WARN\", \"ladder\", \"tools/triage_glyphs.py FAILED" in src, "triage_reports.py survives any error of the ladder module with a loud WARN")
+check("n50_rows_ = [(\"WARN\", \"plugin A/B\", \"tools/triage_glyphs.py FAILED" in src, "triage_reports.py survives any error of n50_plugin_rows with a loud WARN")
 
 if fails:
     print("FAIL: %d check(s)" % len(fails))

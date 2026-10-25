@@ -1103,7 +1103,17 @@ ladder_env_args() {   # "A=1 B=2" -> "--env A=1 --env B=2"
 }
 ladder_w() { printf '%s\n' "$*" >> "$LF"; }
 ladder_text_script() {   # the Terminal's text: a colored listing, ANSI colors, then a line a second so that the window draws all the time
-    _lt=${LADDER_TEXT:-/Users/Shared/rdna3-ladder-text.command}
+    # made once per run, as root, in a directory of its own that mktemp creates (a fixed name in the sticky /Users/Shared could be a planted link);
+    # ladder_restore removes it. LADDER_TEXT stands in for it in the host test.
+    if [ -n "${LADDER_TEXT:-}" ]; then _lt=$LADDER_TEXT
+    else
+        if [ -z "${_LADDER_TEXTDIR:-}" ]; then
+            _LADDER_TEXTDIR=$(mktemp -d /Users/Shared/rdna3-ladder-text.XXXXXX) || { echo "ladder: cannot make a directory for the text script" >&2; return 1; }
+            chmod 755 "$_LADDER_TEXTDIR"
+        fi
+        _lt=$_LADDER_TEXTDIR/text.command
+    fi
+    [ -L "$_lt" ] && rm -f "$_lt"
     cat > "$_lt" <<'TXT'
 #!/bin/sh
 clear
@@ -1114,7 +1124,26 @@ while [ $i -lt 8 ]; do printf '\033[%sm The quick brown fox jumps over the lazy 
 while :; do i=$((i + 1)); printf '\033[1;3%sm %s  rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz\033[0m\n' $((i % 7 + 1)) "$(date +%T)"; sleep 1; done
 TXT
     chmod 755 "$_lt" 2>/dev/null
-    echo "$_lt"
+    _LADDER_TEXT=$_lt   # (a global: this is not called inside $( ), where _LADDER_TEXTDIR would be lost)
+    return 0
+}
+ladder_wait_new() {   # ladder_wait_new NAME "<pids before>": the new pids of NAME, polled up to LADDER_LAUNCHWAIT s (the window in which a pid could be missed is the poll)
+    _wn_i=0
+    while :; do
+        _wn=$(ladder_new_pids "$1" "$2")
+        if [ -n "$_wn" ] || [ "$_wn_i" -ge "${LADDER_LAUNCHWAIT:-8}" ]; then break; fi
+        sleep 1; _wn_i=$((_wn_i + 1))
+    done
+    echo "$_wn"
+}
+ladder_sweep() {   # Terminal / Chess instances that are not in the run's starting set: started by the ladder and missed by its pid capture
+    for _sa in Terminal Chess; do
+        eval "_sb=\${_LADDER_BASE_$_sa:-}"
+        _sn=$(ladder_new_pids "$_sa" "$_sb")
+        [ -n "$_sn" ] || continue
+        ladder_w "sweep: $_sa instance(s) $_sn started after the run began and not captured: quit"
+        ladder_quit "$_sn"
+    done
 }
 ladder_new_pids() {   # ladder_new_pids NAME "<pids before>": the pids of NAME that are new
     for _lp in $(pgrep -x "$1" 2>/dev/null); do
@@ -1144,15 +1173,30 @@ ladder_ws_conf() {   # ladder_ws_conf "<NAME=value ...>": rdna3mtl.conf = the ru
     bisect_plugin_save
     {
         if [ -f "$BISECT_CONFBAK" ]; then
-            _lk=; for _le in $1; do _lk="$_lk -e ^${_le%%=*}="; done
-            # shellcheck disable=SC2086
-            grep -v $_lk "$BISECT_CONFBAK" 2>/dev/null
+            # the original without any line of these keys, as the plugin's parser reads them: blanks before the key and around the '=' are ignored
+            _lk=; for _le in $1; do _lk="$_lk ${_le%%=*}"; done
+            awk -v keys="$_lk" 'BEGIN { n = split(keys, K, " ") }
+                { l = $0; sub(/^[ \t]+/, "", l); if (l ~ /=/) { k = l; sub(/[ \t]*=.*/, "", k); for (i = 1; i <= n; i++) if (k == K[i]) next } print }' "$BISECT_CONFBAK" 2>/dev/null
         fi
         for _le in $1; do echo "$_le"; done
         true
     } > "$BISECT_CONF.new" && bisect_own "$BISECT_CONF.new" && mv -f "$BISECT_CONF.new" "$BISECT_CONF"
 }
-ladder_quit() {   # ladder_quit "<pids>": the instances this rung started, and only those
+ladder_quit() {   # ladder_quit "<pids>" [graceful]: the instances this rung started, and only those
+    if [ "${2:-}" = graceful ]; then
+        # ask each one to quit (System Events, by unix id: the instance, not the app name, which would also hit the owner's own), so that it runs its atexit
+        # (the plugin's last `vk: ab: SUMMARY`); whatever is still there after LADDER_QUITGRACE s gets SIGTERM, then SIGKILL
+        for _qp in $1; do
+            with_limit 15 as_user osascript -e "tell application \"System Events\" to tell (first process whose unix id is $_qp) to quit" >/dev/null 2>&1
+        done
+        _qw=0
+        while [ "$_qw" -lt "${LADDER_QUITGRACE:-8}" ]; do
+            _qa=
+            for _qp in $1; do kill -0 "$_qp" 2>/dev/null && _qa=1; done
+            [ -z "$_qa" ] && break
+            sleep 1; _qw=$((_qw + 1))
+        done
+    fi
     kill -TERM $1 2>/dev/null
     sleep "${LADDER_QUITWAIT:-2}"
     kill -KILL $1 2>/dev/null
@@ -1169,22 +1213,23 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     if [ "$_rs" = windowserver ]; then
         ladder_w "set: rdna3mtl.conf $_renv; WindowServer restart"
         ladder_ws_conf "$_renv" || ladder_w "failed: rdna3mtl.conf not written"
-        bisect_restart_ws || return 1
-        _LADDER_WS=1
+        _LADDER_WS=1   # (before the restart: if it fails, the conf is still put back and WindowServer restarted once more at the end)
+        bisect_restart_ws || { ladder_w "failed: WindowServer did not come back with a login; the conf is put back at the end and WindowServer restarted once more"; return 1; }
     else
         _rargs=$(ladder_env_args "$_renv")
         ladder_w "env: ${_rargs:-(nothing)}"
     fi
     _rt0=$(date +%s)
     ladder_w "started: $(date +%T)"
-    _tb=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' '); _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
+    # each app's instances are listed right before its own open and polled for right after it: the window in which another instance could be taken for ours
+    _tb=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
-    as_user open -n -a Terminal $_rargs "$(ladder_text_script)" >/dev/null 2>&1
-    sleep "${LADDER_LAUNCHWAIT:-4}"
+    as_user open -n -a Terminal $_rargs "$_LADDER_TEXT" >/dev/null 2>&1
+    _tp=$(ladder_wait_new Terminal "$_tb")
+    _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
     as_user open -n -a Chess $_rargs >/dev/null 2>&1
-    sleep "${LADDER_LAUNCHWAIT:-4}"
-    _tp=$(ladder_new_pids Terminal "$_tb"); _cp=$(ladder_new_pids Chess "$_cb")
+    _cp=$(ladder_wait_new Chess "$_cb")
     _LADDER_PIDS="$_tp$_cp"
     ladder_w "pids: Terminal=${_tp:-none}Chess=${_cp:-none}"
     [ -n "$_tp" ] && [ -n "$_cp" ] || ladder_w "WARN: an app did not start (Terminal: ${_tp:-no} Chess: ${_cp:-no}): the rung proves little"
@@ -1200,9 +1245,11 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     case $_rwait in y) _rans=y ;; n) _rans=n ;; *) _rans=- ;; esac
     ladder_w "answer: $_rans"
     sleep "${LADDER_TAIL:-12}"   # the plugin's counters go out every 10 s while something moved (`vk: ab: SUMMARY`, `managed: SUMMARY`)
-    ladder_log_slice "$_rn" "$_rt0" "$_tp$_cp$([ "$_rs" = windowserver ] && pgrep -x WindowServer 2>/dev/null | tr '\n' ' ')"
-    ladder_quit "$_tp$_cp"
+    _lwp=$([ "$_rs" = windowserver ] && pgrep -x WindowServer 2>/dev/null | tr '\n' ' ')
+    ladder_quit "$_tp$_cp" graceful   # first: a quit runs the plugin's atexit, whose last SUMMARY the slice below should hold
     _LADDER_PIDS=
+    sleep "${LADDER_AFTERQUIT:-2}"
+    ladder_log_slice "$_rn" "$_rt0" "$_tp$_cp$_lwp"
     ladder_w "== end rung $_rn"
     ladder_push
     return 0
@@ -1221,7 +1268,9 @@ ladder_push() {   # up to the host after every rung: a run cut short keeps what 
 ladder_restore() {   # the plugin's conf and allow list exactly as the run found them; the instances still running are quit
     [ -n "${_LADDER_PIDS:-}" ] && ladder_quit "$_LADDER_PIDS"
     _LADDER_PIDS=
+    [ -n "${_LADDER_BASE_SET:-}" ] && [ -z "${_LADDER_WS:-}" ] && ladder_sweep   # (not after a WindowServer restart: the session's apps are all new then)
     bisect_plugin_restore
+    if [ -n "${_LADDER_TEXTDIR:-}" ]; then rm -rf "${_LADDER_TEXTDIR:?}"; _LADDER_TEXTDIR=; fi
     [ -n "${_LADDER_WS:-}" ] && [ -n "${LF:-}" ] && ladder_w "restored: rdna3mtl.conf as the run found it (a WindowServer started during a rung keeps that rung's conf until it restarts)"
     if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
     return 0
@@ -1233,7 +1282,7 @@ ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer
     _btty=
     if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
-    _LADDER_WS=; _LADDER_PIDS=
+    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=
     ladder_w "# rdna3 ladder v1"
     ladder_w "variant: $_lv ($([ "$_lv" = 2 ] && echo ladder-ws || echo ladder))"
     ladder_w "started: $(date +%T)"
@@ -1254,6 +1303,10 @@ ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer
     trap 'ladder_restore; exit 130' INT
     trap 'ladder_restore; exit 143' TERM
     [ "$_lv" = 2 ] && trap '' HUP   # a WindowServer restart closes the Terminal this was started from
+    # the instances that were there before the run: never ours to quit
+    _LADDER_BASE_Terminal=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' '); _LADDER_BASE_Chess=$(pgrep -x Chess 2>/dev/null | tr '\n' ' '); _LADDER_BASE_SET=1
+    ladder_w "baseline_pids: Terminal=${_LADDER_BASE_Terminal:-none}Chess=${_LADDER_BASE_Chess:-none}"
+    ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM; return 1; }
     caffeinate -u -t 5 >/dev/null 2>&1 &
     notify "ladder: $(echo $LADDER_RUNGS | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
     _lfail=0

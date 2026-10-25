@@ -4577,6 +4577,8 @@ def report(path, show_all):
     except ImportError:
         n50_rows_ = [("WARN", "plugin A/B", "tools/triage_glyphs.py is missing next to triage_reports.py: the plugin's RADV profile, load pass layout, "
                       "fence and managed shadow lines were NOT read")]
+    except Exception as e_:  # noqa: BLE001  (one bad line of a report must not take the whole triage down)
+        n50_rows_ = [("WARN", "plugin A/B", "tools/triage_glyphs.py FAILED (%s: %s): the plugin's A/B rows are missing from this triage; the rest of it ran" % (type(e_).__name__, e_))]
     for lvl_, name_, text_ in n50_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
     if ladder_txt:
@@ -4586,6 +4588,8 @@ def report(path, show_all):
             ladder_rows_ = ladder_rows(lr_, lv_, lp_)
         except ImportError:
             ladder_rows_ = [("WARN", "ladder", "tools/triage_glyphs.py is missing next to triage_reports.py: the ladder's rungs were NOT read")]
+        except Exception as e_:  # noqa: BLE001
+            ladder_rows_ = [("WARN", "ladder", "tools/triage_glyphs.py FAILED (%s: %s): the ladder's rows are missing from this triage; the rest of it ran" % (type(e_).__name__, e_))]
         for lvl_, name_, text_ in ladder_rows_:
             print("   %s %-20s %s" % (lvl_, name_, text_))
     # step 10: the accelerator also loads from the Auxiliary KC

@@ -46,6 +46,25 @@ def _kv(text):
     return out
 
 
+# the switches NVMTL_PARANOID=1 sets (metal/plugin/NVMTLObjects.m, tests/test_triage_glyphs.py compares the two lists)
+PARANOID_KEYS = ("NVMTL_RADV_DEBUG", "NVMTL_ASYNC_COMMIT", "NVMTL_GSUB_INFLIGHT", "NVMTL_PRESUBMIT_PROLOGUE", "NVMTL_NO_POOL_REUSE", "NVMTL_NO_BUFREUSE",
+                 "NVMTL_NO_BUFTEX_RECYCLE", "NVMTL_NO_HEAPTEX_RECYCLE", "NVMTL_NO_HEAPTEX_PLACE", "NVMTL_NO_DIRTYONLY", "NVMTL_ENC78_OFF", "NVMTL_G79_OFF",
+                 "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM")
+
+
+def ab_switch_keys(text):
+    """{(process, pid): set of NVMTL_ keys} of the processes that logged `vk: ab switches` (an empty set for `none set`), from the plugin log lines in `text`"""
+    out = {}
+    for proc, pid, tid, msg in _lines(text):
+        if _SWITCHES_NONE.match(msg):
+            out.setdefault((proc, pid), set())
+            continue
+        m = _SWITCHES.match(msg)
+        if m:
+            out.setdefault((proc, pid), set()).update(k for k, v in _TOKEN.findall(m.group(1)))
+    return out
+
+
 def n50_plugin_rows(text=""):
     """[(level, name, text)]. WARN: a debug / diagnostic profile or switch was on (the run does not show the default plugin), a flag was refused or a conf
     line skipped, the fence returned before the GPU's last write was visible, the CPU rewrote a managed buffer's range while its copy was in flight, a
@@ -141,6 +160,11 @@ def n50_plugin_rows(text=""):
             "%s=%s" % (k, " / ".join(v)) for k, v in sorted(by.items()))[:700]))
     elif switch_none:
         rows.append(("INFO", "plugin switch", "no NVMTL_ switch set in %s" % names(switch_none)))
+    # processes that told which switches they have and never printed a SUMMARY: nothing about their counters is known
+    nosum = sorted({k[0] for k in switch_procs if k not in ab and k not in mg})
+    if nosum:
+        rows.append(("INFO", "ab summary", "%s logged `vk: ab switches` but no `vk: ab: SUMMARY` / `managed: SUMMARY` line: the counters are UNKNOWN there (the process ended before its first "
+                     "10 s tick, or ran no LOAD pass and no witnessed submit); the load pass and fence rows say nothing about it" % ", ".join(nosum)))
     old_plugin = sorted({k[0] for k in driver_up if k not in switch_procs})
     if old_plugin:
         rows.append(("WARN", "plugin switch", "%s logged no `vk: ab switches` line (an older plugin): which switches were on is not in the report" % ", ".join(old_plugin)))
@@ -208,6 +232,11 @@ LADDER_RUNGS = ("baseline", "radv", "sync", "managed", "alignguard", "paranoid",
 LADDER_WS_RUNGS = ("radv-ws", "paranoid-ws")
 
 
+def ab_summary_keys(text):
+    """the (process, pid) of the processes that printed a `vk: ab: SUMMARY` or `managed: SUMMARY` line"""
+    return {(proc, pid) for proc, pid, tid, msg in _lines(text) if _SUM_AB.match(msg) or _SUM_MG.match(msg)}
+
+
 def ladder_log_name(rung):
     """the archive member of a rung's log slice"""
     return "41-ladder-%s.log" % rung
@@ -268,22 +297,40 @@ def ladder_rows(rungs, variant=1, problems=()):
             continue
         sub = n50_plugin_rows(r.get("log", ""))
         warn = [t for lvl, nm, t in sub if lvl == "WARN" and nm in ("fence early", "managed shadow", "plugin conf")]
-        sw = [t for lvl, nm, t in sub if nm in ("plugin switch", "radv debug", "paranoid profile") and lvl == "WARN"]
         looks = r.get("looks") or []
         v = r.get("verdict")
-        reached = sw or not r.get("conf")
-        txt = "set %s (%s)%s; %d look(s); %s%s" % (", ".join(r.get("conf") or []) or "nothing", r.get("scope", "?"),
-                                                  "" if reached else " - BUT the plugin log slice shows no such switch: the rung did not reach the plugin", len(looks),
-                                                  ("verdict " + {"y": "PICTURE RIGHT", "n": "picture broken"}.get(v, str(v))) if v else "no verdict (the owner was not asked or did not answer)",
-                                                  ("; counters: " + " | ".join(w)[:200]) if warn else "")
-        extra = list(r.get("warn") or [])
+        # the switches the rung asked for against the keys the processes' own `vk: ab switches` lines show: a missing key = it did not reach that process,
+        # an extra one = not the default plugin (a leftover conf line in the baseline, or a rung that set more than it should)
+        want = {c.split("=", 1)[0] for c in (r.get("conf") or [])}
+        allowed = set(want) | (set(PARANOID_KEYS) | {"NVMTL_PARANOID"} if "NVMTL_PARANOID" in want else set())
+        procs = ab_switch_keys(r.get("log", ""))
+        miss = sorted({"%s: %s" % (k[0], ", ".join(sorted(want - ks))) for k, ks in procs.items() if want - ks})
+        stray = sorted({"%s: %s" % (k[0], ", ".join(sorted(ks - allowed))) for k, ks in procs.items() if ks - allowed})
+        reached = not want or (bool(procs) and not miss)
+        problems_ = []
+        if want and not procs:
+            problems_.append("the plugin log slice has no `vk: ab switches` line, so the rung did not reach the plugin")
+        elif miss:
+            problems_.append("the rung did not reach the plugin (a switch it set is missing from `vk: ab switches` of %s)" % "; ".join(miss))
+        if stray:
+            problems_.append("not default: %s set in %s although the rung did not ask for it" % ("; ".join(stray), "the process" if len(stray) == 1 else "those processes"))
+        have_sum = ab_summary_keys(r.get("log", ""))
+        nosum = sorted({k[0] for k in procs if k not in have_sum})
+        if nosum:
+            problems_.append("no SUMMARY line from %s: the counters are unknown there" % ", ".join(nosum))
+        txt = "set %s (%s); %d look(s); %s%s" % (", ".join(r.get("conf") or []) or "nothing", r.get("scope", "?"), len(looks),
+                                                 ("verdict " + {"y": "PICTURE RIGHT", "n": "picture broken"}.get(v, str(v))) if v else "no verdict (the owner was not asked or did not answer)",
+                                                 ("; counters: " + " | ".join(warn)[:200]) if warn else "")
+        extra = problems_ + list(r.get("warn") or [])
+        if warn:
+            extra.append("a counter or conf WARN in the slice")
         if r.get("cut"):
             extra.append("the rung has no end line (cut off)")
         if r.get("log") == "" and r.get("conf"):
             extra.append("no plugin log slice for this rung")
         if extra:
             txt += "; " + "; ".join(extra)[:240]
-        rows.append(("INFO" if reached and not extra else "WARN", "ladder " + name, txt))
+        rows.append(("INFO" if not extra else "WARN", "ladder " + name, txt))
     # the verdict of the whole ladder: which rung made the picture right
     ans = {n: rungs[n].get("verdict") for n in names if n in rungs}
     if ans.get("baseline") == "n":
