@@ -11,7 +11,13 @@ _BRACKET = re.compile(r"^copy_image_to_buffer: (?:\(special copy\) )?(recording|
 _BRACKET_B2I = re.compile(r"^copy_buffer_to_image: (?:\(special copy\) )?(recording|vkCmdCopyBufferToImage recorded)")
 _MSU = re.compile(r"^msupload: buffer -> (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view (\d+), mode (\d+)\).*?\[(\d+) so far\]")
 _FBF = re.compile(r"^vk: fbfetch: fragment module #(\d+) declares .*? and (READS them|no read is left \(folded away\));.*?: (.*?) "
-                  r"\[(\d+) read / (\d+) declared-only / (\d+) zeroed / (\d+) zeroing failed so far\]")
+                  r"\[(?:(\d+) served / )?(\d+) read / (\d+) declared-only / (\d+) zeroed / (\d+) zeroing failed so far\]")
+# the implemented path (N48 follow-up): per-pass sets, draws, restarts, and every way it refuses
+_FBF_DRAW = re.compile(r"^vk: fbfetch: draw (\d+) reads .*?\[(\d+) set\(s\), (\d+) skipped, (\d+) restart\(s\)\]")
+_FBF_REASON = re.compile(r"^vk: fbfetch: (UNSUPPORTED|reads of attachments the pipeline lacks) \((.*?)\): reads of colour attachment\(s\) 0x([0-9a-f]+) are zeroed")
+_FBF_BAD = re.compile(r"^(?:vk: fbfetch: (a draw that reads .*? is SKIPPED: .*?|colour attachment \d+ of this pass cannot be an input attachment: .*?|"
+                      r"input-attachment descriptor set allocation FAILED.*?|descriptor layouts FAILED.*?|moving the subpass inputs.*? FAILED.*?)|"
+                      r"fbfetch: the render pass could not be RESTARTED.*?)(?: \(|\s*\[|$)")
 
 
 def _lines(pluginlog):
@@ -29,6 +35,10 @@ def n48_plugin_rows(pluginlog=""):
     msu = {}                                 # (process, samples, fmt) -> highest running count
     msu_failed = []
     fbf_read, fbf_gone = {}, {}              # process -> highest module number
+    fbf_impl, fbf_zmod = {}, {}              # process -> highest module number: implemented / zeroed (the module line)
+    fbf_unsup = collections.Counter()        # reason -> process -> lines (real limits; "pipeline lacks the attachment" is normal)
+    fbf_bad = collections.Counter()          # process + message -> lines (draw skipped, attachment refused, allocation failed, restart failed)
+    fbf_draw = {}                            # process -> (draws, sets, skipped, restarts) at the highest draw line
     fbf_zeroed = 0
     scan_failed = 0
     brackets = {}                            # (pid, tid) -> (process, call, last state)
@@ -57,9 +67,32 @@ def n48_plugin_rows(pluginlog=""):
             continue
         m = _FBF.match(msg)
         if m:
-            tab = fbf_read if m.group(2).startswith("READS") else fbf_gone
+            verdict = m.group(3)
+            if not m.group(2).startswith("READS"):
+                tab = fbf_gone
+            elif "undefined descriptor" in verdict or verdict.startswith("each read replaced"):
+                tab = fbf_read
+            elif verdict.startswith("IMPLEMENTED"):
+                tab = fbf_impl
+            else:
+                tab = fbf_zmod
             tab[proc] = max(tab.get(proc, 0), int(m.group(1)))
-            fbf_zeroed = max(fbf_zeroed, int(m.group(6)))
+            fbf_zeroed = max(fbf_zeroed, int(m.group(7)))
+            continue
+        m = _FBF_DRAW.match(msg)
+        if m:
+            cur = fbf_draw.get(proc, (0, 0, 0, 0))
+            if int(m.group(1)) >= cur[0]:
+                fbf_draw[proc] = tuple(int(m.group(i)) for i in (1, 2, 3, 4))
+            continue
+        m = _FBF_REASON.match(msg)
+        if m:
+            if m.group(1) == "UNSUPPORTED":
+                fbf_unsup[(m.group(2)[:80], proc)] += 1
+            continue
+        m = _FBF_BAD.match(msg)
+        if m:
+            fbf_bad[(proc, (m.group(1) or "the render pass could not be RESTARTED")[:120])] += 1
             continue
         if msg.startswith("vk: fbfetch: the scan of a fragment module"):
             scan_failed += 1
@@ -85,9 +118,22 @@ def n48_plugin_rows(pluginlog=""):
                      "DRIVER-PLAN N48 (real input attachment); NVMTL_FBFETCH_ZERO=1 makes the read a defined zero for an A/B" %
                      (", ".join("%s (up to module #%d)" % (p, n) for p, n in sorted(fbf_read.items())[:4]),
                       ("%d read(s) replaced by zero" % fbf_zeroed) if fbf_zeroed else "reads left as translated")))
-    elif fbf_gone:
+    elif fbf_gone and not (fbf_impl or fbf_zmod):
         rows.append(("INFO", "framebuffer fetch", "[[color(n)]] declared in %s but no read is left in the module (folded away)" %
                      ", ".join(sorted(fbf_gone)[:4])))
+    if fbf_impl or fbf_draw:
+        rows.append(("INFO", "framebuffer fetch",
+                     "IMPLEMENTED (render-pass input attachments, DRIVER-PLAN N48): modules served in %s; draws that fetched: %s" %
+                     (", ".join("%s (up to module #%d)" % (p, n) for p, n in sorted(fbf_impl.items())[:4]) or "-",
+                      "; ".join("%s %d draw(s), %d pass set(s), %d skipped, %d pass restart(s)" % ((p,) + v) for p, v in sorted(fbf_draw.items())[:4]) or "none logged")))
+    if fbf_unsup:
+        rows.append(("WARN", "framebuffer fetch",
+                     "reads the implementation does not carry were replaced by a zero vector (a black / wrong blend for them): " +
+                     "; ".join("%s in %s (%d)" % (r, p, n) for (r, p), n in sorted(fbf_unsup.items(), key=lambda kv: -kv[1])[:4])))
+    if fbf_bad:
+        rows.append(("WARN", "framebuffer fetch",
+                     "the implemented path refused or failed (the draws that read are SKIPPED, nothing is drawn from an undefined descriptor): " +
+                     "; ".join("%s: %s (%d)" % (p, msg, n) for (p, msg), n in sorted(fbf_bad.items(), key=lambda kv: -kv[1])[:4])))
     if scan_failed:
         rows.append(("WARN", "framebuffer fetch", "%d scan failure line(s): the plugin could not scan a fragment module for [[color(n)]] reads" % scan_failed))
     open_ = [(proc, call, state, pid, tid) for (pid, tid, _), (proc, call, state) in sorted(brackets.items())

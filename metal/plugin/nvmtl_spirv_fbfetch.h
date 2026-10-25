@@ -4,17 +4,14 @@
  * The translator maps a Metal fragment input `[[color(n)]]` to a Vulkan input
  * attachment: a UniformConstant variable of an OpTypeImage with Dim SubpassData,
  * descriptor set 0, binding 192 + n (translator reflect/mod.rs
- * COLOR_INPUT_BINDING_BASE), read with OpImageRead. The plugin's descriptor set
- * layout has no binding 192..199, so a read that survives into the pipeline makes
- * RADV load an image descriptor from a binding it does not have (card run
- * 2026-10-25c: WindowServer and Terminal built such modules; random colours and
- * corrupt glyphs are the suspects).
+ * COLOR_INPUT_BINDING_BASE), read with OpImageRead. A module can declare colour inputs the pipeline has no attachment for (card
+ * run 2026-10-25d: Terminal, 0x7 declared, one colour attachment). Before N48 the plugin had no such binding, so RADV loaded an image
+ * descriptor from a binding that was not there (random colours and corrupt glyphs).
  *
- * This file only looks at the module (scan) and, when asked, replaces each such
- * read by a null constant of the read's type, so the result is defined (all
- * zero) instead of whatever the descriptor memory holds. It does not make the
- * read work; that needs the colour attachment as a real input attachment of the
- * render pass (DRIVER-PLAN N10).
+ * This file only looks at the module (scan), replaces the reads of the colour indices in a mask by a null constant of the read's type
+ * (the reads nothing can serve become a defined zero instead of whatever the descriptor memory holds) and moves the subpass-input variables
+ * to the plugin's input-attachment descriptor set. The reads that ARE served need the colour attachment as a real input attachment of
+ * the render pass (nvmtl_vk.c, nvmtl_fbfetch_plan.h; DRIVER-PLAN N48).
  *
  * Pure C99, no Vulkan headers: tests/test_spirv_fbfetch.c. SPDX-License-Identifier: MIT
  */
@@ -45,12 +42,12 @@ enum { NVMTL_OP_TYPE_IMAGE = 25, NVMTL_OP_TYPE_POINTER = 32, NVMTL_OP_VARIABLE =
 enum { NVMTL_FB_IMG_TYPE = 1, NVMTL_FB_PTR_TYPE = 2, NVMTL_FB_VAR = 4, NVMTL_FB_LOADED = 8 };
 #define NVMTL_FBFETCH_MAX_BOUND (1u << 20)
 
-/* One walk. When `zero` is set the reads found are rewritten in place (OpCopyObject of a null constant + OpNop padding)
+/* One walk. When `zero_mask` has bit n set the reads of [[color(n)]] found are rewritten in place (OpCopyObject of a null constant + OpNop padding)
  * and the module grows by the null constants: the caller's buffer holds cap words, *nw is the module's length and is
  * updated. Returns 0 (also when the module has no subpass input), -1 for a malformed module, an id bound over
  * NVMTL_FBFETCH_MAX_BOUND, out of memory, or one that does not fit; after a -1 with `zero` set the buffer may be half
  * rewritten: the caller discards it (it works on a copy). */
-static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, int zero, nvmtl_fbfetch *out)
+static inline int nvmtl_spirv_fbfetch_mask(uint32_t *w, size_t *nw_io, size_t cap, uint32_t zero_mask, nvmtl_fbfetch *out)
 {
     size_t nw = *nw_io;
     memset(out, 0, sizeof *out);
@@ -88,7 +85,7 @@ static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, in
             } else if (op == NVMTL_OP_IMAGE_READ && wc >= 5 && w[i + 3] < bound && (fact[w[i + 3]] & NVMTL_FB_LOADED)) {
                 const uint32_t n = (uint32_t)band[w[i + 3]] - 1u;
                 out->reads++; out->read_mask |= 1u << n;
-                if (zero) {
+                if (zero_mask & (1u << n)) {
                     /* a null constant of the read's result type, declared once before the first function */
                     uint32_t rt = w[i + 1], res = w[i + 2], nid = 0;
                     for (uint32_t k = 0; k < nnull; k++) if (nulls[k][0] == rt) nid = nulls[k][1];
@@ -103,7 +100,7 @@ static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, in
             }
             i += wc;
         }
-        if (!rc && zero && nnull) {
+        if (!rc && zero_mask && nnull) {
             const size_t add = 3u * nnull;
             if (!first_fn || nw + add > cap) rc = -1;
             else {
@@ -117,5 +114,37 @@ static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, in
     }
     free(fact); free(band);
     return rc;
+}
+
+/* zero == 0: scan only; otherwise every read is replaced (the original all-or-nothing form) */
+static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, int zero, nvmtl_fbfetch *out)
+{ return nvmtl_spirv_fbfetch_mask(w, nw_io, cap, zero ? 0xffu : 0u, out); }
+
+/* Move every fetch variable (an id decorated Binding 192..199) to descriptor set `set`: the plugin keeps the input attachments in a set
+ * of their own (NVMTL_FBF_SET), written once per pass, so the fragment set 1 (dirty tracking, reuse, copies) never sees them.
+ * Returns the number of DescriptorSet decorations rewritten, -1 for a malformed module or an id bound over NVMTL_FBFETCH_MAX_BOUND.
+ * Run it BEFORE a "set 0 -> 1" retarget: that one only touches decorations still at 0. */
+static inline int nvmtl_spirv_fbfetch_set(uint32_t *w, size_t nw, uint32_t set)
+{
+    if (nw < 5 || w[0] != 0x07230203u) return -1;
+    const uint32_t bound = w[3];
+    if (!bound || bound > NVMTL_FBFETCH_MAX_BOUND) return -1;
+    uint8_t *band = (uint8_t *)calloc(bound, 1);
+    if (!band) return -1;
+    int n = 0, rc = 0;
+    for (size_t i = 5; i < nw; ) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) { rc = -1; break; }
+        if (op == NVMTL_OP_DECORATE && wc >= 4 && w[i + 1] < bound && w[i + 2] == 33 && w[i + 3] >= NVMTL_FBFETCH_BASE
+            && w[i + 3] < NVMTL_FBFETCH_BASE + NVMTL_FBFETCH_COUNT) band[w[i + 1]] = 1;
+        i += wc;
+    }
+    for (size_t i = 5; !rc && i < nw; ) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (op == NVMTL_OP_DECORATE && wc >= 4 && w[i + 1] < bound && band[w[i + 1]] && w[i + 2] == 34) { w[i + 3] = set; n++; }
+        i += wc;
+    }
+    free(band);
+    return rc ? -1 : n;
 }
 #endif

@@ -1104,12 +1104,23 @@ plugin now uploads into multisample colour textures itself (`msupload:` lines be
 | `copy_image_to_buffer: recording (depth/stencil, multisample or non-colour copy) ...` and `(special copy)` lines | the bracket of copies that are not plain single-sample colour ones (always logged: 16, then every 256th) | read like the plain bracket |
 | `blit copyFromTexture:toBuffer: REFUSED - source is a X, destination a Y` | a Metal object that is not this plugin's | the GL layer hands over something the plugin does not model |
 
-`vk: fbfetch: fragment module #N declares [[color(n)]] subpass inputs 0x1 (binding 192+n) and READS them ...`: once per pipeline
-(first 16, then every 256th). The plugin's set layout has no binding 192..199 and no render pass an input attachment, so a read that
-is still in the module hits an undefined descriptor (random colours, corrupt glyphs in WindowServer / Terminal are the suspects).
-`NVMTL_FBFETCH_ZERO=1` (environment or a line in `rdna3mtl.conf`) turns every such read into a zero vector: if the random colours
-become a fixed pattern the read is the cause; the real fix (the colour attachment as an input attachment of the render pass, descriptor
-at 192+n, a self-dependency barrier per draw) is open in DRIVER-PLAN N48.
+Framebuffer fetch (`[[color(n)]]`, binding 192+n; card run 2026-10-25d: rectangles over text cells with a red/green gradient and broken glyphs in Terminal/Maps/Settings
+were reads of an undefined descriptor; now implemented with render-pass input attachments, DRIVER-PLAN N48, unverified on the card). Lines, in the order a run prints them:
+
+| Line | Meaning | Action |
+|---|---|---|
+| `vk: framebuffer fetch ([[color(n)]]) is implemented with render-pass input attachments (NVMTL_FBFETCH_ZERO=unset)` | once per process: the mode | `FORCED to a ZERO vector` = the A/B experiment is on |
+| `vk: fbfetch: fragment module #N declares [[color(n)]] subpass inputs 0xD (binding 192+n, K decoration(s) moved to set 3) and READS them; pipeline has C colour attachment(s), S sample(s); served 0xA, zeroed 0xZ: <verdict> [...]` | per pipeline (first 16, then every 256th). `served` = colour attachments fetched (`nvk_pipeline.fbread`), `zeroed` = reads replaced by a zero vector | verdict `IMPLEMENTED ...` is the working case; `UNSUPPORTED and the zeroing FAILED - ... undefined descriptor` is the bug the whole work removes (WARN) |
+| `vk: fbfetch: reads of attachments the pipeline lacks (...)` | normal: the translator reads colour inputs the pipeline has no attachment for | INFO |
+| `vk: fbfetch: UNSUPPORTED (reason): reads of colour attachment(s) 0xZ are zeroed, 0xA are served` | a real limit: multisample target, integer format, tessellation, `NVMTL_FBFETCH_ZERO=1`, no layout | the pixels of that blend are wrong (black/transparent contribution); reason names the missing piece |
+| `vk: fbfetch: pass K with input attachments 0xM (W written, refused 0xR): descriptor set made` | per pass that fetched (first 8, then powers of two) | `refused` non-zero is followed by a `colour attachment N of this pass cannot be an input attachment: <reason>` line |
+| `vk: fbfetch: draw K reads [[color(n)]] 0xA: barrier + set 3 bound ... [S set(s), P skipped, R restart(s)]` | draws that fetched (first 4, then powers of two) | `skipped` > 0 is a draw NOT made: read the `a draw that reads ... is SKIPPED: <reason>` lines |
+| `vk: fbfetch: a pipeline that reads [[color(n)]] 0xA was bound in a pass with input attachments 0xH - the pass is RESTARTED (LOAD) with 0xU` | the pass began with a pipeline that did not read; INFO, but many restarts per frame cost time | `fbfetch: the render pass could not be RESTARTED ...` = WARN, the rest of that encoder is not drawn |
+| `vk: fbfetch: input-attachment descriptor set allocation FAILED` / `descriptor layouts FAILED` | pool/ layout failure: the draws that read are skipped / every read is zeroed | WARN |
+
+Triage row `framebuffer fetch` (INFO = implemented with the draw counters, WARN = something above). If the artifacts persist while the row is INFO with draws counted: the fetch itself
+is wrong (compare with `tests/vk_fbfetch_probe.c`, which passes on the dev host's stock RADV; the plugin's Mesa d381c361 has not been compared) - then try `NVMTL_FBFETCH_ZERO=1` (environment or
+a line in `rdna3mtl.conf`) to see whether the pattern changes. If the row is INFO but draws are 0: the pipelines that read were never drawn (check `UNSUPPORTED` lines).
 
 Trace record `kind 17` (`NVT_K_ENC_SPLIT`, one per render encoder that drew; `tools/plugin_trace.py` prints it as `kind 17` until its
 decoder is taught): `dur_us` encoder begin -> end, `rc` pipeline-state variants built while drawing, `a0` draws, `a1` pipeline lookup us,

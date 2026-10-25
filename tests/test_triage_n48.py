@@ -80,6 +80,27 @@ check(rows_of(gone + rd)["framebuffer fetch"][0] == "WARN", "a read anywhere win
 sf = L("Terminal", 797, "1a41", "vk: fbfetch: the scan of a fragment module (4096 words) FAILED - malformed module, an id bound over 1048576, or out of memory; a framebuffer fetch in it would go unnoticed [1 so far]")
 check(rows_of(sf)["framebuffer fetch"][0] == "WARN", "scan failure: WARN")
 
+# framebuffer fetch, the implemented path (line formats of nvmtl_vk.c: nvmtl_fbfetch_pipeline_note, nvmtl_fbf_bind, nvmtl_fbf_prepare_pass)
+FB2 = ("vk: fbfetch: fragment module #%d declares [[color(n)]] subpass inputs 0x7 (binding 192+n, 3 decoration(s) moved to set 3) and READS them; pipeline has 1 colour "
+       "attachment(s), 1 sample(s); served 0x%x, zeroed 0x%x: %s [%d served / %d read / 0 declared-only / %d zeroed / %d zeroing failed so far]")
+impl = L("Terminal", 904, "1e1e", FB2 % (1, 1, 6, "IMPLEMENTED for the attachments the pipeline has (input attachments of the render pass, barrier before each draw); the other reads zeroed", 1, 1, 1, 0))
+impl += L("Terminal", 904, "1e1e", "vk: fbfetch: reads of attachments the pipeline lacks (the pipeline has no colour attachment at that index (normal: the translator reads every colour input it declares)): reads of colour attachment(s) 0x6 are zeroed, 0x1 are served [1 such pipeline(s) for this reason so far]")
+impl += L("Terminal", 904, "1e1e", "vk: fbfetch: draw 4 reads [[color(n)]] 0x1: barrier + set 3 bound (pass inputs 0x1) [2 set(s), 0 skipped, 1 restart(s)]")
+r = rows_of(impl)
+check(list(r) == ["framebuffer fetch"] and r["framebuffer fetch"][0] == "INFO" and "IMPLEMENTED" in r["framebuffer fetch"][2]
+      and "Terminal 4 draw(s), 2 pass set(s), 0 skipped, 1 pass restart(s)" in r["framebuffer fetch"][2], "implemented: INFO only, %r" % r)
+uns = L("Chess", 3000, "1", "vk: fbfetch: UNSUPPORTED (a multisample target (per-sample fetch is not carried)): reads of colour attachment(s) 0x1 are zeroed, 0x0 are served [1 such pipeline(s) for this reason so far]")
+rr = [x for x in t48.n48_plugin_rows(impl + uns) if x[0] == "WARN"]
+check(len(rr) == 1 and "multisample target" in rr[0][2] and "Chess" in rr[0][2], "unsupported reason: WARN, %r" % rr)
+for bad in ("vk: fbfetch: a draw that reads [[color(n)]] 0x1 is SKIPPED: an attachment it reads cannot be an input attachment (pass inputs 0x1, refused 0x1) [1 so far]",
+            "vk: fbfetch: colour attachment 0 of this pass cannot be an input attachment: a layered render pass (format 44, 1 sample(s), 4 layer(s), textureType 3) - pipelines that read it are SKIPPED [1 so far]",
+            "vk: fbfetch: input-attachment descriptor set allocation FAILED (-1000069000, 16 pool(s)) - the draws that read it are SKIPPED [1 so far]",
+            "fbfetch: the render pass could not be RESTARTED with input attachments 0x1 - the rest of this encoder is not drawn"):
+    rr = [x for x in t48.n48_plugin_rows(impl + L("Terminal", 904, "1e1e", bad)) if x[0] == "WARN"]
+    check(len(rr) == 1 and "SKIPPED" in rr[0][2] and "Terminal" in rr[0][2], "refusal line is a WARN: %s -> %r" % (bad[:60], rr))
+failed = L("Terminal", 904, "1e1e", FB2 % (2, 0, 1, "UNSUPPORTED and the zeroing FAILED - the read hits an undefined descriptor", 0, 1, 0, 1))
+check(rows_of(failed)["framebuffer fetch"][0] == "WARN" and "reads left as translated" in rows_of(failed)["framebuffer fetch"][2], "zeroing failed: WARN")
+
 # the copy bracket
 B = "copy_image_to_buffer: recording vk format 130 971x680 (level 0 of 1, layer 0 of 1) 1 sample(s) type 2 aspect 2 element 4 B region (0,0) 971x680 -> row 3884 B offset 0 of 2639120, image layout 1"
 closed = (L("Chess", 3265, "3f06", B) + L("Chess", 3265, "3f06", "copy_image_to_buffer: layout transition recorded") +
