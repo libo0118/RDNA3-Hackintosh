@@ -5991,12 +5991,12 @@ static void rd3AccelPerfCreditOne(struct rd3PerfWalk *w, IORegistryEntry *e)
                                                                        : "no lastSubmittedTime")
                                                                  : "lastSubmittedTime is not 64 bits", (long long)k + 1);
             }
-        } else if (!ao) {   /* not started yet (no number at all): a later take credits it */
+        } else if (!ao) {   /* not started yet (no number at all): only the time after its start is credited (later takes); this take's is lost */
             w->pending[i] = true;
             const SInt64 k = OSAddAtomic64(1, &gCntPerfCreditWait);
             if (rd3_log_due((uint64_t)k, 4, 1023))
                 ALOG("perfstats: pid %d's %s has no accumulatedGPUTime yet (not started: opened, not yet connected) -- "
-                     "this take's %llu us not credited to it (%lld such)", pid, e->getMetaClass()->getClassName(),
+                     "this take's %llu us are lost (perf_pendingns), later takes credit it once started (%lld such)", pid, e->getMetaClass()->getClassName(),
                      pp->gpuNs / 1000, (long long)k + 1);
         } else {
             const SInt64 k = OSAddAtomic64(1, &gCntPerfCreditFail);

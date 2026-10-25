@@ -441,6 +441,18 @@ static void nvmtl_gpu_time_queue_open(id dev, mach_port_t accel)
         if (again) atomic_store(&g_gpuq_state, 2);
     }
 }
+/* the device that opened the queue is refused after all (Vulkan did not come up): close it and let the process's next
+ * device try again, so an idle queue does not stand for a process with no Metal device (ECC round 2) */
+static void nvmtl_gpu_time_queue_drop(const char *why)
+{
+    const uint32_t c = g_gpuq_conn;
+    if (!c) return;   /* none open (off, failed, or not tried): the state stays as it is */
+    g_gpuq_conn = 0;
+    const int32_t kr = g_gpuq_io.close ? (int32_t)g_gpuq_io.close((mach_port_t)c) : -1;
+    atomic_store(&g_gpuq_state, 0);
+    nvlog("GPU time queue: closed again for %s (pid %d; connection 0x%x, IOServiceClose 0x%08x%s): %s; the next Metal device of "
+          "this process opens it again", getprogname(), getpid(), c, (unsigned)kr, kr ? " FAILED" : "", why);
+}
 static void nvmtl_fill_pool_args(uint8_t *a, int second)
 {
     memset(a, 0, 2440);
@@ -489,6 +501,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
     [self nvmtlProbeGPUPass];
     if (nvmtl_vk_init()) {
         nvlog("  NVK did not come up in this process - refusing to be the Metal device for %s", getprogname());
+        nvmtl_gpu_time_queue_drop("Vulkan did not come up: no Metal device");
         return nil;
     }
 #if RDNA3MTL_NV_VIDEO_CODECS

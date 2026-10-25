@@ -61,7 +61,7 @@ KLOG = ("RDNA3Accelerator: perfstats: pid 812 used the GPU (1200 us, 3 job(s)) b
         "RDNA3Accelerator: perfstats: pid 950 used the GPU (7000 us, 9 job(s)) but has no IOAccelSubmitter2 (context\n"
         "RDNA3Accelerator: perfstats: pid 4242 used the GPU (100 us, 1 job(s)) but has no IOAccelSubmitter2 (context\n")
 rows = tr.gpu_time_queue_rows(WS, DEV + APPS, KLOG)
-check(any(r[0] == "INFO" and "pid(s) 812 had GPU time before their queue opened" in r[2] for r in rows), "gap: %r" % rows)
+check(any(r[0] == "INFO" and "pid(s) 812 used the GPU before their queue opened: that time stays uncredited" in r[2] for r in rows), "gap: %r" % rows)
 check(any(r[0] == "WARN" and "pid 900 (Terminal): 5.0 ms" in r[2] and "FAILED at IOConnectAddClient" in r[2] for r in rows),
       "lost with step: %r" % rows)
 check(any(r[0] == "WARN" and "pid 950 (Photos): 7.0 ms" in r[2] and "logged no opened queue" in r[2] for r in rows),
@@ -77,6 +77,33 @@ rows = tr.gpu_time_queue_rows("", BAD, "")
 check(any(r[0] == "WARN" and "Notes (pid 902): the queue that did not start was NOT closed (IOServiceClose 0xe00002c0)" in r[2]
           for r in rows), "bad close: %r" % rows)
 check(any(r[0] == "WARN" and "IOReturn 0xe00002c2 (Notes (902))" in r[2] for r in rows), "bad close group: %r" % rows)
+
+# ECC round 2: a FAILED first try and an opened retry is an INFO, not a WARN; a refused device is no Metal device; a
+# queue closed again (Vulkan failed) no longer stands
+RETRY = ("2026-10-26 10:00:06.1 Df Terminal[900:3c] (RDNA3MTLDriver) NVMTL: -[NVMTLDevice initWithAcceleratorPort:36868] in Terminal\n"
+         "2026-10-26 10:00:06.3 E Terminal[900:3c] NVMTL: GPU time queue: FAILED at IOServiceOpen(accelerator, type 8 = "
+         "IOAccelCommandQueue), IOReturn 0xe00002be for Terminal (pid 900): Activity Monitor shows 0 % GPU for it; Metal works "
+         "as before; one more try at this process's next Metal device\n"
+         "2026-10-26 10:00:07.3 Df Terminal[900:3c] NVMTL: GPU time queue: IOAccelCommandQueue opened for Terminal (pid 900; "
+         "connection 0x2a03)\n")
+rows = tr.gpu_time_queue_rows("", RETRY, KLOG)
+check(not any(r[0] == "WARN" for r in rows if "900" in r[2]), "retry WARN: %r" % rows)
+check(any(r[0] == "INFO" and "needed the retry" in r[2] and "Terminal (900)" in r[2] for r in rows), "retry INFO: %r" % rows)
+check(any(r[0] == "INFO" and "pid(s) 900 used the GPU before their queue opened" in r[2] for r in rows), "retry gap: %r" % rows)
+REF = ("2026-10-26 10:00:06.2 Df Photos[950:3c] (RDNA3MTLDriver) NVMTL: -[NVMTLDevice initWithAcceleratorPort:36869] in Photos\n"
+       "2026-10-26 10:00:06.2 Df Photos[950:3c] (RDNA3MTLDriver) NVMTL:   not allow-listed: no device for Photos\n"
+       "2026-10-26 10:00:08.1 Df Maps[960:3c] (RDNA3MTLDriver) NVMTL: -[NVMTLDevice initWithAcceleratorPort:36870] in Maps\n"
+       "2026-10-26 10:00:08.2 Df Maps[960:3c] NVMTL: GPU time queue: IOAccelCommandQueue opened for Maps (pid 960; connection 0x1)\n"
+       "2026-10-26 10:00:08.3 Df Maps[960:3c] NVMTL:   NVK did not come up in this process - refusing to be the Metal device for Maps\n"
+       "2026-10-26 10:00:08.3 Df Maps[960:3c] NVMTL: GPU time queue: closed again for Maps (pid 960; connection 0x1, IOServiceClose "
+       "0x00000000): Vulkan did not come up: no Metal device; the next Metal device of this process opens it again\n")
+K2 = KLOG + "RDNA3Accelerator: perfstats: pid 960 used the GPU (300 us, 1 job(s)) but has no IOAccelSubmitter2 (context\n"
+rows = tr.gpu_time_queue_rows("", REF, K2)
+check(not any(r[0] == "WARN" and "950" in r[2] for r in rows), "refused device WARN: %r" % rows)
+check(any(r[0] == "INFO" and "no Metal device" in r[2] and "950" in r[2] and "960" in r[2] for r in rows), "refused INFO: %r" % rows)
+check(not any("960 used the GPU before their queue opened" in r[2] for r in rows), "closed queue gap: %r" % rows)
+v = tr.gpu_util_verdict({"perf_rings": 10, "perf_jobs": 5, "perf_pendingns": 10 ** 6, "perf_creditwait": 1})
+check(not any("no process got GPU time" in t for _, t in v), "pending time is not 'no process': %r" % v)
 
 base = {"perf_rings": 10, "perf_jobs": 5}
 v = tr.gpu_util_verdict(dict(base, perf_cmdqueues=3, perf_gpuns=10 ** 9))

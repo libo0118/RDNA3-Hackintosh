@@ -2483,6 +2483,10 @@ def present_verdict(c, current=False, args="", ioreg=""):
 
 GPUQ_DEVINIT = re.compile(r"(?m)^\S+ \S+ +\S+ +(.+?)\[(\d+):[0-9a-f]+\][^\n]*?NVMTL: -\[NVMTLDevice initWithAcceleratorPort:")
 GPUQ_NOSUB = re.compile(r"perfstats: pid (\d+) used the GPU \((\d+) us")
+# a device the plugin refused after its initWithAcceleratorPort line: another vendor's accelerator, not allow-listed, no Vulkan
+GPUQ_REFUSED = re.compile(r"(?m)^\S+ \S+ +\S+ +.+?\[(\d+):[0-9a-f]+\][^\n]*?NVMTL: +(?:accelerator vendor [0-9a-f]+, but this process "
+                          r"runs Metal on [0-9a-f]+: no second device|not allow-listed: no device|NVK did not come up)")
+GPUQ_EVENT = re.compile(r"GPU time queue: (IOAccelCommandQueue opened|closed again) for .+? \(pid (\d+)")
 
 
 def gpu_time_queue_rows(cdlog="", pluginlog="", klog=""):
@@ -2493,7 +2497,10 @@ def gpu_time_queue_rows(cdlog="", pluginlog="", klog=""):
     the processes that opened one; WARN per failure step and IOReturn, for a close that failed too, for a pid the kernel
     could not credit although its plugin made a Metal device and opened no queue, and for plugin device lines with no
     'GPU time queue:' line at all (a plugin older than item 1); INFO for a pid whose time came before its queue opened
-    (the start-up gap), for pids with no Metal device of the plugin, and when switched off."""
+    (the start-up gap), for pids with no Metal device of the plugin, and when switched off. A pid whose FAILED first try
+    was followed by an opened queue (the retry) is an INFO; a device the plugin refused (vendor, allow-list, Vulkan) is no
+    Metal device. Limit: a release build of the plugin does not syslog its initWithAcceleratorPort / refusal lines, so
+    there a pid without its queue line falls into the 'no Metal device' INFO (its FAILED line is still WARNed)."""
     text = (cdlog or "") + "\n" + (pluginlog or "")
     rows = []
     opened = re.findall(r"GPU time queue: IOAccelCommandQueue opened for (.+?) \(pid (\d+)", text)
@@ -2501,7 +2508,14 @@ def gpu_time_queue_rows(cdlog="", pluginlog="", klog=""):
     badclose = re.findall(r"GPU time queue: FAILED at [^\n]*?closing it FAILED too: IOReturn (0x[0-9a-f]+)\)[^\n]*? for (.+?) "
                           r"\(pid (\d+)", text)
     off = re.findall(r"GPU time queue: off \(NVMTL_GPUTIME_QUEUE=0\) for (.+?) \(pid (\d+)", text)
-    devinit = dict((pid, name) for name, pid in GPUQ_DEVINIT.findall(text))
+    refused = set(GPUQ_REFUSED.findall(text))
+    devinit = dict((pid, name) for name, pid in GPUQ_DEVINIT.findall(text) if pid not in refused)
+    last = {}
+    for what, pid in GPUQ_EVENT.findall(text):   # in log order: a queue closed again (its device refused) no longer stands
+        last[pid] = what
+    opened_pids = set(pid for pid, what in last.items() if what != "closed again")
+    retried = sorted(set((name, pid) for _, _, name, pid in failed if pid in opened_pids))
+    failed = [f for f in failed if f[3] not in opened_pids]
     if opened:
         names = sorted(set(n for n, _ in opened))
         rows.append(("INFO", "GPU time queue", "%d process(es) opened their IOAccelCommandQueue (Activity Monitor can show their %% GPU): %s"
@@ -2509,9 +2523,13 @@ def gpu_time_queue_rows(cdlog="", pluginlog="", klog=""):
     for (step, ret), procs in sorted(_group_gpuq(failed).items()):
         rows.append(("WARN", "GPU time queue", "%d process(es) without their IOAccelCommandQueue (Activity Monitor shows 0 %% GPU for "
                      "them): FAILED at %s, IOReturn %s (%s)" % (len(procs), step, ret, ", ".join(sorted(procs)[:8]))))
-    for ret, name, pid in badclose:
+    if retried:
+        rows.append(("INFO", "GPU time queue", "%d process(es) needed the retry (FAILED at the first device, opened at the next): %s"
+                     % (len(retried), ", ".join("%s (%s)" % r for r in retried[:8]))))
+    for ret, name, pid in badclose:   # WARN even after a working retry: the unstarted queue stays until the process exits
         rows.append(("WARN", "GPU time queue", "%s (pid %s): the queue that did not start was NOT closed (IOServiceClose %s): a "
-                     "half-made IOAccelCommandQueue may stay under the accelerator until the process exits" % (name, pid, ret)))
+                     "half-made IOAccelCommandQueue may stay under the accelerator until the process exits (perf_creditwait "
+                     "grows with it)%s" % (name, pid, ret, " - its retry opened a working one" if pid in opened_pids else "")))
     if off:
         rows.append(("INFO", "GPU time queue", "switched off (NVMTL_GPUTIME_QUEUE=0) in %d process(es): Activity Monitor shows 0 %% "
                      "GPU for them" % len(set(off))))
@@ -2522,11 +2540,10 @@ def gpu_time_queue_rows(cdlog="", pluginlog="", klog=""):
     nosub = {}
     for pid, us in GPUQ_NOSUB.findall(klog or ""):
         nosub[pid] = nosub.get(pid, 0) + int(us)
-    opened_pids = set(pid for _, pid in opened)
     gap = sorted(p for p in nosub if p in opened_pids)
     if gap:
-        rows.append(("INFO", "GPU time queue", "pid(s) %s had GPU time before their queue opened (the start-up gap: credited "
-                     "from the next take on)" % ", ".join(gap[:10])))
+        rows.append(("INFO", "GPU time queue", "pid(s) %s used the GPU before their queue opened: that time stays uncredited "
+                     "(perf_nosubns); only the time after the open reaches Activity Monitor" % ", ".join(gap[:10])))
     lost = sorted(p for p in nosub if p not in opened_pids and p in devinit)
     for p in lost[:10]:
         why = [st for st, _, _, fp in failed if fp == p]
@@ -2618,8 +2635,8 @@ def gpu_util_verdict(c, ioreg=""):
     if c.get("perf_uccbad"):
         out.append(("WARN", "%d IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid: their "
                             "processes' time counts as 'no IOAccelSubmitter2' though they have one" % c["perf_uccbad"]))
-    if rings and not gpu and not nosub and c.get("perf_jobs"):
-        out.append(("WARN", "the rings ran %s job(s) but no process got GPU time (perf_gpuns 0, perf_nosubns 0)"
+    if rings and not gpu and not nosub and not c.get("perf_pendingns") and c.get("perf_jobs"):
+        out.append(("WARN", "the rings ran %s job(s) but no process got GPU time (perf_gpuns 0, perf_nosubns 0, perf_pendingns 0)"
                     % c.get("perf_jobs")))
     if c.get("perf_creditfail"):
         out.append(("WARN", "%d time(s) GPU time NOT credited: no child iterator, or a submitter whose accumulatedGPUTime "

@@ -364,7 +364,7 @@ vki="$root/build/mesa/vulkaninfo.log"
 # companion; collect_plugin_trace.sh --traces-only above left it out)
 if [ -f "$root/tools/macos/collect_plugin_trace.sh" ]; then
     lim=240
-    run 32-log-nvmtl-windowserver.txt log show --last boot --info --style compact --predicate 'process == "WindowServer" AND eventMessage CONTAINS "NVMTL"'
+    run 32-log-nvmtl-windowserver.txt log show --last boot --info --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "NVMTL" OR eventMessage CONTAINS "NullMoth:")'
     lim=45
 fi
 
