@@ -40,6 +40,13 @@ def _unq(v):
     return v[1:-1].replace('\\"', '"').replace("\\\\", "\\") if v.startswith('"') else None
 
 
+def _seq(kv):
+    try:
+        return int(kv.get("seq", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _kv(text):
     out = {}
     for k, v in _KV.findall(text):
@@ -120,7 +127,11 @@ def n50_plugin_rows(text=""):
             mg[key] = _kv(m.group(1)); continue
         m = _SUM_SIN.match(msg)
         if m:
-            sin[key] = _kv(m.group(1)); continue
+            kv = _kv(m.group(1))
+            # a timer tick and the exit line can reach the log out of order: keep the highest seq
+            if key not in sin or _seq(kv) >= _seq(sin[key]):
+                sin[key] = kv
+            continue
         m = _WIT.match(msg)
         if m:
             old = wit_lines.get(key, (0, 0)); wit_lines[key] = (old[0] + 1, max(old[1], int(m.group(2)))); continue

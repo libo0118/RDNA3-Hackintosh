@@ -933,7 +933,7 @@ static void nvmtl_sin_summary(int force) {
         &gRsLay[0], &gRsLay[1], &gRsLay[2], &gRsLay[3], &gRsLay[4], &gRsLay[5], &gVerChecked, &gVerMismatch, &gVerFail, &gCiNew, &gCiRecycled, &gCiParked, &gCiEvicted, &gCiRefusedSize, &gCiRefusedForm, &gCiRefusedFull };
     unsigned long long total = 0;
     for (unsigned i = 0; i < sizeof all / sizeof *all; i++) total += atomic_load(all[i]);
-    if (!force && (now - gSinSumNs < 10ull * 1000000000ull || !total || total == gSinSumLast)) { os_unfair_lock_unlock(&gSinSumLock); return; }
+    if (!force && (now - gSinSumNs < 9ull * 1000000000ull || !total || total == gSinSumLast)) { os_unfair_lock_unlock(&gSinSumLock); return; }
     gSinSumNs = now; gSinSumLast = total; const unsigned long long seq = ++gSinSeq, tms = (now - gSinT0) / 1000000ull;
     os_unfair_lock_unlock(&gSinSumLock);
     nvlog_uncapped("vk: surfin: SUMMARY seq=%llu t_ms=%llu cache=%d cimg_on=%d verify=%u calls=%llu sin_us_total=%llu fast=%llu fast_us=%llu miss_unsynced=%llu miss_seed=%llu miss_gen=%llu "
@@ -955,6 +955,7 @@ static void nvmtl_sin_summary(int force) {
 static void nvmtl_sin_arm(void) {
     static dispatch_once_t once; static dispatch_source_t timer;
     dispatch_once(&once, ^{
+        os_unfair_lock_lock(&gSinSumLock); if (!gSinT0) gSinT0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); os_unfair_lock_unlock(&gSinSumLock);   /* t_ms from the first counted call, not the first tick */
         atexit(nvmtl_sin_atexit);
         timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_queue_create("rdna3.surfin.summary", DISPATCH_QUEUE_SERIAL));
         if (!timer) { nvlog("vk: surfin: the 10 s SUMMARY timer could not be made - the totals go out at exit only (WindowServer never exits cleanly)"); return; }
