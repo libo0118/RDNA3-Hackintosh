@@ -48,6 +48,21 @@ check(r["multisample upload"][0] == "WARN" and "vkCreateGraphicsPipelines" in r[
       any(x[0] == "WARN" for x in t48.n48_plugin_rows(ok + L("Chess", 3005, "3b4f", "msupload: vkCreateGraphicsPipelines(format 44, 4 samples) -> -3"))), "msupload failure: WARN")
 check([x[0] for x in t48.n48_plugin_rows(ok + L("Chess", 3005, "3b4f", "msupload: vkCreateFramebuffer -> -4"))].count("WARN") == 1, "framebuffer failure: WARN")
 
+# the failure lines of every shape the plugin prints (new "msupload: FAILED - ..." and the older "msupload: vkCreate... -> N")
+for line in ("msupload: FAILED - vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?) (-3) [1 failed, 0 refused, 0 done so far]",
+             "msupload: vkCreateShaderModule -> -3 (the device lacks Int64 / PhysicalStorageBuffer64?)",
+             "msupload: FAILED - vkCreateFramebuffer (-4) [2 failed, 0 refused, 5 done so far]",
+             "msupload: FAILED - no attachment view of format 44 over the format-50 image (0) [1 failed, 0 refused, 0 done so far]",
+             "msupload: FAILED - more (format, samples) pairs than the pass table holds (16) [1 failed, 0 refused, 0 done so far]",
+             "msupload: FAILED - framebuffer retention allocation (0) [1 failed, 0 refused, 0 done so far]"):
+    rr = rows_of(L("Chess", 3005, "3b4f", line))
+    check(list(rr) == ["multisample upload"] and rr["multisample upload"][0] == "WARN", "failure line not a WARN: %s -> %r" % (line, rr))
+# the pass-built and upload lines are not failures
+check(rows_of(L("Chess", 3005, "3b4f", "msupload: pass built for view format 44 at 4 samples (1 in this process)")) == {}, "pass built: nothing")
+# REFUSED lines of the pass count as refused copies, with the running counts stripped from the reason
+rr = rows_of(L("Chess", 3005, "3b4f", "msupload: REFUSED - a render pass is open [1 refused, 0 failed, 0 done so far]"))
+check(list(rr) == ["plugin copy refused"], "msupload REFUSED: %r" % rr)
+
 # framebuffer fetch
 FB = ("vk: fbfetch: fragment module #%d declares [[color(n)]] subpass inputs 0x1 (binding 192+n) and %s; pipeline has 1 colour attachment(s), 1 sample(s); "
       "the set layout has no such binding and no render pass an input attachment: %s [%d read / %d declared-only / %d zeroed / %d zeroing failed so far]")
@@ -84,9 +99,38 @@ check(t48.n48_plugin_rows(sp + L("Chess", 3265, "3f06", "copy_image_to_buffer: (
 b2i = L("Chess", 3265, "3f06", "copy_buffer_to_image: recording vk format 44 100x100")
 check("copy_buffer_to_image: recording" in rows_of(b2i)["plugin copy bracket"][2], "buffer_to_image open")
 
-# the hook in triage_reports.py
+# the hook in triage_reports.py: the real ImportError path (the module hidden), not a grep. A report is run through
+# triage_reports.report() with triage_n48 unimportable: it must print the loud WARN row and not crash.
+import io
+import subprocess
+import tarfile
+import tempfile
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
-check("from triage_n48 import n48_plugin_rows" in src and "n48_plugin_rows(pluginlog)" in src and "triage_n48.py is missing" in src, "triage_reports.py calls n48_plugin_rows and says so when the module is missing")
+check("from triage_n48 import n48_plugin_rows" in src and "n48_plugin_rows(pluginlog)" in src, "triage_reports.py calls n48_plugin_rows")
+with tempfile.TemporaryDirectory() as d:
+    tools = os.path.join(d, "tools")
+    os.makedirs(tools)
+    for name in os.listdir(os.path.join(ROOT, "tools")):
+        if name.endswith(".py") and name != "triage_n48.py":      # everything but the module
+            with open(os.path.join(ROOT, "tools", name), "rb") as f, open(os.path.join(tools, name), "wb") as o:
+                o.write(f.read())
+    rep = os.path.join(d, "reports"); os.makedirs(rep)
+    def member(tar, name, text):
+        data = text.encode(); ti = tarfile.TarInfo("rdna3-report/" + name); ti.size = len(data); tar.addfile(ti, io.BytesIO(data))
+    with tarfile.open(os.path.join(rep, "rdna3-report-x.tar.gz"), "w:gz") as tar:
+        member(tar, "01-boot-args.txt", "boot-args: rdna3lvl=10 rdna3accel=1\n")
+        member(tar, "03-kexts.txt", "io.github.voten641.RDNA3Accel 1\n")
+        member(tar, "11-ioreg-props.txt", '"Level" = 10\n')
+        member(tar, "26-log-metal-plugin.txt", L("Chess", 1, "a", "copy_image_to_buffer: REFUSED - x"))
+    for have, want_row, want_not in ((True, "plugin copy refused", "triage_n48.py is missing"), (False, "triage_n48.py is missing", "plugin copy refused")):
+        if have:
+            with open(os.path.join(ROOT, "tools", "triage_n48.py"), "rb") as f, open(os.path.join(tools, "triage_n48.py"), "wb") as o:
+                o.write(f.read())
+        out = subprocess.run([sys.executable, "-I", os.path.join(tools, "triage_reports.py"), rep], capture_output=True, text=True)
+        check(want_row in out.stdout and want_not not in out.stdout and "Traceback" not in out.stderr,
+              "module %s: wanted %r, got stdout %r stderr %r" % ("present" if have else "hidden", want_row, out.stdout[-300:], out.stderr[-300:]))
+        if have:
+            os.remove(os.path.join(tools, "triage_n48.py"))
 
 if fails:
     print("test_triage_n48: FAIL")

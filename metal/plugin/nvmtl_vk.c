@@ -6858,25 +6858,38 @@ static inline uint32_t nvmtl_lvl(uint32_t d, uint32_t l) { d >>= l; return d ? d
 #include "nvmtl_msupload_spv.h"
 static pthread_mutex_t g_msu_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkPipelineLayout g_msu_layout;
-static struct { uint32_t fmt, samples; VkRenderPass rp; VkPipeline pipe; } g_msu_tab[8];
+/* 4 formats x 3 sample counts = 12 pairs the plan can ask for; 16 slots. A pair whose build failed stays in the table as failed:
+ * it is not rebuilt (shader modules, render pass, pipeline) on every call. */
+static struct { uint32_t fmt, samples; int failed; VkRenderPass rp; VkPipeline pipe; } g_msu_tab[16];
 static unsigned g_msu_n;
 static _Atomic unsigned g_msu_done, g_msu_refused, g_msu_failed;
 struct nvmtl_msu_pc { uint32_t base[2]; uint32_t row; int32_t ox, oy; uint32_t w, h, mode; };   /* 32 bytes, nvmtl_msupload_spv.h */
 _Static_assert(sizeof(struct nvmtl_msu_pc) == 32, "msu.frag push constant block");
 
-static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, VkRenderPass *rp_out, VkPipeline *pipe_out)
+/* every failure of the upload pass: counted, and logged for the first 8 and every 1024th, with the running count */
+static void nvmtl_msu_fail(const char *what, long code)
 {
-    int rc = -1;
-    pthread_mutex_lock(&g_msu_lock);
-    for (unsigned i = 0; i < g_msu_n; i++)
-        if (g_msu_tab[i].fmt == fmt && g_msu_tab[i].samples == samples) { *rp_out = g_msu_tab[i].rp; *pipe_out = g_msu_tab[i].pipe; rc = 0; goto out; }
-    if (g_msu_n == sizeof g_msu_tab / sizeof *g_msu_tab) { nvlog("msupload: more than 8 (format, samples) pairs - pass REFUSED"); goto out; }
+    const unsigned n = atomic_fetch_add(&g_msu_failed, 1) + 1;
+    if (n <= 8 || n % 1024 == 0) nvlog("msupload: FAILED - %s (%ld) [%u failed, %u refused, %u done so far]", what, code, n,
+                                       atomic_load(&g_msu_refused), atomic_load(&g_msu_done));
+}
+static void nvmtl_msu_refuse(const char *what)
+{
+    const unsigned n = atomic_fetch_add(&g_msu_refused, 1) + 1;
+    if (n <= 8 || n % 1024 == 0) nvlog("msupload: REFUSED - %s [%u refused, %u failed, %u done so far]", what, n,
+                                       atomic_load(&g_msu_failed), atomic_load(&g_msu_done));
+}
+
+/* build the render pass and pipeline of one (view format, samples) pair; called with g_msu_lock held, once per pair */
+static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, VkRenderPass *rp_out, VkPipeline *pipe_out)
+{
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE; VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
     VkResult r;
+    char what[96];
     if (!g_msu_layout) {
         VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(struct nvmtl_msu_pc) };
         VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &pr };
-        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msu_layout)) != VK_SUCCESS) { nvlog("msupload: vkCreatePipelineLayout -> %d", r); g_msu_layout = VK_NULL_HANDLE; goto out; }
+        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msu_layout)) != VK_SUCCESS) { g_msu_layout = VK_NULL_HANDLE; nvmtl_msu_fail("vkCreatePipelineLayout", r); return -1; }
     }
     VkAttachmentDescription ad = { 0, (VkFormat)fmt, (VkSampleCountFlagBits)samples, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
         VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL };
@@ -6888,11 +6901,12 @@ static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, VkRenderPass *rp_o
         { 0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 } };
     VkRenderPassCreateInfo rci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, 1, &ad, 1, &sd, 2, deps };
-    if ((r = pvkCreateRenderPass(g_dev, &rci, NULL, &rp)) != VK_SUCCESS) { nvlog("msupload: vkCreateRenderPass(format %u, %u samples) -> %d", fmt, samples, r); goto out; }
+    if ((r = pvkCreateRenderPass(g_dev, &rci, NULL, &rp)) != VK_SUCCESS) {
+        snprintf(what, sizeof what, "vkCreateRenderPass (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(what, r); return -1; }
     VkShaderModuleCreateInfo vsi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_vert_spv, nvmtl_msu_vert_spv };
     VkShaderModuleCreateInfo fsi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_frag_spv, nvmtl_msu_frag_spv };
     if ((r = pvkCreateShaderModule(g_dev, &vsi, NULL, &vm)) != VK_SUCCESS || (r = pvkCreateShaderModule(g_dev, &fsi, NULL, &fm)) != VK_SUCCESS) {
-        nvlog("msupload: vkCreateShaderModule -> %d (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
+        nvmtl_msu_fail("vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
     VkPipelineShaderStageCreateInfo st[2] = {
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main", NULL },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fm, "main", NULL } };
@@ -6908,15 +6922,34 @@ static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, VkRenderPass *rp_o
     VkPipelineDynamicStateCreateInfo dsi = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, 2, dyn };
     VkGraphicsPipelineCreateInfo gp = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, NULL, 0, 2, st, &vi, &ia, NULL, &vp, &rs, &ms, NULL, &cbs, &dsi,
         g_msu_layout, rp, 0, VK_NULL_HANDLE, -1 };
-    if ((r = pvkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipe)) != VK_SUCCESS) { nvlog("msupload: vkCreateGraphicsPipelines(format %u, %u samples) -> %d", fmt, samples, r); pipe = VK_NULL_HANDLE; goto fail; }
+    if ((r = pvkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipe)) != VK_SUCCESS) {
+        snprintf(what, sizeof what, "vkCreateGraphicsPipelines (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(what, r); goto fail; }
     pvkDestroyShaderModule(g_dev, vm, NULL); pvkDestroyShaderModule(g_dev, fm, NULL);
-    g_msu_tab[g_msu_n].fmt = fmt; g_msu_tab[g_msu_n].samples = samples; g_msu_tab[g_msu_n].rp = rp; g_msu_tab[g_msu_n].pipe = pipe; g_msu_n++;
-    nvlog("msupload: pass built for view format %u at %u samples (%u in this process)", fmt, samples, g_msu_n);
-    *rp_out = rp; *pipe_out = pipe; rc = 0; goto out;
+    *rp_out = rp; *pipe_out = pipe;
+    return 0;
 fail:
     if (vm) pvkDestroyShaderModule(g_dev, vm, NULL);
     if (fm) pvkDestroyShaderModule(g_dev, fm, NULL);
     if (rp) pvkDestroyRenderPass(g_dev, rp, NULL);
+    return -1;
+}
+
+static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, VkRenderPass *rp_out, VkPipeline *pipe_out)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_msu_lock);
+    for (unsigned i = 0; i < g_msu_n; i++)
+        if (g_msu_tab[i].fmt == fmt && g_msu_tab[i].samples == samples) {
+            if (g_msu_tab[i].failed) { rc = -2; goto out; }   /* built (and logged) once, never retried */
+            *rp_out = g_msu_tab[i].rp; *pipe_out = g_msu_tab[i].pipe; rc = 0; goto out;
+        }
+    if (g_msu_n == sizeof g_msu_tab / sizeof *g_msu_tab) { rc = -2; nvmtl_msu_fail("more (format, samples) pairs than the pass table holds", (long)g_msu_n); goto out; }
+    VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
+    g_msu_tab[g_msu_n].fmt = fmt; g_msu_tab[g_msu_n].samples = samples;
+    if (nvmtl_msu_build(fmt, samples, &rp, &pipe)) { g_msu_tab[g_msu_n].failed = 1; g_msu_n++; goto out; }
+    g_msu_tab[g_msu_n].rp = rp; g_msu_tab[g_msu_n].pipe = pipe; g_msu_n++;
+    nvlog("msupload: pass built for view format %u at %u samples (%u in this process)", fmt, samples, g_msu_n);
+    *rp_out = rp; *pipe_out = pipe; rc = 0;
 out:
     pthread_mutex_unlock(&g_msu_lock);
     return rc;
@@ -6930,31 +6963,32 @@ static int nvmtl_vk_cmd_copy_buffer_to_msimage(nvk_cmdbuf *c, nvk_buffer *b, siz
                             g_copy_aspect_override, img->w, img->h, x, y, w, h, row_bytes, off, b->size, &plan, &why)) {
         unsigned n = atomic_fetch_add(&g_msu_refused, 1) + 1;
         if (n <= 8 || n % 1024 == 0)
-            nvlog("copy_buffer_to_image: REFUSED - a %u-sample image: %s (vk format %u, type %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [%u refused so far]",
-                  img->samples, why, img->fmt, img->mtl_type, x, y, w, h, row_bytes, off, b->size, n);
+            nvlog("copy_buffer_to_image: REFUSED - a %u-sample image: %s (vk format %u, type %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [%u refused, %u failed so far]",
+                  img->samples, why, img->fmt, img->mtl_type, x, y, w, h, row_bytes, off, b->size, n, atomic_load(&g_msu_failed));
         return -1;
     }
     const uint64_t addr = nvmtl_vk_buffer_address(b);
     if (c->in_rp || !addr || !g_dev) {
-        nvlog("msupload: REFUSED - %s", c->in_rp ? "a render pass is open" : "the buffer has no device address (bufferDeviceAddress is not enabled)");
-        atomic_fetch_add(&g_msu_refused, 1);
+        nvmtl_msu_refuse(c->in_rp ? "a render pass is open" : "the buffer has no device address (bufferDeviceAddress is not enabled)");
         return -1;
     }
     VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
-    if (nvmtl_msu_pipeline(plan.view_fmt, img->samples, &rp, &pipe)) { atomic_fetch_add(&g_msu_failed, 1); return -1; }
+    { const int pr_ = nvmtl_msu_pipeline(plan.view_fmt, img->samples, &rp, &pipe);
+      if (pr_ == -2) nvmtl_msu_refuse("the pass for this (view format, samples) pair failed to build earlier");
+      if (pr_) return -1; }
     void *view = NULL; uint32_t vw = 0, vh = 0;
     if (nvmtl_vk_cmd_attachment_view_fmt(c, img, 0, 0, 0, plan.view_fmt, 0, &view, &vw, &vh) || !view) {
-        nvlog("msupload: no attachment view of format %u over the format-%u image", plan.view_fmt, img->fmt); atomic_fetch_add(&g_msu_failed, 1); return -1; }
+        char w_[96]; snprintf(w_, sizeof w_, "no attachment view of format %u over the format-%u image", plan.view_fmt, img->fmt); nvmtl_msu_fail(w_, 0); return -1; }
     VkImageView views[1] = { (VkImageView)view };
     VkFramebufferCreateInfo fci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rp, 1, views, vw, vh, 1 };
     VkFramebuffer fb = VK_NULL_HANDLE; VkResult r = pvkCreateFramebuffer(g_dev, &fci, NULL, &fb);
-    if (r != VK_SUCCESS) { nvlog("msupload: vkCreateFramebuffer -> %d", r); atomic_fetch_add(&g_msu_failed, 1); return -1; }
+    if (r != VK_SUCCESS) { nvmtl_msu_fail("vkCreateFramebuffer", r); return -1; }
     if (c->nfb == c->capfb) {
         unsigned cap = c->capfb ? c->capfb * 2 : 16;
         void **grown = (void **)realloc(c->fbs, cap * sizeof *grown);
         if (grown) { c->fbs = grown; c->capfb = cap; }
     }
-    if (c->nfb >= c->capfb) { pvkDestroyFramebuffer(g_dev, fb, NULL); nvlog("msupload: framebuffer retention allocation failed"); atomic_fetch_add(&g_msu_failed, 1); return -1; }
+    if (c->nfb >= c->capfb) { pvkDestroyFramebuffer(g_dev, fb, NULL); nvmtl_msu_fail("framebuffer retention allocation", 0); return -1; }
     c->fbs[c->nfb++] = fb;
     const unsigned seq = atomic_fetch_add(&g_msu_done, 1) + 1;
     if (seq <= 8 || seq % 1024 == 0)

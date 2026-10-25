@@ -51,7 +51,8 @@ def n48_plugin_rows(pluginlog=""):
             k = (proc, int(m.group(1)), int(m.group(4)))
             msu[k] = max(msu.get(k, 0), int(m.group(7)))
             continue
-        if msg.startswith("msupload: ") and re.search(r"-> -?\d+$|no attachment view|retention allocation failed|more than 8|vkCreate\w+\(", msg):
+        if msg.startswith("msupload: ") and not msg.startswith(("msupload: buffer ->", "msupload: pass built")) and re.search(
+                r"^msupload: (FAILED\b|vkCreate\w*|no attachment view|more than)|->\s*-?\d+", msg):
             msu_failed.append("%s: %s" % (proc, msg[:140]))
             continue
         m = _FBF.match(msg)
