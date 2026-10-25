@@ -213,7 +213,7 @@ case $w in *"$ROOT/.env"*"ignored"*) ;; *) fail "forgejo_token: no warning namin
 [ -z "$(tok)" ] || fail "forgejo_token: every source bad must mean no token"
 # xtrace: the token is never traced, and xtrace is restored
 echo 'FORGEJO_TOKEN=trace-secret-1' > "$ROOT/.env"; rm -f "$HOME/.config/rdna3vm/forgejo-token"
-tr_out=$( { set -x; forgejo_token; case $- in *x*) echo XTRACE_ON >&2 ;; esac; set +x; } 2>&1 )
+tr_out=$( { set -x; forgejo_token; case $- in (*x*) echo XTRACE_ON >&2 ;; esac; set +x; } 2>&1 )
 case $tr_out in *trace-secret-1*) fail "forgejo_token: the token went into the xtrace" ;; esac
 case $tr_out in *XTRACE_ON*) ;; *) fail "forgejo_token: xtrace was not restored" ;; esac
 rm -f "$ROOT/.env" "$HOME/.config/rdna3vm/forgejo-token"

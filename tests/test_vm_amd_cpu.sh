@@ -303,9 +303,12 @@ for m in host "host,-svm"; do
     [ "$(cat "$T/out.txt")" = "$m" ] || fail "load_conf changed CPU_MODEL=$m to $(cat "$T/out.txt")"
     cmp -s "$T/config" "$T/config.before" || fail "load_conf edited the config of CPU_MODEL=$m"
 done
-printf 'CPU_MODEL="Haswell-noTSX,kvm=on"\nCPUS=12\n' > "$T/config"
-env CONF=$T/config bash -c 'set -euo pipefail; . "$1"; load_conf >/dev/null; echo "$CPU_MODEL"' _ "$T/fns.sh" > "$T/out.txt"
-grep -q '^Skylake-Client' "$T/out.txt" || fail "load_conf: the old Haswell-noTSX migration is gone"
+# the migration edits the config with GNU sed -i (rdna3vm runs on the Linux host only): not on CI's macOS runner
+if sed --version >/dev/null 2>&1; then
+    printf 'CPU_MODEL="Haswell-noTSX,kvm=on"\nCPUS=12\n' > "$T/config"
+    env CONF=$T/config bash -c 'set -euo pipefail; . "$1"; load_conf >/dev/null; echo "$CPU_MODEL"' _ "$T/fns.sh" > "$T/out.txt"
+    grep -q '^Skylake-Client' "$T/out.txt" || fail "load_conf: the old Haswell-noTSX migration is gone"
+fi
 
 # ---- the whole cmd__oc chain with stubbed losetup / mount: the config's CPU_MODEL decides
 mkdir -p "$T/bin" "$T/ocw"
