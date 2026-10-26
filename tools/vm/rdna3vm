@@ -1749,6 +1749,7 @@ cmd__passthrough() {
     command -v lspci >/dev/null &&
         lspci -vv -s "$bdf" 2>/dev/null | grep -E 'Region|BAR [0-9]|Resizable|LnkSta:' | sed 's/^/  host: /'
     echo "== qemu start"
+    touch "$WORK/boot-start"   # this boot's files (the BOOTWATCH notice below)
     qemu-system-x86_64 "${QARGS[@]}" & qpid=$!
     # the serial log onto the disk every 2 s: a GPU reset that freezes the
     # whole computer otherwise leaves its last minutes (the interesting
@@ -1763,6 +1764,25 @@ cmd__passthrough() {
           sleep $((t == 8 ? 8 : 32))
           echo "== guest PCI bus (QEMU 'info pci', $t s after start)"
           $VMTOOL monitor "$mon" "info pci" 2>&1 | sed 's/^/  /'
+      done; } &
+    # the boot watchdog (autoreport.sh bootwatch_run: WindowServer never
+    # opened the GPU) uploads bootwatch-<stamp>-<n>.txt about 4-5 min after
+    # the start (the report daemon starts about 2 min in, then 75 s): say on
+    # the console when its evidence is on the host, so a hung boot is not
+    # stopped before it (card run 2026-10-26, -cpu host: stopped at 2 min)
+    { local f seen=" "
+      while kill -0 $qpid 2>/dev/null; do
+          sleep 5
+          for f in "$WORK"/reports/bootwatch-*.txt; do
+              [ -f "$f" ] && [ "$f" -nt "$WORK/boot-start" ] || continue
+              case "$seen" in *" $f "*) continue ;; esac
+              seen="$seen$f "
+              if grep -q '^BOOTWATCH-END' "$f" 2>/dev/null; then
+                  echo "== BOOTWATCH: $(basename "$f"): the watchdog is done ($(grep -m1 '^BOOTWATCH-END' "$f" | cut -c1-90)); the VM may be stopped now (Esc x3)"
+              else
+                  echo "== BOOTWATCH: $(basename "$f") arrived: WindowServer has not opened the GPU; the evidence is on the host, the VM may be stopped now (Esc x3)"
+              fi
+          done
       done; } &
     # step sleep: the guest wakes on its RTC alarm (pmset relative wake 30);
     # still suspended after 90 s, QEMU's system_wakeup brings it back

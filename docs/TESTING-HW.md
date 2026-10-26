@@ -152,6 +152,7 @@ information that cannot be obtained in the simulator.
 |---|---|
 | hang at boot on step N | restart with the boot-args of step N−1 (OpenCore picker) and a report from that boot; describe at which point of the verbose log it stopped |
 | kernel panic | after the restart `collect.sh` attaches the two latest panic reports by itself |
+| no login window or desktop (WindowServer never reaches the GPU) | wait: the boot watchdog in the report daemon takes its evidence (sample, logs) about 4-5 min after the start and `rdna3vm` prints `== BOOTWATCH: ... the VM may be stopped now (Esc x3)` once it is on the host; stop the VM after that line, not before |
 | black screen, system alive | SSH, `tools/macos/collect.sh screen`, then `sudo nvram boot-args="..."` without the last flag and `sudo reboot` |
 | no `RDNA3` entries at all in the log | the kext did not load: `03-kexts.txt` and `kmutil showloaded`; check that the installer rebuilt the collection and that SIP allows kexts from `/Library/Extensions` |
 | `RDNA3,PSPResult` other than 0 | firmware is missing from `RDNA3Accel.kext/Contents/Resources` or it is a different version than expected; send the report |
