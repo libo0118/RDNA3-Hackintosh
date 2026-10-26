@@ -5866,6 +5866,9 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
 
 static pthread_mutex_t nvmtl_submit_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 void (*nvmtl_pre_submit_hook)(void);
+/* DRIVER-PLAN N55: a capture read-back must not run the pre-submit hook (it would flush the app's pending managed uploads at a moment
+   the app did not choose): set only around nvmtl_vk_copy_buffer_nohook, on the calling thread */
+static __thread int g_skip_presubmit;
 void (*nvmtl_pre_release_hook)(void *);
 typedef struct { nvk_cmdbuf cb; unsigned begun, n, fills, copies, nhold; unsigned long long bytes; void *hold[4]; } nvmtl_prologue;
 static __thread nvmtl_prologue *g_pre_cur;
@@ -5985,7 +5988,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     else c->timing.clock.valid = 0;
     pt[0] = nvmtl_perf_now();
     const int pro = nvmtl_prologue_on();
-    if (!pro && nvmtl_pre_submit_hook) { const int k0 = g_perf_kind; g_perf_kind |= 1; nvmtl_pre_submit_hook(); g_perf_kind = k0; }
+    if (!pro && nvmtl_pre_submit_hook && !g_skip_presubmit) { const int k0 = g_perf_kind; g_perf_kind |= 1; nvmtl_pre_submit_hook(); g_perf_kind = k0; }
     const uint64_t sA = nvmtl_perf_now();
     const uint32_t wseq = nvmtl_keep_on() ? nvmtl_wit_record(c) : 0;
     VkResult result = pvkEndCommandBuffer(c->cb);
@@ -5997,7 +6000,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     if (result != VK_SUCCESS) { nvt_vk_submit(f->trseq, who, NVT_SUB_EARLY_FAIL, (int)result, 0, 0, 0); nvmtl_cmd_retire(c); return -1; }
     nvmtl_prologue *const pre = &f->pre;
     pthread_mutex_lock(&nvmtl_submit_mutex);
-    if (pro && nvmtl_pre_submit_hook) {
+    if (pro && nvmtl_pre_submit_hook && !g_skip_presubmit) {
         nvmtl_prologue *const up = g_pre_cur; g_pre_cur = pre;
         const int k0 = g_perf_kind; g_perf_kind |= 1; nvmtl_pre_submit_hook(); g_perf_kind = k0;
         g_pre_cur = up;
@@ -6492,6 +6495,14 @@ int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffe
     const int r = nvmtl_vk_submit_wait(&c);
     g_perf_kind = k0;
     nvmtl_perf_note(NVP_COPY, t0, size);
+    return r;
+}
+
+int nvmtl_vk_copy_buffer_nohook(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size)
+{
+    g_skip_presubmit = 1;
+    const int r = nvmtl_vk_copy_buffer(q, src, srcOff, dst, dstOff, size);
+    g_skip_presubmit = 0;
     return r;
 }
 

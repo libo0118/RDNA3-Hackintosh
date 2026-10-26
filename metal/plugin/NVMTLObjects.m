@@ -3182,18 +3182,26 @@ static void nvmtl_cap_finish(nvmtl_capbuf *cbuf, NSArray *later, unsigned k, uin
         if (cpu && !b->_shadow.map) continue;   /* shared / host memory: the GPU read these very bytes */
         nvk_buffer st = {0}; snprintf(nm, sizeof nm, "%s.gpu_done", slot);
         if (nvmtl_vk_buffer_create(hi - lo, 1, &st) || !st.map) { nvmtl_cap_text(cbuf, "ERR ", nm, "staging buffer allocation failed"); if (st.buf) nvmtl_vk_buffer_destroy(&st); continue; }
-        if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, lo, &st, 0, hi - lo)) nvmtl_cap_text(cbuf, "ERR ", nm, "GPU read-back copy failed");
+        if (nvmtl_vk_copy_buffer_nohook(nvmtl_device_queue(), &b->_b, lo, &st, 0, hi - lo)) nvmtl_cap_text(cbuf, "ERR ", nm, "GPU read-back copy failed");
         else nvmtl_cap_bytes(cbuf, nm, lo, st.map, hi - lo);
         nvmtl_vk_buffer_destroy(&st);
     }
-    char path[256]; snprintf(path, sizeof path, NVMTL_CAP_DIR "/capture-%s-%d-%u.bin", getprogname() ?: "unknown", (int)getpid(), k);
-    mkdir(NVMTL_CAP_DIR, 01777);
-    const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0640);
-    size_t done = 0;
-    if (fd >= 0) { while (done < cbuf->n) { const ssize_t w = write(fd, cbuf->p + done, cbuf->n - done); if (w <= 0) break; done += (size_t)w; } close(fd); }
-    if (fd < 0 || done != cbuf->n) {
+    char pn[64], file[128], path[200]; nvmtl_cap_safe_name(getprogname(), pn, sizeof pn);
+    snprintf(file, sizeof file, "capture-%s-%d-%u.bin", pn, (int)getpid(), k);
+    snprintf(path, sizeof path, NVMTL_CAP_DIR "/%s", file);
+    size_t done = 0; int err = 0; const char *stage = "directory";
+    const int dfd = nvmtl_cap_open_dir(NVMTL_CAP_DIR);
+    if (dfd < 0) err = errno;
+    else {
+        stage = "create";
+        const int fd = nvmtl_cap_open_file(dfd, file);
+        if (fd < 0) err = errno;
+        else { stage = "write"; if (nvmtl_cap_write_all(fd, cbuf->p, cbuf->n, &done)) err = errno; if (close(fd) && !err) { err = errno; stage = "close"; } }
+        close(dfd);
+    }
+    if (err) {
         atomic_fetch_add(&g_cap_failed, 1);
-        nvlog_uncapped("capture: draw #%llu (%s) NOT written: %s %s (%zu of %zu bytes)", (unsigned long long)ord, who.UTF8String, path, strerror(errno), done, cbuf->n);
+        nvlog_uncapped("capture: draw #%llu (%s) NOT written: %s failed for %s: %s (%zu of %zu bytes)", (unsigned long long)ord, who.UTF8String, stage, path, strerror(err), done, cbuf->n);
     } else {
         atomic_fetch_add(&g_cap_written, 1);
         nvlog_uncapped("capture: draw #%llu (%s) -> %s: %zu bytes, %u records, %u DROPPED by the byte caps%s [%u of %u written]", (unsigned long long)ord, who.UTF8String,

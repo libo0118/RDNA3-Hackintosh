@@ -135,6 +135,7 @@ done
 # a regular file with one link, this boot, a size cap), the same bounded exclusive copy, then the NVMTLCP1 magic from the copy.
 # An app's capture belongs to the app's user (no header uid to match): the owner is listed, never trusted for anything.
 ccap=${NVMTL_COLLECT_CAPBYTES:-67108864}; nc=0; cout="$dir/33-plugin-capture"
+ctot=${NVMTL_COLLECT_CAPTOTAL:-536870912}; csum=0   # all captures together: the report stays packable
 for src in ${NVMTL_TRACE_DIR:-} $sysdir; do
     [ -n "$src" ] && [ -d "$src" ] && [ ! -L "$src" ] || continue
     set -- $(ls -ldn "$src" 2>/dev/null)
@@ -149,6 +150,7 @@ for src in ${NVMTL_TRACE_DIR:-} $sysdir; do
         elif [ ! -f "$f" ]; then why="not a regular file"
         elif [ "$links" != 1 ]; then why="$links hard links"
         elif [ "$size" -gt "$ccap" ] 2>/dev/null; then why="over $ccap bytes"
+        elif [ "$((csum + size))" -gt "$ctot" ] 2>/dev/null; then why="past the $ctot bytes of all captures (NVMTL_COLLECT_CAPTOTAL)"
         elif [ "$size" -lt 16 ] 2>/dev/null; then why="shorter than a capture header"
         elif [ ! -r "$f" ]; then why="unreadable: run with sudo"
         elif [ -n "$boot" ] && [ "$(mtime_of "$f")" -lt "$((boot - tol))" ] 2>/dev/null; then why="written before this boot: an old capture"
@@ -164,7 +166,7 @@ for src in ${NVMTL_TRACE_DIR:-} $sysdir; do
             rm -f "$cout/$dest"; note "REJECT capture $line: no NVMTLCP1 magic"; rejected=$((rejected + 1)); continue
         fi
         chmod 644 "$cout/$dest" 2>/dev/null
-        note "ACCEPT capture $line -> 33-plugin-capture/$dest"; nc=$((nc + 1))
+        note "ACCEPT capture $line -> 33-plugin-capture/$dest"; nc=$((nc + 1)); csum=$((csum + size))
     done
 done
 [ "$nc" -gt 0 ] && note "== draw captures collected: $nc (tools/capture_decode.py <report>)"

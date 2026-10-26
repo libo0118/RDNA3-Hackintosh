@@ -1022,7 +1022,11 @@ Read it as: per buffer, `cpu_draw vs gpu_done` DIFFER over bytes the draw reads 
 say which glyph read which differing bytes) = the GPU drew from bytes the app did not give it: an upload or coherence
 bug, chase the managed upload / kernel path for that range; `cpu_draw vs cpu_done` changed = the app or the plugin rewrote
 the bytes while the GPU needed them; everything SAME = the inputs were right: replay the draw (SPIR-V, constants, buffers in
-the capture) on the host's RADV and compare with `/tmp/cap/*-cpu_draw.pgm`. No `capture-*.bin` but the switch was set:
+the capture) on the host's RADV and compare with `/tmp/cap/*-cpu_draw.pgm`. Caveats: `cpu_done` / `gpu_done` are taken at completion, so
+a slice the app reused right away (Core Animation's buffer pool) may differ for the app's own reasons - trust differences only
+over bytes the draw read and `cpu_done` did not change; the read-back is a synchronous copy submitted from the completion
+handler WITHOUT the pre-submit hook (it does not flush pending managed uploads), but it is an extra submit, so a captured run is
+not timed exactly like an uncaptured one. The collector keeps at most 64 captures and 512 MiB (`NVMTL_COLLECT_CAPTOTAL`). No `capture-*.bin` but the switch was set:
 the `capture:` lines say why (MALFORMED, another process named, budget, write failure).
 
 ## Plugin frame trace

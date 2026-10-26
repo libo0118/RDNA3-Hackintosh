@@ -24,6 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define NVMTL_CAP_MAX_DRAWS     32u
 #define NVMTL_CAP_DRAW_BYTES    (48u << 20)    /* one draw's file */
@@ -161,5 +166,67 @@ static inline int nvmtl_cap_bytes(nvmtl_capbuf *b, const char *name, uint64_t lo
 {
     uint8_t o[8]; nvmtl_cap_u64(o, lo);
     return nvmtl_cap_rec2(b, "BUF ", name, o, 8, d, n);
+}
+
+/* the process name in a file name: [A-Za-z0-9._ -] kept, everything else '_', at most n-1 characters, "unknown" when empty
+   (as nvmtl_trace.h names the traces; a long name cannot push the pid and index out of the path) */
+static inline void nvmtl_cap_safe_name(const char *pn, char *out, size_t n)
+{
+    size_t k = 0;
+    if (!out || !n) return;
+    for (; pn && pn[k] && k + 1 < n && k < 48; k++) {
+        const char c = pn[k];
+        out[k] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_') ? c : '_';
+    }
+    out[k] = 0;
+    if (!k) snprintf(out, n, "unknown");
+}
+
+/* the shared capture directory, opened once per write without following a symlink (nvmtl_trace.h nvt_open_dir): created
+   1777 like the trace directory only when this call made it (fchmod through the fd); its owner must be root, ourselves or
+   _windowserver (88) - a root process takes only root's. -1 with errno set otherwise. */
+static inline int nvmtl_cap_open_dir(const char *dir)
+{
+    int created = 0;
+    if (mkdir(dir, 0777) == 0) created = 1;
+    else if (errno != EEXIST) return -1;
+    const int fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) { close(fd); errno = ENOTDIR; return -1; }
+    const uid_t me = geteuid();
+    if (me == 0 ? st.st_uid != 0 : (st.st_uid != 0 && st.st_uid != me && st.st_uid != 88)) { close(fd); errno = EPERM; return -1; }
+    if (created) (void)fchmod(fd, 01777);
+    return fd;
+}
+
+/* create `file` in `dfd` exclusively, never through a symlink; a stale file of ours (regular, our uid, one link: the same pid
+   after a reboot, /var/tmp persists) is replaced once, anything else is refused (EEXIST). Mode 0640. */
+static inline int nvmtl_cap_open_file(int dfd, const char *file)
+{
+    for (int again = 0; again < 2; again++) {
+        const int fd = openat(dfd, file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0640);
+        if (fd >= 0) { (void)fchmod(fd, 0640); return fd; }
+        if (errno != EEXIST) return -1;
+        struct stat st;
+        if (again || fstatat(dfd, file, &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1
+            || unlinkat(dfd, file, 0) != 0) { errno = EEXIST; return -1; }
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+/* all of it, EINTR retried; 0 = written, else -1 with the errno of the failing write (EIO for a zero-length write) */
+static inline int nvmtl_cap_write_all(int fd, const uint8_t *p, size_t n, size_t *done)
+{
+    size_t d = 0;
+    while (d < n) {
+        const ssize_t w = write(fd, p + d, n - d);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) { if (w == 0) errno = EIO; if (done) *done = d; return -1; }
+        d += (size_t)w;
+    }
+    if (done) *done = d;
+    return 0;
 }
 #endif

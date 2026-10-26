@@ -167,6 +167,11 @@ def report(name, blob, out):
         if t == "ERR ":
             print("  ERROR %s: %s" % (n, d.decode("utf-8", "replace")))
     bufs = buffers(recs)
+    print("  NOTE: cpu_done / gpu_done are read when the command buffer COMPLETED, not at the draw: an app that reuses a pool slice or a\n"
+          "  sub-range as soon as it may (Core Animation's buffer pool) can have rewritten it by then - such changes are the app's, not a\n"
+          "  driver bug; trust a cpu_draw vs gpu_done difference only over bytes this draw read and cpu_done did not change.\n"
+          "  The GPU read-back is a synchronous copy without the pre-submit hook (no managed upload is flushed by it), but it is still an\n"
+          "  extra submit at completion time: a captured run is not timed like an uncaptured one.")
     for m in re.finditer(r"^buffer (\S+): (.*)$", meta, re.M):
         slot = m.group(1)
         snaps = bufs.get(slot, {})
