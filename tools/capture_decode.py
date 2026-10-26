@@ -147,10 +147,59 @@ def blit_analysis(meta, bufs, out, tag):
     for i, r, gd, rd in bad[:24]:
         print("    rect %d min=(%.1f,%.1f) size=%gx%g offset=%d bpr=%d: %d coverage byte(s) differ%s" % (i, r[0], r[1], r[2], r[3], int(r[4]), int(r[5]), gd,
               ", the RECT itself differs" if rd else ""))
+    target_check(meta, bufs, imgs["cpu_draw"] if mvp else None, W, H, out, tag)
     if out and mvp:
         for kind, img in imgs.items():
             with open(os.path.join(out, "%s-%s.pgm" % (tag, kind)), "wb") as f:
                 f.write(b"P5\n%d %d\n255\n" % (W, H) + bytes(img))
+
+
+def target_check(meta, bufs, cov, W, H, out, tag):
+    """N56: the target rows the GPU left (target.gpu_done, read at completion) against the CPU's coverage of this draw.
+    A pixel the CPU covers (>= 128) must differ from the region's background, a pixel with no coverage within 1 px must not."""
+    snap = bufs.get("target", {}).get("gpu_done")
+    if not snap:
+        m = re.search(r"^target_readback (.*)$", meta, re.M)
+        print("  target: no read-back (%s)" % (m.group(1) if m else "a capture without N56"))
+        return
+    lo, d = snap
+    pitch = int(re.search(r"bytes_per_row=(\d+)", meta).group(1))
+    sc = [int(x) for x in re.search(r"^scissor set=\d+ (.*)$", meta, re.M).group(1).split()]
+    x0, y0, x1, y1 = sc[0], sc[1], min(W, sc[0] + sc[2]), min(H, sc[1] + sc[3])
+    px = lambda x, y: d[y * pitch - lo + 4 * x: y * pitch - lo + 4 * x + 4]
+    counts = {}
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            k = bytes(px(x, y))
+            counts[k] = counts.get(k, 0) + 1
+    bg = max(counts, key=counts.get)
+    far = lambda p: max(abs(p[i] - bg[i]) for i in range(3)) > 24
+    if cov is None:
+        print("  target: read back, but no CPU coverage to compare (no mvp)")
+        return
+    miss = extra = text = 0
+    cols = {}
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            c = cov[y * W + x]
+            near = max(cov[yy * W + xx] for yy in range(max(0, y - 1), min(H, y + 2)) for xx in range(max(0, x - 1), min(W, x + 2)))
+            p = px(x, y)
+            if c >= 128:
+                text += 1
+                if not far(p):
+                    miss += 1; cols[x // 8] = cols.get(x // 8, 0) + 1
+            elif near == 0 and far(p):
+                extra += 1; cols[x // 8] = cols.get(x // 8, 0) + 1
+    bad = sorted(k * 8 for k, v in cols.items() if v >= 2)
+    print("  target (the GPU's rows %d..%d at completion, background bgra %s): %d of %d covered pixels show NO text, %d pixels show ink the CPU did not draw%s"
+          % (y0, y1, tuple(bg), miss, text, extra, (" - columns %d..%d" % (bad[0], bad[-1] + 7)) if bad else " - the draw output MATCHES"))
+    if out:
+        with open(os.path.join(out, "%s-target.ppm" % tag), "wb") as f:
+            f.write(b"P6\n%d %d\n255\n" % (x1 - x0, y1 - y0))
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    p = px(x, y)
+                    f.write(bytes([p[2], p[1], p[0]]))
 
 
 def report(name, blob, out):
