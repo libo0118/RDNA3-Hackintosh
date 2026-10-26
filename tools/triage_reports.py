@@ -4832,7 +4832,7 @@ def report(path, show_all):
         try:
             from triage_glyphs import parse_ladder, ladder_rows, glyph_verdicts
             lv_, lr_, lp_ = parse_ladder(ladder_txt, ladder_logs)
-            # the automatic glyph verdict reads the rungs' 1280-wide looks that sit next to the archive (<report>-scanoutladder-<rung>h-pipe<N>.ppm)
+            # the automatic glyph verdict reads the rungs' hi-res looks (native size; 1280 wide from older kexts) that sit next to the archive (<report>-scanoutladder-<rung>h-pipe<N>.ppm)
             gl_ = glyph_verdicts(lr_, path[:-len(".tar.gz")] if path.endswith(".tar.gz") else None)   # (None: said per rung, not skipped)
             # variant 4 (N54): the kernel's coherence switches, one per rung (tools/triage_coherence.py)
             ladder_rows_ = coh_ladder_rows_(ladder_txt, lr_, lp_, gl_) if lv_ == 4 else ladder_rows(lr_, lv_, lp_, gl_)

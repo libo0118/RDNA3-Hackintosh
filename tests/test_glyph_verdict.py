@@ -1,6 +1,7 @@
 """tools/glyph_verdict.py (DRIVER-PLAN N50, the ladder's automatic glyph verdict) on synthetic looks.
 
-The looks are made the way the card's look is: a 1920x1080 scanout sampled nearest-neighbour down to 1280x720 (source pixel = floor(1.5 * output
+The looks are made the way the card's look is: a 1920x1080 scanout at its native size (since 2026-10-26: every pixel; the NATIVE cases) or, as older
+kexts gave it, sampled nearest-neighbour down to 1280x720 (source pixel = floor(1.5 * output
 pixel): every third source row and column is dropped, so tick lines whose top rows differ by a multiple of 3 are sampled identically and the others
 are not - three classes), a noisy "wallpaper", a Terminal-like window with tick lines of 14 source rows that end in the same text (the time stamp
 at the left is different on each line) in a colour per line, and other windows. Cases: drawn right = clean, random strokes in the right half of every
@@ -77,14 +78,16 @@ class Window:
 
 
 def render(windows, w=1280, h=720, seed=3):
+    """the look of a 1920x1080 screen at w x h: 1280x720 = the old nearest-neighbour sample (factor 1.5), 1920x1080 = the native look (every pixel)"""
     pix = noise_ppm(w, h, seed)
+    factor = 1920.0 / w
     for win in windows:
         for yo in range(h):
-            sy = int(yo * 1.5)
+            sy = int(yo * factor)
             if not (win.y0 <= sy < win.y0 + win.h):
                 continue
             for xo in range(w):
-                sx = int(xo * 1.5)
+                sx = int(xo * factor)
                 if win.x0 <= sx < win.x0 + win.w:
                     p = win.pixel(sx, sy)
                     if p is not None:
@@ -140,6 +143,23 @@ check(len(st) == 1 and st[0]["verdict"] == "broken" and st[0]["share"] <= 0.3, "
 st = analyze([Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, hit_prob=0.35))])
 check(len(st) == 1 and st[0]["verdict"] == "broken", "broken with a third of the cells hit: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
 
+# ---- the native look (1920x1080, every source pixel, since 2026-10-26): the same verdicts with the geometry scaled by 1.5
+NATIVE = dict(w=1920, h=1080)
+check(gv.Geom(1920).scale == 1.5 and gv.Geom(1280).scale == 1.0 and gv.Geom(640).scale == 1.0, "Geom: the scale is the width / 1280, at least 1")
+st = analyze([Window(1100, 330, 80, 24, tick_lines(22))], **NATIVE)
+check(len(st) == 1 and st[0]["verdict"] == "clean" and st[0]["lines"] >= 20 and st[0]["share"] >= 0.95 and st[0]["scale"] == 1.5,
+      "native, clean tick lines: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
+st = analyze([Window(200, 100, 80, 16, tick_lines(14, seed=9, colour=(250, 250, 250)))], seed=8, **NATIVE)
+check(len(st) == 1 and st[0]["verdict"] == "clean" and st[0]["lines"] >= 12, "native, another place, one colour: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
+st = analyze([Window(1100, 330, 80, 24, tick_lines(22, broken_from=37))], **NATIVE)
+check(len(st) == 1 and st[0]["verdict"] == "broken" and st[0]["share"] <= 0.3, "native, broken tick lines: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
+st = analyze([Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, hit_prob=0.35))], **NATIVE)
+check(len(st) == 1 and st[0]["verdict"] == "broken", "native, broken with a third of the cells hit: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
+st = analyze([Window(1100, 330, 80, 24, ragged_lines(22))], **NATIVE)
+check(st == [], "native: a window of changing text is not a tick stack: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
+st = analyze([Window(1100, 330, 80, 6, tick_lines(5))], **NATIVE)
+check(st == [], "native: five lines are not a stack")
+
 # ---- not tick lines: a window of changing text, a short stack
 st = analyze([Window(1100, 330, 80, 24, ragged_lines(22))])
 check(st == [], "a window of changing text is not a tick stack: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
@@ -163,8 +183,8 @@ v = gv.verdict_files([os.path.join(tmp, "nope.ppm")])
 check(v["verdict"] == "none" and "no look could be read" in v["text"], "nothing readable: %r" % (v["text"],))
 
 # ---- the second look: only the LIVE window counts (the text script prints a line a second; a restored / frozen window does not change)
-def look(path, windows, seed=3):
-    open(path, "wb").write(render(windows, seed=seed))
+def look(path, windows, seed=3, **kw):
+    open(path, "wb").write(render(windows, seed=seed, **kw))
 
 
 a1, a2, b1, b2 = (os.path.join(tmp, n) for n in ("a1-pipe0.ppm", "a2-pipe0.ppm", "b1-pipe0.ppm", "b2-pipe0.ppm"))
@@ -176,6 +196,15 @@ v = gv.verdict_files([a1], later=[a2])
 check(v["verdict"] == "broken" and len(v["stacks"]) == 1 and len(v["static"]) == 1 and "STATIC" in v["text"] and "in the live window" in v["text"],
       "live broken + static clean: %r" % (v["text"],))
 check(v["static"][0]["verdict"] == "clean" and v["stacks"][0]["live"] and v["stacks"][0]["changed"] >= gv.LIVE_MIN, "the static one is the clean one, the live one changed a lot")
+# the same at the native size: the live-change threshold scales with the area (LIVE_MIN x 1.5^2)
+look(a1, [Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, seed=5)), static_clean], **NATIVE)
+look(a2, [Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, seed=6, first=3)), static_clean], **NATIVE)
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "broken" and len(v["stacks"]) == 1 and len(v["static"]) == 1 and v["static"][0]["verdict"] == "clean" and
+      v["stacks"][0]["changed"] >= gv.Geom(1920).live_min, "native, live broken + static clean: %r" % (v["text"],))
+look(a1, [static_clean], **NATIVE); look(a2, [static_clean], **NATIVE)
+v = gv.verdict_files([a1], later=[a2])
+check(v["verdict"] == "none" and "no LIVE tick stack" in v["text"], "native, only static text: %r" % (v["text"],))
 # a live CLEAN window with a static BROKEN one: clean (the restored text of another rung does not decide)
 look(a1, [Window(1100, 330, 80, 24, tick_lines(22, seed=5)), Window(300, 200, 80, 16, tick_lines(14, broken_from=37, seed=2, first=7))])
 look(a2, [Window(1100, 330, 80, 24, tick_lines(22, seed=6, first=3)), Window(300, 200, 80, 16, tick_lines(14, broken_from=37, seed=2, first=7))])
@@ -280,6 +309,8 @@ def with_mixed(n, **kw):
 for n, skip in ((14, 0), (18, 1), (22, 3)):
     st = analyze([Window(100, 100, 80, 30, with_mixed(n)[skip:])], seed=4)
     check(len(st) == 1 and st[0]["verdict"] == "clean" and st[0]["lines"] >= n - 4 - 1, "fixed colour + mixed lines (%d ticks, skip %d): %r" % (n, skip, [(s["lines"], s["twinned"], s["verdict"]) for s in st]))
+st = analyze([Window(100, 100, 80, 30, with_mixed(18)[1:])], seed=4, **NATIVE)
+check(len(st) == 1 and st[0]["verdict"] == "clean", "native, fixed colour + mixed lines: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
 st = analyze([Window(100, 100, 80, 30, with_mixed(22, broken_from=37))], seed=4)
 check(len(st) == 1 and st[0]["verdict"] == "broken", "fixed colour + mixed lines, broken: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
 

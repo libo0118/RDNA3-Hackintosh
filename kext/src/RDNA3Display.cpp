@@ -338,12 +338,20 @@ void RDNA3Accel::displayProbeConnectors()
  * failing (the report's look after the wake keeps its other pipes) */
 int RDNA3Accel::drmScanoutAsleep(struct rd_xnu_scanout *s)
 {
-    uint32_t pipe = s->pipe, row0 = s->row0, flags = s->flags;
-    bzero(s, sizeof(*s));
+    uint32_t pipe = s->pipe, row0 = s->row0, flags = s->flags, col0 = 0;
+    /* the tail (col0..pad) only for a native look: an older caller's
+     * struct ends at 'asleep' (RD_XNU_SCANOUT_V1_SIZE) */
+    if (flags & RD_XNU_SCANOUT_NATIVE)
+        col0 = s->col0;
+    bzero(s, (flags & RD_XNU_SCANOUT_NATIVE) ? sizeof(*s) : RD_XNU_SCANOUT_V1_SIZE);
     s->pipe = pipe;
     s->row0 = row0;
     s->flags = flags;
     s->asleep = 1;
+    if (flags & RD_XNU_SCANOUT_NATIVE) {
+        s->col0 = col0;
+        s->abi = RD_XNU_SCANOUT_ABI;
+    }
     if (!fScanoutAsleepLogged) {
         fScanoutAsleepLogged = true;
         LOG("display: scanout look refused: display asleep (system sleep or shutdown)");
@@ -355,8 +363,16 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     rdna3_scanout_info si;
-    uint32_t pipe = s->pipe, row0 = s->row0, nrows = 0, out_h = 0;
+    uint32_t pipe = s->pipe, row0 = s->row0, nrows = 0, out_h = 0, ncols = 0;
     uint32_t out_w = RD_XNU_SCANOUT_W, per_call = RD_XNU_SCANOUT_ROWS;
+    /* the native look (the owner's request 2026-10-26): every source pixel,
+     * one segment of rows x columns per call; the tail exists (the
+     * dispatch refuses NATIVE from a caller without it) */
+    bool native = (s->flags & RD_XNU_SCANOUT_NATIVE) != 0;
+    uint32_t col0 = native ? s->col0 : 0;
+    /* the picture's first call: the CRC and the underflow clear once */
+    bool first = row0 == 0 && col0 == 0;
+    static bool sNativeTooBigLogged;
     int r;
     if (!kauth_cred_issuser(kauth_cred_get()))
         return -RD_EPERM;
@@ -376,7 +392,7 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     /* the OTG CRC of what leaves the pipe (after the scaler and the blank),
      * on the first call of a picture: windows over the active area, two
      * frames to settle (nothing borrowed while the lock is dropped) */
-    if (row0 == 0) {
+    if (first) {
         SCANOUT_LOCK_OR_ASLEEP();
         r = dcn32_scanout_info(a->fDispDev, pipe, &si);
         IOLockUnlock(a->fDispLock);
@@ -411,9 +427,20 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     }
     r = dcn32_scanout_info(a->fDispDev, pipe, &si);
     /* hubp2_clear_underflow once read: the next look shows if it comes back */
-    if (r == RDNA3_OK && row0 == 0 && (s->flags & RD_XNU_SCANOUT_CLEAR_UNDERFLOW) && si.underflow)
+    if (r == RDNA3_OK && first && (s->flags & RD_XNU_SCANOUT_CLEAR_UNDERFLOW) && si.underflow)
         dcn32_clear_underflow(a->fDispDev, pipe);
-    if (r == RDNA3_OK && si.lit && si.width && si.height) {
+    bool too_big = false;
+    if (r == RDNA3_OK && native && si.lit && si.width && si.height) {
+        out_w = si.width;
+        out_h = si.height;
+        if (si.width > RD_XNU_SCANOUT_NATIVE_MAX || si.height > RD_XNU_SCANOUT_NATIVE_MAX) {
+            too_big = true;   /* nrows 0: the tool says "not readable" */
+        } else {
+            rd_xnu_scanout_native_seg(si.width, si.height, row0, col0, &nrows, &ncols);
+            if (nrows && dcn32_scanout_copy(a->fDispDev, &si, row0, nrows, col0, ncols, s->rgb) != RDNA3_OK)
+                nrows = ncols = 0;
+        }
+    } else if (r == RDNA3_OK && si.lit && si.width && si.height) {
         if ((s->flags & RD_XNU_SCANOUT_HIRES) && si.width > RD_XNU_SCANOUT_W)
             out_w = si.width < RD_XNU_SCANOUT_HIRES_W ? si.width : RD_XNU_SCANOUT_HIRES_W;
         per_call = (uint32_t)(sizeof(s->rgb) / ((size_t)out_w * 3));
@@ -430,8 +457,18 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     a->fDispDev->vram_cpu = oldCpu;
     a->fDispDev->vram_cpu_len = oldLen;
     IOLockUnlock(a->fDispLock);
+    if (too_big && !sNativeTooBigLogged) {
+        sNativeTooBigLogged = true;
+        LOG("display: native scanout look refused: pipe %u surface %ux%u is over %u each way",
+            pipe, si.width, si.height, (unsigned)RD_XNU_SCANOUT_NATIVE_MAX);
+    }
     if (r != RDNA3_OK)
         return -RD_EINVAL;
+    if (native) {
+        s->col0 = col0;
+        s->ncols = ncols;
+        s->abi = RD_XNU_SCANOUT_ABI;
+    }
     s->powered = si.powered;
     s->lit = si.lit;
     s->blanked = si.blanked;

@@ -5,14 +5,18 @@ at the left). Drawn right, two tick lines are the same picture of that text. Dra
 turn into random strokes) every line is different, because the garbage is different every time. So the verdict does not need to know what
 the glyphs should look like, only that identical text is drawn identically:
 
-  1. in the look (a PPM or a PNG - tools/lookimg.py reads both -, 1280 wide, nearest-neighbour sampled from the scanout; `--picture` of tools/triage_reports.py makes PNGs) it
-     finds stacks of text lines: runs of >= 8 bands of rows that have many horizontal edges, at an even pitch, with a gap between them;
+  1. in the look (a PPM or a PNG - tools/lookimg.py reads both -; `--picture` of tools/triage_reports.py makes PNGs) it finds stacks of text lines: runs of
+     >= 8 bands of rows that have many horizontal edges, at an even pitch, with a gap between them. Looks come at the panel's native size (1920x1080 since
+     2026-10-26, every source pixel) or, from older kexts, 1280 wide (nearest-neighbour: one source row and column in three dropped). The geometry below
+     (line heights, pitches, gaps, margins, windows) is in pixels of a 1280-wide look and is scaled by the look's width / 1280 (`Geom`), so both kinds
+     are judged alike;
   2. in each stack it keeps the lines whose right edge is the same (the tick lines: a log window or a directory listing has ragged edges, so a
      window of changing text is never taken for one);
   3. it cuts the right half of each kept line (the part after the time stamp) as a black-and-white strip and looks for a TWIN: another line whose
-     strip differs in at most TWIN_TOL of its ink. The sampling drops one source row in three, so the lines fall into at most three classes of rows
-     seen; lines of one class are pixel-identical when the text is right (a 12 % tolerance covers the antialiasing that depends on the colour of
-     the line), and a class has several lines in 15 or more; a line with random strokes has no twin;
+     strip differs in at most TWIN_TOL of its ink. In a native look every tick line is the same pixels when the text is right; in a 1280-wide look the
+     sampling drops one source row in three, so the lines fall into at most three classes of rows seen, and lines of one class are pixel-identical (a
+     class has several lines in 15 or more). A 12 % tolerance covers the antialiasing that depends on the colour of the line; a line with random
+     strokes has no twin;
   4. clean when >= 80 % of the lines have a twin, broken when <= 50 %, unclear in between; no stack of 8 lines = `none`.
 
 Pure Python (no PIL, no numpy): the report host's triage must run anywhere. Checked on the card run 2026-10-25f looks (every live window broken, 9 to
@@ -32,6 +36,7 @@ except ImportError:   # run from another directory without tools/ on the path
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import lookimg
 
+REF_W = 1280         # the geometry constants below are in pixels of a look this wide (a 1920 panel sampled to 1280); Geom scales them
 MIN_BANDS = 8        # a stack of fewer lines proves nothing
 TWIN_TOL = 0.12      # a twin differs in at most this share of its ink
 CLEAN_AT = 0.80      # share of the lines with a twin: at least this = clean
@@ -41,6 +46,25 @@ WIN, STEP = 96, 48   # the windows the stacks are looked for in (columns)
 STRIP_FROM = 0.5     # the strip starts here between the left and the right edge of the text (after the time stamp)
 CLUSTER_GAP = 40     # columns of blank that end a line's text
 INK_DIFF = 90        # distance (sum of the three channels) from the window's background that is ink
+
+
+class Geom:
+    """the pixel geometry of the heuristics for a look `w` wide: the constants above (in pixels of a REF_W-wide look) times w / REF_W, at least 1 (a
+    1920-wide native look of a 1920 panel: 1.5, the text is 1.5 times as many pixels as in the 1280-wide sample)"""
+
+    def __init__(self, w):
+        self.scale = k = max(1.0, w / float(REF_W))
+        r = lambda v: int(round(v * k))
+        self.win, self.step = r(WIN), r(STEP)
+        self.band_min, self.band_max = r(4), r(14)           # a line of text: rows tall
+        self.gap_min, self.gap_max = 1, r(6)                 # rows between two lines
+        self.pitch_min, self.pitch_max, self.pitch_tol = r(7), r(26), max(2, r(2))
+        self.margin_x, self.margin_y = r(60), max(2, r(2))   # around a stack: the window's background is sampled there
+        self.edge_tol = max(2, r(2))                         # the tick lines' common right edge
+        self.min_strip = r(30)                               # the strip after the time stamp
+        self.cluster_gap = r(CLUSTER_GAP)
+        self.min_pitch = r(8)                                # changed_pixels: the line pitch at least
+        self.live_min = int(round(LIVE_MIN * k * k))         # changed pixels: an area
 
 
 def parse_ppm(data):
@@ -66,11 +90,12 @@ def _runs(flags):
     return out
 
 
-def _chain(bands):
-    """the longest run of bands that look like lines of text: 4..14 rows tall, 1..6 rows apart, an even pitch of 7..26 rows"""
+def _chain(bands, g=None):
+    """the longest run of bands that look like lines of text: 4..14 rows tall, 1..6 rows apart, an even pitch of 7..26 rows (in a 1280-wide look; Geom scales them)"""
+    g = g or Geom(REF_W)
     best, chain = [], []
     for b in bands:
-        if not 4 <= b[1] - b[0] <= 14:
+        if not g.band_min <= b[1] - b[0] <= g.band_max:
             if len(chain) > len(best):
                 best = chain
             chain = []
@@ -78,7 +103,7 @@ def _chain(bands):
         if chain:
             gap, pitch = b[0] - chain[-1][1], b[0] - chain[-1][0]
             ppitch = chain[-1][0] - chain[-2][0] if len(chain) > 1 else pitch
-            if 1 <= gap <= 6 and abs(pitch - ppitch) <= 2 and 7 <= pitch <= 26:
+            if g.gap_min <= gap <= g.gap_max and abs(pitch - ppitch) <= g.pitch_tol and g.pitch_min <= pitch <= g.pitch_max:
                 chain.append(b)
                 continue
             if len(chain) > len(best):
@@ -87,19 +112,20 @@ def _chain(bands):
     return chain if len(chain) > len(best) else best
 
 
-def _find_stacks(L, w, h):
-    """[(nbands, y0, y1, x0, x1)] per window of WIN columns that holds a chain of >= MIN_BANDS lines, merged into stacks (same rows, touching windows)"""
+def _find_stacks(L, w, h, g=None):
+    """[(nbands, y0, y1, x0, x1)] per window of WIN columns (scaled) that holds a chain of >= MIN_BANDS lines, merged into stacks (same rows, touching windows)"""
+    g = g or Geom(w)
     pref = []
     for row in L:
         p = [0]
         p.extend(itertools.accumulate(1 if abs(a - b) > EDGE else 0 for a, b in zip(row, row[1:])))
         pref.append(p)
     hits = []
-    for x0 in range(0, w - WIN + 1, STEP):
-        seq = [pref[y][x0 + WIN - 1] - pref[y][x0] >= 3 for y in range(h)]
-        ch = _chain(_runs(seq))
+    for x0 in range(0, w - g.win + 1, g.step):
+        seq = [pref[y][x0 + g.win - 1] - pref[y][x0] >= 3 for y in range(h)]
+        ch = _chain(_runs(seq), g)
         if len(ch) >= MIN_BANDS:
-            hits.append([len(ch), ch[0][0], ch[-1][1], x0, x0 + WIN])
+            hits.append([len(ch), ch[0][0], ch[-1][1], x0, x0 + g.win])
     # windows that hold the same rows are one stack: their columns are joined
     hits.sort(key=lambda t: (t[1], t[3]))
     merged = []
@@ -119,9 +145,10 @@ def _median(v):
     return s[len(s) // 2]
 
 
-def _analyze_stack(pix, w, h, st, tol):
+def _analyze_stack(pix, w, h, st, tol, g=None):
+    g = g or Geom(w)
     n0, y0, y1, cx0, cx1 = st
-    xlo, xhi, ya, yb = max(cx0 - 60, 0), min(cx1 + 60, w), max(y0 - 2, 0), min(y1 + 2, h)
+    xlo, xhi, ya, yb = max(cx0 - g.margin_x, 0), min(cx1 + g.margin_x, w), max(y0 - g.margin_y, 0), min(y1 + g.margin_y, h)
     cnt = Counter()
     for y in range(ya, yb, 2):
         row = pix[(y * w + cx0) * 3:(y * w + cx1) * 3]
@@ -135,13 +162,13 @@ def _analyze_stack(pix, w, h, st, tol):
     c0, c1 = cx0 - xlo, cx1 - xlo
     rc = [sum(r[c0:c1]) for r in ink]
     mx = max(rc) if rc else 0
-    bands = [b for b in _runs([c >= max(2, 0.12 * mx) for c in rc]) if b[1] - b[0] >= 4]
+    bands = [b for b in _runs([c >= max(2, 0.12 * mx) for c in rc]) if b[1] - b[0] >= g.band_min]
     lines = []   # (a, b, left, right) of each line's own text, in rect coordinates
     for a, b in bands:
         cols = [x for x in range(xhi - xlo) if any(ink[y][x] for y in range(a, b))]
         clusters, cur = [], []
         for x in cols:
-            if cur and x - cur[-1] > CLUSTER_GAP:
+            if cur and x - cur[-1] > g.cluster_gap:
                 clusters.append(cur); cur = []
             cur.append(x)
         if cur:
@@ -155,14 +182,14 @@ def _analyze_stack(pix, w, h, st, tol):
     # the tick lines: the same right edge (a window of changing text is ragged there)
     best_v, best_k = None, []
     for v in sorted({ln[3] for ln in lines}):
-        k = [ln for ln in lines if abs(ln[3] - v) <= 2]
+        k = [ln for ln in lines if abs(ln[3] - v) <= g.edge_tol]
         if len(k) > len(best_k):
             best_v, best_k = v, k
     if len(best_k) < MIN_BANDS or len(best_k) < 0.6 * len(lines):
         return None
     xa, xb = _median([ln[2] for ln in best_k]), _median([ln[3] for ln in best_k])
     xs = xa + int(STRIP_FROM * (xb - xa))
-    if xb - xs < 30:
+    if xb - xs < g.min_strip:
         return None
     # each line's strip as one integer of bits (rows top-aligned, padded to the tallest): a twin test is an xor and a popcount
     subs = []
@@ -203,10 +230,11 @@ def analyze_ppm(data, tol=TWIN_TOL):
     for y in range(h):
         r = pix[y * w * 3:(y + 1) * w * 3]
         L.append([(a + b + c) // 3 for a, b, c in zip(r[0::3], r[1::3], r[2::3])])
-    out = []
-    for st in _find_stacks(L, w, h):
-        r = _analyze_stack(pix, w, h, st, tol)
+    out, g = [], Geom(w)
+    for st in _find_stacks(L, w, h, g):
+        r = _analyze_stack(pix, w, h, st, tol, g)
         if r:
+            r["scale"] = g.scale
             out.append(r)
     out.sort(key=lambda r: -r["lines"])
     return out
@@ -215,7 +243,7 @@ def analyze_ppm(data, tol=TWIN_TOL):
 _ORDER = {"broken": 0, "unclear": 1, "clean": 2}
 
 LIVE_STEP = 60       # luminance step between two looks that counts as a changed pixel
-LIVE_MIN = 150       # changed pixels in a stack's rectangle (grown to where the next lines appear) that make it LIVE
+LIVE_MIN = 150       # changed pixels in a stack's rectangle (grown to where the next lines appear) that make it LIVE (in a 1280-wide look: Geom.live_min scales it by the area)
 
 
 def _lum(pix, w, y, x0, x1):
@@ -232,7 +260,7 @@ def changed_pixels(data_a, data_b, rect, pitch=None):
     if (wa, ha) != (wb, hb):
         raise ValueError("the two looks differ in size (%dx%d against %dx%d)" % (wa, ha, wb, hb))
     x0, y0, x1, y1 = rect
-    pitch = pitch or max((y1 - y0) // 20, 8)
+    pitch = pitch or max((y1 - y0) // 20, Geom(wa).min_pitch)
     x0, x1, y0, y1 = max(x0, 0), min(x1 + 1, wa), max(y0 - 2, 0), min(y1 + 4 * pitch, ha)
     n = 0
     for y in range(y0, y1):
@@ -276,8 +304,9 @@ def verdict_files(paths, tol=TWIN_TOL, later=None):
             for r in found:
                 r["file"] = p
                 if other is not None:
-                    r["changed"] = changed_pixels(data, other, r["rect"], max((r["rect"][3] - r["rect"][1]) // max(r["lines"], 1), 8))
-                    r["live"] = r["changed"] >= LIVE_MIN
+                    g = Geom(parse_ppm(data)[0])
+                    r["changed"] = changed_pixels(data, other, r["rect"], max((r["rect"][3] - r["rect"][1]) // max(r["lines"], 1), g.min_pitch))
+                    r["live"] = r["changed"] >= g.live_min
                     if not r["live"]:
                         static.append(r)
                         continue

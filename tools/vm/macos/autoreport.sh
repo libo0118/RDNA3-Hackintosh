@@ -1079,7 +1079,7 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
 # conf line, a restart and a report each. `rdna3vm step ladder` (boot-arg rdna3ladder=1: the play step's boot-args, no desktop to drive) or by
 # hand: sudo sh autoreport.sh --standalone --ladder. Per rung: Terminal gets text (a colored listing, then a line a second so that it draws
 # all the time) and Chess a game, both as NEW instances (`open -n -a APP --env NVMTL_X=1`: the plugin reads its switches from the environment
-# of the process as well as from rdna3mtl.conf, the environment wins), then a 320-wide and a 1280-wide scanout look and the plugin log of
+# of the process as well as from rdna3mtl.conf, the environment wins), then a 320-wide and a native-size (hi-res) scanout look and the plugin log of
 # exactly those processes (log show --start, by pid), labelled by rung. Nothing is written to rdna3mtl.conf and WindowServer is not restarted
 # for the app rungs. `rdna3vm step ladder-ws` (rdna3ladder=2, standalone --ladder-ws) adds rungs whose switch must reach WindowServer
 # (radv-ws, paranoid-ws): rdna3mtl.conf edited, WindowServer restarted through the bisect-plugin machinery (bisect_restart_ws: the login
@@ -1242,13 +1242,13 @@ ladder_new_pids() {   # ladder_new_pids NAME "<pids before>": the pids of NAME t
         case " $2 " in *" $_lp "*) ;; *) printf '%s ' "$_lp" ;; esac
     done
 }
-ladder_look_hires() {   # ladder_look_hires NAME: the 1280-wide look (small text-cell rectangles and broken glyphs are too small at 320)
+ladder_look_hires() {   # ladder_look_hires NAME: the hi-res look at the panel's native size (1280 wide from a kext before 2026-10-26; small text-cell rectangles and broken glyphs are too small at 320)
     ladder_w "-- look $1 (hires, $(date +%T))"
     if [ ! -x "$D/bin/rdna3_drminfo" ]; then ladder_w "NOT TAKEN: no $D/bin/rdna3_drminfo"; return 1; fi
     mkdir -p "$HOME/rdna3-scanout/$1"
     with_limit 90 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/$1" > "$LD/look.out" 2>&1
     _lr=$?
-    grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep' "$LD/look.out" | cut -c1-140 >> "$LF"
+    grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep|native look' "$LD/look.out" | cut -c1-140 >> "$LF"
     ladder_w "exit: $_lr"
 }
 ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began (the LAST 600000 bytes: a flood keeps the end, where the SUMMARY lines are)
@@ -1480,7 +1480,7 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
 # an M6 hi-res look keeps only its picture; the pipes' state stays in the
 # results (a pipe not lit or asleep must not look like a frozen picture)
 m6_look_state() {
-    grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep' | cut -c1-140
+    grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep|native look' | cut -c1-140
 }
 
 # the progress window as soon as somebody is logged in, with the time the
@@ -1962,7 +1962,7 @@ play_looks() {   # play_looks <minute>: three scanout looks 20 s apart, the coun
         done_ $?
         [ "$_pk" = c ] || sleep 20
     done
-    # one 1280-wide look per report (the three above stay 320 wide, the
+    # one hi-res look per report, native size (the three above stay 320 wide, the
     # triage's checks read them): small text-cell rectangles and broken
     # glyphs are too small to see at 320. The pictures go up as PPMs; the
     # host's triage makes the PNGs (tools/triage_reports.py ppm_to_png)
@@ -2098,7 +2098,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             done_ $?
             [ $k = 3 ] || sleep 20
         done
-        # one 1280-wide look (look 3h) beside the three 320-wide ones: small
+        # one hi-res look (look 3h, native size) beside the three 320-wide ones: small
         # text-cell rectangles and broken glyphs are too small at 320
         mkdir -p "$HOME/rdna3-scanout/3h"
         hdr "rdna3_drminfo --scanout-hires (look 3h)"
@@ -2499,7 +2499,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 with_limit 40 log show --last 1m --style compact --predicate "process == \"$app\" AND (eventMessage CONTAINS[c] \"metal\" OR eventMessage CONTAINS[c] \"gpu\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"MTL\")" \
                     2>/dev/null | tail -25
                 mkdir -p "$HOME/rdna3-scanout/m6$app"
-                # 1280 wide (card run 54: Chess's and Maps' faults were too
+                # hi-res, native size (card run 54: Chess's and Maps' faults were too
                 # small to see at 320)
                 echo "== rdna3_drminfo --scanout-hires (look m6$app)"
                 with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6$app" 2>&1 | m6_look_state
@@ -2517,8 +2517,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             echo "M6: $m6ok of 2 apps ran on the plugin without a crash"
             # card run 54: System Settings' sidebar stayed stale while it
             # scrolled (WindowServer's copy forward, RD3Surface::
-            # submitCopyForward): its window and the desktop afterwards, 1280
-            # wide, and what the copy forward did meanwhile
+            # submitCopyForward): its window and the desktop afterwards, hi-res
+            # (native size), and what the copy forward did meanwhile
             in_session open -b com.apple.systempreferences 2>&1
             sleep 8
             # in apps mode System Settings is an application like the others

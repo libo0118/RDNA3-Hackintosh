@@ -90,7 +90,7 @@ EOF
 env HT="$T" STUBLOG="$T/stub.log" PATH="$T/bin:$PATH" bash "$T/h.sh" > "$T/out.txt" 2>&1 || fail "the play functions failed: $(tail -5 "$T/out.txt")"
 grep -q '^notify: RDNA3 play: use the desktop; the report is taken at minute 1 and again at minute 2' "$T/stub.log" || fail "no start notification: $(cat "$T/stub.log")"
 [ "$(grep -c 'rdna3_drminfo --scanout (look play1' "$T/home/rdna3-extra.txt")" = 3 ] || fail "first moment: not three looks: $(grep 'look' "$T/home/rdna3-extra.txt")"
-# one 1280-wide look per report (--scanout-hires, look play<N>h), beside the three 320-wide ones
+# one hi-res look per report (--scanout-hires, native size, look play<N>h), beside the three 320-wide ones
 [ "$(grep -c 'rdna3_drminfo --scanout-hires (look play1h)' "$T/home/rdna3-extra.txt")" = 1 ] || fail "first moment: no hires look: $(grep 'look' "$T/home/rdna3-extra.txt")"
 [ "$(grep -c 'rdna3_drminfo --scanout-hires (look play2h)' "$T/home/rdna3-extra-2.txt")" = 1 ] || fail "second report: no hires look: $(grep 'look' "$T/home/rdna3-extra-2.txt")"
 [ -f "$T/home/rdna3-scanout/play2h/scanout-pipe0.ppm" ] || fail "the stub's hires picture is missing"

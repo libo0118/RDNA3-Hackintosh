@@ -308,7 +308,7 @@ vblirq-off rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=
 # ladder_run, docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"). The play step's profile (the
 # desktop on the Metal plugin) with rdna3ladder=1 instead of rdna3play=1: nothing else runs; per rung
 # Terminal + Chess are opened as new instances with that rung's NVMTL_ switches in their environment
-# (`open -n -a APP --env ...`), looked at (320 and 1280 wide) and their plugin log kept; rdna3mtl.conf is
+# (`open -n -a APP --env ...`), looked at (320 wide and hi-res at native size) and their plugin log kept; rdna3mtl.conf is
 # not touched. Rungs: baseline, radv, sync, managed, alignguard, paranoid, loadbarrier.
 # ladder-ws adds the two rungs that need WindowServer restarted (radv-ws, paranoid-ws): the conf is edited
 # and put back, you log in after each restart (the step may run ~45 min).

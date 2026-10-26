@@ -101,6 +101,12 @@ int  dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s);
  * the surface is outside the CPU-visible VRAM. */
 int  dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t out_w,
                           uint32_t out_h, uint32_t row0, uint32_t nrows, uint8_t *rgb);
+/* Native, no scaling: rows [row0, row0 + nrows) x columns [col0, col0 +
+ * ncols) of the surface as RGB888 into rgb (nrows * ncols * 3 bytes, row
+ * by row). The same surfaces as dcn32_scanout_sample; -RDNA3_EINVAL for an
+ * empty or out-of-surface rectangle. */
+int  dcn32_scanout_copy(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t row0, uint32_t nrows,
+                        uint32_t col0, uint32_t ncols, uint8_t *rgb);
 
 /* Scaled modes on a lit head: the monitor keeps its timing, the DPP
  * scaler stretches a smaller surface over the active area. The registers

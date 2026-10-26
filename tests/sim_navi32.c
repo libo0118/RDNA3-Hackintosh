@@ -12263,8 +12263,21 @@ static void run(const char *fwdir)
             CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 4, 4, rgb) == RDNA3_OK &&
                   rgb[(1 * 16 + 3) * 3] == 0x42 && rgb[(1 * 16 + 3) * 3 + 2] == 12);
             CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 6, 4, rgb) == RDNA3_EINVAL);   /* past out_h */
+            /* the native look (RD_XNU_SCANOUT_NATIVE): every source pixel,
+             * no scaling, a rectangle of rows x columns */
+            CHECK(dcn32_scanout_copy(&dev, &si, 20, 2, 50, 14, rgb) == RDNA3_OK);
+            /* out (row 1, col 3) <- surface (53, 21), ABGR8888 */
+            CHECK(rgb[(1 * 14 + 3) * 3] == 0x42 && rgb[(1 * 14 + 3) * 3 + 1] == 21 &&
+                  rgb[(1 * 14 + 3) * 3 + 2] == 53);
+            si.format = RD_DCN_FMT_ARGB8888;
+            CHECK(dcn32_scanout_copy(&dev, &si, 31, 1, 0, 64, rgb) == RDNA3_OK &&
+                  rgb[63 * 3] == 63 && rgb[63 * 3 + 1] == 31 && rgb[63 * 3 + 2] == 0x42);
+            CHECK(dcn32_scanout_copy(&dev, &si, 31, 2, 0, 64, rgb) == RDNA3_EINVAL);    /* past the height */
+            CHECK(dcn32_scanout_copy(&dev, &si, 0, 1, 60, 5, rgb) == RDNA3_EINVAL);     /* past the width */
+            CHECK(dcn32_scanout_copy(&dev, &si, 0, 0, 0, 5, rgb) == RDNA3_EINVAL);      /* empty */
             si.sw_mode = 1;
             CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 0, 4, rgb) == RDNA3_EINVAL);   /* tiled */
+            CHECK(dcn32_scanout_copy(&dev, &si, 0, 1, 0, 16, rgb) == RDNA3_EINVAL);     /* tiled */
             memcpy((void *)px, save, sizeof(save));
             CHECK(dcn32_scanout_info(&dev, 0, &si) == RDNA3_OK && !si.lit);   /* blanked */
             CHECK(dcn32_scanout_info(&dev, 4, &si) == RDNA3_EINVAL);

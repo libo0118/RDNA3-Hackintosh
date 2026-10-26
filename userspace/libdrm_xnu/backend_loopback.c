@@ -86,6 +86,17 @@ static int lb_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32
 /* RD_NR_XNU_SCANOUT: pipe 0 "scans" a 1920x1080 test picture (blue-green
  * gradient, a white box in the middle) so rdna3_drminfo --scanout and the
  * report's picture path run on the host */
+/* the test picture's pixel (x, y) of an out_w x out_h look */
+static void lb_scanout_px(uint32_t x, uint32_t y, uint32_t out_w, uint32_t out_h, uint8_t *o)
+{
+    /* the white box covers the same part of the picture at any width */
+    uint32_t bx = x * RD_XNU_SCANOUT_W / out_w, by = y * 180 / out_h;
+    int box = bx >= 140 && bx < 180 && by >= 70 && by < 110;
+    o[0] = box ? 255 : 0;
+    o[1] = box ? 255 : (uint8_t)(y * 255 / out_h);
+    o[2] = box ? 255 : (uint8_t)(x * 255 / out_w);
+}
+
 static int lb_scanout(void *c, struct rd_xnu_scanout *s)
 {
     uint32_t r, x, per_call, out_w = RD_XNU_SCANOUT_W;
@@ -103,9 +114,22 @@ static int lb_scanout(void *c, struct rd_xnu_scanout *s)
     s->address = s->inuse = 0x8000000000ull;
     s->det_segs = 18;
     s->dispclk_khz = s->dppclk_khz = 165384;
-    /* the kext's RDNA3Accel::displayScanout: RD_XNU_SCANOUT_HIRES samples
-     * RD_XNU_SCANOUT_HIRES_W wide (at most the surface), as many rows per
-     * call as rgb[] holds */
+    /* the kext's RDNA3Accel::drmScanout: RD_XNU_SCANOUT_NATIVE copies the
+     * surface's own pixels, one rd_xnu_scanout_native_seg() per call;
+     * RDNA3_LB_SCANOUT_V1=1 plays a kext from before it (ignores the flag,
+     * abi stays 0) for the host test of rdna3_drminfo's fallback */
+    if ((s->flags & RD_XNU_SCANOUT_NATIVE) && !getenv("RDNA3_LB_SCANOUT_V1")) {
+        s->out_w = s->width;
+        s->out_h = s->height;
+        s->abi = RD_XNU_SCANOUT_ABI;
+        rd_xnu_scanout_native_seg(s->width, s->height, s->row0, s->col0, &s->nrows, &s->ncols);
+        for (r = 0; r < s->nrows; r++)
+            for (x = 0; x < s->ncols; x++)
+                lb_scanout_px(s->col0 + x, s->row0 + r, s->out_w, s->out_h, s->rgb + (r * s->ncols + x) * 3);
+        return 0;
+    }
+    /* RD_XNU_SCANOUT_HIRES samples RD_XNU_SCANOUT_HIRES_W wide (at most
+     * the surface), as many rows per call as rgb[] holds */
     if ((s->flags & RD_XNU_SCANOUT_HIRES) && s->width > RD_XNU_SCANOUT_W)
         out_w = s->width < RD_XNU_SCANOUT_HIRES_W ? s->width : RD_XNU_SCANOUT_HIRES_W;
     per_call = (uint32_t)(sizeof(s->rgb) / ((size_t)out_w * 3));
@@ -115,16 +139,8 @@ static int lb_scanout(void *c, struct rd_xnu_scanout *s)
     if (s->nrows > per_call)
         s->nrows = per_call;
     for (r = 0; r < s->nrows; r++)
-        for (x = 0; x < s->out_w; x++) {
-            uint32_t y = s->row0 + r;
-            uint8_t *o = s->rgb + (r * s->out_w + x) * 3;
-            /* the white box covers the same part of the picture at any width */
-            uint32_t bx = x * RD_XNU_SCANOUT_W / s->out_w, by = y * 180 / s->out_h;
-            int box = bx >= 140 && bx < 180 && by >= 70 && by < 110;
-            o[0] = box ? 255 : 0;
-            o[1] = box ? 255 : (uint8_t)(y * 255 / s->out_h);
-            o[2] = box ? 255 : (uint8_t)(x * 255 / s->out_w);
-        }
+        for (x = 0; x < s->out_w; x++)
+            lb_scanout_px(x, s->row0 + r, s->out_w, s->out_h, s->rgb + (r * s->out_w + x) * 3);
     return 0;
 }
 

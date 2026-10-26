@@ -574,33 +574,61 @@ int dcn32_clear_underflow(rdna3_dev *d, uint32_t pipe)
     return RDNA3_OK;
 }
 
+/* the CPU view of the surface the pipe scans (inuse, else address), or
+ * NULL: only 32 bpp linear surfaces without DCC, inside the CPU BAR */
+static const volatile uint8_t *scanout_base(rdna3_dev *d, const rdna3_scanout_info *s)
+{
+    uint64_t mc = s->inuse ? s->inuse : s->address;
+    if ((s->format != RD_DCN_FMT_ARGB8888 && s->format != RD_DCN_FMT_ABGR8888) || s->sw_mode ||
+        s->dcc || !s->width || !s->height || s->pitch_px < s->width || mc < d->fb_start)
+        return NULL;
+    return rdna3_vram_cpu(d, mc - d->fb_start, (uint64_t)s->pitch_px * 4 * s->height);
+}
+
+static void scanout_px(const rdna3_scanout_info *s, uint32_t v, uint8_t *o)
+{
+    if (s->format == RD_DCN_FMT_ARGB8888) {   /* 0xAARRGGBB */
+        o[0] = (uint8_t)(v >> 16); o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)v;
+    } else {                                  /* 0xAABBGGRR */
+        o[0] = (uint8_t)v; o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)(v >> 16);
+    }
+}
+
 int dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t out_w,
                          uint32_t out_h, uint32_t row0, uint32_t nrows, uint8_t *rgb)
 {
-    uint64_t mc = s->inuse ? s->inuse : s->address, off, len;
-    volatile uint8_t *base;
+    const volatile uint8_t *base;
     uint32_t r, x;
-    if ((s->format != RD_DCN_FMT_ARGB8888 && s->format != RD_DCN_FMT_ABGR8888) || s->sw_mode ||
-        s->dcc || !s->width || !s->height || s->pitch_px < s->width || !out_w || !out_h ||
-        row0 + nrows > out_h || mc < d->fb_start)
+    if (!out_w || !out_h || row0 + nrows > out_h)
         return RDNA3_EINVAL;
-    off = mc - d->fb_start;
-    len = (uint64_t)s->pitch_px * 4 * s->height;
-    base = rdna3_vram_cpu(d, off, len);
+    base = scanout_base(d, s);
     if (!base)
         return RDNA3_EINVAL;
     for (r = 0; r < nrows; r++) {
         uint32_t sy = (uint32_t)((uint64_t)(row0 + r) * s->height / out_h);
         const volatile uint32_t *row = (const volatile uint32_t *)(base + (uint64_t)sy * s->pitch_px * 4);
-        for (x = 0; x < out_w; x++) {
-            uint32_t v = row[(uint64_t)x * s->width / out_w];
-            uint8_t *o = rgb + ((uint64_t)r * out_w + x) * 3;
-            if (s->format == RD_DCN_FMT_ARGB8888) {   /* 0xAARRGGBB */
-                o[0] = (uint8_t)(v >> 16); o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)v;
-            } else {                                  /* 0xAABBGGRR */
-                o[0] = (uint8_t)v; o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)(v >> 16);
-            }
-        }
+        for (x = 0; x < out_w; x++)
+            scanout_px(s, row[(uint64_t)x * s->width / out_w], rgb + ((uint64_t)r * out_w + x) * 3);
+    }
+    return RDNA3_OK;
+}
+
+int dcn32_scanout_copy(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t row0, uint32_t nrows,
+                       uint32_t col0, uint32_t ncols, uint8_t *rgb)
+{
+    const volatile uint8_t *base;
+    uint32_t r, x;
+    if (!nrows || !ncols || row0 >= s->height || nrows > s->height - row0 || col0 >= s->width ||
+        ncols > s->width - col0)
+        return RDNA3_EINVAL;
+    base = scanout_base(d, s);
+    if (!base)
+        return RDNA3_EINVAL;
+    for (r = 0; r < nrows; r++) {
+        const volatile uint32_t *row =
+            (const volatile uint32_t *)(base + (uint64_t)(row0 + r) * s->pitch_px * 4) + col0;
+        for (x = 0; x < ncols; x++)
+            scanout_px(s, row[x], rgb + ((uint64_t)r * ncols + x) * 3);
     }
     return RDNA3_OK;
 }

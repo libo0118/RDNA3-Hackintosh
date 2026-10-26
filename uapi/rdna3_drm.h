@@ -110,7 +110,17 @@ struct rd_xnu_scanout {
     uint32_t dlg_after_scaler, dlg_req_delivery, dlg_line_delivery;
     uint32_t flags;                                /* in (row0 0): RD_XNU_SCANOUT_* */
     uint32_t asleep;                               /* out: system sleep / shutdown, nothing read */
+    /* ---- the tail (RD_XNU_SCANOUT_NATIVE): a caller whose struct ends at
+     * 'asleep' (RD_XNU_SCANOUT_V1_SIZE, before the native looks) still
+     * works; the kernel touches the tail only for RD_XNU_SCANOUT_NATIVE,
+     * which it refuses (-RD_EINVAL) from such a short caller */
+    uint32_t col0;                                 /* in (NATIVE): first column of this call */
+    uint32_t ncols;                                /* out (NATIVE): columns in rgb[] per row */
+    uint32_t abi;                                  /* out: RD_XNU_SCANOUT_ABI when NATIVE was honoured;
+                                                    * an older kext leaves the caller's 0 */
+    uint32_t pad;
 };
+#define RD_XNU_SCANOUT_V1_SIZE  (offsetof(struct rd_xnu_scanout, asleep) + sizeof(uint32_t))
 /* after the read, clear the sticky HUBP underflow status (hubp2_clear_underflow):
  * a later look shows whether it comes back */
 #define RD_XNU_SCANOUT_CLEAR_UNDERFLOW 1u
@@ -119,6 +129,40 @@ struct rd_xnu_scanout {
  * run 54: stale regions in apps were too small to see at 320 wide */
 #define RD_XNU_SCANOUT_HIRES           2u
 #define RD_XNU_SCANOUT_HIRES_W         1280
+/* every call: the surface's own pixels, no scaling (out_w x out_h = width x
+ * height, at most RD_XNU_SCANOUT_NATIVE_MAX each way). A native row can be
+ * wider than rgb[] (3840 px = 11520 bytes, the user client's payload is
+ * 4 KiB), so a call returns rows [row0, row0 + nrows) x columns
+ * [col0, col0 + ncols), ncols * nrows pixels packed in rgb[] row by row,
+ * as rd_xnu_scanout_native_seg() says. A kext that predates it ignores the
+ * flag (abi stays 0): send it together with RD_XNU_SCANOUT_HIRES and an
+ * older kext answers with the 1280-wide sample. Owner's request
+ * 2026-10-26: the 1280 look dropped every third pixel of a 1920 panel. */
+#define RD_XNU_SCANOUT_NATIVE          4u
+#define RD_XNU_SCANOUT_NATIVE_MAX      8192
+#define RD_XNU_SCANOUT_ABI             2u
+#define RD_XNU_SCANOUT_RGB_PX          (RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_ROWS)
+/* the NATIVE segment of the call at (row0, col0) of a width x height
+ * surface: whole rows when a row fits in rgb[] (as many as fit), else one
+ * row cut in pieces of RD_XNU_SCANOUT_RGB_PX columns. 0 x 0 past the end.
+ * The kernel and the caller's loop both use this (next: col0 += ncols, at
+ * the row's end col0 = 0, row0 += nrows). */
+static inline void rd_xnu_scanout_native_seg(uint32_t width, uint32_t height, uint32_t row0, uint32_t col0,
+                                             uint32_t *nrows, uint32_t *ncols)
+{
+    *nrows = *ncols = 0;
+    if (!width || row0 >= height || col0 >= width)
+        return;
+    if (col0 == 0 && width <= RD_XNU_SCANOUT_RGB_PX) {
+        *ncols = width;
+        *nrows = RD_XNU_SCANOUT_RGB_PX / width;
+        if (*nrows > height - row0)
+            *nrows = height - row0;
+        return;
+    }
+    *nrows = 1;
+    *ncols = width - col0 < RD_XNU_SCANOUT_RGB_PX ? width - col0 : RD_XNU_SCANOUT_RGB_PX;
+}
 /* private: this file's device-wide id (non-zero, never reused while the
  * device lives). DRM_AMDGPU_SCHED names the file whose contexts it changes
  * by a DRM fd; the kext has no fds, so libdrm_xnu puts the id of that fd's
@@ -455,7 +499,10 @@ typedef struct rdna3_drm_ops {
      * the GPU clock otherwise, guessable) */
     uint64_t (*random64)(void *ctx);
     /* RD_NR_XNU_SCANOUT: fill everything after row0 (pipe and row0 are
-     * set); optional, -EOPNOTSUPP when missing. The OS checks privilege. */
+     * set); optional, -EOPNOTSUPP when missing. The OS checks privilege.
+     * The tail after 'asleep' (col0..pad) only when flags has
+     * RD_XNU_SCANOUT_NATIVE: the dispatch guarantees the caller's struct
+     * has it then; without the flag it may end at RD_XNU_SCANOUT_V1_SIZE. */
     int   (*scanout)(void *ctx, struct rd_xnu_scanout *s);
     /* may the calling thread raise scheduling priority? Linux: DRM master
      * (drm_is_current_master) or CAP_SYS_NICE; the OS's stand-in (root on

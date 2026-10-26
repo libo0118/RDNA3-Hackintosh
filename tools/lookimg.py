@@ -2,15 +2,17 @@
 arithmetic on bytes): no PIL, no numpy, so `python3 -I` on any machine reads them. Used by glyph_verdict.py, triage_glyphs.py, triage_bisect.py,
 triage_reports.py and `rdna3vm result`.
 
-The card writes binary PPMs (P6, 8 bit): 2.7 MB for a 1280x720 look. `rdna3vm result` keeps them raw when it can pack with xz (the looks of one run are the
-same desktop, xz finds that: 142 MB of looks go to about 2 MB) and turns them into PNGs (lossless, about half the size, a decode round trip is checked before
+The card writes binary PPMs (P6, 8 bit): 6.2 MB for a native 1920x1080 hi-res look (2.7 MB for the 1280x720 ones of kexts before 2026-10-26), 0.17 MB
+for a 320-wide one. `rdna3vm result` keeps them raw when it can pack with xz (the looks of one run are the same desktop, xz finds that: card run 2026-10-26c's
+60 looks, 109 MB, go to 2.7 MB; the same at native size, 241 MB, to about 5.7 MB in 7 s) and turns them into PNGs (lossless, about half the size, a decode round trip is checked before
 the PPM is dropped) when it can only gzip. Old reports keep their PPMs, so every reader takes both; `read_look(path)` also finds the other extension.
 
     python3 -I tools/lookimg.py --to-png DIR     every DIR/*.ppm -> DIR/*.png (verified), the PPM removed; one summary line, WARN lines for what stayed
     python3 -I tools/lookimg.py --info FILE...   size and format of looks
 
 decode_png: 8-bit grey / grey+alpha / RGB / RGBA, not interlaced, all five filter types (the alpha channel is dropped; no palette: no tool of ours writes one).
-Filters None / Up / Sub are vectorised, Average and Paeth run a Python loop per byte (about 2 s for 1280x720: only foreign encoders use them)."""
+Filters None / Up / Sub are vectorised, Average and Paeth run a Python loop per byte (about 2 s for 1280x720, 2.25 times that for 1920x1080: only foreign
+encoders use them). Sizes up to 16384 each way."""
 import glob
 import os
 import re
@@ -281,7 +283,7 @@ def _jobs():
 
 def to_png_dir(d):
     """every d/*.ppm -> .png with the PPM removed; (converted, kept, bytes before, bytes after, [problems]).
-    One process per CPU (a 1280x720 look takes 0.5 s of pure Python; 60 looks were 30 s): each file is
+    One process per CPU (a 1280x720 look takes 0.5 s of pure Python, a 1920x1080 one about 1.1 s; 60 looks were 30 s): each file is
     independent, the results are put together in file order, so the answer is the same as one by one"""
     n = kept = before = after = 0
     problems = []
