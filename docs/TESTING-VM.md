@@ -934,8 +934,10 @@ sed -i 's/^CPU_MODEL=.*/CPU_MODEL="Skylake-Client,-hle,-rtm,kvm=on,vendor=Genuin
 
 What `host` does:
 
-- QEMU gets `-cpu host,kvm=on,+invtsc,vmware-cpuid-freq=on,check` (more flags
-  after `host,` in `CPU_MODEL` are appended). The vendor stays AuthenticAMD:
+- QEMU gets `-cpu host,kvm=on,-kvm-pv-unhalt,+invtsc,vmware-cpuid-freq=on,check`
+  (more flags after `host,` in `CPU_MODEL` are appended). `-kvm-pv-unhalt` is
+  required: without it macOS 26.4+ turns on paravirtual ticket locks and the
+  first contended lock panics the VM on an AMD host (see the table below). The vendor stays AuthenticAMD:
   the patches expect it. `+invtsc` is the invariant TSC (macOS since Monterey
   panics when the host's TSC is not stable: `rdna3vm check` wants the host
   clocksource to be `tsc`). `ignore_msrs` is set by the VM start as before.
@@ -969,6 +971,8 @@ What a failed boot looks like (**needs the card / the VM: not run yet**).
 | What you see | Meaning |
 |---|---|
 | a restart loop at the Apple logo or right after `EXITBS:START`; a panic naming `cpuid_set_info`, `commpage`, `Non-monotonic time` or `thread_invoke` | an AMD patch did not match this macOS (Apple changed the kernel; macOS 26.4 needed a new one, which the vendored file has). Send `serial-*.log`, `host-*.log` and `00-host.txt`; the Darwin number is in the panic text. The fix is a newer AMD_Vanilla `patches.plist` (see `amd_vanilla.SOURCE`), not a change here |
+| `Kernel trap ... type = 14=page fault`, `CR2` equal to `RIP`, `Error code: 0x...3`, a backtrace with `_copypv` (really an unnamed static function after it), `lck_ticket`, `IOCatalogue::findDrivers` or any other contended lock | macOS 26.4+ pv ticket locks: the kernel kicks a sleeping waiter with the Intel `VMCALL`; KVM on an AMD host rewrites it to `VMMCALL` in the guest's read-only kernel text and the write faults. Cause: QEMU exposed `kvm-pv-unhalt` (`-cpu host` does by default). `-kvm-pv-unhalt` must be in the `-cpu` line (`last-cpu` in `~/rdna3-vm`, `vm-cpu:` in `00-host.txt`); a `+kvm-pv-unhalt` in `CPU_MODEL` brings the panic back. Second switch inside macOS: boot-arg `pvticket=0` in `BASE_ARGS` of `~/rdna3-vm/config` |
+| the log ends at `EXITBS:START` (no `EXITBS:END`, no kernel line) | the hang is inside `ExitBootServices` (OVMF / OpenCore), before macOS runs one instruction, so no kernel patch and no AMD_Vanilla entry can be the cause. Seen once with `CPUS=12`; `CPUS=8` (the 5800X's 8 cores, a power of two, the tested setting) reached the kernel. Use `CPUS=8`; for the full chip `CPUS=16 CPU_THREADS=2`. If a count other than 8 matters, send `serial-*.log` and `host-*.log` of the hang |
 | a panic about the topology or a CPU count | `CPUS` / `CPU_THREADS` / core count disagree or macOS dislikes the number; try `CPUS=8` or `CPUS=16 CPU_THREADS=2` |
 | `kernel_task` panics about the TSC or the clock | the host TSC; `dmesg \| grep -i -e tsc -e clocksource` on Linux, a power cycle of the computer helps sometimes |
 | QEMU prints `warning: host doesn't support requested feature` | read the feature: `+invtsc` missing means the host reports no invariant TSC |
@@ -978,6 +982,24 @@ OpenCore image is cleaned at its start). If macOS does not boot even in
 the Skylake model afterwards, copy the original again:
 `qemu-img convert -O raw /mnt/data/OSX-KVM/OpenCore/OpenCore.qcow2 ~/rdna3-vm/OpenCore-rdna3.img`
 and `rdna3vm prepare ...` once more (it re-applies SIP off and the kexts).
+
+Does the patch list still fit a new macOS? Run it against the kernel the VM boots
+(the files, read only: `kernel` = `/System/Library/Kernels/kernel`, the Boot KC =
+`/System/Library/KernelCollections/BootKernelExtensions.kc`; Darwin = `uname -r`):
+
+```sh
+python3 tools/vm/ocpatchsim.py BootKernelExtensions.kc tools/vm/data/amd_vanilla-a174cca.plist 25.4.0
+```
+
+It applies the entries exactly as OpenCore 1.0.6 does (Base lookup, Find / Mask /
+Replace / ReplaceMask, Count, Skip, Limit, Min/MaxKernel; `tests/test_ocpatchsim.py`) and
+prints per entry the matches against its Count with function+offset, and `--avoid
+START-END` (file offsets) flags a match inside a range. For Darwin 25.4.0 every
+applicable entry matches its Count (the kernel and the Boot KC give the same sites)
+except one: AMD_Vanilla's `Force CPUFAMILY_INTEL_PENRYN 11.3+` has the Base
+`_cpuid_set_info ` with a trailing space, so OpenCore never applies it (same on bare
+metal; macOS 26.4.1 and 26.7.1 boot reported with the same file). The quirks that run
+before the list (`ProvideCurrentCpuInfo`, `DisableLinkeditJettison`) are not simulated.
 
 What was checked on this computer (Ryzen 7 5800X, Zen 3, host kernel 7.2): QEMU 11.1.2 accepts
 the `-cpu` and `-smp` lines (no warning; `threads=2` needs `+topoext`); the

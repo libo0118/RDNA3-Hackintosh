@@ -268,7 +268,7 @@ printf 'processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 580
 printf 'processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Intel(R) Core(TM) i7\n' > "$T/cpuinfo-intel"
 # the same set -euo pipefail as the script; a CONFIG-style env: CPU_MODEL, CPUS, CPU_THREADS, vendor
 h() { env CONF=$T/config RDNA3VM_CPUINFO="${VENDOR:-$T/cpuinfo-amd}" bash -c 'set -euo pipefail; . "$1"; shift; "$@"' _ "$T/fns.sh" "$@"; }
-BASE="host,kvm=on,+invtsc,vmware-cpuid-freq=on,check"
+BASE="host,kvm=on,-kvm-pv-unhalt,+invtsc,vmware-cpuid-freq=on,check"
 [ "$(CPU_MODEL=host CPUS=12 h cpu_qemu_model)" = "$BASE" ] || fail "cpu_qemu_model host"
 [ "$(CPU_MODEL=host CPUS=16 CPU_THREADS=2 h cpu_qemu_model)" = "$BASE,+topoext" ] || fail "threads above 1 need +topoext"
 [ "$(CPU_MODEL=host,-svm,+x2apic CPUS=8 h cpu_qemu_model)" = "$BASE,-svm,+x2apic" ] || fail "host,extra flags"
@@ -384,9 +384,9 @@ mkdir -p "$T/qw"
 h2 bash -c 'true' >/dev/null 2>&1 || true
 env WORK="$T/qw" CONF=$T/config RDNA3VM_CPUINFO="$T/cpuinfo-amd" CPUS=16 CPU_THREADS=2 CPU_MODEL=host OSK=k RAM_GB=4 OVMF_CODE=/c MACDISK=/m \
     bash -c 'set -euo pipefail; . "$1"; qemu_common; printf "%s\n" "${QARGS[@]}"' _ "$T/fns2.sh" > "$T/out.txt" || fail "qemu_common failed"
-grep -qx 'VM CPU: -cpu host,kvm=on,+invtsc,vmware-cpuid-freq=on,check,+topoext -smp 16,sockets=1,cores=8,threads=2' "$T/out.txt" || fail "qemu_common line: $(cat "$T/out.txt")"
+grep -qx 'VM CPU: -cpu host,kvm=on,-kvm-pv-unhalt,+invtsc,vmware-cpuid-freq=on,check,+topoext -smp 16,sockets=1,cores=8,threads=2' "$T/out.txt" || fail "qemu_common line: $(cat "$T/out.txt")"
 grep -qx -- '-smp' "$T/out.txt" && grep -qx '16,sockets=1,cores=8,threads=2' "$T/out.txt" || fail "QARGS -smp: $(cat "$T/out.txt")"
-grep -qx 'host,kvm=on,+invtsc,vmware-cpuid-freq=on,check,+topoext' "$T/out.txt" || fail "QARGS -cpu"
+grep -qx 'host,kvm=on,-kvm-pv-unhalt,+invtsc,vmware-cpuid-freq=on,check,+topoext' "$T/out.txt" || fail "QARGS -cpu"
 grep -q 'AMD_Vanilla patches on (core count 8' "$T/qw/last-cpu" || fail "last-cpu: $(cat "$T/qw/last-cpu")"
 grep -q -- '-cpu host,kvm=on' "$T/qw/last-cpu" || fail "last-cpu has no -cpu line"
 echo "test_vm_amd_cpu: ok"

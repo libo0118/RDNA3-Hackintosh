@@ -280,6 +280,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	tests/test_triage_stale_kexts.sh
 	tests/test_vm_present_ab.sh
 	tests/test_vm_amd_cpu.sh
+	python3 -I tests/test_ocpatchsim.py
 	tests/test_triage_present.sh
 	tests/test_triage_fb_n40.sh
 	tests/test_probe_coredisplay.sh
