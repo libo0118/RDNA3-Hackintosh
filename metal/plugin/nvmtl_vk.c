@@ -762,7 +762,7 @@ static void nvmtl_vkmsg_arm(void)
  * are not. Only RADV's own flag names are taken (nvmtl_ab_switch.h), at most 200 characters; a value that is refused is logged with the reason.
  * The result is always logged, quoted: a debug profile left in rdna3mtl.conf must be visible in the report. */
 static char g_radv_saved[2][NVMTL_RADV_FLAGS_MAX * 2 + 8]; static int g_radv_had[2], g_radv_touched[2];
-static char g_attr_saved[64]; static int g_attr_had, g_attr_touched;   /* RADV_ATTR_RING_BIG_PAGE as it was (N57) */
+static char g_attr_saved[256]; static int g_attr_had, g_attr_touched;   /* RADV_ATTR_RING_BIG_PAGE as it was (N57) */
 static const struct { const char *knob, *var; } g_radv_k[2] = { { "NVMTL_RADV_DEBUG", "RADV_DEBUG" }, { "NVMTL_RADV_PERFTEST", "RADV_PERFTEST" } };
 static void nvmtl_radv_env(void)
 {

@@ -130,7 +130,8 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             }
         }
         a->vramSummaryMaybe(false);
-        a->discardableNote(bo, pool == RD3_POOL_HI ? "VRAM beyond BAR0" : "VRAM visible");
+        if (bo->flags & AMDGPU_GEM_CREATE_DISCARDABLE)
+            a->discardableNote(bo, pool == RD3_POOL_HI ? "VRAM beyond BAR0" : "VRAM visible");
         return 0;
     }
     const int gr = a->gttAlloc(bo);
