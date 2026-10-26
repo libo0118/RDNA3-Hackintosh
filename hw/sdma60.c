@@ -221,6 +221,10 @@ int sdma60_wait_fence_us(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq, uint32_
         held = vram;
         d->os.udelay(d->os.ctx, 1);
     }
+    if (vram && want_sys && rd3_coh_seq_passed(*r->fence_sys_cpu, seq)) {   /* landed during the last delay */
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_SYS);
+        return RDNA3_OK;
+    }
     if (vram) {
         rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_FALLBACK);
         RERR(d, "SDMA%u: fence %u: its system copy (%u) did not land within %u us: the VRAM fence is taken", r->inst,
@@ -889,18 +893,17 @@ void sdma60_vm_set_pte_pde(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint6
 /* Ported from sdma_v6_0_ring_get_rptr: the rptr writeback is in bytes */
 uint64_t sdma60_ring_get_rptr(rdna3_dev *d, rdna3_sdma_ring *r)
 {
-    uint64_t rptr = 0;
-    rdna3_vram_read(d, r->wb + RD_SDMA_WB_RPTR, &rptr, 8);
-    return rptr >> 2;
+    /* one 32-bit load (N54): a byte-wise read through the write-combined BAR can tear a carry and make
+     * ring_space() see free room the engine has not fetched yet; the ring is far below 4 GB, the low dword suffices */
+    return (uint64_t)rdna3_vram_read32(d, r->wb + RD_SDMA_WB_RPTR) >> 2;
 }
 
 /* Ported from sdma_v6_0_ring_get_wptr: the poll slot (bytes) with a doorbell */
 uint64_t sdma60_ring_get_wptr(rdna3_dev *d, rdna3_sdma_ring *r)
 {
-    uint64_t wptr = 0;
-    if (r->use_doorbell)
-        rdna3_vram_read(d, r->wb + RD_SDMA_WB_WPTR, &wptr, 8);
-    return wptr >> 2;
+    if (!r->use_doorbell)
+        return 0;
+    return (uint64_t)rdna3_vram_read32(d, r->wb + RD_SDMA_WB_WPTR) >> 2;   /* one 32-bit load (N54) */
 }
 
 /* Ported from sdma_v6_0_is_idle */

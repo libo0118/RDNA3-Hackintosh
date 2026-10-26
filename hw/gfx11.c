@@ -937,6 +937,10 @@ int gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)
         held = vram;
         d->os.udelay(d->os.ctx, 1);
     }
+    if (vram && want_sys && rd3_coh_seq_passed(*r->fence_sys_cpu, seq)) {   /* landed during the last delay */
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_SYS);
+        return RDNA3_OK;
+    }
     if (vram) {
         rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_FALLBACK);
         RERR(d, "GFX: fence %u: its system copy (%u) did not land within %u us: the VRAM fence is taken", seq,
@@ -2521,7 +2525,7 @@ void gfx11_read_status(rdna3_dev *d, const rdna3_gfx_ring *r, rdna3_gfx_status *
     st->sdma0_status = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_GC, 0, regSDMA0_STATUS_REG_BASE_IDX,
                                                       regSDMA0_STATUS_REG));
     if (r && r->wb != UINT64_MAX)
-        rdna3_vram_read(d, r->wb + RD_GFX_WB_RPTR, &wb, 4);
+        wb = rdna3_vram_read32(d, r->wb + RD_GFX_WB_RPTR);   /* one 32-bit load (N54) */
     st->rb0_rptr_wb = wb;
     st->rlc_stat = RG(d, regRLC_STAT);
     st->rlc_gpm_stat = RG(d, regRLC_GPM_STAT);
