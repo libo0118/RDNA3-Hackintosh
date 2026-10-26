@@ -129,6 +129,11 @@ typedef struct rdna3_dev {
      * 0 (default) keeps the verified behaviour; set by the OS layer right
      * after rdna3_dev_init. */
     int      amdgpu_exact;
+    /* boot-arg rdna3vmfrag=0: the default GPUVM path (amdgpu_exact 0)
+     * writes VRAM mappings as 4 KiB PTEs without a fragment, as before
+     * DRIVER-PLAN N57's fix; 0 (default) = amdgpu_vm_pte_fragment
+     * fragments in the PTEs (hw/gpuvm.c ptb_fragment) */
+    int      vm_frag_off;
     /* with amdgpu_exact: a display core drives the DCN
      * (amdgpu_device_has_dc_support; smu_v13_0_notify_display_change) */
     int      amdgpu_dc;

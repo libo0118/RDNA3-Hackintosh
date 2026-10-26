@@ -4,9 +4,11 @@ RDNA3Bringup::discardableMapNote) and the plugin (nvmtl_vk.c nvmtl_radv_env) wri
 the default 4 KiB PTEs (FAIL), a ring in GTT (FAIL), an old kext (WARN), the attrring rung's switch; and the ladder rung's own check."""
 import os
 import sys
+import tempfile
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
-from triage_attr_ring import attr_ring_rows, parse  # noqa: E402
+from triage_attr_ring import attr_ring_rows, parse, report_serial  # noqa: E402
 import triage_glyphs as tg  # noqa: E402
 
 FAILS = []
@@ -96,6 +98,42 @@ gl = {n: {"verdict": "broken", "text": "BROKEN"} for n in tg.LADDER_RUNGS}
 gl["attrring"] = {"verdict": "clean", "text": "CLEAN"}
 check(any(x[1] == "ladder glyphs attrring" and "attribute ring" in x[2] for x in tg.ladder_rows(rungs, 1, (), gl)), "a clean attrring rung is named")
 check(tg.LADDER_RUNGS[:2] == ("baseline", "attrring"), "attrring runs right after the baseline")
+
+# card run 2026-10-26h: the N57 lines only in the serial log next to the report (the archive's kernel log had none). Lines exactly as the
+# serial log carries them: before the GPUVM fix (fragment 0, FAIL) and after it (default path, fragment 5, PASS)
+S_CREATE = "RDNA3: GEM DISCARDABLE #10: 4224 KiB, alignment 2048 KiB, VRAM beyond BAR0 at 0x1a200000 (64 KiB aligned yes, 2 MiB aligned yes)\n"
+S_MAP_OLD = ("RDNA3: GEM_VA DISCARDABLE #10: VA 0x800000200000 + 4224 KiB -> contiguous VRAM 0x1a200000 (PA 0x1a200000), PTE fragment 0 (4 KiB, "
+             "4 KiB PTEs, rdna3amdgpu=0): BIG_PAGE WRONG: fragment-below-64KiB\n")
+S_MAP_NEW = ("RDNA3: GEM_VA DISCARDABLE #10: VA 0x800000200000 + 4224 KiB -> contiguous VRAM 0x1a200000 (PA 0x1a200000), PTE fragment 5 (128 KiB, "
+             "amdgpu_vm_pte_fragment in 4 KiB PTEs, rdna3amdgpu=0): BIG_PAGE ok\n")
+with tempfile.TemporaryDirectory() as td:
+    rep = os.path.join(td, "rdna3-report-ladder-1-20261026-104623.tar.gz")
+    open(rep, "w").close()
+    check(report_serial(rep) == (None, ""), "no serial log: (None, '')")
+    with open(os.path.join(td, "serial-20261026-180000.log"), "w") as f:
+        f.write("RDNA3: an older boot\n")
+    t = time.time() - 100
+    os.utime(os.path.join(td, "serial-20261026-180000.log"), (t, t))
+    with open(os.path.join(td, "serial-20261026-184402.log"), "w") as f:
+        f.write(S_CREATE + S_MAP_OLD)
+    with open(os.path.join(td, "serial-install-20261026-190000.log"), "w") as f:
+        f.write("RDNA3: the install boot, never the run\n")
+    name, text = report_serial(rep)
+    check(name == "serial-20261026-184402.log" and "GEM_VA DISCARDABLE #10" in text, "the newest serial log, not the install one: %r" % (name,))
+    r = attr_ring_rows(K + "no N57 line in the archive\n", "", text, name)
+    check(lv(r) == ["FAIL"] and "fragment below 64 KiB" in r[0][2] and "PTE fragment 0" in r[0][2] and "serial-20261026-184402.log" in r[0][2],
+          "serial-only fragment 0 is FAIL and names the serial log: %r" % (r,))
+r = attr_ring_rows("", "", S_CREATE + S_MAP_NEW, "serial-x.log")
+check(lv(r) == ["PASS"] and "PTE fragment 5 = 128 KiB" in r[0][2] and "amdgpu_vm_pte_fragment in 4 KiB PTEs" in r[0][2], "fragment 5 is PASS: %r" % (r,))
+check(not any(x[0] == "WARN" and "disagree" in x[2] for x in r), "the kernel's ok agrees: %r" % (r,))
+# the same lines in the archive and in the serial log count once; the archive's lines need no serial note
+r = attr_ring_rows(K + S_CREATE + K + S_MAP_NEW, "", S_CREATE + S_MAP_NEW, "serial-x.log")
+check(lv(r) == ["PASS"] and r[0][2].startswith("1 DISCARDABLE mapping(s)") and "serial-x.log" not in r[0][2], "duplicates count once: %r" % (r,))
+c, m = parse(S_CREATE + S_MAP_OLD + S_CREATE + S_MAP_OLD)
+check(len(c) == 1 and len(m) == 1, "parse dedupes by #n: %r %r" % (c, m))
+# nothing in either log: WARN names where it looked
+r = attr_ring_rows("", "", "RDNA3: something else\n", "serial-x.log")
+check(lv(r) == ["WARN"] and "serial-x.log" in r[0][2], "no lines anywhere is WARN and names the serial log: %r" % (r,))
 
 if FAILS:
     sys.exit(1)

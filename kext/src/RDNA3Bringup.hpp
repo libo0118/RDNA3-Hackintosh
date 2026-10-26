@@ -289,6 +289,9 @@ private:
     /* rdna3amdgpu=1: amdgpu's own sequence where the verified default
      * differs (rdna3_dev.amdgpu_exact); ladder step amdgpu */
     bool             fAmdgpuExact = false;
+    /* rdna3vmfrag=0: the default GPUVM path maps VRAM with 4 KiB PTEs
+     * without a fragment, as before DRIVER-PLAN N57's fix (rdna3_dev.vm_frag_off) */
+    bool             fVmFrag = true;
     void             discardableMapNote(const rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size);
     uint32_t         fDiscardMapLogs = 0;   /* GEM_VA of DISCARDABLE BOs (the attribute ring, DRIVER-PLAN N57) */
     /* rdna3amdgpu=1: gfx_v11_0_sw_init's queue topology (ring names, KCQ

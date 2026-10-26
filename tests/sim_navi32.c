@@ -48,6 +48,7 @@
 #include "gen/osssys_6_0_0.h"
 #include "sdma60.h"
 #include "gpuvm.h"
+#include "rdna3_attr_ring.h"
 #include "gen/gc_11_0_0_sdma.h"
 #include "gfx11.h"
 #include "dcn32.h"
@@ -1187,6 +1188,61 @@ static uint64_t test_scatter_pa(void *ctx, uint64_t i)
 static uint64_t test_contig_pa(void *ctx, uint64_t i)
 {
     return *(const uint64_t *)ctx + i * 4096;
+}
+
+/* the PTE the GPU's walk finds for 'va' in a default-path VM (no huge PDEs;
+ * 0 when a level is missing) */
+static uint64_t test_vm_pte(rdna3_dev *dev, const rdna3_vm *vm, uint64_t va)
+{
+    static const uint32_t shift[4] = { 39, 30, 21, 12 };
+    uint64_t t = vm->root, e = 0;
+    int l;
+    for (l = 0; l < 4; l++) {
+        rdna3_vram_read(dev, t + 8 * ((va >> shift[l]) & 511), &e, 8);
+        if (l < 3) {
+            if (!(e & RD_PTE_VALID) || (e & RD_PDE_PTE))
+                return 0;
+            t = (e & 0x0000FFFFFFFFF000ull) - rdna3_vram_pa(dev, 0);
+        }
+    }
+    return e;
+}
+
+/* DRIVER-PLAN N57: what a PTE's fragment F tells the TLB (one translation
+ * for the 2^F-page aligned VA block around it) is true for every valid PTE
+ * of [va, va + pages pages): every page of the block is mapped, with the same
+ * flags and fragment, at one physically contiguous run aligned to the
+ * block; and the TLB's translation of each page through the fragment (the
+ * block's base PA + the page's offset) is the page's own PA. The smallest
+ * fragment seen (32: no valid PTE), -1 on a violation. */
+static int test_vm_frag_check(rdna3_dev *dev, const rdna3_vm *vm, uint64_t va, uint64_t pages)
+{
+    uint64_t i, j;
+    int min = 32;
+    for (i = 0; i < pages; i++) {
+        uint64_t a = va + i * 4096, e = test_vm_pte(dev, vm, a), pfn = a >> 12, bs, base;
+        unsigned f = (unsigned)((e >> 7) & 0x1f);
+        if (!(e & RD_PTE_VALID))
+            continue;
+        if ((int)f < min)
+            min = (int)f;
+        bs = pfn & ~((1ull << f) - 1);
+        base = (e & 0x0000FFFFFFFFF000ull) - ((pfn - bs) << 12);
+        if (base & ((4096ull << f) - 1)) {
+            printf("    fragment %u at 0x%llx: block PA 0x%llx not aligned\n", f, (unsigned long long)a, (unsigned long long)base);
+            return -1;
+        }
+        for (j = 0; j < (1ull << f); j++) {
+            uint64_t o = test_vm_pte(dev, vm, (bs + j) << 12);
+            if (!(o & RD_PTE_VALID) || (o & ~0x0000FFFFFFFFF000ull) != (e & ~0x0000FFFFFFFFF000ull) ||
+                (o & 0x0000FFFFFFFFF000ull) != base + (j << 12)) {
+                printf("    fragment %u at 0x%llx claims 0x%llx: PTE 0x%llx\n", f, (unsigned long long)a,
+                       (unsigned long long)((bs + j) << 12), (unsigned long long)o);
+                return -1;
+            }
+        }
+    }
+    return min;
 }
 
 /* amdgpu_asic_update_umd_stable_pstate stand-in: counts enter / exit */
@@ -11209,6 +11265,90 @@ static void run(const char *fwdir)
             gpuvm_vm_fini(&dev, &vm);
             CHECK(pool.nfree == 64);
 
+            /* DRIVER-PLAN N57, card run 2026-10-26h: the default path maps VRAM with
+             * amdgpu_vm_pte_fragment fragments (in PTB PTEs, at most 1 MiB, capped at the PA's
+             * alignment); the attribute ring's BIG_PAGE needs >= 4 (64 KiB). The run's ring:
+             * VA 0x800000200000 + 4224 KiB -> PA 0x1a200000. */
+            {
+                const uint64_t rva = 0x0000800000200000ull, rpa = 0x1a200000ull;
+                const uint64_t sva = 0x0000800001000000ull, spa = 0x1b000000ull, sys0 = 0x7000000000ull;
+                uint64_t pg, sys = sys0;
+                int bad = 0;
+                CHECK(!dev.amdgpu_exact && !dev.vm_frag_off);
+                /* the kernel's N57 line: fragment 5 (2 MiB-aligned steps capped at 1 MiB, then 128 KiB), BIG_PAGE ok */
+                CHECK(gpuvm_map_fragment(&dev, rva, rpa, 1056) == 5);
+                CHECK(rdna3_bigpage_problems(1, rva, rpa, gpuvm_map_fragment(&dev, rva, rpa, 1056)) == 0);
+                CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK);
+                CHECK(gpuvm_map_linear(&dev, &vm, rva, rpa, 1056, vpte) == RDNA3_OK);
+                for (pg = 0; pg < 1056; pg++) {
+                    uint64_t rpte = test_vm_pte(&dev, &vm, rva + pg * 4096);
+                    unsigned want = pg < 1024 ? 8 : 5;
+                    if (gpuvm_lookup(&dev, &vm, rva + pg * 4096 + 0x10) != rpa + pg * 4096 + 0x10 ||
+                        (rpte & RD_PTE_FRAG(31)) != RD_PTE_FRAG(want) || (rpte & ~0x0000FFFFFFFFF000ull & ~RD_PTE_FRAG(31)) != vpte)
+                        bad++;
+                }
+                CHECK(bad == 0);
+                CHECK(test_vm_frag_check(&dev, &vm, rva - 0x10000, 1056 + 32) == 5);
+                CHECK(gpuvm_lookup(&dev, &vm, rva - 4096) == 0 && gpuvm_lookup(&dev, &vm, rva + 1056 * 4096) == 0);
+                /* unmapping it clears every PTE */
+                gpuvm_unmap(&dev, &vm, rva, 1056);
+                for (pg = 0, bad = 0; pg < 1056; pg++)
+                    bad += test_vm_pte(&dev, &vm, rva + pg * 4096) != 0;
+                CHECK(bad == 0 && test_vm_frag_check(&dev, &vm, rva, 1056) == 32);
+                /* a VA 4 KiB past a 64 KiB boundary: smaller steps up to the alignment (0 first), all consistent */
+                CHECK(gpuvm_map_fragment(&dev, sva + 4096, spa + 4096, 64) == 0);
+                CHECK(gpuvm_map_linear(&dev, &vm, sva + 4096, spa + 4096, 64, vpte) == RDNA3_OK);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 80) == 0);
+                CHECK((test_vm_pte(&dev, &vm, sva + 0x10000) & RD_PTE_FRAG(31)) == RD_PTE_FRAG(4) &&
+                      (test_vm_pte(&dev, &vm, sva + 0x20000) & RD_PTE_FRAG(31)) == RD_PTE_FRAG(5));
+                gpuvm_unmap(&dev, &vm, sva + 4096, 64);
+                /* a 64 KiB aligned VA over a PA only 4 KiB aligned: the PA caps the fragment (amdgpu's buddy
+                 * blocks never meet this; our range allocator may) */
+                CHECK(gpuvm_map_fragment(&dev, sva, spa + 4096, 32) == 0);
+                CHECK(gpuvm_map_linear(&dev, &vm, sva, spa + 4096, 32, vpte) == RDNA3_OK);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 32) == 0);
+                CHECK((test_vm_pte(&dev, &vm, sva + 0x8000) & RD_PTE_FRAG(31)) == 0);
+                gpuvm_unmap(&dev, &vm, sva, 32);
+                /* system pages, even a contiguous run: 4 KiB PTEs, fragment 0 */
+                CHECK(gpuvm_map(&dev, &vm, sva, 32, test_contig_pa, &sys, gpuvm_pte_flags(6, 1)) == RDNA3_OK);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 32) == 0 &&
+                      (test_vm_pte(&dev, &vm, sva + 0x10000) & 0x0000FFFFFFFFF000ull) == sys0 + 0x10000);
+                gpuvm_unmap(&dev, &vm, sva, 32);
+                /* a hole in the middle of a 1 MiB fragment: the rest is mapped again in steps of its own
+                 * (amdgpu_vm_bo_clear_mappings -> amdgpu_vm_bo_update), nothing claims the hole */
+                CHECK(gpuvm_map_linear(&dev, &vm, sva, spa, 256, vpte) == RDNA3_OK);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 256) == 8);
+                gpuvm_unmap(&dev, &vm, sva + 100 * 4096, 4);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 256) == 2);
+                CHECK((test_vm_pte(&dev, &vm, sva) & RD_PTE_FRAG(31)) == RD_PTE_FRAG(6) &&
+                      (test_vm_pte(&dev, &vm, sva + 96 * 4096) & RD_PTE_FRAG(31)) == RD_PTE_FRAG(2) &&
+                      (test_vm_pte(&dev, &vm, sva + 104 * 4096) & RD_PTE_FRAG(31)) == RD_PTE_FRAG(3) &&
+                      (test_vm_pte(&dev, &vm, sva + 128 * 4096) & RD_PTE_FRAG(31)) == RD_PTE_FRAG(7));
+                for (pg = 0, bad = 0; pg < 256; pg++)
+                    bad += gpuvm_lookup(&dev, &vm, sva + pg * 4096) != ((pg >= 100 && pg < 104) ? 0 : spa + pg * 4096);
+                CHECK(bad == 0);
+                /* a new mapping over part of it (REPLACE): its own pages there, the old fragments around cut */
+                CHECK(gpuvm_map_linear(&dev, &vm, sva + 120 * 4096, spa + 0x200000, 16, vpte) == RDNA3_OK);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 256) >= 0);
+                for (pg = 0, bad = 0; pg < 256; pg++)
+                    bad += gpuvm_lookup(&dev, &vm, sva + pg * 4096) !=
+                           ((pg >= 100 && pg < 104) ? 0 : (pg >= 120 && pg < 136) ? spa + 0x200000 + (pg - 120) * 4096 : spa + pg * 4096);
+                CHECK(bad == 0);
+                gpuvm_unmap(&dev, &vm, sva, 256);
+                CHECK(test_vm_frag_check(&dev, &vm, sva, 256) == 32);
+                /* rdna3vmfrag=0: the old 4 KiB PTEs */
+                dev.vm_frag_off = 1;
+                CHECK(gpuvm_map_fragment(&dev, rva, rpa, 1056) == 0);
+                CHECK(rdna3_bigpage_problems(1, rva, rpa, 0) == RD_BIGPAGE_FRAG_SMALL);
+                CHECK(gpuvm_map_linear(&dev, &vm, rva, rpa, 1056, vpte) == RDNA3_OK);
+                CHECK(test_vm_frag_check(&dev, &vm, rva, 1056) == 0 &&
+                      (test_vm_pte(&dev, &vm, rva) & ~0x0000FFFFFFFFF000ull) == vpte);
+                gpuvm_unmap(&dev, &vm, rva, 1056);
+                dev.vm_frag_off = 0;
+                gpuvm_vm_fini(&dev, &vm);
+                CHECK(vm.tables == 0 && pool.nfree == 64);
+            }
+
             /* rdna3amdgpu=1: amdgpu_vm_pt_clear values, amdgpu_vm_ptes_update
              * with fragments and huge PDEs, unmapping with EXECUTABLE */
             {
@@ -11219,16 +11359,20 @@ static void run(const char *fwdir)
                                 regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
                 unsigned walks = S.vm_huge_walks, t0;
                 CHECK(hoff != UINT64_MAX && hoff + (4ull << 20) <= BAR_LEN && !(hpa & ((2ull << 20) - 1)));
-                /* DRIVER-PLAN N57: the fragment the logs report - 4 KiB PTEs (0) on the default path */
-                CHECK(gpuvm_map_fragment(&dev, hva, 1024) == 0);
+                /* DRIVER-PLAN N57: the fragment the logs report - the default path caps it at 1 MiB (8) */
+                CHECK(gpuvm_map_fragment(&dev, hva, hpa, 1024) == 8);
                 dev.amdgpu_exact = 1;
-                /* amdgpu_vm_pte_fragment's steps: 4 MiB aligned 4 MiB = 10; the attribute ring (2 MiB aligned,
-                 * 4224 KiB: 2 MiB + 2 MiB + 128 KiB) = 5; 64 KiB aligned 16 pages = 4; a 4 KiB aligned VA = 0 */
-                CHECK(gpuvm_map_fragment(&dev, hva, 1024) == 10);
-                CHECK(gpuvm_map_fragment(&dev, hva + (2ull << 20), 1056) == 5);
-                CHECK(gpuvm_map_fragment(&dev, hva + 0x10000, 16) == 4);
-                CHECK(gpuvm_map_fragment(&dev, hva + 4096, 16) == 0);
-                CHECK(gpuvm_map_fragment(&dev, hva, 0) == 0);
+                /* amdgpu_vm_pte_fragment's steps (from the VA alone, as amdgpu): 4 MiB aligned 4 MiB = 10; the
+                 * attribute ring (2 MiB aligned, 4224 KiB: 2 MiB + 2 MiB + 128 KiB) = 5; 64 KiB aligned 16 pages = 4;
+                 * a 4 KiB aligned VA = 0; rdna3vmfrag=0 does not touch this path */
+                dev.vm_frag_off = 1;
+                CHECK(gpuvm_map_fragment(&dev, hva, hpa, 1024) == 10);
+                dev.vm_frag_off = 0;
+                CHECK(gpuvm_map_fragment(&dev, hva, hpa + 4096, 1024) == 10);
+                CHECK(gpuvm_map_fragment(&dev, hva + (2ull << 20), hpa, 1056) == 5);
+                CHECK(gpuvm_map_fragment(&dev, hva + 0x10000, hpa, 16) == 4);
+                CHECK(gpuvm_map_fragment(&dev, hva + 4096, hpa, 16) == 0);
+                CHECK(gpuvm_map_fragment(&dev, hva, hpa, 0) == 0);
                 CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK && vm.tables == 1);
                 rdna3_vram_read(&dev, vm.root + 8 * 511, &e, 8);
                 CHECK(e == RD_PDE_PTE);                    /* a PD's cleared entry */

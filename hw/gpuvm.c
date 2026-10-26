@@ -737,57 +737,194 @@ static uint64_t walk_to_ptb(rdna3_dev *d, rdna3_vm *vm, uint64_t va, int create)
     return table;
 }
 
-static uint64_t linear_pa(void *ctx, uint64_t i);
-
-int gpuvm_map(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages,
-              rdna3_page_pa_fn pa_fn, void *ctx, uint64_t pte_flags)
+struct linear_ctx { uint64_t pa; };
+static uint64_t linear_pa(void *ctx, uint64_t i)
 {
-    uint64_t i, ptb = UINT64_MAX, cur_block = UINT64_MAX;
-    va &= RD_VM_VA_MASK;
-    if ((va & 4095) || !pages || va + pages * 4096 > (1ull << RD_VM_VA_BITS))
-        return RDNA3_EINVAL;
-    if (d->amdgpu_exact) {
-        int r = vm_update_range(d, vm, va, pages, pa_fn, ctx, pa_fn == linear_pa, pte_flags);
-        rdna3_hdp_flush(d);
-        if (r)
-            RERR(d, "VM: mapping 0x%llx failed (%d)", (unsigned long long)va, r);
-        return r;
-    }
+    return ((struct linear_ctx *)ctx)->pa + i * 4096;
+}
+
+/* ---- the default path's PTE fragments (DRIVER-PLAN N57) ----
+ * amdgpu maps VRAM through amdgpu_vm_update_range -> amdgpu_vm_ptes_update,
+ * which walks a physically contiguous range in amdgpu_vm_pte_fragment steps
+ * and writes each step's AMDGPU_PTE_FRAG into its PTEs: the TLB then holds
+ * one translation per fragment, and the SPI's attribute ring
+ * (SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE, 64 KiB pages) relies on a fragment of
+ * at least 4. The default path keeps its PTB-only tables (no huge PDEs), so
+ * a step of 2 MiB or more, which amdgpu writes as a huge PDE, is written as
+ * PTEs of the largest fragment amdgpu_vm_ptes_update puts into a PTB
+ * (from the PDB0 shift 9 on it goes up a level): 8, 1 MiB. A step is also
+ * capped at the physical address's alignment: amdgpu's VRAM manager hands
+ * out naturally aligned drm_buddy blocks, so a fragment-aligned VA there
+ * meets a fragment-aligned PA; our range allocator promises only the BO's
+ * own alignment. System pages keep 4 KiB PTEs (fragment 0). */
+#define VM_PTB_MAX_FRAG (VM_BLOCK_SIZE - 1)
+
+static unsigned int ptb_fragment(uint64_t start, uint64_t end, uint64_t pa_pfn)
+{
+    vm_update_params p;
+    uint64_t frag_end;
+    unsigned int frag, pa_align = ffs64(pa_pfn) - 1;   /* wraps for 0, as amdgpu's ffs */
+    p.d = NULL;
+    p.vm = NULL;
+    p.pages_addr = NULL;
+    p.ctx = NULL;
+    amdgpu_vm_pte_fragment(&p, start, end, &frag, &frag_end);
+    if (frag > VM_PTB_MAX_FRAG)
+        frag = VM_PTB_MAX_FRAG;
+    if (frag > pa_align)
+        frag = pa_align;
+    return frag;
+}
+
+/* the default path: the PTEs of 'pages' pages at 'va', page i at
+ * pa_fn(ctx, i); with 'frags' the range is physically contiguous and every
+ * ptb_fragment step carries its fragment (a step never crosses a PTB: it
+ * is at most 1 MiB and aligned) */
+static int ptb_write(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages, rdna3_page_pa_fn pa_fn,
+                     void *ctx, uint64_t pte_flags, int frags)
+{
+    uint64_t i, ptb = UINT64_MAX, cur_block = UINT64_MAX, start = va >> 12, frag_end = 0;
+    unsigned int frag = 0;
     for (i = 0; i < pages; i++) {
         uint64_t a = va + i * 4096, pa = pa_fn(ctx, i);
         if (a >> 21 != cur_block) {
             ptb = walk_to_ptb(d, vm, a, 1);
             if (ptb == UINT64_MAX) {
-                rdna3_hdp_flush(d);
                 RERR(d, "VM: out of page-table pages mapping 0x%llx", (unsigned long long)a);
                 return RDNA3_ENOMEM;
             }
             cur_block = a >> 21;
         }
-        entry_write(d, ptb, level_index(a, RD_VM_LEVELS - 1), (pa & PTE_ADDR_MASK) | pte_flags);
+        if (frags && i >= frag_end) {
+            frag = ptb_fragment(start + i, start + pages, pa >> 12);
+            frag_end = i + (1ull << frag);
+        }
+        entry_write(d, ptb, level_index(a, RD_VM_LEVELS - 1), (pa & PTE_ADDR_MASK) | pte_flags | RD_PTE_FRAG(frag));
     }
-    rdna3_hdp_flush(d);
     return RDNA3_OK;
 }
 
+/* the default path's PTE of page 'pfn' (0 when its PTB does not exist) */
+static uint64_t ptb_pte(rdna3_dev *d, rdna3_vm *vm, uint64_t pfn)
+{
+    uint64_t ptb = walk_to_ptb(d, vm, pfn << 12, 0);
+    return ptb == UINT64_MAX ? 0 : entry_read(d, ptb, level_index(pfn << 12, RD_VM_LEVELS - 1));
+}
+
+/* pages [ps, pe) of a fragment cut by an update: physically contiguous from
+ * 'pa' with 'flags' (checked page by page), they get ptb_fragment steps of
+ * their own; a page that is not what the fragment said is logged and the
+ * valid pages keep 4 KiB PTEs (fragment 0 claims nothing) */
+static void ptb_refrag_piece(rdna3_dev *d, rdna3_vm *vm, uint64_t ps, uint64_t pe, uint64_t pa, uint64_t flags)
+{
+    struct linear_ctx c;
+    uint64_t i, pte = 0;
+    for (i = ps; i < pe; i++) {
+        pte = ptb_pte(d, vm, i);
+        if ((pte & ~RD_PTE_FRAG(31)) != ((pa + ((i - ps) << 12)) | flags))
+            break;
+    }
+    if (i == pe) {
+        c.pa = pa;
+        ptb_write(d, vm, ps << 12, pe - ps, linear_pa, &c, flags, 1);
+        return;
+    }
+    RERR(d, "VM: fragment 0x%llx..0x%llx cut by an update is not one contiguous mapping (page 0x%llx: PTE 0x%llx): "
+         "4 KiB PTEs there", (unsigned long long)(ps << 12), (unsigned long long)(pe << 12), (unsigned long long)(i << 12),
+         (unsigned long long)pte);
+    for (i = ps; i < pe; i++) {
+        uint64_t ptb = walk_to_ptb(d, vm, i << 12, 0);
+        if (ptb == UINT64_MAX)
+            continue;
+        pte = entry_read(d, ptb, level_index(i << 12, RD_VM_LEVELS - 1));
+        if ((pte & RD_PTE_VALID) && (pte & RD_PTE_FRAG(31)))
+            entry_write(d, ptb, level_index(i << 12, RD_VM_LEVELS - 1), pte & ~RD_PTE_FRAG(31));
+    }
+}
+
+/* An update of [s, e) (an unmap, or a mapping over part of an old one)
+ * leaves the fragment of the page 'pfn' next to it claiming the pages of
+ * [s, e) when that fragment reaches into the range: the TLB would keep
+ * translating them through it. amdgpu never leaves that: the rest of a
+ * split mapping is mapped again with fragments of its own
+ * (amdgpu_vm_bo_clear_mappings -> amdgpu_vm_bo_update). Here the rest of
+ * that fragment outside [s, e) gets its own ptb_fragment steps. */
+static void ptb_refrag_edge(rdna3_dev *d, rdna3_vm *vm, uint64_t pfn, uint64_t s, uint64_t e)
+{
+    uint64_t pte = ptb_pte(d, vm, pfn), bs, be, bpa, flags;
+    unsigned int f = (unsigned int)((pte >> 7) & 0x1f);   /* AMDGPU_PTE_FRAG */
+    if (!(pte & RD_PTE_VALID) || !f)
+        return;
+    bs = pfn & ~((1ull << f) - 1);
+    be = bs + (1ull << f);
+    if (be <= s || bs >= e)
+        return;   /* the fragment stays outside [s, e) */
+    bpa = (pte & PTE_ADDR_MASK) - ((pfn - bs) << 12);
+    flags = pte & ~PTE_ADDR_MASK & ~RD_PTE_FRAG(31);
+    if (bs < s)
+        ptb_refrag_piece(d, vm, bs, s, bpa, flags);
+    if (be > e)
+        ptb_refrag_piece(d, vm, e, be, bpa + ((e - bs) << 12), flags);
+}
+
+static void ptb_refrag_edges(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages)
+{
+    uint64_t s = va >> 12, e = s + pages;
+    if (s)
+        ptb_refrag_edge(d, vm, s - 1, s, e);
+    if (e < VM_MAX_PFN)
+        ptb_refrag_edge(d, vm, e, s, e);
+}
+
+int gpuvm_map(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages,
+              rdna3_page_pa_fn pa_fn, void *ctx, uint64_t pte_flags)
+{
+    int r;
+    va &= RD_VM_VA_MASK;
+    if ((va & 4095) || !pages || va + pages * 4096 > (1ull << RD_VM_VA_BITS))
+        return RDNA3_EINVAL;
+    if (d->amdgpu_exact) {
+        r = vm_update_range(d, vm, va, pages, pa_fn, ctx, pa_fn == linear_pa, pte_flags);
+        rdna3_hdp_flush(d);
+        if (r)
+            RERR(d, "VM: mapping 0x%llx failed (%d)", (unsigned long long)va, r);
+        return r;
+    }
+    /* VRAM (gpuvm_map_linear) with amdgpu_vm_pte_fragment fragments unless
+     * rdna3vmfrag=0; system pages always 4 KiB PTEs */
+    r = ptb_write(d, vm, va, pages, pa_fn, ctx, pte_flags, !d->vm_frag_off && pa_fn == linear_pa);
+    /* also after a failed write: the part already written may cut a
+     * neighbour's fragment, which must not keep claiming those pages */
+    if (!d->vm_frag_off)
+        ptb_refrag_edges(d, vm, va, pages);
+    rdna3_hdp_flush(d);
+    return r;
+}
+
 /* The smallest PTE fragment (log2 of 4 KiB pages) a physically contiguous
- * mapping of 'pages' at 'va' gets: amdgpu_vm_ptes_update walks the range in
- * amdgpu_vm_pte_fragment steps (rdna3amdgpu=1); the default path writes
- * 4 KiB PTEs without a fragment (0). For the logs of DRIVER-PLAN N57 (the
- * attribute ring's BIG_PAGE needs 64 KiB = fragment 4). */
-unsigned int gpuvm_map_fragment(const rdna3_dev *d, uint64_t va, uint64_t pages)
+ * mapping of 'pages' at 'va' from 'pa' gets: amdgpu_vm_ptes_update walks
+ * the range in amdgpu_vm_pte_fragment steps (rdna3amdgpu=1, from the VA as
+ * amdgpu); the default path in ptb_fragment steps; 0 with rdna3vmfrag=0.
+ * For the logs of DRIVER-PLAN N57 (the attribute ring's BIG_PAGE needs
+ * 64 KiB = fragment 4). */
+unsigned int gpuvm_map_fragment(const rdna3_dev *d, uint64_t va, uint64_t pa, uint64_t pages)
 {
     vm_update_params p;
-    uint64_t start = (va & RD_VM_VA_MASK) >> 12, end = start + pages, frag_end;
+    uint64_t start = (va & RD_VM_VA_MASK) >> 12, end = start + pages, frag_end, s0 = start;
     unsigned int frag, min = 31;
-    if (!d->amdgpu_exact || !pages)
+    if (!pages || (!d->amdgpu_exact && d->vm_frag_off))
         return 0;
     p.d = NULL;
     p.vm = NULL;
     p.pages_addr = NULL;
     p.ctx = NULL;
     while (start < end) {
-        amdgpu_vm_pte_fragment(&p, start, end, &frag, &frag_end);
+        if (d->amdgpu_exact) {
+            amdgpu_vm_pte_fragment(&p, start, end, &frag, &frag_end);
+        } else {
+            frag = ptb_fragment(start, end, (pa >> 12) + (start - s0));
+            frag_end = start + (1ull << frag);
+        }
         if (frag < min)
             min = frag;
         if (frag_end <= start)
@@ -795,12 +932,6 @@ unsigned int gpuvm_map_fragment(const rdna3_dev *d, uint64_t va, uint64_t pages)
         start = frag_end;
     }
     return min;
-}
-
-struct linear_ctx { uint64_t pa; };
-static uint64_t linear_pa(void *ctx, uint64_t i)
-{
-    return ((struct linear_ctx *)ctx)->pa + i * 4096;
 }
 
 int gpuvm_map_linear(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pa, uint64_t pages,
@@ -831,6 +962,9 @@ void gpuvm_unmap(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages)
         if (ptb != UINT64_MAX)
             entry_write(d, ptb, level_index(a, RD_VM_LEVELS - 1), 0);
     }
+    /* a fragment of what stays mapped must not reach into the hole */
+    if (pages && !(va & 4095) && va + pages * 4096 <= (1ull << RD_VM_VA_BITS) && !d->vm_frag_off)
+        ptb_refrag_edges(d, vm, va, pages);
     rdna3_hdp_flush(d);
 }
 
