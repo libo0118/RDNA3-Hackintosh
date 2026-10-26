@@ -21,6 +21,9 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
       true and the Cpuid1 spoof empty (what it replaced is kept in a "#" key of
       Kernel); --no-amd-cpu takes exactly those back; --show-cpu prints the state
   vmtool.py amdpatches           the vendored AMD_Vanilla patch file: count, or why it is unusable
+  vmtool.py ockexts CACHE        fetch the pinned Lilu + RestrictEvents releases into CACHE (sha256
+                                 checked, cached) and print CACHE/ready, where Lilu.kext and
+                                 RestrictEvents.kext (Info.plist + executable only) are
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
   vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
@@ -37,8 +40,10 @@ import os
 import plistlib
 import re
 import select
+import shutil
 import struct
 import sys
+import urllib.request
 import zipfile
 
 APPLE_NVRAM = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
@@ -508,6 +513,101 @@ def cmd_amdpatches(argv):
     return 0
 
 
+# ---------------------------------------------------------------- RestrictEvents (-cpu host)
+# macOS 26 shows "8-Core Intel Xeon W" in About This Mac for the card VM's Mac model
+# (MacBookPro16,1) whatever the CPU. Acidanthera's RestrictEvents patches that string for a
+# non-Intel CPU (CPU name from CPUID, no boot-arg needed); it needs Lilu 1.7.1 or later on
+# macOS 26 (the image's Lilu 1.6.8 does not run there without -lilubetaall, which would also
+# wake every other plugin in the image). rdna3vm's cmd__oc injects both with the AMD_Vanilla
+# patches and takes them out again with them (tools/vm/data/oc_kexts.SOURCE).
+OC_KEXTS = (   # (name, release, sha256 of the RELEASE zip), Lilu first: Kernel/Add order
+    ("Lilu", "1.7.2", "53967d7dcfaab01023a33df2e969a89522f13d6654a6a56ac4711b62dabf3ab8"),
+    ("RestrictEvents", "1.1.6", "98170dfae195ddd28b5d95e3f040125a13ca783bcb9bd1e5b8c588e217b14ee6"),
+)
+OC_KEXT_URL = "https://github.com/acidanthera/%(name)s/releases/download/%(ver)s/%(name)s-%(ver)s-RELEASE.zip"
+OC_KEXT_MAX = 8 << 20                       # the zips are 0.1 - 0.8 MB
+
+
+def fetch_oc_kexts(cache, kexts=OC_KEXTS, url=OC_KEXT_URL, log=None):
+    """Make CACHE/ready/NAME.kext (Contents/Info.plist and the executable only) from the
+    pinned release zips: a zip already in CACHE is used when its sha256 matches, else it is
+    downloaded and must match. Nothing else of the zip (dSYM, other members) is extracted.
+    Returns CACHE/ready; raises PlistEditError (nothing half-done in ready/)."""
+    log = log or (lambda m: None)
+    os.makedirs(cache, exist_ok=True)
+    ready = os.path.join(cache, "ready")
+    stage = os.path.join(cache, "ready.new")
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage)
+    try:
+        for name, ver, sha in kexts:
+            zpath = os.path.join(cache, "%s-%s-RELEASE.zip" % (name, ver))
+            data = None
+            try:
+                with open(zpath, "rb") as f:
+                    data = f.read()
+            except OSError:
+                pass
+            if data is not None and hashlib.sha256(data).hexdigest() != sha:
+                log("cached %s does not match its sha256: fetching again" % os.path.basename(zpath))
+                data = None
+            if data is None:
+                src = url % {"name": name, "ver": ver}
+                log("fetching %s" % src)
+                try:
+                    with urllib.request.urlopen(src, timeout=60) as r:
+                        data = r.read(OC_KEXT_MAX + 1)
+                except (OSError, ValueError) as e:
+                    raise PlistEditError("cannot fetch %s: %s" % (src, e))
+                if len(data) > OC_KEXT_MAX or hashlib.sha256(data).hexdigest() != sha:
+                    raise PlistEditError("%s: sha256 %s is not the pinned %s (tools/vm/data/oc_kexts.SOURCE)"
+                                         % (src, hashlib.sha256(data).hexdigest(), sha))
+                tmp = zpath + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, zpath)
+            _extract_oc_kext(zpath, name, ver, stage)
+            log("%s %s ready" % (name, ver))
+        shutil.rmtree(ready, ignore_errors=True)
+        os.replace(stage, ready)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    return ready
+
+
+def _extract_oc_kext(zpath, name, ver, dest):
+    """NAME.kext/Contents/Info.plist and Contents/MacOS/<CFBundleExecutable> of the zip into
+    DEST (members are named exactly, never by a path the zip chooses)"""
+    root = "%s.kext/Contents/" % name
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            info = z.read(root + "Info.plist")
+            pl = plistlib.loads(info)
+            exe = pl.get("CFBundleExecutable", "")
+            if pl.get("CFBundleIdentifier") != "as.vit9696.%s" % name or pl.get("CFBundleVersion") != ver \
+                    or not exe or "/" in exe or exe.startswith("."):
+                raise PlistEditError("%s: Info.plist is not %s %s (id %r, version %r, executable %r)"
+                                     % (zpath, name, ver, pl.get("CFBundleIdentifier"),
+                                        pl.get("CFBundleVersion"), exe))
+            binary = z.read(root + "MacOS/" + exe)
+    except (OSError, KeyError, zipfile.BadZipFile, plistlib.InvalidFileException, ValueError) as e:
+        raise PlistEditError("%s: no usable %s.kext (%s)" % (zpath, name, e))
+    kd = os.path.join(dest, name + ".kext", "Contents")
+    os.makedirs(os.path.join(kd, "MacOS"))
+    with open(os.path.join(kd, "Info.plist"), "wb") as f:
+        f.write(info)
+    with open(os.path.join(kd, "MacOS", exe), "wb") as f:
+        f.write(binary)
+
+
+def cmd_ockexts(argv):
+    """ockexts CACHE: the pinned Lilu + RestrictEvents, ready for the OpenCore image"""
+    if len(argv) != 1:
+        sys.exit("usage: vmtool.py ockexts CACHE")
+    print(fetch_oc_kexts(argv[0], log=lambda m: print("ockexts: " + m, file=sys.stderr)))
+    return 0
+
+
 def cmd_romcheck(argv):
     data = open(argv[0], "rb").read()
     off, efi = 0, False
@@ -708,7 +808,7 @@ def cmd_monitor(argv):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    cmds = {"plist": cmd_plist, "amdpatches": cmd_amdpatches, "romcheck": cmd_romcheck, "unzip": cmd_unzip,
+    cmds = {"plist": cmd_plist, "amdpatches": cmd_amdpatches, "ockexts": cmd_ockexts, "romcheck": cmd_romcheck, "unzip": cmd_unzip,
             "serve": cmd_serve, "stopkeys": cmd_stopkeys, "evdev": cmd_evdev,
             "usbhid": cmd_usbhid, "monitor": cmd_monitor}
     fn = cmds.get(sys.argv[1])

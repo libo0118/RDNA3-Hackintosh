@@ -958,9 +958,26 @@ What `host` does:
   `#rdna3vm-amd-restore` of `Kernel` (OpenCore ignores `#` keys) and comes
   back with `--no-amd-cpu`, which every other `CPU_MODEL` runs. A second run changes
   nothing. The patch list is vendored in `tools/vm/data/` (source, commit,
-  licence and sha256 in `amd_vanilla.SOURCE`; nothing is downloaded when the
-  VM starts). Only the kernel patches are used, not AMD_Vanilla's IOPCIFamily
-  ones (Zen 4 boards).
+  licence and sha256 in `amd_vanilla.SOURCE`; the patches are not downloaded).
+  Only the kernel patches are used, not AMD_Vanilla's IOPCIFamily ones (Zen 4
+  boards).
+- **The CPU name in About This Mac** (RestrictEvents). macOS shows the Mac
+  model's CPU ("8-Core Intel Xeon W" for MacBookPro16,1) whatever the VM has.
+  In the same mode `rdna3vm` puts Acidanthera's RestrictEvents 1.1.6 and Lilu
+  1.7.2 into OpenCore (`EFI/OC/Kexts` + `Kernel/Add`, Lilu first); RestrictEvents
+  patches that string for a non-Intel CPU and takes the name from CPUID, so no
+  boot-arg is needed (`revcpuname=` would override it; it is left unset). The
+  two RELEASE zips are the only thing `rdna3vm` downloads for the VM: once, into
+  `~/rdna3-vm/oc-kexts`, with the sha256 pinned in `tools/vm/vmtool.py` and
+  `tools/vm/data/oc_kexts.SOURCE` (no network after that). The image's own Lilu
+  is 1.6.8, which does not run on macOS 26; it is kept as
+  `Lilu.kext.rdna3vm-orig` and put back, with RestrictEvents removed, by every
+  run of another `CPU_MODEL` (or a host that is not AMD). A failed download is
+  a `!! RestrictEvents is not injected` line in the terminal and `host-*.log`:
+  the VM boots and only About This Mac keeps the Mac model's name. Check in
+  macOS: About This Mac, and `kextstat | grep -i -e lilu -e restrict` (both
+  listed; with `-liludbgall`/`-revdbg` a DEBUG build would log, the RELEASE one
+  does not). **Needs the VM: not run yet.**
 - The run says what it did: `VM CPU: ...` and `amd-cpu: on, 24 AMD_Vanilla
   kernel patches, core count 12 (0x0C)` in the terminal and in `host-*.log`,
   and the result file's `00-host.txt` has `vm-cpu:` lines (CPU, topology, the

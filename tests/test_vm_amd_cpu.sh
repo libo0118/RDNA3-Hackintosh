@@ -17,6 +17,11 @@
 #    vendor; load_conf leaves CPU_MODEL=host alone; the cmd__oc chain (stubbed losetup /
 #    mount) applies the patches for the config's CPU_MODEL, and takes them out again when it
 #    changes; 'result' puts vm-cpu into 00-host.txt
+#  - RestrictEvents (About This Mac names the real CPU): the pins of tools/vm/data/oc_kexts.SOURCE
+#    and vmtool.py agree; the fetch is sha256 checked and extracts only Info.plist + the
+#    executable; cmd__oc puts Lilu (replacing the image's old one, which is kept) and
+#    RestrictEvents (after Lilu) into EFI/OC/Kexts + Kernel/Add in the AMD mode, idempotently,
+#    and takes everything out again (old Lilu back) when the mode is off or the fetch failed
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
@@ -37,6 +42,29 @@ grep -q "AMD_PATCH_SHA256 = \"$sha\"" "$VTP" || fail "vmtool.py AMD_PATCH_SHA256
 grep -q 'a174cca80efe2377fde3b902666c70863ea66454' "$SRC" || fail "no commit in amd_vanilla.SOURCE"
 grep -q '^Licence:' "$SRC" || fail "no licence note in amd_vanilla.SOURCE"
 [ "$($VT amdpatches | cut -d' ' -f1)" = 24 ] || fail "amdpatches: $($VT amdpatches)"
+
+# ---- RestrictEvents / Lilu pins: SOURCE file and vmtool.py agree
+OSRC=$ROOT/tools/vm/data/oc_kexts.SOURCE
+python3 -I - "$ROOT" "$OSRC" <<'PY' || fail "oc_kexts pins (see above)"
+import re, sys
+root, src = sys.argv[1:3]
+sys.path.insert(0, root + "/tools/vm")
+import vmtool as v
+text = open(src).read()
+if [n for n, _, _ in v.OC_KEXTS] != ["Lilu", "RestrictEvents"]:
+    sys.exit("Lilu must come before RestrictEvents in OC_KEXTS: %r" % [n for n, _, _ in v.OC_KEXTS])
+for name, ver, sha in v.OC_KEXTS:
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        sys.exit("%s: not a sha256" % name)
+    if "sha256 %s" % sha not in text:
+        sys.exit("oc_kexts.SOURCE has no 'sha256 %s' for %s" % (sha, name))
+    if not re.search(r"^\s+%s\s+%s\s" % (name, re.escape(ver)), text, re.M):
+        sys.exit("oc_kexts.SOURCE does not name %s %s" % (name, ver))
+    if "releases/download/%s/%s-%s-RELEASE.zip" % (ver, name, ver) not in text:
+        sys.exit("oc_kexts.SOURCE has no release URL of %s %s" % (name, ver))
+if "acidanthera" not in v.OC_KEXT_URL or "RELEASE.zip" not in v.OC_KEXT_URL:
+    sys.exit("OC_KEXT_URL is not an Acidanthera RELEASE zip: %s" % v.OC_KEXT_URL)
+PY
 
 # ---- the plist edits (python: the exact bytes matter)
 python3 -I - "$ROOT" "$FIX" "$T" <<'PY' || fail "python checks (see above)"
@@ -223,6 +251,87 @@ try:
 except v.PlistEditError as e:
     if "sha256" not in str(e):
         fail("message: %s" % e)
+
+# --- RestrictEvents / Lilu: the fetch (file:// instead of GitHub, the pins swapped for test zips)
+import hashlib, io, os, shutil, zipfile
+def kext_zip(name, ver, exe=None, ident=None, extra=()):
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("%s.kext/Contents/Info.plist" % name, plistlib.dumps({
+            "CFBundleExecutable": exe or name, "CFBundleIdentifier": ident or "as.vit9696." + name,
+            "CFBundleVersion": ver}))
+        z.writestr("%s.kext/Contents/MacOS/%s" % (name, exe or name), b"bin-" + name.encode())
+        z.writestr("%s.kext.dSYM/Contents/Resources/junk" % name, b"x" * 100)
+        for member, data in extra:
+            z.writestr(member, data)
+    return b.getvalue()
+rel = tmp + "/rel"
+os.makedirs(rel)
+zips = {n: kext_zip(n, "9.9") for n in ("Lilu", "RestrictEvents")}
+for n, d in zips.items():
+    open("%s/%s-9.9-RELEASE.zip" % (rel, n), "wb").write(d)
+pins = tuple((n, "9.9", hashlib.sha256(zips[n]).hexdigest()) for n in ("Lilu", "RestrictEvents"))
+url = "file://" + rel + "/%(name)s-%(ver)s-RELEASE.zip"
+cache = tmp + "/occache"
+msgs = []
+ready = v.fetch_oc_kexts(cache, pins, url, log=msgs.append)
+if ready != cache + "/ready":
+    fail("fetch_oc_kexts returned %r" % ready)
+tree = sorted(os.path.relpath(os.path.join(d, f), ready) for d, _, fs in os.walk(ready) for f in fs)
+if tree != ["Lilu.kext/Contents/Info.plist", "Lilu.kext/Contents/MacOS/Lilu",
+            "RestrictEvents.kext/Contents/Info.plist", "RestrictEvents.kext/Contents/MacOS/RestrictEvents"]:
+    fail("the fetch extracted %r (only Info.plist + the executable, no dSYM)" % tree)
+if open(ready + "/Lilu.kext/Contents/MacOS/Lilu", "rb").read() != b"bin-Lilu":
+    fail("the executable was not extracted as it is")
+if not any(m.startswith("fetching ") for m in msgs):
+    fail("a first fetch says nothing: %r" % msgs)
+# cached: no URL needed any more (the zips are checked again, not trusted)
+msgs = []
+v.fetch_oc_kexts(cache, pins, "file:///nonexistent/%(name)s-%(ver)s.zip", log=msgs.append)
+if any(m.startswith("fetching ") for m in msgs):
+    fail("a cached zip was fetched again: %r" % msgs)
+# a cached zip that no longer matches is fetched again, a bad download is refused
+open(cache + "/Lilu-9.9-RELEASE.zip", "ab").write(b"tampered")
+msgs = []
+v.fetch_oc_kexts(cache, pins, url, log=msgs.append)
+if not any("does not match" in m for m in msgs):
+    fail("a tampered cached zip was not noticed: %r" % msgs)
+bad = tuple((n, ver, "0" * 64) for n, ver, _ in pins)
+shutil.rmtree(cache + "-bad", ignore_errors=True)
+try:
+    v.fetch_oc_kexts(cache + "-bad", bad, url)
+except v.PlistEditError as e:
+    if "sha256" not in str(e):
+        fail("sha256 mismatch message: %s" % e)
+else:
+    fail("a download with the wrong sha256 was accepted")
+if os.path.exists(cache + "-bad/ready") or os.path.exists(cache + "-bad/Lilu-9.9-RELEASE.zip"):
+    fail("a refused download left files behind")
+before = sorted(os.listdir(ready))
+os.remove(cache + "/RestrictEvents-9.9-RELEASE.zip")
+try:
+    v.fetch_oc_kexts(cache, pins, "file:///nonexistent/%(name)s-%(ver)s.zip")
+except v.PlistEditError as e:
+    if "cannot fetch" not in str(e):
+        fail("offline message: %s" % e)
+else:
+    fail("an unreachable download was not reported")
+if sorted(os.listdir(ready)) != before or os.path.exists(cache + "/ready.new"):
+    fail("a failed fetch changed ready/ or left ready.new")
+# a zip with the wrong identity / a missing executable / a traversal member is not used
+for label, data in (("identity", kext_zip("Lilu", "9.9", ident="com.evil.Lilu")),
+                    ("version", kext_zip("Lilu", "1.0")),
+                    ("exe path", kext_zip("Lilu", "9.9", exe="../../x"))):
+    d = tmp + "/rel-" + label
+    os.makedirs(d, exist_ok=True)
+    open(d + "/Lilu-9.9-RELEASE.zip", "wb").write(data)
+    try:
+        v.fetch_oc_kexts(tmp + "/c-" + label, (("Lilu", "9.9", hashlib.sha256(data).hexdigest()),),
+                         "file://" + d + "/%(name)s-%(ver)s-RELEASE.zip")
+    except v.PlistEditError:
+        pass
+    else:
+        fail("a zip with the wrong %s was accepted" % label)
 print("python checks ok")
 PY
 
@@ -322,10 +431,13 @@ cat > "$T/bin/mount" <<'EOS'
 for a; do mnt=$a; done
 mkdir -p "$mnt/EFI/OC"
 cp "$FIXTURE" "$mnt/EFI/OC/config.plist"
+[ -d "$KSTATE" ] && cp -R "$KSTATE" "$mnt/EFI/OC/Kexts"
+exit 0
 EOS
 cat > "$T/bin/umount" <<'EOS'
 #!/bin/sh
 cp "$1/EFI/OC/config.plist" "$RESULT"
+rm -rf "$KSTATE"; [ -d "$1/EFI/OC/Kexts" ] && cp -R "$1/EFI/OC/Kexts" "$KSTATE"
 rm -rf "$1/EFI"
 EOS
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/mountpoint"
@@ -336,16 +448,51 @@ chmod +x "$T/bin/"*
 cp "$FIX" "$T/image.plist"
 oc() {   # oc ARGS...: one _oc call on the "image"; the result becomes the next call's image
     env PATH="$T/bin:$PATH" RDNA3VM_DIR="$T/ocw" RDNA3VM_CPUINFO="$T/cpuinfo-amd" FIXTURE="$T/image.plist" RESULT="$T/image-out.plist" \
-        bash "$VM" _oc "$@" && cp "$T/image-out.plist" "$T/image.plist"
+        KSTATE="$T/kstate" RDNA3VM_OCKEXT_DIR="${READY-$T/ready}" bash "$VM" _oc "$@" && cp "$T/image-out.plist" "$T/image.plist"
 }
+# the image's EFI/OC/Kexts: the OSX-KVM Lilu 1.6.8 and VirtualSMC; "ready" = what vmtool ockexts gives
+mk_kext() {   # mk_kext DIR NAME VERSION
+    mkdir -p "$1/$2.kext/Contents/MacOS"
+    printf '<plist><dict><key>CFBundleExecutable</key>\n<string>%s</string>\n<key>CFBundleVersion</key>\n<string>%s</string></dict></plist>\n' "$2" "$3" > "$1/$2.kext/Contents/Info.plist"
+    echo "$2 $3" > "$1/$2.kext/Contents/MacOS/$2"
+}
+mk_kext "$T/kstate" Lilu 1.6.8; mk_kext "$T/kstate" VirtualSMC 1.3.3
+mk_kext "$T/ready" Lilu 1.7.2; mk_kext "$T/ready" RestrictEvents 1.1.6
+adds() { python3 -I -c "import plistlib,sys; print(' '.join(a['BundlePath'] for a in plistlib.load(open(sys.argv[1],'rb'))['Kernel']['Add']))" "$1"; }
+fver() { sed -n '/CFBundleVersion/{n;s/.*<string>\(.*\)<.string>.*/\1/p}' "$1/Contents/Info.plist"; }
+cp -R "$T/kstate" "$T/kstate.orig"
 printf 'CPU_MODEL="host"\nCPUS=12\n' > "$T/ocw/config"
 oc --boot-args "-v keepsyms=1" > "$T/out.txt" || fail "_oc with CPU_MODEL=host failed"
 grep -qx 'amd-cpu: on, 24 AMD_Vanilla kernel patches, core count 12 (0x0C)' "$T/out.txt" || fail "_oc did not say the AMD patches are on: $(cat "$T/out.txt")"
 [ "$($VT plist "$T/image.plist" --show-cpu)" = "amd-cpu: on, 24 patches, core count 12" ] || fail "the image has no AMD patches after a host run"
+# RestrictEvents: Lilu 1.7.2 replaces the image's 1.6.8 (kept), RestrictEvents is listed after Lilu
+grep -qx "RestrictEvents 1.1.6 + Lilu 1.7.2 injected (the AMD CPU's name in About This Mac)" "$T/out.txt" || fail "_oc did not say RestrictEvents is in: $(cat "$T/out.txt")"
+[ "$(adds "$T/image.plist")" = "Lilu.kext VirtualSMC.kext RestrictEvents.kext" ] || fail "Kernel/Add after a host run: $(adds "$T/image.plist")"
+[ "$(fver "$T/kstate/Lilu.kext")" = 1.7.2 ] && [ "$(fver "$T/kstate/Lilu.kext.rdna3vm-orig")" = 1.6.8 ] || fail "Lilu 1.7.2 in, the image's 1.6.8 kept: $(ls -a "$T/kstate")"
+[ "$(fver "$T/kstate/RestrictEvents.kext")" = 1.1.6 ] && [ -f "$T/kstate/RestrictEvents.kext/Contents/MacOS/RestrictEvents" ] || fail "RestrictEvents.kext not copied"
+[ -d "$T/kstate/VirtualSMC.kext" ] || fail "an unrelated kext of the image went"
+python3 -I - "$T/image.plist" <<'PY' || fail "RestrictEvents / Lilu Kernel/Add entries"
+import plistlib, sys
+add = {a["BundlePath"]: a for a in plistlib.load(open(sys.argv[1], "rb"))["Kernel"]["Add"]}
+for k, exe in (("Lilu.kext", "Contents/MacOS/Lilu"), ("RestrictEvents.kext", "Contents/MacOS/RestrictEvents")):
+    a = add[k]
+    if not a["Enabled"] or a["ExecutablePath"] != exe or a["PlistPath"] != "Contents/Info.plist" \
+            or a["MinKernel"] != "" or a["MaxKernel"] != "" or a["Arch"] not in ("Any", "x86_64"):
+        sys.exit("%s: %r" % (k, a))
+PY
 # the next run, same mode: nothing moves
-cp "$T/image.plist" "$T/image.1"
+cp "$T/image.plist" "$T/image.1"; cp -R "$T/kstate" "$T/kstate.1"
 oc --boot-args "-v keepsyms=1" >/dev/null || fail "_oc second run"
 cmp -s "$T/image.plist" "$T/image.1" || fail "a second host run changed the image"
+diff -r "$T/kstate" "$T/kstate.1" >/dev/null || fail "a second host run changed EFI/OC/Kexts"
+# the fetch failed (no network): loud, the VM still boots, everything RestrictEvents is out again, the old Lilu is back
+cp "$T/image.plist" "$T/image.host"; cp -R "$T/kstate" "$T/kstate.host"
+https_proxy=http://127.0.0.1:9 READY= oc --boot-args "-v keepsyms=1" > "$T/out.txt" 2>&1 || fail "_oc must not fail when RestrictEvents cannot be fetched"
+grep -q '^!! RestrictEvents is not injected' "$T/out.txt" || fail "a failed fetch is not loud: $(cat "$T/out.txt")"
+[ "$($VT plist "$T/image.plist" --show-cpu)" = "amd-cpu: on, 24 patches, core count 12" ] || fail "a failed fetch must leave the AMD patches on"
+[ "$(adds "$T/image.plist")" = "Lilu.kext VirtualSMC.kext" ] && [ ! -e "$T/kstate/RestrictEvents.kext" ] || fail "a failed fetch left RestrictEvents: $(adds "$T/image.plist")"
+[ "$(fver "$T/kstate/Lilu.kext")" = 1.6.8 ] && [ ! -e "$T/kstate/Lilu.kext.rdna3vm-orig" ] || fail "a failed fetch left Lilu 1.7.2: $(ls -a "$T/kstate")"
+cp "$T/image.host" "$T/image.plist"; rm -rf "$T/kstate"; cp -R "$T/kstate.host" "$T/kstate"
 # --show does not edit (and does not need the CPU)
 oc --show >/dev/null && cmp -s "$T/image.plist" "$T/image.1" || fail "_oc --show changed the image"
 # CPUS and CPU_THREADS change the count
@@ -355,8 +502,10 @@ oc --boot-args "-v keepsyms=1" >/dev/null || fail "_oc CPUS=16 CPU_THREADS=2"
 # an Intel host: host mode but no AMD patches
 cp "$FIX" "$T/image.plist"
 env PATH="$T/bin:$PATH" RDNA3VM_DIR="$T/ocw" RDNA3VM_CPUINFO="$T/cpuinfo-intel" FIXTURE="$T/image.plist" RESULT="$T/image-out.plist" \
-    bash "$VM" _oc --boot-args "-v" >/dev/null && cp "$T/image-out.plist" "$T/image.plist"
+    KSTATE="$T/kstate-intel" RDNA3VM_OCKEXT_DIR="$T/ready" bash "$VM" _oc --boot-args "-v" >/dev/null && cp "$T/image-out.plist" "$T/image.plist"
 [ "$($VT plist "$T/image.plist" --show-cpu)" = "amd-cpu: off" ] || fail "an Intel host got AMD patches"
+[ ! -e "$T/kstate-intel" ] || fail "an Intel host got RestrictEvents / Lilu files"
+cp "$FIX" "$T/image.plist"
 # switch back to the Skylake model: no manual edit, the OpenCore config is the original again
 printf 'CPU_MODEL="host"\nCPUS=12\n' > "$T/ocw/config"
 oc --boot-args "-v keepsyms=1" >/dev/null || fail "_oc host"
@@ -364,6 +513,27 @@ printf 'CPU_MODEL="%s"\nCPUS=12\n' "$SKL" > "$T/ocw/config"
 oc --boot-args "keepsyms=1 gemini_check=SUCCESS" > "$T/out.txt" || fail "_oc back to Skylake"
 grep -qx 'amd-cpu: off (24 AMD_Vanilla patches removed, 4 values restored)' "$T/out.txt" || fail "_oc back: $(cat "$T/out.txt")"
 cmp -s "$T/image.plist" "$FIX" || fail "after switching back the OpenCore config is not the original"
+grep -q '^RestrictEvents taken out of OpenCore' "$T/out.txt" && grep -q "^the image's own Lilu 1.6.8 is back" "$T/out.txt" || fail "_oc back: no word about RestrictEvents / Lilu: $(cat "$T/out.txt")"
+[ ! -e "$T/kstate/RestrictEvents.kext" ] && [ ! -e "$T/kstate/Lilu.kext.rdna3vm-orig" ] && [ "$(fver "$T/kstate/Lilu.kext")" = 1.6.8 ] || fail "after switching back: $(ls -a "$T/kstate")"
+diff -r "$T/kstate" "$T/kstate.orig" >/dev/null || fail "after switching back EFI/OC/Kexts is not the image's original"
+# an image without Lilu: the AMD mode adds it (and a marker), the next mode takes it out with its entry
+python3 -I - "$FIX" "$T/nolilu.plist" <<'PY'
+import re, sys
+t = open(sys.argv[1]).read()
+t2 = re.sub(r"\t\t\t<dict>(?:(?!</dict>).)*?<string>Lilu\.kext</string>.*?</dict>\n", "", t, count=1, flags=re.S)
+assert t2 != t
+open(sys.argv[2], "w").write(t2)
+PY
+cp "$T/nolilu.plist" "$T/image.plist"; rm -rf "$T/kstate"; mk_kext "$T/kstate" VirtualSMC 1.3.3
+printf 'CPU_MODEL="host"\nCPUS=12\n' > "$T/ocw/config"
+oc --boot-args "-v" >/dev/null || fail "_oc host without a Lilu"
+[ "$(adds "$T/image.plist")" = "VirtualSMC.kext Lilu.kext RestrictEvents.kext" ] || fail "no Lilu: Kernel/Add $(adds "$T/image.plist")"
+[ "$(fver "$T/kstate/Lilu.kext")" = 1.7.2 ] && [ -e "$T/kstate/.rdna3vm-lilu-added" ] || fail "no Lilu: files $(ls -a "$T/kstate")"
+printf 'CPU_MODEL="%s"\nCPUS=12\n' "$SKL" > "$T/ocw/config"
+oc --boot-args "-v" >/dev/null || fail "_oc back to Skylake without a Lilu"
+[ "$(adds "$T/image.plist")" = "VirtualSMC.kext" ] && [ ! -e "$T/kstate/Lilu.kext" ] && [ ! -e "$T/kstate/RestrictEvents.kext" ] && [ ! -e "$T/kstate/.rdna3vm-lilu-added" ] ||
+    fail "no Lilu, back: $(adds "$T/image.plist") / $(ls -a "$T/kstate")"
+cp "$FIX" "$T/image.plist"; rm -rf "$T/kstate"; cp -R "$T/kstate.orig" "$T/kstate"
 # no config at all (first prepare): the default Skylake model, nothing to take out, no failure
 rm -f "$T/ocw/config"
 oc --boot-args "keepsyms=1 gemini_check=SUCCESS" >/dev/null || fail "_oc without a config"
