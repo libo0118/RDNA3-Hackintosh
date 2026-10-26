@@ -203,7 +203,7 @@ steps:
 | `bisect` | the display bug (black screens, windows that do not appear or only flash, flicker): every new feature that has a runtime switch off, then back on one at a time, 30 s each (13 steps, 6.5 min; [Display bisect](#display-bisect-step-bisect)) | **sit at the monitors for the whole run**: a notification, a spoken "step N" and N beeps announce every step; note the step numbers where the picture goes wrong |
 | `bisect-plugin` | the same for the Metal plugin's switches (`rdna3mtl.conf`, the allow list); **restarts WindowServer three times** | run it last, after `bisect`; log in again at the login window each time unless the guest logs in by itself |
 | `bisect-agdc` | the same bisect on the **agdc profile** (WindowServer on our Metal plugin, the card busy): `swap_mode`, `swap_gen`, `flipbuf_present`, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` in 13 combinations of 30 s each, 6.5 min ([Display bisect on the agdc profile](#display-bisect-on-the-agdc-profile-step-bisect-agdc)) | the plain `bisect` runs the default profile, where the AGDC is idle and WindowServer draws on the CPU: use this one for the real desktop. **Sit at the monitors for the whole run**; same announcements as `bisect`. Step 7 turns `iop` off while WindowServer runs: the picture may stay wrong afterwards (shut macOS down from the report's end as usual) |
-| `ladder` | DRIVER-PLAN N50, the broken glyphs / tile blocks: the Metal plugin's A/B switches one rung at a time in ONE run (7 rungs, about 26 min; [The A/B ladder](#the-ab-ladder-steps-ladder-and-ladder-ws)) | nothing to type, nothing to answer: Terminal and Chess open and close by themselves on the desktop, look at the screen; the report has one row per rung. `ladder-ws` (about 45 min) adds the WindowServer rungs, which restart the desktop: **log in at the login window each time** |
+| `ladder` | DRIVER-PLAN N50, the broken glyphs / tile blocks: the Metal plugin's A/B switches one rung at a time in ONE run (8 rungs, about 29 min; [The A/B ladder](#the-ab-ladder-steps-ladder-and-ladder-ws)) | nothing to type, nothing to answer: Terminal and Chess open and close by themselves on the desktop, look at the screen; the report has one row per rung. `ladder-ws` (about 45 min) adds the WindowServer rungs, which restart the desktop: **log in at the login window each time** |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
@@ -665,14 +665,14 @@ start, so a boot-arg step is the clean A/B.
 DRIVER-PLAN N50 (broken glyphs in Terminal / Maps, tile-shaped blocks in Chess; card run 2026-10-25e). One run replaces five reports with a switch each:
 
 ```sh
-rdna3vm step ladder       # the app rungs: about 26 minutes
+rdna3vm step ladder       # the app rungs: about 29 minutes
 rdna3vm step ladder-ws    # and the two WindowServer rungs: about 45 minutes, you log in after each restart
 rdna3vm step ladder-glyphs     # the glyph hunt: 13 rungs, about 25 minutes (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...)
 rdna3vm step ladder-coh        # the kernel coherence switches (DRIVER-PLAN N54): 10 rungs, about 17 minutes (baseline, all, then one sysctl debug.rdna3_coh_<name> each; docs/AFTER-TESTS.md "Kernel coherence switches")
 ```
 
 The step is the `play` profile (the desktop on the Metal plugin) with `rdna3ladder=1` / `2` instead of `rdna3play=1`; no other test runs. Per rung
-(`baseline`, `radv`, `sync`, `managed`, `alignguard`, `paranoid`, `loadbarrier`) the guest opens Terminal (colour text, a tick line every second) and Chess as
+(`baseline`, `attrring` (DRIVER-PLAN N57: `NVMTL_ATTR_RING_BIG_PAGE=0`, RADV's attribute ring without BIG_PAGE), `radv`, `sync`, `managed`, `alignguard`, `paranoid`, `loadbarrier`) the guest opens Terminal (colour text, a tick line every second) and Chess as
 new instances with that rung's `NVMTL_*` switches in their environment (`open -n -a APP --env ...`; the plugin reads the environment as well as `rdna3mtl.conf`),
 takes a 320-wide and a hi-res (native size) scanout look, keeps the plugin log of those two processes, and quits them. `rdna3mtl.conf` is not touched by the app rungs.
 Terminal's text is a colour listing, then a tick line a second in ONE fixed colour (bright white) ending in the same `abcdefghijklmnopqrstuvwxyz`, and every 4th second a

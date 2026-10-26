@@ -16,6 +16,7 @@
 #include "gfx11_info.h"
 #include "RDNA3Trace.h"
 #include "rdna3_bo_map.h"
+#include "rdna3_attr_ring.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -129,9 +130,40 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             }
         }
         a->vramSummaryMaybe(false);
+        a->discardableNote(bo, pool == RD3_POOL_HI ? "VRAM beyond BAR0" : "VRAM visible");
         return 0;
     }
-    return a->gttAlloc(bo);
+    const int gr = a->gttAlloc(bo);
+    if (!gr && (bo->flags & AMDGPU_GEM_CREATE_DISCARDABLE))
+        a->discardableNote(bo, (bo->domains & AMDGPU_GEM_DOMAIN_VRAM) ? "GTT, VRAM was asked for and refused" : "GTT, as asked");
+    return gr;
+}
+
+/* DRIVER-PLAN N57: every GEM BO created with AMDGPU_GEM_CREATE_DISCARDABLE
+ * (RADV's GFX11 attribute ring; the only DISCARDABLE BO it makes): where it
+ * lands. Mesa sets SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE for it ("VRAM is only
+ * guaranteed with AMDGPU_GEM_CREATE_DISCARDABLE"): the SPI translates it in
+ * 64 KiB pages. amdgpu_gem_create_ioctl still retries a failed VRAM-only
+ * request with GTT added (DISCARDABLE only keeps amdgpu_bo_create from adding
+ * GTT to the allowed domains, and amdgpu_evict_flags drops it rather than
+ * moving it); so does the UAPI here, and such a BO is logged loudly: BIG_PAGE
+ * over 4 KiB system pages is wrong. The first 16, then every 1024th; GTT
+ * always. (fDrmLock held.) */
+void RDNA3Accel::discardableNote(const rdna3_bo *bo, const char *where)
+{
+    const uint32_t n = ++fDiscardLogs;
+    const bool vram = bo->placement == AMDGPU_GEM_DOMAIN_VRAM;
+    if (vram && n > 16 && (n & 1023))
+        return;
+    if (vram)
+        LOG("GEM DISCARDABLE #%u: %llu KiB, alignment %llu KiB, %s at 0x%llx (64 KiB aligned %s, 2 MiB aligned %s)", n,
+            (unsigned long long)(bo->size >> 10), (unsigned long long)(bo->alignment >> 10), where,
+            (unsigned long long)bo->vram_offset, (bo->vram_offset & (RD_BIGPAGE_BYTES - 1)) ? "no" : "yes",
+            (bo->vram_offset & ((2ull << 20) - 1)) ? "no" : "yes");
+    else
+        LOG("GEM DISCARDABLE #%u: %llu KiB, alignment %llu KiB, %s - WRONG for the attribute ring: BIG_PAGE translates it in "
+            "64 KiB pages, system pages are 4 KiB and scattered (DRIVER-PLAN N57)", n,
+            (unsigned long long)(bo->size >> 10), (unsigned long long)(bo->alignment >> 10), where);
 }
 
 /* GEM_CREATE: VRAM refused the client's BO and GTT did not take it either

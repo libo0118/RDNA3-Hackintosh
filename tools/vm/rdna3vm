@@ -794,11 +794,11 @@ auto_limit() {
     case " $1 " in
         *" rdna3bisect=1 "*|*" rdna3bisect=4 "*) m=$((m + 11)) ;;
         *" rdna3bisect=2 "*) m=$((m + 16)) ;;
-        # rdna3ladder=1 (N50): 7 rungs of ~2.5 min (launch, settle, two looks, the log slice) + the report;
+        # rdna3ladder=1 (N50): 8 rungs of ~2.5 min (launch, settle, two looks, the log slice; `attrring` added by N57) + the report;
         # =2: and two WindowServer restarts with a login after each (up to 5 min each if nobody logs in at once);
         # =3 (ladder-glyphs): 13 rungs of ~95 s (two hi-res looks each; card run 2026-10-25f: 7 rungs took 8 min) + the report
-        *" rdna3ladder=1 "*) m=$((m + 14)) ;;
-        *" rdna3ladder=2 "*) m=$((m + 32)) ;;
+        *" rdna3ladder=1 "*) m=$((m + 17)) ;;
+        *" rdna3ladder=2 "*) m=$((m + 35)) ;;
         *" rdna3ladder=3 "*) m=$((m + 30)) ;;
         # =4 (ladder-coh, DRIVER-PLAN N54): 10 rungs of ~95 s, one kernel coherence switch each, two hi-res looks + the report
         *" rdna3ladder=4 "*) m=$((m + 24)) ;;

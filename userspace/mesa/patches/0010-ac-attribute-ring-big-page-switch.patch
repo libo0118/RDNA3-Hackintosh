@@ -1,0 +1,43 @@
+From: RDNA3-Hackintosh
+Subject: [PATCH] ac: RADV_ATTR_RING_BIG_PAGE=0 turns the attribute ring's BIG_PAGE off
+
+Card run 2026-10-26g (DRIVER-PLAN N57): Terminal's glyphs break at draw
+time on the GPU, a contiguous run of exactly 18 instances of one draw gets
+garbage varyings while the draw's inputs are right on the GPU and the same
+SPIR-V is pixel-perfect under Linux RADV on this card. On GFX11 the
+vertex attributes reach the pixel shader through the attribute ring, a
+DISCARDABLE VRAM BO that ac_emit_cp_gfx11_ge_rings declares with
+SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE = discardable_allows_big_page: the SPI
+then translates the ring in 64 KiB pages, which holds only when the
+kernel placed the ring in contiguous VRAM and mapped it with matching
+PTE fragments. The macOS kernel driver's GPUVM writes 4 KiB PTEs without
+fragments by default (amdgpu always uses them).
+
+RADV_ATTR_RING_BIG_PAGE=0 clears discardable_allows_big_page (its only
+user is that register) and says so on stderr; the Metal plugin sets it
+from NVMTL_ATTR_RING_BIG_PAGE=0 (the ladder's `attrring` rung). Unset or
+any other value: upstream behaviour.
+---
+diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
+index 895e38b..4bda3e5 100644
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -1641,6 +1641,18 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
+    info->discardable_allows_big_page = info->gfx_level >= GFX10_3 && info->gfx_level < GFX12 &&
+                                        info->has_dedicated_vram;
+ 
++   /* RADV_ATTR_RING_BIG_PAGE=0: SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE off, the GFX11 attribute ring is translated in 4 KiB
++    * pages (an A/B for the macOS kernel driver's placement and PTEs of the ring BO). Unset or any other value: as upstream.
++    */
++   {
++      const char *big_page = debug_get_option("RADV_ATTR_RING_BIG_PAGE", NULL);
++      if (big_page && big_page[0] == '0' && big_page[1] == '\0') {
++         fprintf(stderr, "radv: RADV_ATTR_RING_BIG_PAGE=0: attribute ring BIG_PAGE off (was %d)\n",
++                 info->discardable_allows_big_page);
++         info->discardable_allows_big_page = false;
++      }
++   }
++
+    /* Compute the scratch WAVESIZE granularity in bytes. */
+    info->scratch_wavesize_granularity_shift = info->gfx_level >= GFX11 ? 8 : 10;
+    info->scratch_wavesize_granularity = BITFIELD_BIT(info->scratch_wavesize_granularity_shift);

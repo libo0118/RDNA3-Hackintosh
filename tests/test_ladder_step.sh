@@ -93,6 +93,7 @@ for p in $(echo "$pred" | sed -n 's/processID == \([0-9]*\)/\1/gp' | tr -cs '0-9
     if [ -n "$ev" ]; then
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: RADV_DEBUG=$radv RADV_PERFTEST=unset (NVMTL_RADV_DEBUG=unset, NVMTL_RADV_PERFTEST=unset)"
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab switches [1]:$sw"
+        case " $ev " in *" NVMTL_ATTR_RING_BIG_PAGE=0 "*) echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: RADV_ATTR_RING_BIG_PAGE=\"0\" (NVMTL_ATTR_RING_BIG_PAGE=\"0\") - the attribute ring's BIG_PAGE is OFF: this run does not show the default driver" ;; esac
     else
         echo "2026-10-25 12:00:01.000 Df  Chess[$p:1f] (RDNA3MTLDriver) NVMTL: vk: ab switches: none set (x)"
     fi
@@ -215,14 +216,15 @@ for SH in sh bash dash; do
     run 1 apps
     L=$T/apps/ladder.txt
     grep -q '^rc=0$' "$T/apps.out" || fail "$SH: variant 1 rc: $(tail -5 "$T/apps.out")"
-    [ "$(grep -c '^== rung ' "$L")" = 7 ] && [ "$(grep -c '^== end rung ' "$L")" = 7 ] || fail "$SH: not 7 rungs: $(grep '^== ' "$L")"
+    [ "$(grep -c '^== rung ' "$L")" = 8 ] && [ "$(grep -c '^== end rung ' "$L")" = 8 ] || fail "$SH: not 8 rungs: $(grep '^== ' "$L")"
     [ "$(grep '^== rung ' "$L" | sed 's/^== rung //' | tr '\n' ' ' | sed 's/ $//')" = "$RUNGS" ] || fail "$SH: the rungs ran in a different order: $(grep '^== rung ' "$L")"
-    [ "$(grep -c '^open -n -a ' "$T/stub.log")" = 14 ] || fail "$SH: expected 14 open calls: $(grep -c '^open' "$T/stub.log")"
+    [ "$(grep -c '^open -n -a ' "$T/stub.log")" = 16 ] || fail "$SH: expected 16 open calls: $(grep -c '^open' "$T/stub.log")"
     n=0
     for r in $RUNGS; do
         n=$((n + 1))
         case $r in
             baseline) want="" ;;
+            attrring) want="--env NVMTL_ATTR_RING_BIG_PAGE=0" ;;
             radv) want="--env NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears" ;;
             sync) want="--env NVMTL_ASYNC_COMMIT=0" ;;
             managed) want="--env NVMTL_MANAGED_CHECK=1 --env NVMTL_MANAGED_SNAPSHOT=1" ;;
@@ -248,13 +250,13 @@ for SH in sh bash dash; do
     [ "$(grep -c 'rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz' "$T/text.command")" = 1 ] && grep 'rdna3 ladder tick' "$T/text.command" | grep -q '\\033\[97m' || fail "$SH: the tick line is not in one fixed colour"
     ! grep 'rdna3 ladder tick' "$T/text.command" | grep -q 'i % 7' || fail "$SH: the tick line still takes its colour from the counter"
     grep -q 'ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 !#\$%%&' "$T/text.command" || fail "$SH: the mixed-glyph line is missing"
-    [ "$(grep -c '^drminfo --scanout-hires ' "$T/stub.log")" = 7 ] && [ "$(grep -c '^drminfo --scanout ' "$T/stub.log")" = 7 ] || fail "$SH: looks: $(grep -c drminfo "$T/stub.log")"
+    [ "$(grep -c '^drminfo --scanout-hires ' "$T/stub.log")" = 8 ] && [ "$(grep -c '^drminfo --scanout ' "$T/stub.log")" = 8 ] || fail "$SH: looks: $(grep -c drminfo "$T/stub.log")"
     grep -q '^log show --start ' "$T/stub.log" && grep -q 'processID == 1000' "$T/stub.log" || fail "$SH: the log slice is not by pid"
     # only the pids this run started are quit; the owner's Terminal (500) is not
     ! grep -q '^kill .*500' "$T/stub.log" || fail "$SH: the owner's Terminal was killed"
     # the quit needs no consent: SIGINT first (no System Events), and the evidence file says how every instance ended
     ! grep -q 'osascript\|System Events' "$T/stub.log" || fail "$SH: the quit goes through System Events/osascript"
-    [ "$(grep -c '^kill -INT ' "$T/stub.log")" = 7 ] && [ "$(grep -c '^quit: pid [0-9]* ended by SIGINT after ' "$L")" = 14 ] || fail "$SH: the quit by SIGINT: $(grep -c '^kill -INT' "$T/stub.log") kills, $(grep -c '^quit: pid' "$L") lines"
+    [ "$(grep -c '^kill -INT ' "$T/stub.log")" = 8 ] && [ "$(grep -c '^quit: pid [0-9]* ended by SIGINT after ' "$L")" = 16 ] || fail "$SH: the quit by SIGINT: $(grep -c '^kill -INT' "$T/stub.log") kills, $(grep -c '^quit: pid' "$L") lines"
     ! grep -q '^kill -TERM' "$T/stub.log" || fail "$SH: an instance that quit on SIGINT was TERMed too"
     [ "$(grep -n '^kill -INT' "$T/stub.log" | head -1 | cut -d: -f1)" -lt "$(grep -n '^log show' "$T/stub.log" | head -1 | cut -d: -f1)" ] || fail "$SH: the log slice is taken before the apps are asked to quit"
     grep -q '^pkill -f ' "$T/stub.log" || fail "$SH: the text script was not ended before the quit"
@@ -286,7 +288,7 @@ PYEOF
     run 2 ws
     L=$T/ws/ladder.txt
     grep -q '^rc=0$' "$T/ws.out" || fail "$SH: variant 2 rc: $(tail -5 "$T/ws.out")"
-    [ "$(grep -c '^== rung ' "$L")" = 9 ] && [ "$(grep '^== rung ' "$L" | tail -2 | sed 's/^== rung //' | tr '\n' ' ')" = "radv-ws paranoid-ws " ] || fail "$SH: variant 2 rungs: $(grep '^== rung ' "$L" | tr '\n' ' ')"
+    [ "$(grep -c '^== rung ' "$L")" = 10 ] && [ "$(grep '^== rung ' "$L" | tail -2 | sed 's/^== rung //' | tr '\n' ' ')" = "radv-ws paranoid-ws " ] || fail "$SH: variant 2 rungs: $(grep '^== rung ' "$L" | tr '\n' ' ')"
     cmp -s "$T/conf" "$T/conf.orig" || fail "$SH: rdna3mtl.conf is not as it was: $(cat "$T/conf")"
     cmp -s "$T/allow" "$T/allow.orig" || fail "$SH: the allow list is not as it was"
     [ ! -e "$T/conf.bak" ] && [ ! -e "$T/conf.bak.absent" ] && [ ! -e "$T/allow.bak" ] || fail "$SH: backups left behind"
@@ -303,9 +305,9 @@ PYEOF
     run 2 ws2
     grep -q '^rc=0$' "$T/ws2.out" || fail "$SH: no-conf run rc"
     [ ! -e "$T/conf" ] && [ ! -e "$T/conf.bak.absent" ] || fail "$SH: a conf the run made was left: $(cat "$T/conf" 2>/dev/null)"
-    # an interrupt in the middle of a rung: SIGTERM at the 8th hires look = the first WindowServer rung (variant 2), so that the conf is at stake
+    # an interrupt in the middle of a rung: SIGTERM at the 9th hires look = the first WindowServer rung (variant 2), so that the conf is at stake
     fresh
-    run 2 intr STOP_AT=8
+    run 2 intr STOP_AT=9
     grep -q '^rc=143$' "$T/intr.out" || fail "$SH: an interrupted run did not exit 143: $(tail -3 "$T/intr.out")"
     cmp -s "$T/conf" "$T/conf.orig" || fail "$SH: after an interrupt rdna3mtl.conf is not as it was: $(cat "$T/conf")"
     cmp -s "$T/allow" "$T/allow.orig" && [ ! -e "$T/conf.bak" ] || fail "$SH: after an interrupt: allow list / backups"
@@ -340,10 +342,10 @@ PYEOF
     fresh
     run 1 stubborn IGNORE_INT=1
     grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1001 1000$' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores SIGINT is not TERMed"
-    [ "$(grep -c '^quit: pid [0-9]* ended by SIGTERM after ' "$T/stubborn/ladder.txt")" = 14 ] && ! grep -q 'ended by SIGINT' "$T/stubborn/ladder.txt" || fail "$SH: how the instances ended (TERM): $(grep '^quit' "$T/stubborn/ladder.txt" | sort | uniq -c | head -3)"
+    [ "$(grep -c '^quit: pid [0-9]* ended by SIGTERM after ' "$T/stubborn/ladder.txt")" = 16 ] && ! grep -q 'ended by SIGINT' "$T/stubborn/ladder.txt" || fail "$SH: how the instances ended (TERM): $(grep '^quit' "$T/stubborn/ladder.txt" | sort | uniq -c | head -3)"
     fresh
     run 1 killed IGNORE_INT=1 IGNORE_TERM=1
-    [ "$(grep -c '^quit: pid [0-9]* ended by SIGKILL after ' "$T/killed/ladder.txt")" = 14 ] && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores INT and TERM is not KILLed: $(grep '^quit' "$T/killed/ladder.txt" | head -3)"
+    [ "$(grep -c '^quit: pid [0-9]* ended by SIGKILL after ' "$T/killed/ladder.txt")" = 16 ] && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores INT and TERM is not KILLed: $(grep '^quit' "$T/killed/ladder.txt" | head -3)"
     fresh
     run 1 immortal IGNORE_INT=1 IGNORE_TERM=1 IGNORE_KILL=1
     grep -q '^quit: pid(s) .* SURVIVED SIGKILL$' "$T/immortal/ladder.txt" || fail "$SH: an instance that survives SIGKILL is not reported: $(grep '^quit' "$T/immortal/ladder.txt" | head -3)"
@@ -357,7 +359,7 @@ def quit_row(path):
 imm, kil, ok, stub = (quit_row(a) for a in sys.argv[1:5])
 assert imm and imm[0][0] == "WARN" and "STILL ALIVE after SIGKILL" in imm[0][2], imm
 assert kil and kil[0][0] == "INFO" and "ended by SIGKILL" in kil[0][2], kil
-assert ok and ok[0][0] == "INFO" and "14 instance(s) ended by SIGINT" in ok[0][2], ok
+assert ok and ok[0][0] == "INFO" and "16 instance(s) ended by SIGINT" in ok[0][2], ok
 assert stub and "ended by SIGTERM" in stub[0][2], stub
 PYEOF
     # a log slice over 600000 bytes keeps its END (the SUMMARY lines) and says it was truncated
@@ -385,7 +387,7 @@ PYEOF
     run 3 hup3 STOP_AT=3 STOP_SIG=HUP
     grep -q '^rc=129$' "$T/hup3.out" && grep -q '^ABORTED by SIGHUP at rung ' "$T/hup3/ladder.txt" || fail "$SH: SIGHUP in the glyph hunt: $(tail -3 "$T/hup3.out")"
     fresh
-    run 2 hup2 STOP_AT=8 STOP_SIG=HUP
+    run 2 hup2 STOP_AT=9 STOP_SIG=HUP
     grep -q '^rc=0$' "$T/hup2.out" && ! grep -q '^ABORTED' "$T/hup2/ladder.txt" || fail "$SH: the WindowServer variant must go on after SIGHUP (the restart closes its Terminal): $(tail -3 "$T/hup2.out")"
     # the text script is made in a directory of mktemp's and removed at the end (no fixed name in /Users/Shared)
     fresh
@@ -485,12 +487,12 @@ PYEOF
     ! grep -q '^open' "$T/stub.log" && cmp -s "$T/conf" "$T/conf.orig" || fail "$SH: nobody logged in, yet something ran"
     fresh
     run 1 noapp FAIL_APP=Chess
-    grep -q '^WARN: an app did not start' "$T/noapp/ladder.txt" && [ "$(grep -c '^== end rung ' "$T/noapp/ladder.txt")" = 7 ] || fail "$SH: an app that did not start is not reported: $(grep -c WARN "$T/noapp/ladder.txt")"
-    printf 'n\ny\ny\n-\n\nn\ny\n' > "$T/keys"
+    grep -q '^WARN: an app did not start' "$T/noapp/ladder.txt" && [ "$(grep -c '^== end rung ' "$T/noapp/ladder.txt")" = 8 ] || fail "$SH: an app that did not start is not reported: $(grep -c WARN "$T/noapp/ladder.txt")"
+    printf 'n\nn\ny\ny\n-\n\nn\ny\n' > "$T/keys"
     fresh
     run 1 tty BISECT_KEYFILE="$T/keys"
     grep -q '^mode: tty$' "$T/tty/ladder.txt" || fail "$SH: tty mode"
-    [ "$(grep '^answer: ' "$T/tty/ladder.txt" | sed 's/^answer: //' | tr '\n' ' ')" = "n y y - - n y " ] || fail "$SH: the owner's answers: $(grep '^answer: ' "$T/tty/ladder.txt" | tr '\n' ' ')"
+    [ "$(grep '^answer: ' "$T/tty/ladder.txt" | sed 's/^answer: //' | tr '\n' ' ')" = "n n y y - - n y " ] || fail "$SH: the owner's answers: $(grep '^answer: ' "$T/tty/ladder.txt" | tr '\n' ' ')"
     python3 -I - "$T/tty/ladder.txt" <<'PYEOF' || fail "$SH: ladder verdicts"
 import sys, os
 sys.path.insert(0, os.environ["ROOT"] + "/tools")

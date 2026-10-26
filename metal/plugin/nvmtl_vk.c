@@ -762,6 +762,7 @@ static void nvmtl_vkmsg_arm(void)
  * are not. Only RADV's own flag names are taken (nvmtl_ab_switch.h), at most 200 characters; a value that is refused is logged with the reason.
  * The result is always logged, quoted: a debug profile left in rdna3mtl.conf must be visible in the report. */
 static char g_radv_saved[2][NVMTL_RADV_FLAGS_MAX * 2 + 8]; static int g_radv_had[2], g_radv_touched[2];
+static char g_attr_saved[64]; static int g_attr_had, g_attr_touched;   /* RADV_ATTR_RING_BIG_PAGE as it was (N57) */
 static const struct { const char *knob, *var; } g_radv_k[2] = { { "NVMTL_RADV_DEBUG", "RADV_DEBUG" }, { "NVMTL_RADV_PERFTEST", "RADV_PERFTEST" } };
 static void nvmtl_radv_env(void)
 {
@@ -787,9 +788,30 @@ static void nvmtl_radv_env(void)
     const int on = (getenv("RADV_DEBUG") && *getenv("RADV_DEBUG")) || (getenv("RADV_PERFTEST") && *getenv("RADV_PERFTEST"));
     nvlog("vk: RADV_DEBUG=%s RADV_PERFTEST=%s (NVMTL_RADV_DEBUG=%s, NVMTL_RADV_PERFTEST=%s)%s", shown[0], shown[1], knob[0], knob[1],
           on ? " - A DEBUG PROFILE IS ON: this run does not show the default driver" : "");
+    /* DRIVER-PLAN N57: NVMTL_ATTR_RING_BIG_PAGE=0 -> RADV_ATTR_RING_BIG_PAGE=0 (userspace/mesa/patches/0010, read by ac_query_gpu_info at
+     * vkCreateInstance / vkEnumeratePhysicalDevices): the GFX11 attribute ring without SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE (the ladder's
+     * `attrring` rung). Put back with the RADV flags. Always logged, so the triage sees what RADV got. */
+    {
+        const char *kv = getenv("NVMTL_ATTR_RING_BIG_PAGE"), *old = getenv("RADV_ATTR_RING_BIG_PAGE");
+        char why[96], q[160], qk[160];
+        const char *want = nvmtl_attr_ring_value(kv, why, sizeof why);
+        g_attr_had = old != NULL; g_attr_touched = 0;
+        if (old) snprintf(g_attr_saved, sizeof g_attr_saved, "%s", old);
+        nvmtl_ab_quote(qk, sizeof qk, kv);
+        if (why[0]) nvlog("vk: NVMTL_ATTR_RING_BIG_PAGE=%s REJECTED: %s - RADV_ATTR_RING_BIG_PAGE unchanged", qk, why);
+        if (want && (!old || strcmp(old, want))) { setenv("RADV_ATTR_RING_BIG_PAGE", want, 1); g_attr_touched = 1; }
+        const char *now = getenv("RADV_ATTR_RING_BIG_PAGE");
+        nvmtl_ab_quote(q, sizeof q, now);
+        nvlog("vk: RADV_ATTR_RING_BIG_PAGE=%s (NVMTL_ATTR_RING_BIG_PAGE=%s)%s", q, qk,
+              (now && !strcmp(now, "0")) ? " - the attribute ring's BIG_PAGE is OFF: this run does not show the default driver" : "");
+    }
 }
 static void nvmtl_radv_env_restore(void)
 {
+    if (g_attr_touched) {
+        if (g_attr_had) setenv("RADV_ATTR_RING_BIG_PAGE", g_attr_saved, 1); else unsetenv("RADV_ATTR_RING_BIG_PAGE");
+        g_attr_touched = 0;
+    }
     for (int i = 0; i < 2; i++) {
         if (!g_radv_touched[i]) continue;
         if (g_radv_had[i]) setenv(g_radv_k[i].var, g_radv_saved[i], 1); else unsetenv(g_radv_k[i].var);

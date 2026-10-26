@@ -289,6 +289,8 @@ private:
     /* rdna3amdgpu=1: amdgpu's own sequence where the verified default
      * differs (rdna3_dev.amdgpu_exact); ladder step amdgpu */
     bool             fAmdgpuExact = false;
+    void             discardableMapNote(const rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size);
+    uint32_t         fDiscardMapLogs = 0;   /* GEM_VA of DISCARDABLE BOs (the attribute ring, DRIVER-PLAN N57) */
     /* rdna3amdgpu=1: gfx_v11_0_sw_init's queue topology (ring names, KCQ
      * priority), the CP fault IVs of gfx_v11_0_late_init and
      * drm_sched_fault: a ring whose job faulted (bit AMDGPU_HW_IP_GFX /

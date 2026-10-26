@@ -81,7 +81,7 @@ accelerator and framebuffer); test `tests/test_bootargs.c`.
 | `psp13.c/.h` | PSP 13.0.x: bootloader, sOS, TMR, ring, firmware load | `psp13_hw_init` |
 | `smu13.c/.h` | SMU 13.0.10 (PMFW): mailbox, PPTable, features, metrics | `smu13_send_msg`, `smu13_pm_init`, `smu13_read_metrics` |
 | `gmc11.c/.h`, `mmhub302.c` | GMC 11, GFXHUB 3.0.3 + MMHUB GART, VM faults | `gmc11_init`, `gmc11_gart_map`, `gmc11_gart_tlb_flush`, `gmc11_decode_vm_fault` |
-| `gpuvm.c/.h` | Per-process GPU page tables (amdgpu_vm / vm_pt) | `gpuvm_vm_init`, `gpuvm_map`, `gpuvm_unmap`, `gpuvm_lookup` |
+| `gpuvm.c/.h` | Per-process GPU page tables (amdgpu_vm / vm_pt) | `gpuvm_vm_init`, `gpuvm_map`, `gpuvm_unmap`, `gpuvm_lookup`, `gpuvm_map_fragment` (the PTE fragment a VRAM mapping gets, N57) |
 | `ih60.c/.h` | IH 6.0 interrupt ring and IV decode | `ih60_init`, `ih60_process`, `ih60_decode_iv` |
 | `sdma60.c/.h` | SDMA 6.0 ring, copy / fill / fence packets, soft reset | `sdma60_start`, `sdma60_commit`, `sdma60_emit_copy`, `sdma60_test_ring` |
 | `gfx11.c/.h`, `gfx11_info.c/.h` | GFX 11: RLC/RS64, KGQ/KCQ/KIQ, MES, reset, ring tests, CU/RB info after harvest | `gfx11_hw_init`, `gfx11_kgq_start`, `gfx11_kiq_start`, `gfx11_mes_*`, `gfx11_soft_reset`, `gfx11_ring_test_ib` |
@@ -108,6 +108,7 @@ with one host test each (`tests/test_<name>.c`):
 |---|---|
 | `rdna3_bootargs.h` | boot-arg defaults |
 | `rdna3_coh.h` | N54 coherence switches (`debug.rdna3_coh_<name>`, mask, all) |
+| `rdna3_attr_ring.h` | N57: does a DISCARDABLE BO (the GFX11 attribute ring) hold what SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE assumes (VRAM, 64 KiB aligned and congruent, PTE fragment >= 4); the kext's `GEM DISCARDABLE` / `GEM_VA DISCARDABLE` lines |
 | `rdna3_gpu_busy.h`, `rdna3_gpu_util.h` | GPU busy time per ring / process; Activity Monitor utilisation window |
 | `rdna3_bo_map.h`, `rdna3_vram_place.h`, `rdna3_vram_park.h`, `rdna3_surf_pending.h` | CPU mapping holds its BO (N47); where VRAM goes; surface VRAM kept across dealloc/alloc (N41); WindowServer's pending GPU writes |
 | `rdna3_a3_display.h`, `rdna3_swap_front.h`, `rdna3_swap_copy.h`, `rdna3_write_gen.h`, `rdna3_flip_latch.h`, `rdna3_flip_queue.h` | which surfaces A3 keeps out; swap buffer / copy forward source; swap as copy; write generation; flip latch; present queue (N38) |
@@ -164,7 +165,7 @@ Makefiles must list the same files as `tools/triage_reports.py` (`*_HASH_FILES`;
 `uapi/rdna3_drm.c` in-process: host tests, `tools/radv_host.sh`), `override/libdrm_macros.h`. Real
 libdrm sources are in `third_party/libdrm`. Programs: `rdna3_drminfo` (UAPI acceptance, `--dma-test`,
 `--gfx-test`, `--scanout[-hires]`, `--vcn-test`), `rdna3_modetest`, `rdna3_pmctl`, `rdna3_vktest`
-(RADV smoke test), `mtlprobe` (Metal compute/render). RADV build + patches: `userspace/mesa/`.
+(RADV smoke test), `mtlprobe` (Metal compute/render). RADV build + patches: `userspace/mesa/` (`patches/0010`: `RADV_ATTR_RING_BIG_PAGE=0`, N57).
 
 ### 2.7 Translator (`metal/translator/`)
 
@@ -241,7 +242,7 @@ Report pipeline:
 | Ladder variants | 1 `ladder` (`LADDER_RUNGS`: app rungs), 2 `ladder-ws` (+ WindowServer rungs), 3 `ladder-glyphs` (plugin knobs, N50), 4 `ladder-coh` (kernel coherence sysctls, N54). Rung -> knob: `ladder_rung_env` (`NAME=value` env or `sysctl:NAME=VALUE`). Looks: `rdna3_drminfo --scanout[-hires]`. |
 | VM host | `tools/vm/rdna3vm` (bash, 2.4k lines): `check`, `prepare`, `window`, `step N`, `args "BOOT-ARGS"`, `queue`, `approve` (once per framebuffer build), `reports`, `result` (all of a run in `~/Downloads/rdna3-result.tar.xz` + per-test PASS/FAIL, `--show`), `update` (git pull + newest CI artifact + prepare), `cts`. Steps and boot-args: `tools/ladder-steps.txt` (`@smbios=`, `@gpubus=` host-only tokens). Helpers: `vmtool.py` (OpenCore plist edits), `queue_journal.py`, `ocpatchsim.py`. |
 | CPU mode | `CPU_MODEL=host` in the VM config (N53): QEMU `-cpu host` on the Ryzen; `vmtool.py plist --amd-cpu CORES` adds the AMD Vanilla patches (`tools/vm/data/amd_vanilla-*.plist`); `CPUS`, `CPU_THREADS`; tests `test_vm_amd_cpu.sh`, `test_ocpatchsim.py`. |
-| Triage | `tools/triage_reports.py` (5.7k lines; `report()` builds rows `(LEVEL, name, text)`; `read_member(tar, "NN-...")` reads a member). Helpers it imports: `triage_tar.py` (archive read once), `triage_par.py` (`pmap`, parallel looks), `triage_glyphs.py` (N50 rows, ladder rows), `triage_n48.py` (N48/N52 plugin copy rows), `triage_coherence.py` (N54 rows, `coh_ladder_rows`), `triage_bisect.py`, `triage_bootwatch.py` (boot watchdog files), `glyph_verdict.py` (automatic glyph verdict of looks), `lookimg.py` (PPM/PNG looks), `plugin_trace.py`, `rdna3_trace.py`, `capture_decode.py`, `result_checklist.py` (turns triage text into PASS/FAIL lines: `classify()` rules). |
+| Triage | `tools/triage_reports.py` (5.7k lines; `report()` builds rows `(LEVEL, name, text)`; `read_member(tar, "NN-...")` reads a member). Helpers it imports: `triage_tar.py` (archive read once), `triage_par.py` (`pmap`, parallel looks), `triage_glyphs.py` (N50 rows, ladder rows), `triage_n48.py` (N48/N52 plugin copy rows), `triage_coherence.py` (N54 rows, `coh_ladder_rows`), `triage_attr_ring.py` (N57 `attribute ring` / `attr ring switch` rows), `triage_bisect.py`, `triage_bootwatch.py` (boot watchdog files), `glyph_verdict.py` (automatic glyph verdict of looks), `lookimg.py` (PPM/PNG looks), `plugin_trace.py`, `rdna3_trace.py`, `capture_decode.py`, `result_checklist.py` (turns triage text into PASS/FAIL lines: `classify()` rules). |
 | Procedure | `docs/AFTER-TESTS.md` (sections per step and per symptom: N42 VBL, N48 copies, N50 ladder, N51 surf-in, N54 coherence, N55 capture, plugin frame trace) |
 
 ## 4. Tests and CI
@@ -253,7 +254,7 @@ firmware checks). It runs, by area:
 |---|---|
 | Hardware model | `sim_navi32` (Navi 32 register model: PSP/SMU/GMC/IH/SDMA/GFX/DCN; `tests/sim_*.inc`), `test_discovery`, `test_fw`, `test_range_alloc` |
 | UAPI / libdrm | `test_uapi`, `test_bo_map`, `test_bo_map_race`, `test_libdrm_amdgpu` (real libdrm over `backend_loopback`), `rdna3_drminfo_host` (`--scanout`, DMA/GFX tests) |
-| Accelerator / display logic | `test_a3_display`, `test_swap_front`, `test_swap_copy`, `test_write_gen`, `test_flip_latch`, `test_flip_queue`, `test_vbl_irq`, `test_tcall`, `test_gpu_busy`, `test_vram_park`, `test_vram_place`, `test_surf_pending`, `test_trace`, `test_coh`, `test_fb_policy`, `test_bootargs`, `test_gamma_judge`, `test_agdc_k5`, `test_agdc_n48` |
+| Accelerator / display logic | `test_a3_display`, `test_swap_front`, `test_attr_ring`, `test_swap_copy`, `test_write_gen`, `test_flip_latch`, `test_flip_queue`, `test_vbl_irq`, `test_tcall`, `test_gpu_busy`, `test_vram_park`, `test_vram_place`, `test_surf_pending`, `test_trace`, `test_coh`, `test_fb_policy`, `test_bootargs`, `test_gamma_judge`, `test_agdc_k5`, `test_agdc_n48` |
 | Metal plugin helpers | `test_mtl_allow`, `test_linear_pitch`, `test_gpu_time_queue`, `test_ab_switch`, `test_surf_census`, `test_surfin_cache`, `test_copy_pack`, `test_capture` (+ `tools/capture_decode.py --check`), `test_msupload`, `test_msdl`, `test_spirv_fbfetch`, `test_fbfetch_plan` |
 | Python / source checks | `test_accel_hash_parity.py`, `test_fb_agdc_hash_parity.py`, `test_trace_parity.py`, `test_accel_slots.py` (`tools/check_accel_slots.py`), `test_accel_locks.py`, `test_kext_kpi_versions.py`, `test_kmutil_kpi_guard.py` |
 | Triage / tools | `test_triage_*.py` / `.sh` (fixtures in `reports/<date>` and `tests/trace_fixture.py`), `test_bootwatch.sh`, `test_glyph_verdict.py`, `test_lookimg.py`, `test_plugin_trace.sh`, `test_result_checklist.sh`, `test_bisect_step.sh`, `test_ladder_step.sh`, `test_play_step.sh`, `test_approve_gate.sh`, `test_vm_*.sh`, `test_forgejo_update.sh` |

@@ -263,6 +263,7 @@ private:
     uint32_t      fVramRefusalLogs = 0;
     uint32_t      fVramHiClearFails = 0; /* a no-CPU BO could not be cleared and went to GTT */
     uint32_t      fVramLargeLogs = 0;
+    uint32_t      fDiscardLogs = 0;      /* GEM BOs created with AMDGPU_GEM_CREATE_DISCARDABLE (the attribute ring, DRIVER-PLAN N57) */
     bool          fVramSysctl = false;
     /* the report (fDrmLock held): "key=value ..." for debug.rdna3_vram, the
      * summary line and the line at a refusal */
@@ -306,6 +307,7 @@ private:
     static int    drmTxState(void *ctx, struct rd_xnu_txstate *t);    /* RDNA3Display.cpp */
     static int    drmVmFaultInfo(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
     int           gttAlloc(rdna3_bo *bo);
+    void          discardableNote(const rdna3_bo *bo, const char *where);   /* DRIVER-PLAN N57 log line */
     int           gttWire(rdna3_bo *bo, IOMemoryDescriptor *md, bool prepared);
     static void   gttFree(RDNA3Gtt *g);
     static void   drmBoFree(void *ctx, rdna3_bo *bo);

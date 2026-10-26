@@ -31,6 +31,7 @@ _WIT = re.compile(r"^vk: keep witness (\d+) landed only (\d+) us AFTER the flush
 _POOL_OFF = re.compile(r"^vk: pool reuse OFF")
 _MG_ON = re.compile(r"^managed: (?:shadow check ON|upload snapshot ON)")
 _DRIVER = re.compile(r"^vk: driver opened directly")
+_ATTR_OFF = re.compile(r'^vk: RADV_ATTR_RING_BIG_PAGE="0" ')   # DRIVER-PLAN N57, metal/plugin/nvmtl_vk.c nvmtl_radv_env
 _LAYOUT_NAMES = ("UNDEFINED", "GENERAL", "COLOR", "DS", "DSRO", "SRO", "SRC", "DST", "PREINIT", "other")
 
 
@@ -404,7 +405,7 @@ def n50_plugin_rows(text=""):
 # the ladder: tools/vm/macos/autoreport.sh ladder_run writes ladder.txt (one block per rung: what it ran with, the looks, the answer) and <rung>.log
 # (the plugin log slice of the rung's processes); collect.sh packs them as 41-ladder.txt and 41-ladder-<rung>.log. The rung list is the same as
 # autoreport.sh's LADDER_RUNGS / LADDER_WS_RUNGS (tests/test_ladder_step.sh compares them)
-LADDER_RUNGS = ("baseline", "radv", "sync", "managed", "alignguard", "paranoid", "loadbarrier")
+LADDER_RUNGS = ("baseline", "attrring", "radv", "sync", "managed", "alignguard", "paranoid", "loadbarrier")
 LADDER_WS_RUNGS = ("radv-ws", "paranoid-ws")
 # variant 3 (`rdna3vm step ladder-glyphs`): the glyph hunt (the same list in autoreport.sh's LADDER_GLYPHS_RUNGS; the test compares). The knob of each rung (tests compare these
 # with autoreport.sh's table too); `paranoid` is the NEGATIVE control (card run 2026-10-25f: it does not clean the text)
@@ -695,6 +696,11 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
                 problems_.append("Terminal did not start in this rung (pids: %s): the rung proves nothing" % r["pids"].strip()[:60])
             elif not any(k[1] == tpid for k in procs):
                 problems_.append("Terminal pid %d logged nothing (no `vk: ab switches` line) in the slice, the rung proves nothing" % tpid)
+        if name == "attrring" and procs:   # DRIVER-PLAN N57: the knob must have reached RADV, not only the plugin
+            att = {(proc, pid) for proc, pid, _t, msg in _lines(r.get("log", "")) if _ATTR_OFF.match(msg)}
+            notyet = sorted({k[0] for k in procs if k not in att})
+            if notyet:
+                problems_.append("RADV_ATTR_RING_BIG_PAGE=0 is not logged by %s (`vk: RADV_ATTR_RING_BIG_PAGE=\"0\"`): a plugin older than DRIVER-PLAN N57, the attribute ring kept its BIG_PAGE" % ", ".join(notyet))
         have_sum = ab_summary_keys(r.get("log", ""))
         nosum = sorted({k[0] for k in procs if k not in have_sum})
         if nosum:
@@ -758,6 +764,9 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
             clean = [n for n in clean if n == "baseline" or (engaged.get(n) or (None,))[0] is True]
         if gv_.get("baseline") == "broken" and clean:
             rows.append(("INFO", "ladder glyphs", "the baseline glyphs were BROKEN and CLEAN with: %s (tools/glyph_verdict.py: identical tick lines are drawn identically)" % ", ".join(clean)))
+            if "attrring" in clean and variant in (1, 2):
+                rows.append(("INFO", "ladder glyphs attrring", "CLEAN without the attribute ring's BIG_PAGE while the baseline was BROKEN: the GFX11 attribute ring's placement / PTE "
+                             "fragments in the kernel are the cause - read the `attribute ring` row, fix the kernel side (DRIVER-PLAN N57)"))
         elif gv_.get("baseline") == "broken":
             tail = ""
             if variant == 3:
