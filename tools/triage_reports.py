@@ -5326,6 +5326,19 @@ def main():
         print("   %s %-20s %s" % (lv, "STALE KEXTS" if lv == "FAIL" else "stale check", t))
         if lv == "FAIL":
             STALE_KEXTS_SHOWN = failed = True
+    # the boot watchdog's files (tools/triage_bootwatch.py): WindowServer never opened the GPU, with its stack, also when macOS
+    # never sent a report
+    try:
+        from triage_bootwatch import bootwatch_rows
+        for lv, label, t, detail in bootwatch_rows(d, d0, os.path.join(d0, "rdna3-result")):
+            print("   %s %s: %s" % (lv, label, t))
+            for l in detail:
+                print(l)
+            failed = failed or lv == "FAIL"
+    except ImportError:
+        print("   WARN BOOTWATCH: tools/triage_bootwatch.py is missing next to triage_reports.py: the boot watchdog's files were NOT read")
+    except Exception as e_:   # never silence: the rest of the triage still runs
+        print("   WARN BOOTWATCH: tools/triage_bootwatch.py FAILED (%s: %s): the boot watchdog's files were NOT read" % (type(e_).__name__, e_))
     reports = glob.glob(os.path.join(d, "rdna3-report-*.tar.gz"))
     # a tests file whose archive never came (collect.sh killed): its results
     # still count, under the archive's would-be name

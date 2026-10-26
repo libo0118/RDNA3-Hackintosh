@@ -1505,6 +1505,170 @@ early_window() {
         touch /tmp/rdna3-progress.win
 }
 
+# BOOTWATCH-BEGIN
+# The boot watchdog (card runs 2026-10-26e/f: the kext and the AGDC came up, WindowServer never opened the accelerator, the
+# screen stayed black and the owner killed the VM - macOS's unified log of that boot went with it). Started in the background
+# at the very start of a VM boot (bootwatch_start below); a plain `sh` loop that never blocks the boot path:
+#  - every BW_POLL s it asks "did WindowServer open the GPU?": a WindowServer IOUserClientCreator under RDNA3Accelerator or
+#    RDNA3Accel in the ioreg (IOKit stamps every user client "pid N, <process>"; no kext log needed), or has anybody logged in?
+#    Either one ends the watch (a "recovered" file when it had already fired).
+#  - BW_N s (boot-arg rdna3bootwatch=N, default 75, 0 = off) after the start, with the accelerator in the ioreg (a boot
+#    below the accelerator's level has nothing to wait for), it collects bootwatch-<stamp>-<n>.txt: ps of WindowServer /
+#    loginwindow, the IOAccel / RDNA3 ioreg essentials, kextstat, the plugin conf, `sample WindowServer 5` (spindump when
+#    sample is missing or gives nothing), `log show --last 3m` of WindowServer / loginwindow / RDNA3 / NVMTL / AGPM, the
+#    kernel's own dmesg. The file goes up to the host share after every section (the VM may be killed at any moment) and
+#    waits in /var/db/rdna3-pending-* for the next boot when the host did not answer. Again every BW_REPEAT s while WindowServer
+#    has no GPU client, at most BW_MAXN times and BW_MAXSEC s. `sync` after every round so the unified log persists.
+#  - missing tools are skipped with a line in the file; every failure is a line in $BW_LOG.
+# tools/triage_bootwatch.py reads the files; docs/AFTER-TESTS.md "WindowServer never opened the GPU".
+BW_PIDFILE=/var/run/rdna3-bootwatch.pid
+BW_LOG=/var/db/rdna3-bootwatch.log
+BW_PEND=/var/db/rdna3-pending-
+BW_POLL=${BW_POLL:-5}
+BW_REPEAT=${BW_REPEAT:-60}
+BW_MAXN=${BW_MAXN:-30}
+BW_MAXSEC=${BW_MAXSEC:-2400}
+# with_limit above, for use inside $( ) and pipes: its timer's stdout is /dev/null, so the sleep it leaves behind does not hold the
+# pipe open until it ends (a `with_limit 20 ioreg | grep -q` would wait 20 s for EOF)
+bw_limit() {
+    _t=$1; shift
+    "$@" & _p=$!
+    ( sleep "$_t"; kill -9 "$_p" ) >/dev/null 2>&1 </dev/null & _w=$!
+    wait "$_p"; _r=$?
+    pkill -P "$_w" 2>/dev/null; kill "$_w" 2>/dev/null
+    return $_r
+}
+bw_console_user() { stat -f %Su /dev/console 2>/dev/null; }
+bw_uptime() {   # seconds since the kernel booted (0 when unknown)
+    _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9][0-9]*\).*/\1/p')
+    [ -n "$_bt" ] && echo $(( $(date +%s) - _bt )) || echo 0
+}
+bw_acc_present() { bw_limit 20 ioreg -r -c RDNA3Accelerator -d 1 2>/dev/null | grep -q RDNA3Accelerator; }
+bw_ws_gpu() {   # 0: WindowServer has a user client of the accelerator or the core
+    for _c in RDNA3Accelerator RDNA3Accel; do
+        bw_limit 20 ioreg -l -w0 -r -c "$_c" 2>/dev/null | grep -q 'IOUserClientCreator.*WindowServer' && return 0
+    done
+    return 1
+}
+bw_state() {   # login | gpu | wait
+    case "$(bw_console_user)" in ""|root|loginwindow) ;; *) echo login; return ;; esac
+    if bw_ws_gpu; then echo gpu; else echo wait; fi
+}
+bw_put() {   # bw_put <pending file>: to the host under its name without the pending prefix
+    curl -sf --connect-timeout 5 --max-time 30 -T "$1" "$HOST/reports/${1#$BW_PEND}" >/dev/null 2>&1
+}
+bw_collect() {   # bw_collect <n> <elapsed s>: the evidence of one round, uploaded after every section
+    _o=${BW_PEND}bootwatch-$BW_STAMP-$1.txt
+    ( umask 077; : > "$_o" ) 2>/dev/null || { echo "$(date +%T) cannot write $_o"; return 1; }
+    {
+        echo "BOOTWATCH: n=$1 trigger_s=$BW_N after_s=$2 uptime_s=$(bw_uptime) console_user=$(bw_console_user) stamp=$BW_STAMP"
+        echo "date: $(date)"
+        echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"
+        echo "== ps (WindowServer, loginwindow, AGPM)"
+        _ps=$(ps -axo pid,ppid,state,%cpu,etime,wchan,command 2>/dev/null) || _ps=$(ps -axo pid,ppid,state,%cpu,etime,command 2>&1)
+        echo "$_ps" | sed -n 1p
+        echo "$_ps" | grep -E 'WindowServer|loginwindow|AGPM|agpm' | grep -v grep
+        echo "$_ps" | grep -qE 'WindowServer' || echo "WindowServer: NOT RUNNING"
+        echo "== launchctl list (WindowServer, loginwindow, rdna3)"
+        launchctl list 2>&1 | grep -iE 'windowserver|loginwindow|rdna3' | head -20
+        echo "== ioreg: RDNA3Accelerator / RDNA3Accel essentials"
+        for _c in RDNA3Accelerator RDNA3Accel; do
+            echo "-- $_c"
+            bw_limit 25 ioreg -l -w0 -r -c "$_c" 2>&1 |
+                grep -E '\+-o|IOUserClientCreator|MetalPlugin|IOGLBundleName|IOAccelRevision|"RDNA3,|IOAccelCounter' |
+                grep -v -E 'DiscoveryBinary|,EDID"' | cut -c1-240 | head -120
+        done
+        echo "== kextstat (RDNA3, AGDC, AGPM)"
+        if command -v kextstat >/dev/null 2>&1; then bw_limit 20 kextstat 2>&1 | grep -iE 'rdna3|agdc|agpm|AppleGraphics' | cut -c1-200
+        else echo "kextstat: not installed"; fi
+        echo "== plugin conf (/Library/GPUBundles/rdna3mtl/rdna3mtl.conf) and the allow list"
+        cat /Library/GPUBundles/rdna3mtl/rdna3mtl.conf 2>&1 | head -60
+        echo "-- allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ')"
+        echo "== dmesg (RDNA3, AGDC, AGPM; the last 120)"
+        dmesg 2>&1 | grep -E 'RDNA3|AGDC|AGPM|IOAccel' | tail -n 120 | cut -c1-300
+        echo "== WindowServer crash reports on disk"
+        ls -lt /Library/Logs/DiagnosticReports 2>/dev/null | grep -iE 'WindowServer|loginwindow' | head -5
+    } >> "$_o" 2>&1
+    bw_put "$_o"
+    {
+        echo "== sample WindowServer"
+        _wp=$(pgrep -x WindowServer 2>/dev/null | head -n 1)
+        if [ -z "$_wp" ]; then echo "WindowServer: NOT RUNNING"
+        else
+            _sf=$(mktemp /tmp/rdna3-bw.XXXXXX 2>/dev/null) || _sf=/tmp/rdna3-bw.$$
+            if command -v sample >/dev/null 2>&1; then
+                bw_limit 45 sample "$_wp" 5 -file "$_sf" >/dev/null 2>&1
+                echo "sample $_wp 5: exit $?"
+            else echo "sample: not installed"; fi
+            if [ -s "$_sf" ]; then head -c 400000 "$_sf"
+            elif command -v spindump >/dev/null 2>&1; then
+                echo "== spindump WindowServer (sample gave nothing)"
+                : > "$_sf"
+                bw_limit 60 spindump "$_wp" 5 -onlyTarget -o "$_sf" >/dev/null 2>&1
+                echo "spindump $_wp 5: exit $?"
+                head -c 400000 "$_sf"
+            else echo "no sample output and no spindump"; fi
+            rm -f "$_sf"
+        fi
+    } >> "$_o" 2>&1
+    bw_put "$_o"
+    sync   # the unified log reaches the disk
+    {
+        echo "== log show --last 3m (WindowServer, loginwindow, RDNA3, NVMTL, AGPM, AGDC)"
+        if command -v log >/dev/null 2>&1; then
+            bw_limit 90 log show --last 3m --style compact --predicate \
+                'process == "WindowServer" OR process == "loginwindow" OR eventMessage CONTAINS[c] "RDNA3" OR eventMessage CONTAINS[c] "NVMTL" OR eventMessage CONTAINS[c] "AGPM" OR eventMessage CONTAINS[c] "AGDC"' \
+                2>&1 | tail -n 600 | cut -c1-400
+        else echo "log: not installed"; fi
+        echo "BOOTWATCH-DONE: n=$1"
+    } >> "$_o" 2>&1
+    sync
+    if bw_put "$_o"; then rm -f "$_o"; else echo "$(date +%T) upload of ${_o#$BW_PEND} failed: kept for the next boot"; fi
+}
+bw_final() {   # bw_final <n> <state> <elapsed s> <snapshots>: how the watch ended
+    _o=${BW_PEND}bootwatch-$BW_STAMP-$1.txt
+    ( umask 077; echo "BOOTWATCH-END: state=$2 after_s=$3 uptime_s=$(bw_uptime) snapshots=$4 trigger_s=$BW_N stamp=$BW_STAMP console_user=$(bw_console_user)" > "$_o" ) 2>/dev/null ||
+        { echo "$(date +%T) cannot write $_o"; return 1; }
+    if bw_put "$_o"; then rm -f "$_o"; else echo "$(date +%T) upload of ${_o#$BW_PEND} failed: kept for the next boot"; fi
+}
+bootwatch_run() {
+    BW_STAMP=$(date +%Y%m%d-%H%M%S); BW_T0=$(date +%s)
+    echo "$(date +%T) bootwatch $BW_STAMP: waiting for WindowServer to open the GPU (trigger $BW_N s)"
+    _n=0; _next=$BW_N
+    while :; do
+        _el=$(( $(date +%s) - BW_T0 ))
+        _st=$(bw_state)
+        case "$_st" in
+            gpu|login)
+                [ "$_n" -gt 0 ] && bw_final $((_n + 1)) "$_st" "$_el" "$_n"
+                echo "$(date +%T) bootwatch: done after $_el s ($_n snapshot(s))"
+                return 0 ;;
+        esac
+        if [ "$_el" -ge "$BW_MAXSEC" ]; then
+            [ "$_n" -gt 0 ] && bw_final $((_n + 1)) timeout "$_el" "$_n"
+            return 0
+        fi
+        if [ "$_el" -ge "$_next" ] && bw_acc_present; then
+            _n=$((_n + 1))
+            echo "$(date +%T) bootwatch: WindowServer has no GPU client after $_el s: snapshot $_n"
+            bw_collect "$_n" "$_el"
+            if [ "$_n" -ge "$BW_MAXN" ]; then bw_final $((_n + 1)) gave-up "$_el" "$_n"; return 0; fi
+            _next=$(( $(date +%s) - BW_T0 + BW_REPEAT ))
+        fi
+        sleep "$BW_POLL"
+    done
+}
+bootwatch_start() {   # in the background, once per boot (a re-exec of this script does not start a second one)
+    _bn=$(nvram boot-args 2>/dev/null | tr ' ' '\n' | sed -n 's/^rdna3bootwatch=\([0-9][0-9]*\)$/\1/p' | tail -n 1)
+    BW_N=${_bn:-75}
+    [ "$BW_N" -gt 0 ] 2>/dev/null || return 0
+    if [ -f "$BW_PIDFILE" ] && kill -0 "$(cat "$BW_PIDFILE" 2>/dev/null)" 2>/dev/null; then return 0; fi
+    ( bootwatch_run ) </dev/null >> "$BW_LOG" 2>&1 &
+    echo $! > "$BW_PIDFILE" 2>/dev/null
+    return 0
+}
+# BOOTWATCH-END
+
 # rdna3vminstall=1: the host booted macOS without the card only to install
 # its new bundle (rdna3vm _install): no tests, no desktop to wait for -
 # install as soon as the host answers, then shut down
@@ -1515,6 +1679,9 @@ case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vminstall=1 "*) IN
 # (by the install boot), then stop - no tests without the card
 APPROVE=
 case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vmapprove=1 "*) APPROVE=1 ;; esac
+# the boot watchdog (above): from the start of a VM boot that runs tests, not in the install / approve boots (no card, nothing
+# to wait for) and not in a standalone or by-hand run (a person is looking)
+[ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ] && [ -z "$INSTALL_ONLY" ] && [ -z "$APPROVE" ] && [ -n "$HOST" ] && bootwatch_start
 
 if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ]; then
     rm -f /tmp/rdna3-progress.win
