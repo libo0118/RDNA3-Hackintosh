@@ -102,11 +102,20 @@ chmod +x "$T"/bin/*
 # the same without spindump, kextstat and log (a Mac that lacks them)
 mkdir -p "$T/bin-bare"
 for f in "$T"/bin/*; do case "$(basename "$f")" in spindump|kextstat|log) ;; *) cp "$f" "$T/bin-bare/" ;; esac; done
+# and a system PATH without them: macOS has all three in /usr/bin and /usr/sbin (CI run 37)
+mkdir -p "$T/sys-bare"
+for d in /bin /usr/bin /sbin /usr/sbin; do
+    for f in "$d"/*; do
+        b=$(basename "$f")
+        case "$b" in spindump|kextstat|log) continue ;; esac
+        [ -e "$T/sys-bare/$b" ] || [ -L "$T/sys-bare/$b" ] || ln -s "$f" "$T/sys-bare/$b"
+    done
+done
 
 # ---- the scenarios: one script, run by every shell
 cat > "$T/scen.sh" <<'EOF2'
 S=$1; BIN=$2; BLK=$3
-export S PATH="$BIN:$PATH"
+export S PATH="$BIN:${SCEN_SYS:-$PATH}"
 . "$BLK"
 HOST=http://10.0.2.2:8000
 BW_PEND=$S/pend/rdna3-pending-
@@ -122,10 +131,10 @@ EOF2
 # timeout(1) is GNU coreutils: macOS has none, perl's alarm does the same there
 tmo() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else perl -e 'alarm shift; exec @ARGV' "$@"; fi; }
 
-run_scen() {   # run_scen <shell> <name> <scenario body> [bin dir]: a fresh state directory
+run_scen() {   # run_scen <shell> <name> <scenario body> [bin dir] [system PATH]: a fresh state directory
     local sh=$1 name=$2 body=$3 bin=${4:-$T/bin}
     S=$T/$sh-$name; mkdir -p "$S"; : > "$S/calls"
-    SCEN=$body tmo 120 "$sh" "$T/scen.sh" "$S" "$bin" "$T/block.sh" > "$S/out.txt" 2>&1 ||
+    SCEN=$body SCEN_SYS=${5:-$PATH} tmo 120 "$sh" "$T/scen.sh" "$S" "$bin" "$T/block.sh" > "$S/out.txt" 2>&1 ||
         fail "$sh $name: the scenario failed: $(tail -5 "$S/out.txt")"
 }
 
@@ -189,7 +198,7 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
     run_scen $sh nosample 'touch "$S/nosample"; BW_MAXN=1; bootwatch_run'
     S=$T/$sh-nosample
     grep -q '^== spindump WindowServer' "$S"/host/bootwatch-*-1.txt && grep -q 'mach_msg2_trap' "$S"/host/bootwatch-*-1.txt || fail "$sh nosample: no spindump fallback"
-    run_scen $sh bare 'touch "$S/nosample"; BW_MAXN=1; bootwatch_run' "$T/bin-bare"
+    run_scen $sh bare 'touch "$S/nosample"; BW_MAXN=1; bootwatch_run' "$T/bin-bare" "$T/sys-bare"
     S=$T/$sh-bare
     f=$(ls "$S"/host/bootwatch-*-1.txt | head -n1)
     grep -q 'no sample output and no spindump' "$f" && grep -q '^kextstat: not installed' "$f" && grep -q '^log: not installed' "$f" && grep -q '^BOOTWATCH-DONE' "$f" ||
