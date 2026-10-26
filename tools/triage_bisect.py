@@ -907,7 +907,7 @@ def locate(report_path):
     if report_path.endswith(".tar.gz") and os.path.exists(report_path):
         import tarfile
         try:
-            with tarfile.open(report_path) as tar:
+            with _open_tar(report_path) as tar:
                 for m in tar.getmembers():
                     if m.isfile() and m.name.endswith("bisect.txt"):
                         texts.append(tar.extractfile(m).read().decode("utf-8", "replace"))
@@ -916,13 +916,23 @@ def locate(report_path):
     return max(texts, key=len) if texts else ""
 
 
+def _open_tar(path):
+    """the report archive, decompressed once per file (tools/triage_tar.py); plain tarfile without it"""
+    try:
+        from triage_tar import open_tar
+    except ImportError:
+        import tarfile
+        return tarfile.open(path)
+    return open_tar(path)
+
+
 def _tar_member(path, suffix):
     """one member of a report archive, "" when there is none"""
     if not os.path.exists(path):
         return ""
     import tarfile
     try:
-        with tarfile.open(path) as tar:
+        with _open_tar(path) as tar:
             for m in tar.getmembers():
                 if m.name.endswith(suffix) and m.isfile():
                     return tar.extractfile(m).read().decode("utf-8", "replace")

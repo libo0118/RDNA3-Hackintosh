@@ -606,6 +606,17 @@ def rung_engaged(name, st, bst):
     return None, ""
 
 
+def _judge_rung(task):
+    """one rung's verdict (a worker of glyph_verdicts); one bad picture must not take the triage down"""
+    import glyph_verdict as gv
+    _name, files, later, hunt = task
+    try:
+        # a rung with a second look (the glyph hunt) is judged on the window that changed between the two, its own live text
+        return gv.verdict_files(files, later=later) if hunt else gv.verdict_files(files)
+    except Exception as e:  # noqa: BLE001
+        return {"verdict": "none", "text": "the glyph check FAILED (%s: %s)" % (type(e).__name__, e)}
+
+
 def glyph_verdicts(rungs, prefix):
     """{rung: {"verdict", "text"}} of the automatic glyph check (tools/glyph_verdict.py) on the rung's hires look(s): `<prefix>-scanout<look>-pipe<N>.ppm` (or .png), prefix
     = the report's path without .tar.gz; the `h2` look of the glyph hunt is the second look that identifies the live window. A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
@@ -614,7 +625,7 @@ def glyph_verdicts(rungs, prefix):
         import lookimg
     except ImportError:
         return {n: {"verdict": "none", "text": "tools/glyph_verdict.py is missing next to triage_glyphs.py: the glyphs were NOT checked"} for n in rungs}
-    out = {}
+    out, todo = {}, []
     for name, r in rungs.items():
         files, later = [], []
         looks_ = r.get("looks") or []
@@ -631,11 +642,16 @@ def glyph_verdicts(rungs, prefix):
         if not files:
             out[name] = {"verdict": "none", "text": "the glyphs were NOT judged: no hires look file next to the report (%s-scanout%s-pipe*.ppm or .png): they are uploaded beside the archive and were not sent, or not kept with it" % (os.path.basename(prefix), [l for l in looks_ if l.endswith("h")][0])}
             continue
-        try:
-            # a rung with a second look (the glyph hunt) is judged on the window that changed between the two, its own live text
-            out[name] = gv.verdict_files(files, later=later) if any(l.endswith("h2") for l in looks_) else gv.verdict_files(files)
-        except Exception as e:  # noqa: BLE001  (one bad picture must not take the triage down)
-            out[name] = {"verdict": "none", "text": "the glyph check FAILED (%s: %s)" % (type(e).__name__, e)}
+        todo.append((name, files, later, any(l.endswith("h2") for l in looks_)))
+    # the pictures are decoded in pure Python (about 0.35 s each): the rungs are judged in parallel, the answers keep the order of `rungs`
+    try:
+        from triage_par import pmap
+    except ImportError:   # a copy of this file alone: serial
+        def pmap(fn, items):
+            return [fn(x) for x in items]
+    for (name, _f, _l, _h2), res in zip(todo, pmap(_judge_rung, todo)):
+        out[name] = res
+    out = {n: out[n] for n in rungs if n in out}
     return out
 
 

@@ -32,9 +32,9 @@ export ROOT
 
 FUNCS="approve_markers approve_marker_any approve_marker_text approve_marker_clear run_note old_driver_note
 bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result cmd_result_show result_file approve_cmd host_opt
-bundle_source_hashes"
+bundle_source_hashes now_ms phase_start phase queue_journal"
 for f in $FUNCS; do sed -n "/^$f() {/,/^}/p" "$RV"; done > "$T/fn.sh"
-[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 18 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
+[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 22 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
 
 export WORK=$T/work
 mkdir -p "$WORK/reports"
