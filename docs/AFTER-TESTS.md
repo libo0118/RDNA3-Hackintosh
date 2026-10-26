@@ -105,12 +105,16 @@ exactly what to run next. One round = one report batch → one fix → one retes
    prints the per-pipe state ("screens") and writes the PNGs next to them:
    **look at them** (the user is often not at the screen) before asking
    what the monitors showed.
-   The looks are 320 wide; one look per report is 1280 wide
+   The looks are 320 wide; one look per report is hi-res
    (`--scanout-hires`: `<report>-scanout3h-pipe<N>` in a normal run,
    `-scanoutplay5h-` / `-scanoutplay10h-` in the play step, `m6*` in M6) for
-   small text-cell rectangles and broken glyphs. Its PNG is 1280x720 for a
-   1080p panel (sampled 2 of 3 pixels: the kext's ioctl returns one row per
-   call at that width; true 1920 needs a larger `rgb[]` in the UAPI).
+   small text-cell rectangles and broken glyphs. Since 2026-10-26 it is the
+   surface's NATIVE size, every pixel (1920x1080 for a 1080p panel, 6.2 MB
+   as PPM; DRIVER-PLAN N56). A kext from before that gives a 1280x720
+   nearest-neighbour sample (2 of 3 pixels: thin strokes can vanish or
+   double) and the look's output says `native look: NOT available, the kext
+   predates it`: then do not judge single-pixel detail from it, `rdna3vm
+   update` (+ approve) first.
    Exit 1 = a check failed. The first `FAIL` (in ladder order) is your target.
 3. From step 2 on, check discovery once:
    ```sh
@@ -1226,7 +1230,7 @@ by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/au
 `alignguard` (`NVMTL_NO_ALIGN_GUARD=1`), `paranoid` (`NVMTL_PARANOID=1`), `loadbarrier` (`NVMTL_LOAD_BARRIER=1`). Per rung the run opens Terminal (a colour
 listing, then a tick line every second in one fixed colour, bright white, and every 4th second a line of mixed glyphs) and Chess as NEW instances with that rung's switches in their environment
 (`open -n -a Terminal --env NVMTL_X=1`: the plugin reads its switches from the process's environment as well as from the conf file, the environment wins),
-waits 25 s (Terminal is opened with `-ApplePersistenceIgnoreState YES`: no window restored from the previous rung), takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
+waits 25 s (Terminal is opened with `-ApplePersistenceIgnoreState YES`: no window restored from the previous rung), takes a 320-wide and a hi-res (native size) scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
 by rung), after ending the two instances with SIGINT, then SIGTERM, then SIGKILL (a wait after each; no System Events: that needs the owner's Automation consent, which card run 2026-10-25f never got, `quit: still running after 8s` in every rung). `41-ladder.txt` has a line per instance (`quit: pid N ended by SIGINT after 1s`), the triage row `ladder quit` counts them. A signal skips the plugin's exit `SUMMARY`; the 10 s time-based lines (`vk: ab: SUMMARY`, `managed: SUMMARY`, `census: SUMMARY`) are the evidence, and each rung waits 12 s before it quits. The instances that were already running when the run began (the Terminal you started it from,
 your own Chess) are never touched. `rdna3mtl.conf` is not written and WindowServer is not restarted: the
 switch reaches the two apps only, which is where the artefacts show. At the desktop, the run asks nothing; from a Terminal (`--standalone --ladder`) it asks `y` (picture right) /
@@ -1244,13 +1248,14 @@ process has a key the rung did NOT ask for ("not default: X", also a conf line l
 picture was RIGHT with: X" names the discriminator. Reading it: a rung whose WARN says the switch did not reach the plugin proves nothing (the `--env` was not
 taken: check `34-metal-conf.txt` and `26-log-metal-plugin.txt`); without your answers, compare `ladder-<rung>h` pictures by eye (the text is the quickest test).
 
-**The glyph verdict (automatic).** Each rung's 1280-wide look (`<report>-scanoutladder-<rung>h-pipe<N>.ppm`, or `.png` when `rdna3vm result` had no xz and packed PNGs; next to the archive) is read by `tools/glyph_verdict.py`
+**The glyph verdict (automatic).** Each rung's hi-res look (native size; 1280 wide from a kext before 2026-10-26; `<report>-scanoutladder-<rung>h-pipe<N>.ppm`, or `.png` when `rdna3vm result` had no xz and packed PNGs; next to the archive) is read by `tools/glyph_verdict.py`
 (pure Python, PPM and PNG via `tools/lookimg.py`; the triage prints it in the `ladder <rung>` row as `glyphs (automatic, tools/glyph_verdict.py): ...`, and the `ladder glyphs` row says which rungs made the baseline's
 broken text clean). Terminal prints a tick line a second that ends in the same text, in one colour; drawn right, two such lines are the same picture, drawn wrong (random
 strokes) every line is different. The tool finds stacks of at least 8 text lines of an even pitch in the look (colour agnostic, no knowledge of the window's place), keeps the
 lines that end at the same column (a log window, a listing: ragged ends, never taken for tick lines), cuts the right half of each (after the time stamp) as a black-and-white
-strip and counts the lines that have a TWIN (another line within 12 % of its ink; the 1920 -> 1280 sampling drops one row in three, so lines fall into three classes of
-rows seen and each class has several lines). `CLEAN` = at least 80 % of the lines have a twin, `BROKEN` = at most 50 %, `unclear` between, `none` = no tick stack (the text window was not
+strip and counts the lines that have a TWIN (another line within 12 % of its ink; in a native look the tick lines are the same pixels, in an old 1280-wide look the
+1920 -> 1280 sampling drops one row in three, so lines fall into three classes of rows seen and each class has several lines; the tool's line heights, pitches and
+margins scale with the look's width / 1280, so both kinds are judged alike). `CLEAN` = at least 80 % of the lines have a twin, `BROKEN` = at most 50 %, `unclear` between, `none` = no tick stack (the text window was not
 on a screen: the rung proves nothing; card run 2026-10-26b: all 13 rungs `none`, the pictures show Chess on top of the tick Terminal, which the ladder opened first;
 it now opens Chess first, so the Terminal is the window in front: open the pictures before trusting a `none`). Every stack on the screens is judged and the WORST decides: a window that Terminal restored from its saved state shows the text of the
 previous rung, static and drawn clean, next to the live one (the ladder now opens Terminal with `-ApplePersistenceIgnoreState YES`, but a look of an older run has them). Read the numbers:
@@ -1287,7 +1292,7 @@ rung gives (the host test compares them with the source). What a CLEAN rung (bas
 | `no-texbuf`, `no-bindless`, `dontcare-clears` (`NVMTL_DONTCARE_CLEARS=1`), `skip-empty-0` (`NVMTL_SKIP_EMPTY=0`) | that path is the cause |
 | `paranoid` | the NEGATIVE control. Clean here = the run is not comparable (`ladder glyphs control` WARN): the live-window identification or the artefact is unstable |
 
-The verdict of a rung looks at the window that CHANGED between its two 1280-wide looks (`...h` and `...h2`, three seconds apart; the text script prints a line a second): a tick-line window
+The verdict of a rung looks at the window that CHANGED between its two hi-res looks (`...h` and `...h2`, three seconds apart; the text script prints a line a second): a tick-line window
 that did not change (a restored one, another rung's, a frozen screen) is listed as `STATIC ... ignored` and never decides; no live window at all is `none` (`ladder glyphs none` names the rungs).
 
 **A rung only counts if its knob was ENGAGED.** A key that reached the plugin (`vk: ab switches`) can still change nothing: the feature was already off, or the app never uses it. The triage compares the Terminal's

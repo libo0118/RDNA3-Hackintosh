@@ -2263,8 +2263,8 @@ cmd_result_show() {
 cmd_result() {
     local out=${RDNA3VM_RESULT:-} tmp f packed
     local -a sel
-    # xz when the host has it: the looks of one run are the same desktop over and over (a ladder: 142 MB of PPMs, 8 MB as .tar.xz, 90 MB as .tar.gz), so they
-    # stay raw PPMs. Without xz the looks are turned into PNGs (lossless, about half the size) and the archive is gzip
+    # xz when the host has it: the looks of one run are the same desktop over and over (a ladder: 142 MB of PPMs, 8 MB as .tar.xz, 90 MB as .tar.gz; the hi-res
+    # looks are native 1920x1080 since 2026-10-26, about 2.2 times the data and the .tar.xz), so they stay raw PPMs. Without xz the looks are turned into PNGs (lossless, about half the size) and the archive is gzip
     if [ -z "$out" ]; then
         if command -v xz >/dev/null 2>&1; then out=$HOME/Downloads/rdna3-result.tar.xz; else out=$HOME/Downloads/rdna3-result.tar.gz; fi
     fi

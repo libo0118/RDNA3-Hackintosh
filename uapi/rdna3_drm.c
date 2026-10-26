@@ -4541,7 +4541,14 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         ((struct rd_xnu_file_id *)data)->id = f->id;
         ((struct rd_xnu_file_id *)data)->pad = 0;
         return 0;
-    case RD_NR_XNU_SCANOUT: NEED(struct rd_xnu_scanout);
+    case RD_NR_XNU_SCANOUT:
+        /* a caller from before the native looks sends the struct without
+         * its tail: fine, as long as it does not ask for what lives there */
+        if (size < RD_XNU_SCANOUT_V1_SIZE)
+            return -RD_EINVAL;
+        if (size < sizeof(struct rd_xnu_scanout) &&
+            (((struct rd_xnu_scanout *)data)->flags & RD_XNU_SCANOUT_NATIVE))
+            return -RD_EINVAL;
         if (!f->dev->ops.scanout)
             return -RD_EOPNOTSUPP;
         return f->dev->ops.scanout(f->dev->ops.ctx, (struct rd_xnu_scanout *)data);

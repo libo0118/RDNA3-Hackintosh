@@ -28,8 +28,11 @@
  *                              now: HUBP state and a 320-wide picture of it,
  *                              DIR/scanout-pipe<N>.ppm - the report's proof of
  *                              what reaches each panel. Nothing else runs.
- *   rdna3_drminfo --scanout-hires DIR  the same, 1280 wide (an app's
- *                              stale regions and text, card run 54)
+ *   rdna3_drminfo --scanout-hires DIR  the same at the surface's native
+ *                              size, every pixel (1920x1080 on a 1080p panel:
+ *                              an app's stale regions and text, card run 54);
+ *                              an older kext gives its 1280-wide sample and
+ *                              the output says so
  *   rdna3_drminfo --surface-xproc  (the macOS build, rdna3accel=1) RD_NR_XNU_SURFACE_BO
  *                              must refuse another process's (non-global)
  *                              IOSurface with ENOENT: only IOSurfaceRoot's
@@ -471,24 +474,62 @@ static int userq_test(int fd)
     return bad != 0;
 }
 
-/* one pipe's picture, all rows; returns the number of rows read */
-static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info, uint8_t *img,
-                             size_t cap, uint32_t flags)
+/* one pipe's picture, all rows, into *img (grown to out_w x out_h x 3 on
+ * the first reply); returns the number of rows read, (uint32_t)-1 when the
+ * first call failed. RD_XNU_SCANOUT_NATIVE: every source pixel, segments
+ * of rd_xnu_scanout_native_seg(); a kext from before it answers with
+ * abi 0 and its RD_XNU_SCANOUT_HIRES sample (whole rows), taken as is. */
+static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info, uint8_t **img,
+                             size_t *cap, uint32_t flags)
 {
     static struct rd_xnu_scanout s;
-    uint32_t row = 0;
+    uint32_t row = 0, col = 0, r;
+    int native = (flags & RD_XNU_SCANOUT_NATIVE) != 0;
     for (;;) {
         memset(&s, 0, sizeof(s));
         s.pipe = pipe;
         s.row0 = row;
-        s.flags = (row ? 0 : flags) | (flags & RD_XNU_SCANOUT_HIRES);
+        s.col0 = col;
+        s.flags = (row || col ? 0 : flags) | (flags & (RD_XNU_SCANOUT_HIRES | RD_XNU_SCANOUT_NATIVE));
         if (IOCTL(fd, RD_NR_XNU_SCANOUT, s))
             return row ? row : (uint32_t)-1;
-        if (row == 0)
+        if (row == 0 && col == 0) {
+            size_t need = (size_t)s.out_w * s.out_h * 3;
             *info = s;
-        if (!s.nrows || (size_t)(row + s.nrows) * s.out_w * 3 > cap)
+            if (native && s.abi != RD_XNU_SCANOUT_ABI)
+                native = 0;
+            /* nothing to read (a too-big or unreadable surface): no picture-sized allocation for it */
+            if (!s.nrows || s.out_w > RD_XNU_SCANOUT_NATIVE_MAX || s.out_h > RD_XNU_SCANOUT_NATIVE_MAX)
+                return 0;
+            if (need > *cap) {
+                uint8_t *n = realloc(*img, need);
+                if (!n) {
+                    fprintf(stderr, "XNU_SCANOUT: no memory for a %ux%u picture\n", s.out_w, s.out_h);
+                    return 0;
+                }
+                *img = n;
+                *cap = need;
+            }
+        }
+        /* the mode changed in the middle of the look: what was read stays */
+        if (!s.nrows || s.out_w != info->out_w || s.out_h != info->out_h || row + s.nrows > s.out_h)
             return row;
-        memcpy(img + (size_t)row * s.out_w * 3, s.rgb, (size_t)s.nrows * s.out_w * 3);
+        if (native) {
+            if (!s.ncols || s.col0 != col || col + s.ncols > s.out_w
+                || (size_t)s.nrows * s.ncols * 3 > sizeof(s.rgb))   /* never past rgb[], whatever the kext says */
+                return row;
+            for (r = 0; r < s.nrows; r++)
+                memcpy(*img + ((size_t)(row + r) * s.out_w + col) * 3, s.rgb + (size_t)r * s.ncols * 3,
+                       (size_t)s.ncols * 3);
+            col += s.ncols;
+            if (col < s.out_w)
+                continue;
+            col = 0;
+        } else {
+            if ((size_t)s.nrows * s.out_w * 3 > sizeof(s.rgb))
+                return row;
+            memcpy(*img + (size_t)row * s.out_w * 3, s.rgb, (size_t)s.nrows * s.out_w * 3);
+        }
         row += s.nrows;
         if (row >= s.out_h)
             return row;
@@ -529,16 +570,14 @@ static void scanout_txstate(int fd, uint32_t pipe)
 
 static int scanout_dump(int fd, const char *dir, uint32_t hires)
 {
-    enum { CAP = RD_XNU_SCANOUT_HIRES_W * RD_XNU_SCANOUT_HIRES_W * 4 * 3 };
-    uint8_t *img = malloc(CAP), *img2 = malloc(CAP);
+    uint8_t *img = NULL, *img2 = NULL;
+    size_t cap = 0, cap2 = 0;
     int lit = 0, asleep = 0;
-    if (!img || !img2)
-        return 1;
     for (uint32_t p = 0; p < 4; p++) {
         struct rd_xnu_scanout s, s2 = {0};
         /* the sticky underflow is read, then cleared: the second look 2 s
          * later tells whether it keeps coming (bandwidth) or was a switch */
-        uint32_t rows = scanout_grab(fd, p, &s, img, CAP, RD_XNU_SCANOUT_CLEAR_UNDERFLOW | hires), i, n, nonblack = 0,
+        uint32_t rows = scanout_grab(fd, p, &s, &img, &cap, RD_XNU_SCANOUT_CLEAR_UNDERFLOW | hires), i, n, nonblack = 0,
                  diff = 0;
         uint64_t sum[3] = {0, 0, 0};
         if (rows == (uint32_t)-1) {
@@ -571,6 +610,9 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
         if (!s.lit)
             continue;
         lit++;
+        if ((hires & RD_XNU_SCANOUT_NATIVE) && s.abi != RD_XNU_SCANOUT_ABI)
+            printf("  native look: NOT available, the kext predates it (abi %u): this is its %u-wide sample; "
+                   "rdna3vm update brings the native one\n", s.abi, s.out_w);
         if (!rows || rows < s.out_h) {
             printf("  picture: not readable (%u of %u rows; tiled, DCC or outside the BAR)\n", rows, s.out_h);
             continue;
@@ -583,13 +625,14 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
         }
         /* a second look 2 s later: is something drawing? */
         sleep(2);
-        if (scanout_grab(fd, p, &s2, img2, CAP, hires) == rows && !s2.asleep)
+        if (scanout_grab(fd, p, &s2, &img2, &cap2, hires) == rows && !s2.asleep && s2.out_w == s.out_w)
             for (i = 0; i < n * 3; i++)
                 diff += img[i] != img2[i];
-        printf("  picture %ux%u: %u%% not black, mean rgb %u %u %u, %u bytes changed in 2 s%s\n",
+        printf("  picture %ux%u: %u%% not black, mean rgb %u %u %u, %u bytes changed in 2 s%s%s\n",
                s.out_w, rows, (unsigned)((uint64_t)nonblack * 100 / n), (unsigned)(sum[0] / n),
                (unsigned)(sum[1] / n), (unsigned)(sum[2] / n), diff,
-               s2.inuse != s.inuse ? " (flipped meanwhile)" : "");
+               s2.inuse != s.inuse ? " (flipped meanwhile)" : "",
+               s.abi == RD_XNU_SCANOUT_ABI && (hires & RD_XNU_SCANOUT_NATIVE) ? " (native)" : "");
         if (s2.underflow)
             printf("  UNDERFLOW again within 2 s of clearing it (status %u): it keeps running out of data\n",
                    s2.underflow);
@@ -872,7 +915,7 @@ int main(int argc, char **argv)
 #endif
     if (argc > 1 && (!strcmp(argv[1], "--scanout") || !strcmp(argv[1], "--scanout-hires"))) {
         fails = scanout_dump(fd, argc > 2 ? argv[2] : NULL,
-                             strcmp(argv[1], "--scanout") ? RD_XNU_SCANOUT_HIRES : 0);
+                             strcmp(argv[1], "--scanout") ? RD_XNU_SCANOUT_HIRES | RD_XNU_SCANOUT_NATIVE : 0);
         drm_xnu_close(fd);
         return fails;
     }

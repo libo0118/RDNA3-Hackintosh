@@ -3,7 +3,7 @@
 # stubs for open, pgrep, kill, log, killall, curl and rdna3_drminfo:
 #  - the rung list is the one tools/triage_glyphs.py reads
 #  - the app rungs: Terminal and Chess opened as NEW instances (open -n -a APP --env ...) with exactly the rung's NVMTL_ switches, nothing for the
-#    baseline; two looks (320 and 1280 wide) and a log file per rung; only the instances the rung started are quit (the owner's Terminal stays);
+#    baseline; two looks (320 wide and hi-res) and a log file per rung; only the instances the rung started are quit (the owner's Terminal stays);
 #    rdna3mtl.conf is not touched and WindowServer is not restarted
 #  - the WindowServer rungs (variant 2): the conf holds the rung's lines (the others kept, a same-named line replaced) when WindowServer is
 #    restarted, and is EXACTLY the original afterwards - also with no conf file at all, after an interrupt (SIGTERM in a rung), after a dead run

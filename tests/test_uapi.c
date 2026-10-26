@@ -1838,7 +1838,63 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_XNU_SCANOUT, so) == 0 && so.lit && so.nrows == 4 && so.rgb[0] == 7);
         so.pipe = 9;
         CHECK(IOCTL(f, RD_NR_XNU_SCANOUT, so) == -RD_EINVAL);
+        /* a caller from before the native looks (the struct ends at
+         * 'asleep') still works, but cannot ask for the native look whose
+         * col0 / ncols / abi it has no room for */
+        CHECK(RD_XNU_SCANOUT_V1_SIZE == 3984 && offsetof(struct rd_xnu_scanout, col0) == 3984 &&
+              sizeof(so) == 4000);
+        so.pipe = 1;
+        so.flags = RD_XNU_SCANOUT_HIRES;
+        CHECK(rdna3_drm_ioctl(f, RD_NR_XNU_SCANOUT, &so, (uint32_t)RD_XNU_SCANOUT_V1_SIZE) == 0 && so.nrows == 4);
+        CHECK(rdna3_drm_ioctl(f, RD_NR_XNU_SCANOUT, &so, (uint32_t)RD_XNU_SCANOUT_V1_SIZE - 4) == -RD_EINVAL);
+        so.flags = RD_XNU_SCANOUT_HIRES | RD_XNU_SCANOUT_NATIVE;
+        CHECK(rdna3_drm_ioctl(f, RD_NR_XNU_SCANOUT, &so, (uint32_t)RD_XNU_SCANOUT_V1_SIZE) == -RD_EINVAL);
+        CHECK(IOCTL(f, RD_NR_XNU_SCANOUT, so) == 0);
+        so.flags = 0;
         dev.ops.scanout = NULL;
+    }
+    /* the native look's segments: whole rows while a row fits rgb[]
+     * (1280 px), else one row in pieces; every pixel exactly once */
+    {
+        static const uint32_t sizes[][2] = { {1920, 1080}, {3840, 2160}, {1280, 720}, {640, 480},
+                                             {1281, 3}, {2560, 1440}, {8192, 2}, {7, 5} };
+        uint32_t nr, nc;
+        CHECK(RD_XNU_SCANOUT_RGB_PX * 3 == sizeof(((struct rd_xnu_scanout *)0)->rgb) && RD_XNU_SCANOUT_RGB_PX == 1280);
+        rd_xnu_scanout_native_seg(1920, 1080, 0, 0, &nr, &nc);
+        CHECK(nr == 1 && nc == 1280);
+        rd_xnu_scanout_native_seg(1920, 1080, 5, 1280, &nr, &nc);
+        CHECK(nr == 1 && nc == 640);
+        rd_xnu_scanout_native_seg(640, 480, 478, 0, &nr, &nc);
+        CHECK(nr == 2 && nc == 640);
+        rd_xnu_scanout_native_seg(640, 480, 0, 0, &nr, &nc);
+        CHECK(nr == 2 && nc == 640);
+        rd_xnu_scanout_native_seg(1920, 1080, 1080, 0, &nr, &nc);
+        CHECK(nr == 0 && nc == 0);
+        rd_xnu_scanout_native_seg(1920, 1080, 0, 1920, &nr, &nc);
+        CHECK(nr == 0 && nc == 0);
+        rd_xnu_scanout_native_seg(0, 1080, 0, 0, &nr, &nc);
+        CHECK(nr == 0 && nc == 0);
+        for (uint32_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+            uint32_t w = sizes[k][0], h = sizes[k][1], row = 0, col = 0, calls = 0;
+            uint64_t px = 0;
+            int ok = 1;
+            while (row < h && calls < 100000) {
+                rd_xnu_scanout_native_seg(w, h, row, col, &nr, &nc);
+                calls++;
+                if (!nr || !nc || (uint64_t)nr * nc > RD_XNU_SCANOUT_RGB_PX || col + nc > w || row + nr > h ||
+                    (nr > 1 && nc != w)) {
+                    ok = 0;
+                    break;
+                }
+                px += (uint64_t)nr * nc;
+                col += nc;
+                if (col < w)
+                    continue;
+                col = 0;
+                row += nr;
+            }
+            CHECK(ok && row == h && px == (uint64_t)w * h);
+        }
     }
     /* XNU_TXSTATE: the same, text the OS fills */
     {
