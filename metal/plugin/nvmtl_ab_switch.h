@@ -60,6 +60,18 @@ static inline int nvmtl_radv_flag_check(const char *v, int perftest, char *why, 
     return 0;
 }
 
+/* DRIVER-PLAN N57: NVMTL_ATTR_RING_BIG_PAGE -> RADV_ATTR_RING_BIG_PAGE (userspace/mesa/patches/0010: "0" turns SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE
+ * off, the GFX11 attribute ring is translated in 4 KiB pages). Returns the value RADV gets: "0" for knob "0"; NULL for an unset knob or "1"
+ * (upstream, nothing is set; why empty) and for anything else (refused, why says so). */
+static inline const char *nvmtl_attr_ring_value(const char *knob, char *why, size_t cap)
+{
+    if (cap) why[0] = 0;
+    if (!knob || !strcmp(knob, "1")) return NULL;
+    if (!strcmp(knob, "0")) return "0";
+    if (cap) snprintf(why, cap, "only 0 (BIG_PAGE off) or 1 (upstream) is taken");
+    return NULL;
+}
+
 /* 1: every flag of `add` is already a flag of `old` (both comma lists) */
 static inline int nvmtl_radv_flag_contains(const char *old, const char *add)
 {
@@ -179,6 +191,7 @@ static const char *const nvmtl_ab_knobs[] = {
     "NVMTL_NO_DIRTYONLY", "NVMTL_ENC78_OFF", "NVMTL_G79_OFF", "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM", "NVMTL_MANAGED_CHECK", "NVMTL_MANAGED_SNAPSHOT",
     "NVMTL_LOAD_BARRIER", "NVMTL_NO_ALIGN_GUARD", "NVMTL_FBFETCH_ZERO", "NVMTL_SKIP_EMPTY", "NVMTL_EVFOLD", "NVMTL_DONTCARE_CLEARS", "NVMTL_NO_TEXBUF",
     "NVMTL_NO_SAMPVAR", "NVMTL_MANAGED_WHOLE", "NVMTL_MANAGED_PAGES", "NVMTL_NO_SURFIN_CACHE", "NVMTL_SURFIN_VERIFY", "NVMTL_NO_SURFACE_SHARE", "NVMTL_NO_SURFACE_PAGEOFF", "NVMTL_SHARED_VRAM", "NVMTL_ZERO_FILL", "NVMTL_MANAGED_EAGER_ZERO", "NVMTL_NO_BINDLESS",
+    "NVMTL_ATTR_RING_BIG_PAGE",
     NULL };
 
 /* Fill `out` (cap bytes) with `KEY="value"` tokens of the knobs that are set, starting at knob index *next, as many as fit; *next moves past them.

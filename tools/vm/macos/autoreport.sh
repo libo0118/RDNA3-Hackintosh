@@ -1086,7 +1086,10 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
 # window shows, log in), the conf put back exactly (bisect_plugin_save / bisect_plugin_restore, also on an interrupt, and by the top of this
 # script after a dead run). Evidence: $HOME/rdna3-ladder/ladder.txt (collect.sh: 41-ladder.txt) and <rung>.log (41-ladder-<rung>.log);
 # tools/triage_reports.py (tools/triage_glyphs.py ladder_rows) prints one row per rung.
-LADDER_RUNGS="baseline radv sync managed alignguard paranoid loadbarrier"
+# `attrring` (DRIVER-PLAN N57, right after the baseline): NVMTL_ATTR_RING_BIG_PAGE=0 -> RADV_ATTR_RING_BIG_PAGE=0 (userspace/mesa/patches/0010): the
+# apps' RADV declares its GFX11 attribute ring without SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE (4 KiB translation). Clean text there with a broken
+# baseline = the ring's placement / PTE fragments in the kernel are the cause (tools/triage_attr_ring.py, the `attribute ring` row).
+LADDER_RUNGS="baseline attrring radv sync managed alignguard paranoid loadbarrier"
 LADDER_WS_RUNGS="radv-ws paranoid-ws"
 # variant 3 (`rdna3vm step ladder-glyphs`, rdna3ladder=3): the glyph hunt of DRIVER-PLAN N50 after card run 2026-10-25f, where NVMTL_PARANOID did not cure Terminal's text. Strongest
 # first (a run cut short keeps them): `baseline`; the managed-buffer rungs (hypothesis A: the app writes bytes outside its didModifyRange, Apple's drivers copy whole pages):
@@ -1110,6 +1113,7 @@ LADDER_GLYPHS_RUNGS="baseline managed-whole managed-check no-surface-share no-su
 ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
     case $1 in
         baseline) ;;
+        attrring) echo "NVMTL_ATTR_RING_BIG_PAGE=0" ;;
         radv|radv-ws) echo "NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears" ;;
         sync) echo "NVMTL_ASYNC_COMMIT=0" ;;
         managed) echo "NVMTL_MANAGED_CHECK=1 NVMTL_MANAGED_SNAPSHOT=1" ;;

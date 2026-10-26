@@ -4823,6 +4823,17 @@ def report(path, show_all):
     for lvl_, name_, text_ in coh_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
         failed = failed or lvl_ == "FAIL"
+    # DRIVER-PLAN N57: the GFX11 attribute ring (DISCARDABLE BOs) - placement, PTE fragment, the plugin's RADV_ATTR_RING_BIG_PAGE (tools/triage_attr_ring.py)
+    try:
+        from triage_attr_ring import attr_ring_rows
+        ar_rows_ = attr_ring_rows(log or "", (cdlog or "") + "\n" + (pluginlog or ""))
+    except ImportError:
+        ar_rows_ = [("WARN", "attribute ring", "tools/triage_attr_ring.py is missing next to triage_reports.py: the attribute ring's placement was NOT read")]
+    except Exception as e_:  # noqa: BLE001
+        ar_rows_ = [("WARN", "attribute ring", "tools/triage_attr_ring.py FAILED (%s: %s): the attribute ring rows are missing; the rest ran" % (type(e_).__name__, e_))]
+    for lvl_, name_, text_ in ar_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+        failed = failed or lvl_ == "FAIL"
     if ladder_txt:
         try:
             from triage_coherence import coh_ladder_rows as coh_ladder_rows_

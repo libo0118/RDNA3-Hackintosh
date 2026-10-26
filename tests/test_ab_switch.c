@@ -18,6 +18,17 @@ static const char *fake_env(const char *k)
 
 int main(void)
 {
+    /* DRIVER-PLAN N57: NVMTL_ATTR_RING_BIG_PAGE -> RADV_ATTR_RING_BIG_PAGE: only "0" sets it, unset / "1" leave upstream, the rest is refused */
+    { char w[96];
+      CHECK(!strcmp(nvmtl_attr_ring_value("0", w, sizeof w) ? nvmtl_attr_ring_value("0", w, sizeof w) : "", "0") && !w[0]);
+      CHECK(!nvmtl_attr_ring_value(NULL, w, sizeof w) && !w[0]);
+      CHECK(!nvmtl_attr_ring_value("1", w, sizeof w) && !w[0]);
+      CHECK(!nvmtl_attr_ring_value("00", w, sizeof w) && w[0]);
+      CHECK(!nvmtl_attr_ring_value("", w, sizeof w) && w[0]);
+      CHECK(!nvmtl_attr_ring_value("off", w, sizeof w) && strstr(w, "only 0"));
+      int listed = 0;
+      for (int i = 0; nvmtl_ab_knobs[i]; i++) listed |= !strcmp(nvmtl_ab_knobs[i], "NVMTL_ATTR_RING_BIG_PAGE");
+      CHECK(listed); }   /* `vk: ab switches` shows it: the triage's `plugin switch` row and the ladder's rung check */
     /* the flag lists the card run uses are taken */
     CHECK(ok("nodcc", 0));
     CHECK(ok("nodcc,nohiz,nofmask,nofastclears", 0));

@@ -23,6 +23,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/sysctl.h>
 #include "rdna3_bootargs.h"
+#include "rdna3_attr_ring.h"
 #include "RDNA3Trace.h"
 
 extern "C" {
@@ -3295,11 +3296,44 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     }
     if (r)
         return -RD_ENOMEM;
+    if (bo->flags & AMDGPU_GEM_CREATE_DISCARDABLE)
+        discardableMapNote(bo, va, offset, size);
     vmFlush(v->vmid);
     if (fUserqMask)
         userqFlushMesVmids();
     v->gfxFlush = v->compFlush = v->dmaFlush = true;
     return 0;
+}
+
+/* DRIVER-PLAN N57: a GEM_VA map of a DISCARDABLE BO (RADV's GFX11 attribute
+ * ring, SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE = 1: translated in 64 KiB pages).
+ * The VA, the backing (contiguous VRAM and its physical address, or GTT
+ * system pages), the smallest PTE fragment of the mapping
+ * (gpuvm_map_fragment: amdgpu_vm_pte_fragment with rdna3amdgpu=1, 4 KiB
+ * PTEs otherwise) and whether that holds what BIG_PAGE assumes
+ * (common/rdna3_attr_ring.h). The first 16, then every 1024th; a mapping
+ * that does not hold is always logged. */
+void RDNA3Bringup::discardableMapNote(const rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size)
+{
+    const bool vram = bo->placement == AMDGPU_GEM_DOMAIN_VRAM;
+    const uint64_t pa = vram ? rdna3_vram_pa(fDev, bo->vram_offset + offset) : 0;
+    const unsigned frag = vram ? gpuvm_map_fragment(fDev, va, size / 4096) : 0;
+    const unsigned bad = rdna3_bigpage_problems(vram, va, pa, frag);
+    const uint32_t n = ++fDiscardMapLogs;
+    if (!bad && n > 16 && (n & 1023))
+        return;
+    char why[160];
+    snprintf(why, sizeof why, "%s%s%s%s", (bad & RD_BIGPAGE_NOT_VRAM) ? " system pages" : "",
+             (bad & RD_BIGPAGE_FRAG_SMALL) ? " fragment-below-64KiB" : "", (bad & RD_BIGPAGE_VA_ALIGN) ? " VA-not-64KiB-aligned" : "",
+             (bad & RD_BIGPAGE_PA_SKEW) ? " VA-PA-not-64KiB-congruent" : "");
+    if (vram)
+        BLOG("GEM_VA DISCARDABLE #%u: VA 0x%llx + %llu KiB -> contiguous VRAM 0x%llx (PA 0x%llx), PTE fragment %u (%llu KiB, %s): "
+             "BIG_PAGE %s%s", n, (unsigned long long)va, (unsigned long long)(size >> 10),
+             (unsigned long long)(bo->vram_offset + offset), (unsigned long long)pa, frag, 4ull << frag,
+             fAmdgpuExact ? "amdgpu_vm_pte_fragment" : "4 KiB PTEs, rdna3amdgpu=0", bad ? "WRONG:" : "ok", why);
+    else
+        BLOG("GEM_VA DISCARDABLE #%u: VA 0x%llx + %llu KiB -> GTT system pages (not contiguous VRAM), PTE fragment 0 (4 KiB, "
+             "scattered): BIG_PAGE WRONG:%s", n, (unsigned long long)va, (unsigned long long)(size >> 10), why);
 }
 
 /* amdgpu_fill_buffer: a new VRAM BO the CPU cannot reach through BAR0 is

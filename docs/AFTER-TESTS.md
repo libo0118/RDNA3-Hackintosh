@@ -1263,8 +1263,9 @@ The order to try: `NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`; `NVMTL_AS
 
 ### The whole ladder in one card run: `rdna3vm step ladder`
 
-One run instead of one report per switch (autoreport.sh `ladder_run`, boot-arg `rdna3ladder=1`; the profile of the `play` step, nothing else runs, about 26 minutes;
-by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder`). Seven rungs: `baseline`, `radv`
+One run instead of one report per switch (autoreport.sh `ladder_run`, boot-arg `rdna3ladder=1`; the profile of the `play` step, nothing else runs, about 29 minutes;
+by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder`). Eight rungs: `baseline`, `attrring`
+(`NVMTL_ATTR_RING_BIG_PAGE=0`, DRIVER-PLAN N57: below), `radv`
 (`NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`), `sync` (`NVMTL_ASYNC_COMMIT=0`), `managed` (`NVMTL_MANAGED_CHECK=1` + `NVMTL_MANAGED_SNAPSHOT=1`),
 `alignguard` (`NVMTL_NO_ALIGN_GUARD=1`), `paranoid` (`NVMTL_PARANOID=1`), `loadbarrier` (`NVMTL_LOAD_BARRIER=1`). Per rung the run opens Terminal (a colour
 listing, then a tick line every second in one fixed colour, bright white, and every 4th second a line of mixed glyphs) and Chess as NEW instances with that rung's switches in their environment
@@ -1279,6 +1280,20 @@ switch reaches the two apps only, which is where the artefacts show. At the desk
 edit `rdna3mtl.conf` (the file's other lines stay, a same-named line is replaced), restart WindowServer (log in at the login window; Terminal and Chess then open under it)
 and put the conf back exactly (also with no conf file at all, on Ctrl-C / SIGTERM, and at the next start of autoreport.sh after a dead run); the desktop is restarted once more at the end so that it
 runs with the default conf. Run `ladder-ws` only when the app rungs say the switch matters.
+
+**The attribute ring (`attrring` rung, DRIVER-PLAN N57).** Card run 2026-10-26g: the glyphs break on the GPU at draw time, a contiguous run of 18
+instances of one draw gets garbage varyings. On GFX11 the varyings pass through RADV's attribute ring, a DISCARDABLE VRAM BO declared with
+SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE (64 KiB translation). The rung sets `NVMTL_ATTR_RING_BIG_PAGE=0`; the plugin hands RADV `RADV_ATTR_RING_BIG_PAGE=0`
+(Mesa patch 0010) and logs `vk: RADV_ATTR_RING_BIG_PAGE="0" (NVMTL_ATTR_RING_BIG_PAGE="0") - the attribute ring's BIG_PAGE is OFF ...`. Rows:
+`ladder attrring` WARNs when that line is missing (an older plugin: the rung is the baseline again); `ladder glyphs attrring` appears when the rung is
+CLEAN under a BROKEN baseline. The kernel logs every DISCARDABLE BO (`GEM DISCARDABLE #n: 4224 KiB, alignment 2048 KiB, VRAM beyond BAR0 at 0x... (64 KiB
+aligned yes, 2 MiB aligned yes)`; in GTT: `... GTT, VRAM was asked for and refused - WRONG for the attribute ring ...`) and its mapping (`GEM_VA
+DISCARDABLE #n: VA 0x... + 4224 KiB -> contiguous VRAM 0x... (PA 0x...), PTE fragment F (... KiB, 4 KiB PTEs, rdna3amdgpu=0): BIG_PAGE ok | WRONG: ...`);
+the triage row `attribute ring` recomputes the verdict: PASS = VRAM, 64 KiB aligned, VA and PA congruent modulo 64 KiB, PTE fragment >= 4 (64 KiB);
+FAIL otherwise (the default GPUVM path writes 4 KiB PTEs, fragment 0, so the default kext is FAIL; `rdna3amdgpu=1` maps with amdgpu's fragments);
+WARN = no line (a kext before N57). `attr ring switch` lists the processes where RADV_ATTR_RING_BIG_PAGE=0 was on. Action: attrring CLEAN with the
+baseline BROKEN -> the kernel side of the ring is the cause: port amdgpu_vm_pte_fragment fragments for VRAM mappings to the default path (cross-check
+with `rdna3vm step amdgpu`), keep the ring in VRAM. attrring still BROKEN -> not BIG_PAGE: replay a capture on the card's own RADV (N56).
 
 Evidence: `ladder.txt` (archive member `41-ladder.txt`, uploaded after every rung as `<report>-ladder.txt`), each rung's `41-ladder-<rung>.log` and the looks
 `<report>-scanoutladder-<rung>[a|h]-pipe<P>.ppm`. `tools/triage_reports.py` prints one row per rung (`ladder <rung>`: what it set, whether the plugin's own

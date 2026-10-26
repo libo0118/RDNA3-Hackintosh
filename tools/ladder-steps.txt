@@ -309,7 +309,8 @@ vblirq-off rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=
 # desktop on the Metal plugin) with rdna3ladder=1 instead of rdna3play=1: nothing else runs; per rung
 # Terminal + Chess are opened as new instances with that rung's NVMTL_ switches in their environment
 # (`open -n -a APP --env ...`), looked at (320 wide and hi-res at native size) and their plugin log kept; rdna3mtl.conf is
-# not touched. Rungs: baseline, radv, sync, managed, alignguard, paranoid, loadbarrier.
+# not touched. Rungs: baseline, attrring (N57: the attribute ring without BIG_PAGE), radv, sync, managed,
+# alignguard, paranoid, loadbarrier.
 # ladder-ws adds the two rungs that need WindowServer restarted (radv-ws, paranoid-ws): the conf is edited
 # and put back, you log in after each restart (the step may run ~45 min).
 ladder rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3ladder=1

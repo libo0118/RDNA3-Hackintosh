@@ -770,6 +770,33 @@ int gpuvm_map(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages,
     return RDNA3_OK;
 }
 
+/* The smallest PTE fragment (log2 of 4 KiB pages) a physically contiguous
+ * mapping of 'pages' at 'va' gets: amdgpu_vm_ptes_update walks the range in
+ * amdgpu_vm_pte_fragment steps (rdna3amdgpu=1); the default path writes
+ * 4 KiB PTEs without a fragment (0). For the logs of DRIVER-PLAN N57 (the
+ * attribute ring's BIG_PAGE needs 64 KiB = fragment 4). */
+unsigned int gpuvm_map_fragment(const rdna3_dev *d, uint64_t va, uint64_t pages)
+{
+    vm_update_params p;
+    uint64_t start = (va & RD_VM_VA_MASK) >> 12, end = start + pages, frag_end;
+    unsigned int frag, min = 31;
+    if (!d->amdgpu_exact || !pages)
+        return 0;
+    p.d = NULL;
+    p.vm = NULL;
+    p.pages_addr = NULL;
+    p.ctx = NULL;
+    while (start < end) {
+        amdgpu_vm_pte_fragment(&p, start, end, &frag, &frag_end);
+        if (frag < min)
+            min = frag;
+        if (frag_end <= start)
+            break;
+        start = frag_end;
+    }
+    return min;
+}
+
 struct linear_ctx { uint64_t pa; };
 static uint64_t linear_pa(void *ctx, uint64_t i)
 {

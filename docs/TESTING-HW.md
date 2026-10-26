@@ -210,8 +210,8 @@ repository or a Linux host.
    all of them; they are what
    [AFTER-TESTS](AFTER-TESTS.md) expects from the VM.
    The rendering-artefact A/B (DRIVER-PLAN N50) is one command there too, in a Terminal on the Mac that has the card:
-   `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder` (about 26 minutes; `--ladder-ws` adds the two WindowServer
-   rungs): Terminal and Chess open and close by themselves with one `NVMTL_*` switch per rung, it asks `y` / `n` / Enter for each rung's picture,
+   `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder` (about 29 minutes; `--ladder-ws` adds the two WindowServer
+   rungs): Terminal and Chess open and close by themselves with one `NVMTL_*` switch per rung (right after the baseline `attrring`, DRIVER-PLAN N57: `NVMTL_ATTR_RING_BIG_PAGE=0`, RADV's GFX11 attribute ring without SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE), it asks `y` / `n` / Enter for each rung's picture,
    and the report (`41-ladder.txt`, one triage row per rung, an automatic glyph verdict from each rung's hi-res look) says which switch made it right ([AFTER-TESTS](AFTER-TESTS.md), "The whole ladder in one card run"). `--ladder-glyphs` (about 25 minutes) is the glyph hunt (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...).
    Only the collection, without running any test:
    `"$R/tools/macos/collect.sh" <label>` (writes `~/rdna3-report-<label>-<date>.tar.gz`).

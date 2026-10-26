@@ -11219,7 +11219,16 @@ static void run(const char *fwdir)
                                 regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
                 unsigned walks = S.vm_huge_walks, t0;
                 CHECK(hoff != UINT64_MAX && hoff + (4ull << 20) <= BAR_LEN && !(hpa & ((2ull << 20) - 1)));
+                /* DRIVER-PLAN N57: the fragment the logs report - 4 KiB PTEs (0) on the default path */
+                CHECK(gpuvm_map_fragment(&dev, hva, 1024) == 0);
                 dev.amdgpu_exact = 1;
+                /* amdgpu_vm_pte_fragment's steps: 4 MiB aligned 4 MiB = 10; the attribute ring (2 MiB aligned,
+                 * 4224 KiB: 2 MiB + 2 MiB + 128 KiB) = 5; 64 KiB aligned 16 pages = 4; a 4 KiB aligned VA = 0 */
+                CHECK(gpuvm_map_fragment(&dev, hva, 1024) == 10);
+                CHECK(gpuvm_map_fragment(&dev, hva + (2ull << 20), 1056) == 5);
+                CHECK(gpuvm_map_fragment(&dev, hva + 0x10000, 16) == 4);
+                CHECK(gpuvm_map_fragment(&dev, hva + 4096, 16) == 0);
+                CHECK(gpuvm_map_fragment(&dev, hva, 0) == 0);
                 CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK && vm.tables == 1);
                 rdna3_vram_read(&dev, vm.root + 8 * 511, &e, 8);
                 CHECK(e == RD_PDE_PTE);                    /* a PD's cleared entry */
