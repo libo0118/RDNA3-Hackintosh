@@ -72,13 +72,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch Navi 32 firmware for header tests (not redistributed)
         run: |
-          mkdir -p "$RUNNER_TEMP/fw"
+          # a cache on the runner host (jobs run on the host, $HOME stays): gitlab.com answers 429 to a burst of
+          # raw fetches (run 61: RLC, MES, DMCUB, VCN missing, test_fw failed); only missing files are fetched,
+          # with retries that wait
+          cache="${RDNA3_FW_CACHE:-$HOME/.cache/rdna3-fw}"
+          mkdir -p "$cache" "$RUNNER_TEMP/fw"
           for f in psp_13_0_10_sos psp_13_0_10_ta smu_13_0_10 sdma_6_0_3 gc_11_0_3_imu gc_11_0_3_pfp \
                    gc_11_0_3_me gc_11_0_3_mec gc_11_0_3_rlc gc_11_0_3_mes_2 \
                    gc_11_0_3_mes1 dcn_3_2_0_dmcub vcn_4_0_0; do
-            curl -sSfL "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/amdgpu/$f.bin" \
-                 -o "$RUNNER_TEMP/fw/$f.bin" || echo "could not fetch $f"
+            if [ ! -s "$cache/$f.bin" ]; then
+              curl -sSfL --retry 6 --retry-delay 10 --retry-all-errors \
+                   "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/amdgpu/$f.bin" -o "$cache/$f.bin.part" &&
+                [ -s "$cache/$f.bin.part" ] && mv "$cache/$f.bin.part" "$cache/$f.bin" || echo "could not fetch $f"
+              sleep 1
+            fi
+            [ -s "$cache/$f.bin" ] && cp "$cache/$f.bin" "$RUNNER_TEMP/fw/$f.bin"
           done
+          ls "$RUNNER_TEMP/fw" | wc -l
       - name: Unit tests + fuzz (ASan/UBSan), real firmware headers
         run: make test RDNA3_FW_DIR="$RUNNER_TEMP/fw"
       - name: Firmware load plan
