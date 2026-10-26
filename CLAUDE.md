@@ -50,7 +50,7 @@ own job. For every request the manager:
    work, `ecc:build-error-resolver` / `ecc:cpp-build-resolver` when CI is
    red), docs (`ecc:doc-updater`).
 2. Briefs each one completely but briefly: every brief starts with "Read
-   /home/user/RDNA3-Hackintosh/CLAUDE_SUBAGENT.md first" (the rules every
+   /mnt/data/Programowanie/RDNA3-Hackintosh/CLAUDE_SUBAGENT.md first" (the rules every
    agent follows: graph first, worktree, commits and trailers, kernel
    and plugin code rules, logging, checks before done, the final report,
    reviewers) and then holds only what this task needs: the worktree,

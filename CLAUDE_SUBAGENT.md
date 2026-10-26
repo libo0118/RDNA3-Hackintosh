@@ -25,13 +25,22 @@ boots the same disk (`mac_hdd_ng.img`) as the card VM `rdna3vm` runs, and
 two machines on one disk corrupt it. If ssh does not answer, say so in
 your report and let the manager ask the owner; build on CI instead.
 
+## Know where things are: docs/CODEMAP.md
+
+Read docs/CODEMAP.md before anything else in the code: the directories,
+each subsystem's key files and functions, where the logs, counters,
+report members and triage rows live, the tests and CI jobs, and a "where
+to change X" table. Go straight to the files it names; search only for
+what it does not cover. Whoever adds a subsystem, a file family, a report
+member or a counter family updates it in the same commit.
+
 ## Find code through the graph first
 
 Before grepping or reading files, ask the code graph (it saves most of
 the tokens an agent spends finding the right place):
 
 ```sh
-G=/home/user/RDNA3-Hackintosh/graphify-out/graph.json
+G=/mnt/data/Programowanie/RDNA3-Hackintosh/graphify-out/graph.json
 graphify query "<question>" --budget 1500 --graph $G
 graphify explain "<symbol>" --graph $G       # a node and its neighbours
 graphify path "<A>" "<B>" --graph $G         # how A reaches B
