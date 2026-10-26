@@ -155,7 +155,8 @@ load_conf() {
 # CPU_MODEL=host (or host,<more QEMU cpu flags>): the VM runs with QEMU's `-cpu host`, the
 # host's real CPU (an AMD Ryzen: the bare-metal hackintosh test). macOS then needs the
 # AMD_Vanilla kernel patches in OpenCore; cmd__oc puts them in before every boot (vmtool.py
-# plist --amd-cpu, data/amd_vanilla.SOURCE) and takes them out again for any other CPU_MODEL.
+# plist --amd-cpu, data/amd_vanilla.SOURCE) and takes them out again for any other CPU_MODEL;
+# with them goes RestrictEvents (+ a Lilu macOS 26 runs) so About This Mac names the real CPU.
 #  host            the vendor stays AuthenticAMD (the patches expect it: no vendor=GenuineIntel),
 #                  kvm=on gives macOS the hypervisor leaf, +invtsc the invariant TSC (macOS
 #                  since Monterey panics when the TSC is not), vmware-cpuid-freq=on the TSC
@@ -216,7 +217,7 @@ cpu_summary() {   # one line: what the VM's CPU is
     c=$(cpu_cores) || return 1; t=$(cpu_threads) || return 1
     if cpu_is_host; then
         if cpu_amd_patches; then
-            echo "host CPU ($(awk -F': *' '/^model name/ {print $2; exit}' "$CPUINFO")) passed through, ${CPUS} vCPUs = ${c} cores x ${t} threads, AMD_Vanilla patches on (core count ${c}, see tools/vm/data/amd_vanilla.SOURCE)"
+            echo "host CPU ($(awk -F': *' '/^model name/ {print $2; exit}' "$CPUINFO")) passed through, ${CPUS} vCPUs = ${c} cores x ${t} threads, AMD_Vanilla patches on (core count ${c}, see tools/vm/data/amd_vanilla.SOURCE), RestrictEvents for the CPU name (tools/vm/data/oc_kexts.SOURCE)"
         else
             echo "host CPU passed through ($(cpu_host_vendor)), ${CPUS} vCPUs = ${c} cores x ${t} threads, NOT an AMD host: no AMD_Vanilla patches"
         fi
@@ -553,8 +554,61 @@ oc_cleanup() {
     return 0
 }
 
+# RestrictEvents for CPU_MODEL=host on an AMD host (vmtool.py OC_KEXTS, tools/vm/data/oc_kexts.SOURCE):
+# macOS 26 would show "8-Core Intel Xeon W" (the Mac model's) in About This Mac. It needs Lilu 1.7.1+
+# on macOS 26 (the image's Lilu 1.6.8 does not run there); the image's own Lilu.kext is kept as
+# Lilu.kext.rdna3vm-orig while the newer one is in. Outside the AMD mode, or when the release could
+# not be fetched, everything is taken out again and the original Lilu is back.
+# oc_cpu_kexts MNT READY: READY = the vmtool ockexts directory, or empty for "off"; copies / removes
+# the files in MNT/EFI/OC/Kexts and sets OC_KEXT_ARGS (the vmtool plist options that go with them)
+OC_KEXT_ARGS=()
+oc_kext_version() {   # CFBundleVersion of a kext's Info.plist, empty when there is none
+    sed -n '/<key>CFBundleVersion<\/key>/{n;s/.*<string>\([^<]*\)<\/string>.*/\1/p;q;}' "$1/Contents/Info.plist" 2>/dev/null || true
+}
+oc_cpu_kexts() {
+    local mnt=$1 ready=$2 kd=$1/EFI/OC/Kexts have_cfg
+    OC_KEXT_ARGS=()
+    have_cfg=0; grep -q '<string>RestrictEvents.kext</string>' "$mnt/EFI/OC/config.plist" && have_cfg=1
+    if [ -n "$ready" ]; then
+        mkdir -p "$kd" || return 1
+        if [ -d "$kd/Lilu.kext" ]; then
+            if [ "$(oc_kext_version "$kd/Lilu.kext")" != "$(oc_kext_version "$ready/Lilu.kext")" ]; then
+                [ -d "$kd/Lilu.kext.rdna3vm-orig" ] || mv "$kd/Lilu.kext" "$kd/Lilu.kext.rdna3vm-orig" || return 1
+                rm -rf "$kd/Lilu.kext"
+                cp -R "$ready/Lilu.kext" "$kd/" || return 1
+            fi
+        else
+            cp -R "$ready/Lilu.kext" "$kd/" || return 1
+            : > "$kd/.rdna3vm-lilu-added" || return 1
+        fi
+        rm -rf "$kd/RestrictEvents.kext"
+        cp -R "$ready/RestrictEvents.kext" "$kd/" || return 1
+        # Lilu keeps its place (first in the image), RestrictEvents is put last: always after Lilu
+        [ $have_cfg = 1 ] && OC_KEXT_ARGS+=(--remove-kext RestrictEvents)
+        OC_KEXT_ARGS+=(--kext "Lilu:Lilu::" --kext "RestrictEvents:RestrictEvents::")
+        echo "RestrictEvents $(oc_kext_version "$kd/RestrictEvents.kext") + Lilu $(oc_kext_version "$kd/Lilu.kext") injected (the AMD CPU's name in About This Mac)"
+        return 0
+    fi
+    [ -d "$kd" ] || return 0
+    if [ -d "$kd/RestrictEvents.kext" ] || [ $have_cfg = 1 ]; then
+        rm -rf "$kd/RestrictEvents.kext"
+        OC_KEXT_ARGS+=(--remove-kext RestrictEvents)
+        echo "RestrictEvents taken out of OpenCore"
+    fi
+    if [ -d "$kd/Lilu.kext.rdna3vm-orig" ]; then
+        rm -rf "$kd/Lilu.kext"
+        mv "$kd/Lilu.kext.rdna3vm-orig" "$kd/Lilu.kext" || return 1
+        echo "the image's own Lilu $(oc_kext_version "$kd/Lilu.kext") is back"
+    fi
+    if [ -e "$kd/.rdna3vm-lilu-added" ]; then
+        rm -rf "$kd/Lilu.kext"; rm -f "$kd/.rdna3vm-lilu-added"
+        OC_KEXT_ARGS+=(--remove-kext Lilu)
+    fi
+    return 0
+}
+
 cmd__oc() {
-    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap a prev="" sm_written="" edits=1
+    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap a prev="" sm_written="" edits=1 revdir=""
     [ -f "$img" ] || die "no $img"
     # the CPU mode of the config goes into the OpenCore config on every edit: the AMD_Vanilla
     # patches for CPU_MODEL=host on an AMD host, none (and the old values back) otherwise. _oc
@@ -570,6 +624,20 @@ cmd__oc() {
         cpu_args=$(cpu_oc_args) || exit 1
         # shellcheck disable=SC2086
         set -- "$@" $cpu_args
+        case "$cpu_args" in
+        --amd-cpu*)
+            # RestrictEvents + Lilu for the CPU name: fetched (sha256 pinned, cached) before the image
+            # is mounted. RDNA3VM_OCKEXT_DIR = a ready directory (tests/test_vm_amd_cpu.sh). A failure
+            # is loud but does not stop the boot: only About This Mac shows the wrong CPU
+            if [ -n "${RDNA3VM_OCKEXT_DIR:-}" ]; then
+                revdir=$RDNA3VM_OCKEXT_DIR
+            elif revdir=$($VMTOOL ockexts "$WORK/oc-kexts"); then
+                chown -R --reference="$WORK" "$WORK/oc-kexts" 2>/dev/null || true
+            else
+                revdir=
+                echo "!! RestrictEvents is not injected (About This Mac will show the Mac model's CPU name): see above"
+            fi ;;
+        esac
     fi
     # the model this call writes (smbios_want reads it back: a later run that asks for nothing
     # puts the default back instead of keeping this one)
@@ -611,7 +679,8 @@ cmd__oc() {
             esac
         done
     fi
-    [ $rc = 0 ] && { $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" || rc=$?; }
+    if [ $edits = 1 ] && [ $rc = 0 ]; then oc_cpu_kexts "$mnt" "$revdir" || { rc=1; echo "!! cannot update RestrictEvents / Lilu in OpenCore"; }; fi
+    [ $rc = 0 ] && { $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" ${OC_KEXT_ARGS[@]+"${OC_KEXT_ARGS[@]}"} || rc=$?; }
     oc_cleanup
     trap - INT TERM
     if [ -n "$old_trap" ]; then eval "$old_trap"; else trap - EXIT; fi

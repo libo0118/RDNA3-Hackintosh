@@ -1,0 +1,48 @@
+oc_kexts.SOURCE - Lilu and RestrictEvents, fetched and checked, never vendored.
+
+What:     the card VM's About This Mac names the Mac model's CPU ("8-Core Intel Xeon W" for
+          MacBookPro16,1) whatever the VM has. With CPU_MODEL=host on an AMD host (the
+          AMD_Vanilla patches, tools/vm/data/amd_vanilla.SOURCE) rdna3vm's cmd__oc also
+          injects RestrictEvents, whose CPU brand string patch is on by default for a
+          non-Intel CPU and takes the name from CPUID (the real "AMD Ryzen 7 5800X 8-Core
+          Processor"). No boot-arg is needed; revcpu=0|1 and revcpuname="..." exist in its
+          README and are left unset (the README: "taken from CPUID otherwise"). It patches
+          the About This Mac extension for the core count the kernel reports
+          (RestrictEvents.cpp: "8-Core Intel Xeon W" for 8 cores), which is the count the
+          AMD_Vanilla core patch sets.
+Pins:     both are official Acidanthera RELEASE builds (GitHub releases, source tags of the
+          same names; both BSD-3-Clause per the GitHub API; the zips are fetched and checked, not
+          committed, because nothing built by others is kept in this repository):
+            Lilu            1.7.2   (2026-03-20)  Lilu-1.7.2-RELEASE.zip
+              https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip
+              sha256 53967d7dcfaab01023a33df2e969a89522f13d6654a6a56ac4711b62dabf3ab8
+            RestrictEvents  1.1.6   (2025-07-07)  RestrictEvents-1.1.6-RELEASE.zip
+              https://github.com/acidanthera/RestrictEvents/releases/download/1.1.6/RestrictEvents-1.1.6-RELEASE.zip
+              sha256 98170dfae195ddd28b5d95e3f040125a13ca783bcb9bd1e5b8c588e217b14ee6
+          The same pins are OC_KEXTS in tools/vm/vmtool.py (tests/test_vm_amd_cpu.sh checks
+          that this file and vmtool.py agree).
+macOS 26: RestrictEvents 1.1.6 ("Added constants for macOS 26 support"; its plugin range ends
+          at KernelVersion::Tahoe). It needs Lilu 1.2.0 or later by Info.plist, but Lilu itself
+          runs on macOS 26 only from 1.7.1 ("Allow loading on macOS 26 without -lilubetaall");
+          1.7.2 "Fixed AMDSupport lockups & panics in macOS 26" (Lilu's AMD CPU support), so
+          1.7.2 is pinned. The OSX-KVM image's own Lilu is 1.6.8: on Darwin 25 it stays inert
+          (no plugin of the image runs, so nothing but the RDNA3 kexts works today). Lilu
+          1.7.2 does not change that for the image's other plugins: WhateverGreen 1.6.7 and
+          VirtualSMC 1.3.3 end their own range at Sequoia (their kern_start.cpp), -lilubetaall is
+          not set.
+How:      tools/vm/rdna3vm cmd__oc (before every boot, as root) runs `vmtool.py ockexts
+          $WORK/oc-kexts` in the AMD mode: the zips are downloaded once into that cache
+          (sha256 checked, a cached zip is checked again each time), and only
+          Contents/Info.plist + the executable of each kext are taken out of them. They go to
+          EFI/OC/Kexts of the OpenCore image; Kernel/Add gets Lilu (its existing first entry
+          stays, or one is added) and RestrictEvents after it (Arch Any / x86_64 like the
+          image's entries, MinKernel / MaxKernel empty). The image's own Lilu.kext is kept as
+          EFI/OC/Kexts/Lilu.kext.rdna3vm-orig while 1.7.2 is in.
+Off:      any other CPU_MODEL (or a host that is not AMD): RestrictEvents.kext and its
+          Kernel/Add entry are removed and the original Lilu.kext is moved back. A Lilu the
+          image did not have is removed with its entry (marker EFI/OC/Kexts/.rdna3vm-lilu-added).
+          A failed fetch (no network, sha256 mismatch) is a loud "!!" line and the same
+          removal: the VM boots, only About This Mac keeps the Mac model's CPU name.
+Update:   take a newer release's zip sha256 from the GitHub release (download, sha256sum), set
+          OC_KEXTS in tools/vm/vmtool.py and the lines above; check that its README / release
+          notes name the macOS version of the VM and that its Lilu minimum is met.
