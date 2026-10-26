@@ -27,6 +27,7 @@ cat > "$T/bin/ioreg" <<'EOF2'
 #!/bin/sh
 # -r -c CLASS [-d 1] [-l -w0]: the accelerator exists unless $S/noacc; WindowServer's user client appears when $S/wsgpu exists
 echo "ioreg $*" >> "$S/calls"
+[ -e "$S/stuckioreg" ] && exec sleep 600   # a hung boot: ioreg never answers (card run 2026-10-26, -cpu host)
 cls=; while [ $# -gt 0 ]; do [ "$1" = -c ] && cls=$2; shift; done
 [ -e "$S/noacc" ] && exit 0
 case "$cls" in
@@ -203,6 +204,15 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
     f=$(ls "$S"/host/bootwatch-*-1.txt | head -n1)
     grep -q 'no sample output and no spindump' "$f" && grep -q '^kextstat: not installed' "$f" && grep -q '^log: not installed' "$f" && grep -q '^BOOTWATCH-DONE' "$f" ||
         fail "$sh bare: missing tools were not reported: $(head -40 "$f")"
+    # ioreg hangs (the IOKit of a hung boot): the probe gives up, the watch still collects, spindump first, no more ioreg
+    run_scen $sh stuck 'touch "$S/stuckioreg"; BW_PROBE_T=1; BW_N=2; BW_MAXN=1; bootwatch_run'
+    S=$T/$sh-stuck; H=$S/host
+    f=$(ls "$H"/bootwatch-*-1.txt 2>/dev/null | head -n1)
+    [ -n "$f" ] || fail "$sh stuck: no snapshot although ioreg hung: $(ls "$H" 2>&1) $(cat "$S/out.txt")"
+    grep -q '^probe: an ioreg of this watch hung' "$f" && grep -q 'skipped (a probe hung)' "$f" && grep -q '^BOOTWATCH-DONE' "$f" ||
+        fail "$sh stuck: the hung probe is not reported: $(head -30 "$f")"
+    ls "$H"/bootwatch-*-1.spindump >/dev/null 2>&1 || fail "$sh stuck: no spindump on the host: $(ls "$H")"
+    [ "$(grep -c '^ioreg' "$S/calls")" -le 2 ] || fail "$sh stuck: ioreg started again after it hung: $(grep -c '^ioreg' "$S/calls") calls"
     # no WindowServer process at all: said so, no sample is attempted
     run_scen $sh nows 'touch "$S/nows"; BW_MAXN=1; bootwatch_run'
     S=$T/$sh-nows

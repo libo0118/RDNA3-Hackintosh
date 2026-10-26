@@ -1532,25 +1532,42 @@ BW_POLL=${BW_POLL:-5}
 BW_REPEAT=${BW_REPEAT:-60}
 BW_MAXN=${BW_MAXN:-30}
 BW_MAXSEC=${BW_MAXSEC:-2400}
+BW_PROBE_T=${BW_PROBE_T:-20}
 # with_limit above, for use inside $( ) and pipes: its timer's stdout is /dev/null, so the sleep it leaves behind does not hold the
 # pipe open until it ends (a `with_limit 20 ioreg | grep -q` would wait 20 s for EOF)
 bw_limit() {
-    _t=$1; shift
-    "$@" & _p=$!
-    ( sleep "$_t"; kill -9 "$_p" ) >/dev/null 2>&1 </dev/null & _w=$!
-    wait "$_p"; _r=$?
-    pkill -P "$_w" 2>/dev/null; kill "$_w" 2>/dev/null
-    return $_r
+    # the output goes through a file, never straight into the caller's pipe: a command stuck in the kernel (card run
+    # 2026-10-26, -cpu host: ioreg froze with WindowServer, kill -9 cannot reach it) would hold the pipe open, and
+    # `wait` on it never returns. After $1 s it is killed and abandoned, and BW_STUCKF says a probe hung.
+    _bl_t=$1; shift
+    _bl_f=$(mktemp /tmp/rdna3-bwl.XXXXXX 2>/dev/null) || _bl_f=/tmp/rdna3-bwl.$$
+    "$@" > "$_bl_f" 2>&1 & _bl_p=$!
+    _bl_e=0   # in 0.2 s steps: most commands end within the first
+    while kill -0 "$_bl_p" 2>/dev/null && [ "$_bl_e" -lt $((_bl_t * 5)) ]; do sleep 0.2; _bl_e=$((_bl_e + 1)); done
+    if kill -0 "$_bl_p" 2>/dev/null; then
+        kill -9 "$_bl_p" 2>/dev/null
+        : > "$BW_STUCKF" 2>/dev/null
+        cat "$_bl_f"; rm -f "$_bl_f"
+        echo "(${1##*/}: no answer after $_bl_t s: killed and left behind)"
+        return 124
+    fi
+    wait "$_bl_p"; _bl_r=$?
+    cat "$_bl_f"; rm -f "$_bl_f"
+    return $_bl_r
 }
 bw_console_user() { stat -f %Su /dev/console 2>/dev/null; }
 bw_uptime() {   # seconds since the kernel booted (0 when unknown)
     _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9][0-9]*\).*/\1/p')
     [ -n "$_bt" ] && echo $(( $(date +%s) - _bt )) || echo 0
 }
-bw_acc_present() { bw_limit 20 ioreg -r -c RDNA3Accelerator -d 1 2>/dev/null | grep -q RDNA3Accelerator; }
+bw_acc_present() {   # a hung probe counts as present: the ioreg of a hung boot hangs too
+    [ -e "$BW_STUCKF" ] && return 0
+    bw_limit "$BW_PROBE_T" ioreg -r -c RDNA3Accelerator -d 1 2>/dev/null | grep -q RDNA3Accelerator
+}
 bw_ws_gpu() {   # 0: WindowServer has a user client of the accelerator or the core
+    [ -e "$BW_STUCKF" ] && return 1   # no new ioreg once one hung (each would hang as well)
     for _c in RDNA3Accelerator RDNA3Accel; do
-        bw_limit 20 ioreg -l -w0 -r -c "$_c" 2>/dev/null | grep -q 'IOUserClientCreator.*WindowServer' && return 0
+        bw_limit "$BW_PROBE_T" ioreg -l -w0 -r -c "$_c" 2>/dev/null | grep -q 'IOUserClientCreator.*WindowServer' && return 0
     done
     return 1
 }
@@ -1575,8 +1592,21 @@ bw_collect() {   # bw_collect <n> <elapsed s>: the evidence of one round, upload
         echo "$_ps" | grep -qE 'WindowServer' || echo "WindowServer: NOT RUNNING"
         echo "== launchctl list (WindowServer, loginwindow, rdna3)"
         launchctl list 2>&1 | grep -iE 'windowserver|loginwindow|rdna3' | head -20
+        echo "== spindump of every process, user and kernel stacks: bootwatch-$BW_STAMP-$1.spindump"
+        if command -v spindump >/dev/null 2>&1; then
+            _sp=${BW_PEND}bootwatch-$BW_STAMP-$1.spindump
+            rm -f "$_sp"
+            _wp=$(pgrep -x WindowServer 2>/dev/null | head -n 1)
+            bw_limit 120 spindump ${_wp:--noTarget} 3 10 -o "$_sp" >/dev/null 2>&1
+            echo "spindump: exit $? ($(wc -c < "$_sp" 2>/dev/null || echo 0) bytes)"
+            if [ -s "$_sp" ]; then
+                if bw_put "$_sp"; then rm -f "$_sp"; else echo "upload of ${_sp#$BW_PEND} failed: kept for the next boot"; fi
+            fi
+        else echo "spindump: not installed"; fi
+        [ -e "$BW_STUCKF" ] && echo "probe: an ioreg of this watch hung in the kernel (killed, left behind): ioreg below is skipped"
         echo "== ioreg: RDNA3Accelerator / RDNA3Accel essentials"
         for _c in RDNA3Accelerator RDNA3Accel; do
+            [ -e "$BW_STUCKF" ] && { echo "-- $_c: skipped (a probe hung)"; continue; }
             echo "-- $_c"
             bw_limit 25 ioreg -l -w0 -r -c "$_c" 2>&1 |
                 grep -E '\+-o|IOUserClientCreator|MetalPlugin|IOGLBundleName|IOAccelRevision|"RDNA3,|IOAccelCounter' |
@@ -1637,6 +1667,8 @@ bw_final() {   # bw_final <n> <state> <elapsed s> <snapshots>: how the watch end
 }
 bootwatch_run() {
     BW_STAMP=$(date +%Y%m%d-%H%M%S); BW_T0=$(date +%s)
+    BW_STUCKF=${BW_PIDFILE%.pid}.stuck   # a probe hung (bw_limit); next to the pid file
+    rm -f "$BW_STUCKF"
     echo "$(date +%T) bootwatch $BW_STAMP: waiting for WindowServer to open the GPU (trigger $BW_N s)"
     _n=0; _next=$BW_N
     while :; do
