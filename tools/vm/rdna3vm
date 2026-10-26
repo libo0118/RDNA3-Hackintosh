@@ -160,12 +160,21 @@ load_conf() {
 #                  since Monterey panics when the TSC is not), vmware-cpuid-freq=on the TSC
 #                  frequency leaf (QEMU already does when it can), check prints what the host
 #                  cannot give
+#                  -kvm-pv-unhalt: macOS 26.4+ (xnu-12377) turns on paravirtual ticket locks when
+#                  the KVM leaf 0x40000001 EAX has bit 7 (KVM_FEATURE_PV_UNHALT; boot-arg
+#                  pvticket=0 is the macOS-side off switch) and kicks a sleeping waiter with the
+#                  Intel opcode VMCALL (0F 01 C1, _copypv+0x1cc in the 25.4.0 kernel). `-cpu host`
+#                  exposes the bit, a named model (Skylake-Client) does not. On an AMD host KVM
+#                  answers that VMCALL by rewriting it to VMMCALL in the guest's kernel text
+#                  (arch/x86/kvm/x86.c emulator_fix_hypercall), the text is read-only, and the guest
+#                  gets "Kernel trap type 14, CR2 = RIP, error code 3" (card VM panic 2026-10-26,
+#                  docs/DRIVER-PLAN.md N53). Nothing else in the 25.4.0 kernel reads the KVM features.
 #  CPUS            the number of vCPUs (logical processors)
 #  CPU_THREADS     threads per core, default 1: the VM then has CPUS cores of one thread. The
 #                  AMD core count patch is CPUS / CPU_THREADS, so the topology and the patch
 #                  always agree (CPUS=16 CPU_THREADS=2 = the 5800X's 8 cores / 16 threads, patch 08;
 #                  +topoext is added for threads above 1: QEMU warns about an AMD CPU without it)
-CPU_HOST_BASE="host,kvm=on,+invtsc,vmware-cpuid-freq=on,check"
+CPU_HOST_BASE="host,kvm=on,-kvm-pv-unhalt,+invtsc,vmware-cpuid-freq=on,check"
 cpu_is_host() { case "${CPU_MODEL:-}" in host|host,*) return 0 ;; esac; return 1; }
 CPUINFO=${RDNA3VM_CPUINFO:-/proc/cpuinfo}   # (a fake one in tests/test_vm_amd_cpu.sh)
 cpu_host_vendor() { awk -F': *' '/^vendor_id/ {print $2; exit}' "$CPUINFO" 2>/dev/null || true; }
