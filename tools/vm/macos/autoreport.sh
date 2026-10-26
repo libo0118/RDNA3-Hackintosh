@@ -26,14 +26,15 @@ fi
 # rdna3bisect=1 / 2 / 4 asks for it (rdna3vm step bisect / bisect-plugin /
 # bisect-agdc).
 BISECT=; BISECT_HAND=
-# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws | --ladder-glyphs | --ladder-coh;
-# in the VM the boot-arg rdna3ladder=1 / 2 / 3 / 4 (rdna3vm step ladder / ladder-ws / ladder-glyphs / ladder-coh)
+# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws | --ladder-glyphs | --ladder-coh | --apps;
+# in the VM the boot-arg rdna3ladder=1 / 2 / 3 / 4 / 5 (rdna3vm step ladder / ladder-ws / ladder-glyphs / ladder-coh / apps)
 LADDER=
 case "${1:-}" in
     --ladder) LADDER=1; BISECT_HAND=1; shift ;;
     --ladder-ws) LADDER=2; BISECT_HAND=1; shift ;;
     --ladder-glyphs) LADDER=3; BISECT_HAND=1; shift ;;
     --ladder-coh) LADDER=4; BISECT_HAND=1; shift ;;
+    --apps) LADDER=5; BISECT_HAND=1; shift ;;
 esac
 case "${1:-}" in
     --bisect) BISECT=1; BISECT_HAND=1; shift ;;
@@ -1389,7 +1390,7 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
 ladder_push() {   # up to the host after every rung: a run cut short keeps what it did. A file that did not go up is counted in ladder.txt (the triage then cannot judge that rung's glyphs)
     [ -n "$HOST" ] || return 0
     _pu_miss=0
-    for _pp in "$HOME"/rdna3-scanout/ladder-*/scanout-pipe*.ppm; do
+    for _pp in "$HOME"/rdna3-scanout/ladder-*/scanout-pipe*.ppm "$HOME"/rdna3-scanout/apps-*/scanout-pipe*.ppm; do
         [ -f "$_pp" ] || continue
         [ -f "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")" ] && continue
         if curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1; then
@@ -1409,6 +1410,8 @@ ladder_restore() {   # the plugin's conf and allow list exactly as the run found
     [ -n "${_LADDER_BASE_SET:-}" ] && [ -z "${_LADDER_WS:-}" ] && ladder_sweep   # (not after a WindowServer restart: the session's apps are all new then)
     bisect_plugin_restore
     if [ -n "${_LADDER_TEXTDIR:-}" ]; then rm -rf "${_LADDER_TEXTDIR:?}"; _LADDER_TEXTDIR=; fi
+    if [ -n "${_APPS_DIR:-}" ] && [ -z "${APPS_DIR:-}" ]; then rm -rf "${_APPS_DIR:?}"; fi   # (the survey's content; a directory the host test names is the test's)
+    _APPS_DIR=
     [ -n "${_LADDER_WS:-}" ] && [ -n "${LF:-}" ] && ladder_w "restored: rdna3mtl.conf as the run found it (a WindowServer started during a rung keeps that rung's conf until it restarts)"
     if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
     return 0
@@ -1421,9 +1424,9 @@ ladder_abort() {   # ladder_abort SIGNAME EXITCODE: the run is ending because of
     trap - EXIT
     exit "$2"
 }
-ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServer rungs, 3 = the glyph hunt (ladder-glyphs); 0 when every rung ran
+ladder_run() {   # ladder_run <1..5>: 1 = the app rungs, 2 = and the WindowServer rungs, 3 = the glyph hunt (ladder-glyphs), 4 = kernel coherence, 5 = the app survey (APPS block); 0 when every rung ran
     _lv=$1; _LADDER_V=$1
-    _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_GLYPHS_RUNGS; [ "$_lv" = 4 ] && _lrungs=$LADDER_COH_RUNGS
+    _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_GLYPHS_RUNGS; [ "$_lv" = 4 ] && _lrungs=$LADDER_COH_RUNGS; [ "$_lv" = 5 ] && _lrungs=$APPS_RUNGS
     LD=${LADDER_OUT:-$HOME/rdna3-ladder}; LF=$LD/ladder.txt; BD=$LD; BF=$LF
     rm -rf "$LD"; mkdir -p "$LD" || { echo "== ladder: cannot make $LD"; return 1; }
     _btty=
@@ -1431,7 +1434,7 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
     _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=; _LADDER_CUR=; _LADDER_SYSCTL_UNDO=
     ladder_w "# rdna3 ladder v1"
-    ladder_w "variant: $_lv ($(case $_lv in (2) echo ladder-ws ;; (3) echo ladder-glyphs ;; (4) echo ladder-coh ;; (*) echo ladder ;; esac))"   # (pattern): bash 3.2 reads an unbalanced ) inside $( ) as its end
+    ladder_w "variant: $_lv ($(case $_lv in (2) echo ladder-ws ;; (3) echo ladder-glyphs ;; (4) echo ladder-coh ;; (5) echo apps ;; (*) echo ladder ;; esac))"   # (pattern): bash 3.2 reads an unbalanced ) inside $( ) as its end
     ladder_w "started: $(date +%T)"
     ladder_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
     ladder_w "console_user: $(bisect_console_user)"
@@ -1459,10 +1462,16 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     _old_ticks=$(pgrep -f 'rdna3-ladder-text\.' 2>/dev/null | tr '\n' ' ')
     [ -z "$_old_ticks" ] || ladder_w "WARN: the text script of an earlier run is still running (pids $_old_ticks): its Terminal window shows tick lines too and is as live as this run's; close it and run again if a verdict says STATIC/live windows"
     ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM HUP; return 1; }
+    if [ "$_lv" = 5 ]; then apps_assets || { ladder_w "ABORT: no content for the apps"; ladder_restore; trap - EXIT INT TERM HUP; return 1; }; fi
     caffeinate -u -t 5 >/dev/null 2>&1 &
-    notify "ladder: $(echo $_lrungs | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
+    if [ "$_lv" = 5 ]; then notify "app survey: $(echo $_lrungs | wc -w | tr -d ' ') apps open and close by themselves, one after another - look at the screen"
+    else notify "ladder: $(echo $_lrungs | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"; fi
     _lfail=0
-    for _lr in $_lrungs; do ladder_rung "$_lr" apps || _lfail=1; done
+    if [ "$_lv" = 5 ]; then
+        for _lr in $_lrungs; do apps_rung "$_lr" || { _lfail=1; ladder_w "ABORT: the survey stops at ${_LADDER_CUR:-?} (nobody is logged in, or the rung is unknown): the apps after it did not run"; break; }; done
+    else
+        for _lr in $_lrungs; do ladder_rung "$_lr" apps || _lfail=1; done
+    fi
     if [ "$_lv" = 2 ]; then
         for _lr in $LADDER_WS_RUNGS; do ladder_rung "$_lr" windowserver || { _lfail=1; break; }; done
     fi
@@ -1480,6 +1489,544 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     return $_lfail
 }
 # LADDER-END
+
+# APPS-BEGIN (tests/test_apps_step.sh runs this block with the LADDER and BISECT blocks on the host)
+# The app survey (`rdna3vm step apps`, boot-arg rdna3ladder=5, standalone: sudo sh autoreport.sh --standalone --apps): after card run 2026-10-26 the driver draws
+# Terminal and Chess on the card, and those were almost the only apps tried. This opens a wider set of real apps, one after another, with the DEFAULT driver and
+# plugin settings (no NVMTL_ switch, no sysctl, no conf edit, no WindowServer restart), and leaves evidence of each: the next card run gives the list of what is
+# still visibly broken. It reuses the ladder's machinery (variant 5 of ladder_run: ladder.txt = collect.sh's 41-ladder.txt, one `== rung <app>` block per app,
+# <app>.log = 41-ladder-<app>.log): per app, per stage (a stage = a piece of content: Safari's three pages, Settings' panes) a 320-wide look and a hi-res look of
+# both pipes (`scanoutapps-<app>[-<stage>]a|h-pipe<N>`), after the app has had time to draw; then whether it is still running (a death is a crash when a report
+# appeared: the .ips is summarised in <app>-crash.log), whether the plugin is loaded in it (and in its helper processes: Safari's WebKit GPU process), whether
+# WindowServer survived (its pid before and after), the app's own Metal / GPU / error log lines with WindowServer's and the kernel's RDNA3 lines of the same
+# minutes (<app>-sys.log) and the plugin's NVMTL lines of its processes (<app>.log); then the app is quit (SIGINT, TERM, KILL as in the ladder: no System Events, no
+# Automation prompt). tools/triage_apps.py prints a row per app (`app <name>: ran / crashed / did not open ...`).
+# What cannot be done headless: scripting an app's UI (key presses, menu items, typing into Notes) needs System Events, which asks the owner for Accessibility /
+# Automation consent, so every app only shows what `open` gives it: a file, a URL, a pane. A screen recording is the same (Screen Recording consent): QuickTime Player
+# plays a movie the run generates instead. Whether an app DREW is the screenshots' verdict; the run only says it ran, stayed up, and what the logs said.
+APPS_RUNGS="chess terminal textedit calculator notes safari preview maps settings appstore photos imagecapture quicktime mission-control launchpad"
+apps_launchpad_name() { if [ -n "${APPS_LAUNCHPAD:-}" ]; then echo "$APPS_LAUNCHPAD"; elif [ -d /System/Applications/Apps.app ]; then echo Apps; else echo Launchpad; fi; }   # macOS 26 replaced Launchpad with Apps
+apps_proc() {   # apps_proc RUNG: the process name pgrep -x finds (empty: a Dock / WindowServer feature with no process of its own)
+    case $1 in
+        chess) echo Chess ;; terminal) echo Terminal ;; textedit) echo TextEdit ;; calculator) echo Calculator ;; notes) echo Notes ;;
+        safari) echo Safari ;; preview) echo Preview ;; maps) echo Maps ;; settings) echo "System Settings" ;; appstore) echo "App Store" ;;
+        photos) echo Photos ;; imagecapture) echo "Image Capture" ;; quicktime) echo "QuickTime Player" ;;
+        launchpad) apps_launchpad_name ;; mission-control) ;;
+        *) return 1 ;;
+    esac
+}
+apps_stages() {   # apps_stages RUNG: the pieces of content, in order (`main` = the app alone)
+    case $1 in
+        safari) echo "text canvas webgl" ;; preview) echo "pdf image" ;; settings) echo "appearance wallpaper displays" ;;
+        quicktime) echo "play later" ;; mission-control) echo "windows mc closed" ;; launchpad) echo "apps closed" ;;
+        *) echo main ;;
+    esac
+}
+apps_helpers() {   # apps_helpers RUNG: a pgrep -f pattern of the app's helper processes that draw for it (the log slice follows them too; they end with the app)
+    case $1 in safari) echo 'com\.apple\.WebKit\.(GPU|WebContent)|Safari\.app' ;; esac
+}
+apps_extra() {   # apps_extra RUNG: other apps the rung starts and quits
+    case $1 in mission-control) echo "Calculator TextEdit" ;; esac
+}
+apps_settle() {   # apps_settle RUNG STAGE: seconds the stage gets to draw before its looks (APPS_SETTLE overrides, for the host test)
+    [ -n "${APPS_SETTLE:-}" ] && { echo "$APPS_SETTLE"; return; }
+    case $1:$2 in
+        terminal:*) echo 15 ;; appstore:*|photos:*) echo 15 ;; maps:*) echo 12 ;; safari:*) echo 9 ;; quicktime:play) echo 3 ;; quicktime:later) echo 5 ;;
+        mission-control:windows) echo 5 ;; mission-control:*|launchpad:*) echo 3 ;; settings:*|preview:*) echo 6 ;; *) echo 8 ;;
+    esac
+}
+apps_b64() {   # apps_b64 FILE < base64: decode (macOS: base64 -D, newer macOS and GNU: -d)
+    cat > "$1.b64"
+    base64 -D < "$1.b64" > "$1" 2>/dev/null || base64 -d < "$1.b64" > "$1" 2>/dev/null
+    rm -f "$1.b64"
+    [ -s "$1" ]
+}
+apps_assets() {   # apps_assets: the files the apps open, made once per run in a directory of its own (mktemp -d: a fixed name in the sticky /Users/Shared could be a planted link)
+    if [ -n "${APPS_DIR:-}" ]; then _ad=$APPS_DIR; mkdir -p "$_ad"
+    else
+        _ad=$(mktemp -d /Users/Shared/rdna3-apps.XXXXXX) || { echo "apps: cannot make a directory for the content" >&2; return 1; }
+    fi
+    chmod 755 "$_ad"
+    _APPS_DIR=$_ad   # (a global: this is not called inside $( ))
+    # Safari 1: text, CSS (gradients, shadows, rounded corners, blur, an animation that never stops), an inline SVG, a table
+    cat > "$_ad/text.html" <<'APPSEND'
+<!doctype html><meta charset="utf-8"><title>RDNA3 survey: Safari text and CSS</title>
+<style>
+body{font:16px -apple-system,system-ui,sans-serif;margin:24px;background:#fff;color:#111}
+h1{font:700 30px Georgia,serif;margin:0 0 8px}
+.box{display:inline-block;width:150px;height:84px;border-radius:14px;margin:6px;box-shadow:0 6px 14px rgba(0,0,0,.45);color:#fff;padding:8px;box-sizing:border-box;font-weight:600}
+.a{background:linear-gradient(135deg,#f33,#33f)} .b{background:radial-gradient(circle,#ff0,#080)} .c{background:conic-gradient(red,yellow,lime,aqua,blue,magenta,red)}
+.spin{animation:spin 4s linear infinite} @keyframes spin{to{transform:rotate(360deg)}}
+.pulse{animation:pulse 1.2s ease-in-out infinite alternate;background:#c0392b} @keyframes pulse{from{opacity:.15}to{opacity:1}}
+.glass{backdrop-filter:blur(8px);background:rgba(255,255,255,.35);border:1px solid #999}
+code,pre{font:13px Menlo,monospace} table{border-collapse:collapse;margin:8px 0} td,th{border:1px solid #888;padding:4px 12px}
+.s9{font-size:9px}.s11{font-size:11px}.s13{font-size:13px}.s20{font-size:20px}.s28{font-size:28px}
+</style>
+<h1>RDNA3 app survey: Safari text and CSS</h1>
+<p class="s9">9 px: The quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ</p>
+<p class="s11">11 px: The quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ</p>
+<p class="s13">13 px: The quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ</p>
+<p class="s20" style="font-family:Georgia,serif"><i>20 px serif italic</i>, <b>bold</b>, <u>underlined</u>, <s>struck</s>, <code>monospace</code></p>
+<p class="s28" style="color:#2a6">28 px green: !#$%&amp;()*+,-./:;&lt;=&gt;?@[]^_{|}~</p>
+<div><div class="box a">linear gradient</div><div class="box b">radial gradient</div><div class="box c">conic gradient</div><div class="box spin a">rotating</div><div class="box pulse">fading</div></div>
+<div class="glass" style="padding:10px;margin-top:6px">a blurred glass panel over the page background (backdrop-filter)</div>
+<svg width="420" height="110" viewBox="0 0 420 110"><defs><linearGradient id="g"><stop offset="0" stop-color="#fc0"/><stop offset="1" stop-color="#06c"/></linearGradient></defs>
+<rect x="4" y="4" width="412" height="102" rx="16" fill="url(#g)" stroke="#000" stroke-width="3"/><circle cx="70" cy="55" r="34" fill="#fff" fill-opacity=".7"/>
+<path d="M120 80 Q 200 10 280 80 T 410 60" fill="none" stroke="#fff" stroke-width="5"/><text x="130" y="40" font-size="22" fill="#000">inline SVG text 0123456789</text></svg>
+<table><tr><th>column</th><th>value</th><th>note</th></tr><tr><td>alpha</td><td>1.000</td><td>first</td></tr><tr><td>beta</td><td>22.50</td><td>second</td></tr><tr><td>gamma</td><td>333.0</td><td>third</td></tr></table>
+<pre>for (i = 0; i &lt; 10; i++) { draw(i); }   /* a block of monospace text */</pre>
+APPSEND
+    # Safari 2: a 2D canvas animated with requestAnimationFrame (gradients, arcs, text with a shadow), a frame counter in the page itself
+    cat > "$_ad/canvas.html" <<'APPSEND'
+<!doctype html><meta charset="utf-8"><title>RDNA3 survey: Safari canvas</title>
+<body style="margin:0;background:#112;color:#eee;font:14px monospace"><div id="i">starting</div><canvas id="c" width="760" height="420"></canvas>
+<script>
+var c=document.getElementById('c'),x=c.getContext('2d'),i=document.getElementById('i'),n=0,t0=Date.now(),B=[];
+for(var k=0;k<14;k++)B.push({x:Math.random()*700,y:Math.random()*380,dx:2+Math.random()*3,dy:2+Math.random()*3,r:18+Math.random()*26,h:k*25});
+function f(){
+ n++;x.fillStyle='#112';x.fillRect(0,0,760,420);
+ var g=x.createLinearGradient(0,0,760,0);g.addColorStop(0,'#f06');g.addColorStop(.5,'#fc0');g.addColorStop(1,'#06f');x.fillStyle=g;x.fillRect(0,380,760,40);
+ B.forEach(function(b){b.x+=b.dx;b.y+=b.dy;if(b.x<b.r||b.x>760-b.r)b.dx=-b.dx;if(b.y<b.r||b.y>380-b.r)b.dy=-b.dy;
+  var rg=x.createRadialGradient(b.x-b.r/3,b.y-b.r/3,2,b.x,b.y,b.r);rg.addColorStop(0,'#fff');rg.addColorStop(1,'hsl('+((b.h+n*2)%360)+',90%,50%)');
+  x.fillStyle=rg;x.beginPath();x.arc(b.x,b.y,b.r,0,7);x.fill();});
+ x.save();x.shadowColor='#000';x.shadowBlur=8;x.fillStyle='#fff';x.font='bold 34px Helvetica';x.fillText('canvas frame '+n,24,60);x.font='16px Menlo';x.fillText('The quick brown fox 0123456789',24,90);x.restore();
+ x.strokeStyle='#0f8';x.lineWidth=3;x.beginPath();for(var a=0;a<760;a+=4){var y=210+60*Math.sin((a+n*4)/40);a?x.lineTo(a,y):x.moveTo(a,y);}x.stroke();
+ if(n%20==0)i.textContent='canvas ok: frame '+n+', '+Math.round(n*1000/(Date.now()-t0))+' fps';
+ requestAnimationFrame(f);}
+f();
+</script>
+APPSEND
+    # Safari 3: WebGL (a rotating coloured cube with depth test) and the renderer string the browser reports; says so on the page when there is no WebGL
+    cat > "$_ad/webgl.html" <<'APPSEND'
+<!doctype html><meta charset="utf-8"><title>RDNA3 survey: Safari WebGL</title>
+<body style="margin:0;background:#222;color:#eee;font:14px monospace"><pre id="i">starting</pre><canvas id="c" width="640" height="400"></canvas>
+<script>
+var c=document.getElementById('c'),i=document.getElementById('i'),n=0,gl=c.getContext('webgl2')||c.getContext('webgl')||c.getContext('experimental-webgl');
+if(!gl){i.textContent='NO WEBGL: getContext returned null';}else{
+ var d=gl.getExtension('WEBGL_debug_renderer_info');
+ i.textContent='WebGL: '+gl.getParameter(gl.VERSION)+' | '+(d?gl.getParameter(d.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER));
+ var sh=function(t,s){var o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))i.textContent+=' SHADER ERROR: '+gl.getShaderInfoLog(o);return o;};
+ var p=gl.createProgram();
+ gl.attachShader(p,sh(gl.VERTEX_SHADER,'attribute vec3 a;attribute vec3 k;uniform mat4 m;varying vec3 v;void main(){v=k;gl_Position=m*vec4(a,1.0);}'));
+ gl.attachShader(p,sh(gl.FRAGMENT_SHADER,'precision mediump float;varying vec3 v;void main(){gl_FragColor=vec4(v,1.0);}'));
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))i.textContent+=' LINK ERROR: '+gl.getProgramInfoLog(p);gl.useProgram(p);
+ var V=[];for(var k=0;k<8;k++){var x=(k&1)?1:-1,y=(k&2)?1:-1,z=(k&4)?1:-1;V.push(x,y,z,(x+1)/2,(y+1)/2,(z+1)/2);}
+ var I=[0,1,3,0,3,2,4,6,7,4,7,5,0,2,6,0,6,4,1,5,7,1,7,3,0,4,5,0,5,1,2,3,7,2,7,6];
+ var vb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(V),gl.STATIC_DRAW);
+ var ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(I),gl.STATIC_DRAW);
+ var la=gl.getAttribLocation(p,'a'),lk=gl.getAttribLocation(p,'k'),lm=gl.getUniformLocation(p,'m');
+ gl.enableVertexAttribArray(la);gl.vertexAttribPointer(la,3,gl.FLOAT,false,24,0);gl.enableVertexAttribArray(lk);gl.vertexAttribPointer(lk,3,gl.FLOAT,false,24,12);
+ gl.enable(gl.DEPTH_TEST);
+ var mul=function(a,b){var r=new Float32Array(16);for(var q=0;q<4;q++)for(var j=0;j<4;j++){var s=0;for(var w=0;w<4;w++)s+=a[w*4+q]*b[j*4+w];r[j*4+q]=s;}return r;};
+ var fr=function(){n++;var t=n/40,cs=Math.cos,sn=Math.sin,f=1/Math.tan(0.4),P=new Float32Array([f/1.6,0,0,0,0,f,0,0,0,0,-1.5,-1,0,0,-8.5,0]),
+  T=new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,-5,1]),Y=new Float32Array([cs(t),0,-sn(t),0,0,1,0,0,sn(t),0,cs(t),0,0,0,0,1]),X=new Float32Array([1,0,0,0,0,cs(t*.7),sn(t*.7),0,0,-sn(t*.7),cs(t*.7),0,0,0,0,1]);
+  gl.viewport(0,0,640,400);gl.clearColor(.1,.1,.2,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.uniformMatrix4fv(lm,false,mul(P,mul(T,mul(Y,X))));
+  gl.drawElements(gl.TRIANGLES,36,gl.UNSIGNED_SHORT,0);document.title='RDNA3 survey: Safari WebGL, frame '+n;requestAnimationFrame(fr);};
+ fr();}
+</script>
+APPSEND
+    # TextEdit: rich text (fonts, sizes, colours, bold / italic / underline), written by hand: no textutil
+    cat > "$_ad/survey.rtf" <<'APPSEND'
+{\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}{\f1 Times New Roman;}{\f2 Courier;}}{\colortbl;\red220\green30\blue30;\red30\green60\blue220;\red20\green140\blue50;\red120\green40\blue160;}
+\f0\fs56 \b RDNA3 app survey: TextEdit rich text\b0\par
+\fs24 The quick brown fox jumps over the lazy dog 0123456789\par
+\cf1 red \cf2 blue \cf3 green \cf4 purple \cf0 text in four colours, \b bold\b0 , \i italic\i0 , \ul underlined\ulnone , \strike struck\strike0\par
+\f1\fs32 Times New Roman 16 pt: ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz\par
+\f2\fs20 Courier 10 pt: !#$%&()*+,-./:;<=>?@[]^_{|}~\par
+\f0\fs18 Nine point: sphinx of black quartz, judge my vow. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\par
+\fs44 \cf1 Large \cf2 mixed \cf3 sizes \fs12 \cf0 and small\par
+}
+APPSEND
+    # Preview: a two-page PDF (text in two fonts, an axial and a radial shading, colour boxes), made by tools/apps_assets.py and embedded here
+    apps_b64 "$_ad/survey.pdf" <<'APPSEND'
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2Jq
+CjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs4IDAgUiAxMCAwIFJdIC9Db3VudCAyID4+
+CmVuZG9iagozIDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQg
+L0hlbHZldGljYSA+PgplbmRvYmoKNCAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlw
+ZTEgL0Jhc2VGb250IC9UaW1lcy1JdGFsaWMgPj4KZW5kb2JqCjUgMCBvYmoKPDwgL1NoYWRpbmdU
+eXBlIDIgL0NvbG9yU3BhY2UgL0RldmljZVJHQiAvQ29vcmRzIFs2MCAwIDU1MiAwXSAvRnVuY3Rp
+b24gPDwgL0Z1bmN0aW9uVHlwZSAyIC9Eb21haW4gWzAgMV0gL0MwIFsxIDAgMF0gL0MxIFswIDAg
+MV0gL04gMSA+PiAvRXh0ZW5kIFt0cnVlIHRydWVdID4+CmVuZG9iago2IDAgb2JqCjw8IC9TaGFk
+aW5nVHlwZSAzIC9Db2xvclNwYWNlIC9EZXZpY2VSR0IgL0Nvb3JkcyBbMzA2IDMwMCAwIDMwNiAz
+MDAgMTUwXSAvRnVuY3Rpb24gPDwgL0Z1bmN0aW9uVHlwZSAyIC9Eb21haW4gWzAgMV0gL0MwIFsx
+IDEgMF0gL0MxIFswIDAuNCAwXSAvTiAxID4+IC9FeHRlbmQgW2ZhbHNlIHRydWVdID4+CmVuZG9i
+ago3IDAgb2JqCjw8IC9MZW5ndGggNDE2IC9GaWx0ZXIgL0ZsYXRlRGVjb2RlID4+CnN0cmVhbQp4
+2q3Ty3LTMBQG4D1P8S/pTJjK8jXdNaSBQmnTxqXATrFlW4l8iSQ7l6fHSWoSOsMKryyPjr75dc5o
+FOJyYoE6CBN4BL5NEMZ4/zS+v7bBqgq6Vg3f4gOmijeCrzEdTwaoWMphXSBc4CZ8t9of9RwCZ0j3
+S8XxggKXs8yCzvDYFliEwHLbCosevqcSeiwZHZNYXRKPHJOEGceqFtESc1WuCyTlBos6rzTKhiuY
+dluy3RZxmYJY1HZczw+GXbJOpa+q63sH9Xr0cXwz+fT59svXu2/3D9PHp1n4/P3lx89fYPMo5kma
+icVS5kVZrZQ2dbPebHdv0KAzXXowZzmTEoZvDILKXEFXmSg2KBPMJWvzr2qmzG7Qpo/b5uVbNOX6
+L7LtzB+TBgfz1jApImiuRAIpCt7eXyGV2ypDlPFoqd/elLwKTnAU7vaHrCvIUvEcotJ13vaq/YMW
+BiznZoCoLDSPDDe1AotFJXQkihRcCvNP3qcnnvbPu96Jt/vnHXLinf75/XvqeLd/npyN1uudt4dn
+o/X75/2z0Qb/zf8GrmdyngplbmRzdHJlYW0KZW5kb2JqCjggMCBvYmoKPDwgL1R5cGUgL1BhZ2Ug
+L1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNyAwIFIgL1Jl
+c291cmNlcyA8PCAvRm9udCA8PCAvRjEgMyAwIFIgL0YyIDQgMCBSID4+IC9TaGFkaW5nIDw8IC9T
+aDEgNSAwIFIgL1NoMiA2IDAgUiA+PiA+PiA+PgplbmRvYmoKOSAwIG9iago8PCAvTGVuZ3RoIDQ0
+MCAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeNqt08ty2jAUBuA9T/EvmxmayPKV7EIJ
+bdo0JcFp2u6MkW2Bb0iywTx9bYMLTdtVvdCMPOfXNzo647GLq6kGasANYBHYOoG7xJunycONDi/P
+IQtRsgpvMROs5GyL2WQ6RO6FDPQC7gq37mDTHLUMAmNEm61geEGKq3mkQUZ4HJDLEcglbZcImwgl
+BFq9nDYdHKsmmmSdaMp/jzj10puIbvwRGYwP7WhdOxY5tONGDJuC+2ssRLZNEWQ7rIokl8hKJqDq
+cuztKyyzEESjumFatjPq2utUelRN22rVm/G7ye30/Ye7j5/uPz98mT0+zd3nry/fvv+At/CXLAgj
+vlrHSZrlGyFVUW531f4V6nSmSVtznnhxDMV2Ck6uriHziKc7ZAEWsVfff1N4Qu2H9e2X9QSSCmW2
+/Y2k0H6Z1GnNO+XF3IdkggeIeVq/VCYQxlUewY+Yv5avOyVHwXAOwn1zSLtGnAmWgOeySOq3qr8g
+uYKXMDWEn6WS+YqpQsBb8pxLn6chWMzVP3mbnnjaP29aJ17vnzfIiTf655ufsuPN/nlyNlqrd14f
+nY3W7p+3z0br/Df/E9a3f/AKZW5kc3RyZWFtCmVuZG9iagoxMCAwIG9iago8PCAvVHlwZSAvUGFn
+ZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA5IDAgUiAv
+UmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSAzIDAgUiAvRjIgNCAwIFIgPj4gL1NoYWRpbmcgPDwg
+L1NoMSA1IDAgUiAvU2gyIDYgMCBSID4+ID4+ID4+CmVuZG9iagp4cmVmCjAgMTEKMDAwMDAwMDAw
+MCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAw
+MDEyMiAwMDAwMCBuIAowMDAwMDAwMTkyIDAwMDAwIG4gCjAwMDAwMDAyNjUgMDAwMDAgbiAKMDAw
+MDAwMDQ0MCAwMDAwMCBuIAowMDAwMDAwNjI5IDAwMDAwIG4gCjAwMDAwMDExMTcgMDAwMDAgbiAK
+MDAwMDAwMTI5MCAwMDAwMCBuIAowMDAwMDAxODAyIDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUg
+MTEgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjE5NzYKJSVFT0YK
+APPSEND
+    [ -s "$_ad/survey.pdf" ] || ladder_w "WARN: apps: the PDF could not be decoded (base64): the Preview PDF stage opens nothing"
+    # Preview's picture: the PDF's first page as a JPEG (sips renders it with CoreGraphics), larger than the page
+    sips -s format jpeg -s formatOptions 85 "$_ad/survey.pdf" --out "$_ad/survey.jpg" >/dev/null 2>&1
+    [ -s "$_ad/survey.jpg" ] || { cp "$_ad/survey.pdf" "$_ad/survey.jpg" 2>/dev/null; ladder_w "WARN: apps: sips made no JPEG from the PDF: the Preview image stage opens a file with a .jpg name that holds the PDF"; }
+    # QuickTime Player: a 12 s H.264 movie (400x224, yellow / red / white boxes moving), made by tools/apps_assets.py (ffmpeg) and embedded here (a screen recording needs Screen Recording consent)
+    apps_b64 "$_ad/movie.mp4" <<'APPSEND'
+AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAUZbW9vdgAAAGxtdmhkAAAAAAAAAAAA
+AAAAAAAD6AAALuAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAABER0cmFrAAAAXHRraGQAAAADAAAA
+AAAAAAAAAAABAAAAAAAALuAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAA
+AAAAAAAAAABAAAAAAZAAAADgAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAC7gAAAAAAABAAAA
+AAO8bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAoAAAB4ABVxAAAAAAALWhkbHIAAAAAAAAAAHZp
+ZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAADZ21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAA
+ACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAydzdGJsAAAAu3N0c2QAAAAAAAAA
+AQAAAKthdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAZAA4ABIAAAASAAAAAAAAAABFExhdmM2
+My4xLjEwMiBsaWJ4MjY0AAAAAAAAAAAAAAAAGP//AAAAMWF2Y0MBQsAe/+EAGGdCwB6mEQZHbARA
+AAADAEAAAAUDxYuEYAEABmjIQgISyAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAA6nAAAA
+AAAAABhzdHRzAAAAAAAAAAEAAAB4AAAEAAAAAChzdHNzAAAAAAAAAAYAAAABAAAAFQAAACkAAAA9
+AAAAUQAAAGUAAAAcc3RzYwAAAAAAAAABAAAAAQAAAHgAAAABAAAB9HN0c3oAAAAAAAAAAAAAAHgA
+AASeAAAAOQAAACMAAAAOAAAADgAAAA4AAAAOAAAADgAAAA8AAAAPAAAADwAAAA8AAAAPAAAADwAA
+AA8AAAAPAAAADgAAAA4AAAAOAAAADgAAAkIAAAAfAAAAEQAAAAsAAAAMAAAADAAAAAwAAAAMAAAA
+DAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwAAAALAAAACwAAAAsAAAALAAACQQAAAB8AAAAR
+AAAACwAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAsA
+AAALAAAACwAAAAsAAAI+AAAAGwAAABEAAAALAAAADAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAA
+AAwAAAAMAAAADAAAAAwAAAAMAAAACwAAAAsAAAALAAAACwAAAj0AAAAbAAAAEQAAAAsAAAAMAAAA
+DAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwAAAALAAAACwAAAAsAAAAL
+AAACQgAAAB8AAAARAAAACwAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwAAAAMAAAADAAAAAwA
+AAAMAAAADAAAAAsAAAALAAAACwAAAAsAAAAUc3RjbwAAAAAAAAABAAAFSQAAAGF1ZHRhAAAAWW1l
+dGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAALGlsc3QAAAAkqXRvbwAA
+ABxkYXRhAAAAAQAAAABMYXZmNjMuMS4xMDIAAAAIZnJlZQAAFgNtZGF0AAACcQYF//9t3EXpvebZ
+SLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFW
+QyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gy
+NjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTAgcmVmPTE2IGRlYmxvY2s9MTowOjAgYW5hbHlzZT0w
+eDE6MHgxMzEgbWU9dW1oIHN1Ym1lPTEwIHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVm
+PTEgbWVfcmFuZ2U9MjQgY2hyb21hX21lPTEgdHJlbGxpcz0yIDh4OGRjdD0wIGNxbT0wIGRlYWR6
+b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9NyBsb29r
+YWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFj
+ZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0
+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
++PA/wCvwAAAAB0GbAB/gFfgAAAAHQZsQH+AV+AAAAAdBmyAf4BX4AAAAB0GbMB/gFfgAAAI9ZYiC
+Al4jFAAEbeOAAIP0cAAQO7777777777777777777777776666666666666666666666666666666
+666666666666666666666666666666666666666666666666666666666666666666666//+IYLg
+0AIWkBCtdWr/hAAFwY48ImZcACu2bCVSDe4orgEi5tgtbX/x8NAqFBATlMAjwAzlkQlcLu1thPXm
+TBLXXXXXXXXXXXXXXXXXXXXTzccAA1HAAEBKlmYLLKYLa66666666666666666666f+If+CwEgAG
+Xq6ZiigaBicKwAwIFMABgEgdMcvwOIyy+1WPh/6DR39qoSmjqAEk0OFYj7tfhCNztYXRRhqklpa/
+WvSmimthMLTDddddddddddddddddddf4f8AYKgSBASnMAjwAnsiZiC/6vXhMrVf/gGGC5a0IC7tl
+hBTPPJmmCcUN99IMBpTEwzXXXXXXXXXXXXXXXXXXNyxAl/Sgf8FgIOkFYMwQLAhsDoiy/A4EUiX2
+tra2tMENdddddddddddddddddddLS0tLS111111111111111111111111111111111111111/Hw/
+wVh7FAAEBrECCoRBISTIkmcVYq//H/QLPBwEDKRdmHFKSt3KzQTD9dddddddddddddddddddddcz
+IKdqemWuuuuuuuuuuuuuuuuuuuuuvj//oFYeBwEDEeItEQNXLKrl+TSb///QfHQEyRkdavpgt9de
+AAAAG0GaHA/wEydYaYEHkDQby32dhuFY7cuGo7A7wAAAAA1BmioD/AWx3hXNgJSAAAAAB0GaOwP8
+Ar8AAAAIQZpJAP8Ar8AAAAAIQZpZQP8Ar8AAAAAIQZppgP8Ar8AAAAAIQZp5wP8Ar8AAAAAIQZqI
+gD/AK/AAAAAIQZqYkD/AK/AAAAAIQZqooD/AK/AAAAAIQZq4sD/AK/AAAAAIQZrIwD/AK/AAAAAI
+QZrY0D/AK/AAAAAIQZro4D/AK/AAAAAIQZr48D/AK/AAAAAHQZsAH+AV+AAAAAdBmxAf4BX4AAAA
+B0GbIB/gFfgAAAAHQZswH+AV+AAAAjpliIEAl4jFAAEbeOAAIP0cAAQO77777777777777777777
+7777666666666666666666666666666666666666666666666666666666666666666666666666
+6666666666666666666666666666//+IYLg0AIWkBCtdWr/hAAFwY48ImZcACu2bCVSDe4orgEi5
+tgtbX/x8NAqFBATlMAjwAzlkQlcLu1thPXmTBLXXXXXXXXXXXXXXXXXXXXTzccAA1HAAEBKlmYLL
+KYLa66666666666666666666f+If+CwEgAGXq6ZiigaBicKwAwIFMABgEgdMcvwOIyy+1WPh/6DR
+39qoSmjqAEk0OFYj7tfhCNztdeP+Gg0dS38zJ0lNFNbCYWmGa66666666666666666/w/4AwVAkC
+AlOYBHgBPZEzEF/1evCZWq//AMMFy1oQF3bLCCmeeTNME4ob766euuuuuuuuuuuuuuuuuubliBL+
+lA/4LAQdIKwZggWBDYHRFl+BwIpEvtbW1taYIa6666666666666666666WlpaWlrrrrrrrrrrrrr
+rrrrrrrrrrrrrrrrrrrrrrrrrr+Ph/grD2KAAIDWIEFQiCQkmRJM4qxV/+P+gWeDgIGUi7MOKUlb
+uVmgmH66666666666666666666665mQU7U9MtdddddddddddddddddddddfH//QKw8DgIGI8RaIg
+auWVXL8mk3//+g+OgJkjI61fTBb668AAAAAXQZocD/ATJ1hpgQeQNBvLfDEdh2OwO8AAAAANQZoq
+A/wGXDsO4zA7wAAAAAdBmjsD/AK/AAAACEGaSQD/AK/AAAAACEGaWUD/AK/AAAAACEGaaYD/AK/A
+AAAACEGaecD/AK/AAAAACEGaiIA/wCvwAAAACEGamJA/wCvwAAAACEGaqKA/wCvwAAAACEGauLA/
+wCvwAAAACEGayMA/wCvwAAAACEGa2NA/wCvwAAAACEGa6OA/wCvwAAAACEGa+PA/wCvwAAAAB0Gb
+AB/gFfgAAAAHQZsQH+AV+AAAAAdBmyAf4BX4AAAAB0GbMB/gFfgAAAI5ZYiCAl4jFAAEbeOAAIP0
+cAAQO77777777777777777777777766666666666666666666666666666666666666666666666
+66666666666666666666666666666666666666666666666666666//+IYLg0AIWkBCtdWr/hAAF
+wY48ImZcACu2bCVSDe4orgEi5tgtbX/x8NAqFBATlMAjwAzlkQlcLu1thPXmTBLXXXXXXXXXXXXX
+XXXXXXXTzccAA1HAAEBKlmYLLKYLa66666666666666666666f+If+CwEgAGXq6ZiigaBicKwAwI
+FMABgEgdMcvwOIyy+1WPh/6DR39qoSmjqAEk0OFYj7tfhCNztdeP+Gg0dS38zJ0lNFNbCYWmGa66
+666666666666666/w/4AwVAkCAlOYBHgBPZEzEF/1evCZWq//AMMFy1oQF3bLCCmeeTNME4ob766
+euuuuuuuuuuuuuuuuuubliBL+lA/4LAQdIKwZggWBDYHRFl+BwIpEvtbW1taYIa6666666666666
+666666WlpaWlrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr+Ph/grD2KAAIDWIEFQiCQkmRJ
+M4qxV/+P+gWeDgIGUi7MOKUlbuVmgmH66666666666666666666665mQU7U9Mtdddddddddddddd
+dddddddfH//QKw8DgIGI8RaIgauWVXL8mk3//+g+OgJkjI61fTBb668AAAAXQZocD/ATJ1hpgQeQ
+NBvLfDEdh2OwO8AAAAANQZoqA/wGXDsO4zA7wAAAAAdBmjsD/AK/AAAACEGaSQD/AK/AAAAACEGa
+WUD/AK/AAAAACEGaaYD/AK/AAAAACEGaecD/AK/AAAAACEGaiIA/wCvwAAAACEGamJA/wCvwAAAA
+CEGaqKA/wCvwAAAACEGauLA/wCvwAAAACEGayMA/wCvwAAAACEGa2NA/wCvwAAAACEGa6OA/wCvw
+AAAACEGa+PA/wCvwAAAAB0GbAB/gFfgAAAAHQZsQH+AV+AAAAAdBmyAf4BX4AAAAB0GbMB/gFfgA
+AAI+ZYiBAJeIxQABG3jgACD9HAAEDu++++++++++++++++++++++++uuuuuuuuuuuuuuuuuuuuuu
+uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu
+uv//iGC4NACFpAQrXVq/4QABcGOPCJmXAArtmwlUg3uKK4BIubYLW1/8fDQKhQQE5TAI8AM5ZEJX
+C7tbYT15kwS11111111111111111111083HAANRwABASpZmCyymC2uuuuuuuuuuuuuuuuuuuun/i
+H/gsBIABl6umYooGgYnCsAMCBTAAYBIHTHL8DiMsvtVj4f+g0d/aqEpo6gBJNDhWI+7X4Qjc7WF0
+UYapJaWv1r0poprYTC0w3XXXXXXXXXXXXXXXXXX+H/AGCoEgQEpzAI8AJ7ImYgv+r14TK1X/4Bhg
+uWtCAu7ZYQUzzyZpgnFDffSDAaUxMM111111111111111111zcsQJf0oH/BYCDpBWDMECwIbA6Is
+vwOBFIl9ra2trTBDXXXXXXXXXXXXXXXXXXXS0tLS0tdddddddddddddddddddddddddddddddddd
+ddddfx8P8FYexQABAaxAgqEQSEkyJJnFWKv/x/0CzwcBAykXZhxSkrdys0Ew/XXXXXXXXXXXXXXX
+XXXXXXXMyCnanplrrrrrrrrrrrrrrrrrrrrrr4//6BWHgcBAxHiLREDVyyq5fk0m///0Hx0BMkZH
+Wr6YLfXXgAAAABtBmhwP8BMnWGmBB5A0G8t9nYbhWO3LhqOwO8AAAAANQZoqA/wFsd4VzYCUgAAA
+AAdBmjsD/AK/AAAACEGaSQD/AK/AAAAACEGaWUD/AK/AAAAACEGaaYD/AK/AAAAACEGaecD/AK/A
+AAAACEGaiIA/wCvwAAAACEGamJA/wCvwAAAACEGaqKA/wCvwAAAACEGauLA/wCvwAAAACEGayMA/
+wCvwAAAACEGa2NA/wCvwAAAACEGa6OA/wCvwAAAACEGa+PA/wCvwAAAAB0GbAB/gFfgAAAAHQZsQ
+H+AV+AAAAAdBmyAd4BX4AAAAB0GbMBvgFfg=
+APPSEND
+    [ -s "$_ad/movie.mp4" ] || ladder_w "WARN: apps: the movie could not be decoded (base64): QuickTime Player opens nothing"
+    chmod -R a+rX "$_ad" 2>/dev/null
+    ladder_w "assets: $_ad ($(ls "$_ad" | tr '\n' ' '))"
+    return 0
+}
+apps_do() {   # apps_do RUNG STAGE: what the stage opens, as the console user. 0 when `open` ran
+    case $1:$2 in
+        chess:main) as_user open -n -a Chess ;;
+        # the tick text as in the ladder: a new instance that restores no windows (card run 2026-10-25f)
+        terminal:main) as_user open -n -a Terminal "$_LADDER_TEXT" --args -ApplePersistenceIgnoreState YES ;;
+        textedit:main) as_user open -a TextEdit "$_APPS_DIR/survey.rtf" ;;
+        calculator:main) as_user open -a Calculator ;;
+        notes:main) as_user open -a Notes ;;
+        safari:text) as_user open -a Safari "$_APPS_DIR/text.html" ;;
+        safari:canvas) as_user open -a Safari "$_APPS_DIR/canvas.html" ;;
+        safari:webgl) as_user open -a Safari "$_APPS_DIR/webgl.html" ;;
+        preview:pdf) as_user open -a Preview "$_APPS_DIR/survey.pdf" ;;
+        preview:image) as_user open -a Preview "$_APPS_DIR/survey.jpg" ;;
+        maps:main) as_user open -a Maps ;;
+        settings:appearance) as_user open "x-apple.systempreferences:com.apple.Appearance-Settings.extension" ;;
+        settings:wallpaper) as_user open "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension" ;;
+        settings:displays) as_user open "x-apple.systempreferences:com.apple.Displays-Settings.extension" ;;
+        appstore:main) as_user open -a "App Store" ;;
+        photos:main) as_user open -a Photos ;;
+        imagecapture:main) as_user open -a "Image Capture" ;;
+        quicktime:play) as_user open -a "QuickTime Player" "$_APPS_DIR/movie.mp4" ;;   # it plays at once; `later` only looks again
+        quicktime:later) return 0 ;;
+        # Mission Control: two app windows on the desktop first, then its app (it is a toggle: the same call closes it; `closed` says whether it did)
+        mission-control:windows) as_user open -a Calculator; as_user open -a TextEdit "$_APPS_DIR/survey.rtf" ;;
+        mission-control:mc|mission-control:closed) as_user open -a "Mission Control" ;;
+        launchpad:apps|launchpad:closed) as_user open -a "$(apps_launchpad_name)" ;;
+        *) return 1 ;;
+    esac
+}
+apps_wait_new() {   # apps_wait_new NAME "<pids before>": the new pids of NAME, polled up to APPS_LAUNCHWAIT s (an app that takes long to start: Photos, App Store)
+    _awn_i=0
+    while :; do
+        _awn=$(ladder_new_pids "$1" "$2")
+        if [ -n "$_awn" ] || [ "$_awn_i" -ge "${APPS_LAUNCHWAIT:-20}" ]; then break; fi
+        sleep 1; _awn_i=$((_awn_i + 1))
+    done
+    echo "$_awn"
+}
+apps_plugin_in() {   # apps_plugin_in "<pids>": which of these processes have the Metal plugin mapped (lsof; a sandboxed process may not show it: Safari's WebKit GPU process, DRIVER-PLAN N1)
+    _api=$(echo $1 | tr ' ' ',')
+    [ -n "$_api" ] || return 0
+    with_limit 30 lsof +c 0 -n -p "$_api" 2>/dev/null | awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' | sort -u | tr '\n' ' '
+}
+apps_crashes() {   # apps_crashes RUNG: the crash reports (.ips) newer than the rung's start, one path per line
+    for _acd in ${APPS_CRASHDIRS:-/Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports}; do
+        [ -d "$_acd" ] || continue
+        find "$_acd" -maxdepth 2 -type f \( -name '*.ips' -o -name '*.crash' \) -newer "$LD/stamp.$1" 2>/dev/null
+    done
+}
+apps_log_slice() {   # apps_log_slice RUNG START_EPOCH "<pids>": <rung>.log = the plugin's NVMTL lines of those processes (as ladder_log_slice), <rung>-sys.log = those processes' own Metal / GPU / error lines,
+    # WindowServer's NVMTL / Metal / GPU / error lines and the kernel's RDNA3 lines in the same minutes (the LAST 600000 bytes: a flood keeps the end)
+    _as_start=$(date -r "$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d "@$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+    _as_words='eventMessage CONTAINS "NVMTL" OR eventMessage CONTAINS "NullMoth:" OR eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "gpu" OR eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "fault" OR eventMessage CONTAINS[c] "crash" OR eventMessage CONTAINS[c] "assert"'
+    _as_pids=; _as_or=; _as_re=
+    for _ap in $3; do _as_pids="$_as_pids${_as_or}processID == $_ap"; _as_or=" OR "; _as_re="$_as_re${_as_re:+|}$_ap"; done
+    _as_pred='(process == "WindowServer" AND ('"$_as_words"')) OR (process == "kernel" AND eventMessage CONTAINS "RDNA3")'
+    [ -z "$_as_pids" ] || _as_pred="(($_as_pids) AND ($_as_words)) OR $_as_pred"
+    : > "$LD/$1-sys.full"
+    with_limit 120 sh -c "log show --start \"$_as_start\" --info --style compact --predicate '$_as_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery > \"$LD/$1-sys.full\"" 2>/dev/null
+    _as_rc=$?
+    _as_sz=$(wc -c < "$LD/$1-sys.full" | tr -d ' ')
+    _as_note=
+    [ "$_as_rc" = 0 ] || _as_note=", log show did not finish in 120 s (exit $_as_rc): the slice ends early"
+    if [ "${_as_sz:-0}" -gt 600000 ]; then
+        tail -c 600000 "$LD/$1-sys.full" > "$LD/$1-sys.log"
+        _as_note="$_as_note, slice truncated: kept the last 600000 of $_as_sz bytes"
+    else
+        cp "$LD/$1-sys.full" "$LD/$1-sys.log"
+    fi
+    if [ -n "$_as_re" ]; then grep -E "\[($_as_re):" "$LD/$1-sys.full" | grep -E 'NVMTL|NullMoth:' | tail -c 600000 > "$LD/$1.log"; else : > "$LD/$1.log"; fi
+    rm -f "$LD/$1-sys.full"
+    ladder_w "log: $1.log ($(wc -l < "$LD/$1.log" | tr -d ' ') plugin lines of pids $(echo ${3:-none})), $1-sys.log ($(wc -l < "$LD/$1-sys.log" | tr -d ' ') lines: the app's, WindowServer's and the kernel's), since $_as_start$_as_note"
+}
+apps_wait_login() {   # apps_wait_login: after a WindowServer restart, until somebody is logged in again (APPS_WSWAIT s); 0 when the desktop is back
+    _awl=0
+    while :; do
+        _awu=$(bisect_console_user)
+        case "$_awu" in ""|root|loginwindow) ;; *) ladder_w "login: $_awu is back after ${_awl}s"; sleep "${APPS_LOGINGAP:-5}"; return 0 ;; esac
+        [ "$_awl" -ge "${APPS_WSWAIT:-120}" ] && break
+        sleep 5; _awl=$((_awl + 5))
+    done
+    ladder_w "login: NOBODY logged in ${_awl}s after the WindowServer restart: the rungs after this one did not run"
+    return 1
+}
+apps_stage() {   # apps_stage STAGE: open its content, wait for it to draw, look at both pipes (the rung's variables: _rn _an _apre _aextra ...)
+    _ast=$1
+    apps_do "$_rn" "$_ast"; _aorc=$?
+    ladder_w "open: stage $_ast rc=$_aorc ($(date +%T))"
+    if [ -n "$_afirst" ]; then
+        _afirst=
+        if [ -n "$_an" ]; then
+            _apids=$(apps_wait_new "$_an" "$_apre")
+            if [ -z "$_apids" ] && [ -n "$_apre" ]; then _aold=1; fi   # it was running already: the owner's own, not ours to quit
+            if [ -z "$_apids" ] && [ -z "$_apre" ]; then _aopened=; fi
+        fi
+        for _ae in $(apps_extra "$_rn"); do
+            eval "_aep=\${_AXP_$_ae:-}"
+            _aen=$(apps_wait_new "$_ae" "$_aep")
+            [ -n "$_aen" ] || ladder_w "WARN: $_ae did not start (the stage's other window)"
+            for _aq in $_aen; do _aextra="$_aextra $_ae=$_aq"; done
+        done
+        _LADDER_PIDS="$_apids $(for _aq in $_aextra; do printf ' %s' "${_aq#*=}"; done)"
+        ladder_w "pids: $(echo "${_an:-none}" | tr ' ' '_')=$(echo $_apids | tr ' ' ',')$_aextra"
+        [ -z "${_aold:-}" ] || ladder_w "WARN: $_an was already running (pid $(echo $_apre)) before this rung: the rung looks at the owner's instance and does not quit it"
+    fi
+    if [ -z "$_aopened" ]; then   # nothing to wait for: one look so that the owner sees what the screen shows instead
+        ladder_w "WARN: $_an did not start within ${APPS_LAUNCHWAIT:-20} s of the open (open exit $_aorc)"
+    else
+        sleep "$(apps_settle "$_rn" "$_ast")"
+    fi
+    if [ "$_astages" = main ]; then _alb="apps-$_rn"; else _alb="apps-$_rn-$_ast"; fi
+    ladder_w "stage: $_ast ($(date +%T))"
+    bisect_look "${_alb}a" 12
+    ladder_look_hires "${_alb}h"
+    _alooks="$_alooks ${_alb}a ${_alb}h"
+    if [ "$_rn" = terminal ]; then   # the glyph verdict's second look: only the window that changed between the two is the live text (tools/glyph_verdict.py)
+        sleep "${LADDER_LOOK2GAP:-3}"
+        ladder_look_hires "${_alb}h2"
+        _alooks="$_alooks ${_alb}h2"
+    fi
+    # is everything still there after this stage? the first stage that finds one gone is where it died
+    for _aq in $_apids $(for _ax in $_aextra; do echo "${_ax#*=}"; done); do
+        case " $_adead " in *" $_aq@"*) continue ;; esac
+        kill -0 "$_aq" 2>/dev/null || { _adead="$_adead $_aq@$_ast"; ladder_w "died: pid $_aq was gone after stage $_ast ($(date +%T))"; }
+    done
+    [ -n "$_aopened" ]
+}
+apps_rung() {   # apps_rung NAME: one app of the survey, its evidence in $LF; 1 = the run cannot go on (nobody logged in after a WindowServer restart)
+    _rn=$1; _LADDER_CUR=$_rn
+    _an=$(apps_proc "$_rn") || { ladder_w "== rung $_rn: unknown"; return 1; }
+    _astages=$(apps_stages "$_rn")
+    ladder_w "== rung $_rn"
+    ladder_w "scope: apps"
+    ladder_w "conf: (nothing)"
+    ladder_w "app: ${_an:-(none: a Dock / WindowServer feature)}"
+    ladder_w "stages: $_astages"
+    hdr "apps survey: $_rn (${_an:-no process of its own}; $_astages)"
+    _rt0=$(date +%s); : > "$LD/stamp.$_rn"
+    ladder_w "started: $(date +%T)"
+    _aws0=$(pgrep -x WindowServer 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    ladder_w "ws_before: ${_aws0:-none}"
+    _apre=; [ -z "$_an" ] || _apre=$(pgrep -x "$_an" 2>/dev/null | tr '\n' ' ')
+    _ahre=$(apps_helpers "$_rn"); _ahpre=; [ -z "$_ahre" ] || _ahpre=$(pgrep -f "$_ahre" 2>/dev/null | tr '\n' ' ')
+    for _ae in $(apps_extra "$_rn"); do eval "_AXP_$_ae=\$(pgrep -x $_ae 2>/dev/null | tr '\n' ' ')"; done
+    _apids=; _aextra=; _afirst=1; _alooks=; _adead=; _aopened=1; _aold=
+    for _ast in $_astages; do
+        apps_stage "$_ast" || break
+    done
+    ladder_w "looks:$_alooks"
+    sleep "${APPS_TAIL:-5}"   # the plugin's counters go out every 10 s while something moved
+    # what is still alive, who has the plugin, who drew for it
+    _aall="$_apids $(for _aq in $_aextra; do printf ' %s' "${_aq#*=}"; done)"
+    _aalive=
+    for _aq in $_aall; do kill -0 "$_aq" 2>/dev/null && _aalive="$_aalive $_aq"; done
+    _aall=$(echo $_aall); _aalive=$(echo $_aalive)   # (no stray blanks in the lines below)
+    ladder_w "alive: ${_aalive:-none} (of: ${_aall:-none})"
+    _ahp=; [ -z "$_ahre" ] || for _aq in $(pgrep -f "$_ahre" 2>/dev/null); do case " $_ahpre " in *" $_aq "*) ;; *) _ahp="$_ahp $_aq" ;; esac; done
+    ladder_w "helpers: $(echo ${_ahp:-none})"
+    if [ -z "$(echo $_aall $_ahp)" ]; then ladder_w "plugin: not checked (no process started by this rung)"
+    else
+        _apl=$(echo $(apps_plugin_in "$_aall $_ahp"))
+        ladder_w "plugin: ${_apl:-NOT loaded in any process of the app (lsof)}"
+    fi
+    # an instance that appeared after the first stage (an app that died and was opened again by the next stage) is the rung's too: quit it
+    for _asn in $_an $(apps_extra "$_rn"); do
+        eval "_asp=\${_AXP_$_asn:-}"; [ "$_asn" != "$_an" ] || _asp=$_apre
+        for _aq in $(ladder_new_pids "$_asn" "$_asp"); do
+            case " $_aall " in *" $_aq "*) continue ;; esac
+            _aall="$_aall $_aq"; ladder_w "WARN: another instance of $_asn (pid $_aq) started during the rung: quit with the rest"
+        done
+    done
+    _aws1=$(pgrep -x WindowServer 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    ladder_w "ws_after: ${_aws1:-none}"
+    _awsbad=
+    [ "$_aws0" = "$_aws1" ] || { _awsbad=1; ladder_w "WARN: WindowServer restarted during this app (pid ${_aws0:-none} -> ${_aws1:-none}): the desktop session was rebuilt"; }
+    # quit what this rung started (not the owner's own instance): SIGINT, TERM, KILL, a line each
+    ladder_quit "$_aall" graceful   # (an app that was running before the rung has no pid in _apids: only what the rung started is in the list)
+    _LADDER_PIDS=
+    sleep "${LADDER_AFTERQUIT:-2}"
+    # crash reports of the rung (a report takes a moment to appear: after the quit)
+    _acr=$(apps_crashes "$_rn"); _amine=; _awsrep=; _anu=$(echo "$_an" | tr ' ' '_')
+    for _af in $_acr; do
+        _abn=$(basename "$_af"); _awho="other process"
+        case $_abn in
+            WindowServer*|Dock*|"Mission Control"*) _awho="WindowServer / Dock" ;;
+        esac
+        [ -z "$_an" ] || case $_abn in "$_an"*|"$_anu"*) _awho="this app" ;; esac
+        [ -z "$_ahre" ] || case $_abn in com.apple.WebKit*) _awho="this app's helper" ;; esac
+        ladder_w "crash: $_abn ($_awho)"
+        case $_awho in "this app"*|"WindowServer / Dock")
+            if [ "$_awho" = "WindowServer / Dock" ]; then _awsrep="$_awsrep $_abn"; else _amine="$_amine $_abn"; fi
+            { echo "== $_abn"; if type ips_summary >/dev/null 2>&1; then ips_summary "$_af" 2>/dev/null || head -60 "$_af"; else head -60 "$_af"; fi; } >> "$LD/$_rn-crash.log" 2>&1 ;;
+        esac
+    done
+    [ -n "$_acr" ] || ladder_w "crash: none"
+    apps_log_slice "$_rn" "$_rt0" "$_aall $_ahp"
+    # the verdict of the run on this app (whether it DREW is for the screenshots)
+    if [ -z "$_aopened" ]; then _ares="did not open"
+    elif [ -n "$_amine" ]; then _ares="crashed (report:$_amine)"
+    elif [ -n "$_adead" ]; then _ares="exited by itself ($(echo $_adead | sed 's/@/ after stage /g')) with no crash report"
+    elif [ -n "$_aold" ]; then _ares="was already running (the owner's instance)"
+    else _ares="ran"
+    fi
+    [ -z "$_awsrep" ] || _ares="$_ares; WindowServer / Dock crashed (report:$_awsrep)"
+    [ -z "$_awsbad" ] || _ares="$_ares; WindowServer restarted"
+    ladder_w "result: $_ares"
+    ladder_w "== end rung $_rn"
+    ladder_push
+    if [ -n "$_awsbad" ]; then apps_wait_login || return 1; fi
+    return 0
+}
+# APPS-END
 
 # an M6 hi-res look keeps only its picture; the pipes' state stays in the
 # results (a pipe not lit or asleep must not look like a frozen picture)
@@ -1931,12 +2478,13 @@ case " $args " in
     *" rdna3bisect=4 "*) [ -n "$BISECT" ] || BISECT=4 ;;   # rdna3vm step bisect-agdc: the kernel's switches on the agdc profile
 esac
 [ -n "$BISECT" ] && label="bisect-$BISECT"
-# rdna3ladder=1 / 2 / 3 (rdna3vm step ladder / ladder-ws / ladder-glyphs): only the A/B ladder runs (a standalone run takes the flag)
+# rdna3ladder=1 / 2 / 3 / 4 / 5 (rdna3vm step ladder / ladder-ws / ladder-glyphs / ladder-coh / apps): only the A/B ladder runs (a standalone run takes the flag)
 case " $args " in
     *" rdna3ladder=1 "*) [ -n "$LADDER" ] || LADDER=1 ;;
     *" rdna3ladder=2 "*) [ -n "$LADDER" ] || LADDER=2 ;;
     *" rdna3ladder=3 "*) [ -n "$LADDER" ] || LADDER=3 ;;
     *" rdna3ladder=4 "*) [ -n "$LADDER" ] || LADDER=4 ;;
+    *" rdna3ladder=5 "*) [ -n "$LADDER" ] || LADDER=5 ;;
 esac
 [ -n "$LADDER" ] && [ -z "$BISECT" ] && label="ladder-$LADDER"
 # rdna3bisect=3 (rdna3vm args "rdna3bisect=3" --stay): nothing runs at boot, so the bisect can be started by hand in
@@ -2291,7 +2839,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     if [ -n "$LADDER" ] && [ -z "$BISECT" ]; then
         # the A/B ladder replaces the other tests: they would draw on the screens the apps are drawn on
         # (collect.sh packs ladder.txt and the rungs' plugin logs)
-        hdr "ladder (DRIVER-PLAN N50: Terminal + Chess per rung, the plugin's switches one by one)"
+        hdr "$([ "$LADDER" = 5 ] && echo "app survey: real apps one after another on the default driver" || echo "ladder (DRIVER-PLAN N50: Terminal + Chess per rung, the plugin's switches one by one)")"
         ladder_run "$LADDER"
         echo "[exit $?]"
     fi

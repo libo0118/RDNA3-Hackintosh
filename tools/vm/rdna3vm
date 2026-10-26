@@ -816,6 +816,8 @@ auto_limit() {
         *" rdna3ladder=3 "*) m=$((m + 30)) ;;
         # =4 (ladder-coh, DRIVER-PLAN N54): 10 rungs of ~95 s, one kernel coherence switch each, two hi-res looks + the report
         *" rdna3ladder=4 "*) m=$((m + 24)) ;;
+        # =5 (apps, the app survey): 15 apps of ~50-130 s (opened, settled, two looks per stage, the log slice, the quit; Safari, Settings, Mission Control have 2-3 stages) + the report
+        *" rdna3ladder=5 "*) m=$((m + 40)) ;;
         *" rdna3accel=1 "*) m=$((m + 9)) ;;
         *" rdna3lvl="*|*" rdna3profile=0 "*) ;;
         *) m=$((m + 9)) ;;
@@ -1128,9 +1130,9 @@ cmd__once() {
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play play-macpro play-rootport play-desktop play-agdcib play-agdclink play-agdcscaler ladder ladder-ws ladder-glyphs ladder-coh"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play play-macpro play-rootport play-desktop play-agdcib play-agdclink play-agdcscaler ladder ladder-ws ladder-glyphs ladder-coh apps"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play play-macpro play-rootport play-desktop play-agdcib play-agdclink play-agdcscaler ladder ladder-ws ladder-glyphs ladder-coh off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play play-macpro play-rootport play-desktop play-agdcib play-agdclink play-agdcscaler ladder ladder-ws ladder-glyphs ladder-coh apps off)"
     RDNA3VM_STEP=$n
     launch "$a" "$stay"
 }

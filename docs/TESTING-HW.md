@@ -214,6 +214,11 @@ repository or a Linux host.
    `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder` (about 29 minutes; `--ladder-ws` adds the two WindowServer
    rungs): Terminal and Chess open and close by themselves with one `NVMTL_*` switch per rung (right after the baseline `attrring`, DRIVER-PLAN N57: `NVMTL_ATTR_RING_BIG_PAGE=0`, RADV's GFX11 attribute ring without SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE), it asks `y` / `n` / Enter for each rung's picture,
    and the report (`41-ladder.txt`, one triage row per rung, an automatic glyph verdict from each rung's hi-res look) says which switch made it right ([AFTER-TESTS](AFTER-TESTS.md), "The whole ladder in one card run"). `--ladder-glyphs` (about 25 minutes) is the glyph hunt (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...).
+   The app survey is the same machinery with the default driver: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --apps` (VM: `rdna3vm step apps`, about 25 minutes).
+   It opens Chess, Terminal, TextEdit, Calculator, Notes, Safari (a text / CSS page, a canvas animation, a WebGL cube; all made by the run, no network), Preview (a PDF and a JPEG), Maps,
+   System Settings (three panes), App Store, Photos, Image Capture, QuickTime Player (a generated movie), Mission Control and Launchpad (Apps on macOS 26) one after another, takes a
+   320-wide and a hi-res look of both screens per app (`…-scanoutapps-<app>[-<stage>]a|h-pipe<N>.ppm`), says whether each ran, crashed or never opened, whether WindowServer survived, and
+   quits it. Look at the pictures: the report says an app ran, not that it drew ([AFTER-TESTS](AFTER-TESTS.md), "The app survey").
    Only the collection, without running any test:
    `"$R/tools/macos/collect.sh" <label>` (writes `~/rdna3-report-<label>-<date>.tar.gz`).
    **Black screens, windows that do not appear or flash, flicker?** Instead of
