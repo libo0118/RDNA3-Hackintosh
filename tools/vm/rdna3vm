@@ -886,7 +886,7 @@ auto_limit() {
         # =4 (ladder-coh, DRIVER-PLAN N54): 10 rungs of ~95 s, one kernel coherence switch each, two hi-res looks + the report
         *" rdna3ladder=4 "*) m=$((m + 24)) ;;
         # =5 (apps, the app survey): 15 apps of ~50-130 s (opened, settled, two looks per stage, the log slice, the quit; Safari, Settings, Mission Control have 2-3 stages) + the report
-        *" rdna3ladder=5 "*) m=$((m + 40)) ;;
+        *" rdna3ladder=5 "*) m=$((m + 50)) ;;   # about 35-45 min of apps (review of c805a93)
         *" rdna3accel=1 "*) m=$((m + 9)) ;;
         *" rdna3lvl="*|*" rdna3profile=0 "*) ;;
         *) m=$((m + 9)) ;;

@@ -1856,7 +1856,10 @@ apps_wait_new() {   # apps_wait_new NAME "<pids before>": the new pids of NAME, 
 apps_plugin_in() {   # apps_plugin_in "<pids>": which of these processes have the Metal plugin mapped (lsof; a sandboxed process may not show it: Safari's WebKit GPU process, DRIVER-PLAN N1)
     _api=$(echo $1 | tr ' ' ',')
     [ -n "$_api" ] || return 0
-    with_limit 30 lsof +c 0 -n -p "$_api" 2>/dev/null | awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' | sort -u | tr '\n' ' '
+    # through a file: with_limit's timer (its sleep) holds a pipe open for the whole limit (review of c805a93: 30 s a rung)
+    with_limit 30 lsof +c 0 -n -p "$_api" > "$LD/apps-lsof.out" 2>/dev/null
+    awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' "$LD/apps-lsof.out" | sort -u | tr '\n' ' '
+    rm -f "$LD/apps-lsof.out"
 }
 apps_crashes() {   # apps_crashes RUNG: the crash reports (.ips) newer than the rung's start, one path per line
     for _acd in ${APPS_CRASHDIRS:-/Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports}; do
@@ -1877,7 +1880,8 @@ apps_log_slice() {   # apps_log_slice RUNG START_EPOCH "<pids>": <rung>.log = th
     _as_rc=$?
     _as_sz=$(wc -c < "$LD/$1-sys.full" | tr -d ' ')
     _as_note=
-    [ "$_as_rc" = 0 ] || _as_note=", log show did not finish in 120 s (exit $_as_rc): the slice ends early"
+    # 124+ = killed at the limit; 1 is only grep -v finding nothing to print (an empty slice)
+    [ "$_as_rc" -lt 124 ] || _as_note=", log show did not finish in 120 s (exit $_as_rc): the slice ends early"
     if [ "${_as_sz:-0}" -gt 600000 ]; then
         tail -c 600000 "$LD/$1-sys.full" > "$LD/$1-sys.log"
         _as_note="$_as_note, slice truncated: kept the last 600000 of $_as_sz bytes"
@@ -1979,13 +1983,21 @@ apps_rung() {   # apps_rung NAME: one app of the survey, its evidence in $LF; 1 
         ladder_w "plugin: ${_apl:-NOT loaded in any process of the app (lsof)}"
     fi
     # an instance that appeared after the first stage (an app that died and was opened again by the next stage) is the rung's too: quit it
-    for _asn in $_an $(apps_extra "$_rn"); do
-        eval "_asp=\${_AXP_$_asn:-}"; [ "$_asn" != "$_an" ] || _asp=$_apre
+    # one name per line: "System Settings", "App Store", "QuickTime Player" are one process name each
+    _asl=$_an; for _asx in $(apps_extra "$_rn"); do _asl="$_asl
+$_asx"; done
+    _asifs=$IFS; IFS='
+'
+    for _asn in $_asl; do
+        IFS=$_asifs
+        [ -n "$_asn" ] || continue
+        if [ "$_asn" = "$_an" ]; then _asp=$_apre; else eval "_asp=\${_AXP_$_asn:-}"; fi
         for _aq in $(ladder_new_pids "$_asn" "$_asp"); do
             case " $_aall " in *" $_aq "*) continue ;; esac
             _aall="$_aall $_aq"; ladder_w "WARN: another instance of $_asn (pid $_aq) started during the rung: quit with the rest"
         done
     done
+    IFS=$_asifs
     _aws1=$(pgrep -x WindowServer 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
     ladder_w "ws_after: ${_aws1:-none}"
     _awsbad=
