@@ -447,7 +447,15 @@ typedef struct sim {
     uint32_t harvest_wgp[8][2];
     uint64_t tsc;                    /* GOLDEN_TSC: +4 on every access of either half */
     uint8_t  sysmem[1u << 20];       /* system RAM at SYS_PHYS, reached through GART */
-    unsigned gart_unmapped;      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
+    unsigned gart_unmapped;
+    /* DRIVER-PLAN N54: the GFXHUB's VMID0 TLB as the SDMA sees it (SDMA 6.0
+     * is a GFXHUB client): a translation stays until a GFXHUB invalidation
+     * of VMID 0; a hit whose PTE changed since is a stale access */
+    struct { uint64_t page; uint8_t *p; int used; } sdma_tlb[64];
+    unsigned sdma_tlb_hits, sdma_tlb_stale, sdma_tlb_invals;
+    /* the last RELEASE_MEM packets the CP ran: event dword, sel dword, address */
+    uint32_t cp_rel_n, cp_rel_ev[8], cp_rel_sel[8];
+    uint64_t cp_rel_addr[8];      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
     unsigned sdma_resets, sdma_resets_unfrozen;
     /* VCN 4.0 / JPEG 4.0 (see the model above sim_wr) */
     struct {
@@ -514,6 +522,42 @@ static uint8_t *gart_page(uint64_t mc)
         return (pa >= SYS_PHYS && pa - SYS_PHYS < sizeof(S.sysmem)) ? S.sysmem + (pa - SYS_PHYS) + (mc & 0xfff)
                                                                      : NULL;
     return pa + 4096 <= BAR_LEN ? S.vram + pa + (mc & 0xfff) : NULL;
+}
+
+/* the SDMA's GART access through the GFXHUB's VMID0 TLB (DRIVER-PLAN N54) */
+static uint8_t *sdma_gart_page(uint64_t mc)
+{
+    uint64_t pg = mc >> 12;
+    uint8_t *fresh = gart_page(mc), *base;
+    unsigned i, slot = 64;
+    for (i = 0; i < 64; i++) {
+        if (S.sdma_tlb[i].used && S.sdma_tlb[i].page == pg) {
+            S.sdma_tlb_hits++;
+            base = S.sdma_tlb[i].p;
+            if (!fresh || base != fresh - (mc & 0xfff))
+                S.sdma_tlb_stale++;
+            return base ? base + (mc & 0xfff) : NULL;
+        }
+        if (!S.sdma_tlb[i].used && slot == 64)
+            slot = i;
+    }
+    if (fresh) {
+        if (slot == 64)
+            slot = (unsigned)(pg & 63);
+        S.sdma_tlb[slot].used = 1;
+        S.sdma_tlb[slot].page = pg;
+        S.sdma_tlb[slot].p = fresh - (mc & 0xfff);
+    }
+    return fresh;
+}
+
+/* a GFXHUB invalidation request (any engine): VMID 0's bit drops the SDMA's translations */
+static void gfxhub_inv_req(uint32_t req)
+{
+    if (req & 1u) {
+        memset(S.sdma_tlb, 0, sizeof(S.sdma_tlb));
+        S.sdma_tlb_invals++;
+    }
 }
 
 /* ---- VBIOS and PMFW tables ---- */
@@ -2701,9 +2745,13 @@ static uint8_t *vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
  * process VM on a user queue (the MES runs it in the process's VMID) */
 static uint8_t *cp_mem(uint64_t a, uint64_t len)
 {
+    uint8_t *p;
     if (S.cp_cur_uq)
         return vm_ptr(S.uq[S.cp_cur_uq - 1].vmid, a, len);
-    return mc_ptr(a, len);
+    p = mc_ptr(a, len);
+    if (!p && (a & 0xfff) + len <= 4096)
+        p = gart_page(a);   /* a kernel ring writing a GART (system) page: DRIVER-PLAN N54's fence copy */
+    return p;
 }
 
 static void uq_eop(void);
@@ -2886,6 +2934,10 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         case PACKET3_RELEASE_MEM: {
             uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
             uint32_t sel = (PK(2) >> 29) & 7;   /* DATA_SEL 1: 32 bits, 2: 64 bits */
+            S.cp_rel_ev[S.cp_rel_n & 7] = PK(1);
+            S.cp_rel_sel[S.cp_rel_n & 7] = PK(2);
+            S.cp_rel_addr[S.cp_rel_n & 7] = a;
+            S.cp_rel_n++;
             uint8_t *p = cp_mem(a, sel == 2 ? 8 : 4);
             if (p && sel == 1) memcpy(p, &PK(5), 4);
             else if (p && sel == 2 && !(a & 7)) { memcpy(p, &PK(5), 4); memcpy(p + 4, &PK(6), 4); }
@@ -3545,7 +3597,7 @@ static void sdma_run(uint32_t wptr_bytes)
                 uint32_t k = 0;
                 while (k < len) {
                     uint32_t c = 4096 - (uint32_t)((d + k) & 0xfff);
-                    uint8_t *q = gart_page(d + k);
+                    uint8_t *q = sdma_gart_page(d + k);
                     if (c > len - k) c = len - k;
                     if (!q) { S.sdma_bad++; break; }
                     memcpy(q, ps + k, c);
@@ -3557,7 +3609,7 @@ static void sdma_run(uint32_t wptr_bytes)
                 uint32_t k = 0;
                 while (k < len) {
                     uint32_t c = 4096 - (uint32_t)((s + k) & 0xfff);
-                    uint8_t *q = gart_page(s + k);
+                    uint8_t *q = sdma_gart_page(s + k);
                     if (c > len - k) c = len - k;
                     if (!q) { S.sdma_bad++; break; }
                     memcpy(pd + k, q, c);
@@ -3577,6 +3629,8 @@ static void sdma_run(uint32_t wptr_bytes)
         } else if (op == SDMA_OP_FENCE) {
             uint64_t a = RD(1) | ((uint64_t)RD(2) << 32);
             uint8_t *p = mc_ptr(a, 4);
+            if (!p && (a & 0xfff) <= 4092)
+                p = sdma_gart_page(a);   /* DRIVER-PLAN N54's system fence copy */
             if (p) memcpy(p, &RD(3), 4); else S.sdma_bad++;
             n = 4;
         } else if (op == SDMA_OP_INDIRECT) {
@@ -3592,6 +3646,7 @@ static void sdma_run(uint32_t wptr_bytes)
             n = 3;
         } else if (op == SDMA_OP_POLL_REGMEM && sub == SDMA_SUBOP_VM_INVALIDATION) {
             uint32_t eng = (h >> 16) & 0x1f, dist = regGCVM_INVALIDATE_ENG1_REQ - regGCVM_INVALIDATE_ENG0_REQ;
+            gfxhub_inv_req(RD(1));
             S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_REQ + eng * dist] = RD(1);
             S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + eng * dist] = RD(3) & 0xffff;
             S.sdma_vm_inv++;
@@ -4622,12 +4677,14 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             /* the gfx ring's engine (gmc_v11_0_emit_flush_gpu_tlb) */
             S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + RD_GFX_VM_INV_ENG * eng_dist] = v & 0xffff;
             S.ring_tlb_flushes++;
+            gfxhub_inv_req(v);
             *R(dw) = v;
             return;
         }
         if (dw == GC_BASE0 + regGCVM_INVALIDATE_ENG0_REQ + 17 * eng_dist) {
             S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + 17 * eng_dist] = v & 0xffff;
             S.tlb_flushes++;
+            gfxhub_inv_req(v);
             if (S.pending_writes)
                 S.unflushed_doorbells++;
             *R(dw) = v;
@@ -10936,6 +10993,63 @@ static void run(const char *fwdir)
                 CHECK(S.sdma_bad == 0 && S.gart_unmapped == 0 && S.mm_tlb_flushes >= f0 + 4);
                 memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
                 CHECK(wpte == 0);                           /* the window is left unmapped */
+                /* DRIVER-PLAN N54: the next copy maps OTHER pages into the same
+                 * window. SDMA 6.0 translates through the GFXHUB
+                 * (sdma_v6_0_sw_init: vm_hub = AMDGPU_GFXHUB(0)); with only the
+                 * MMHUB flushed it kept the previous pages and wrote there */
+                {
+                    uint64_t pg2[3] = { SYS_PHYS + 0xd000, SYS_PHYS + 0x11000, SYS_PHYS + 0x15000 };
+                    uint32_t g0 = S.tlb_flushes, st0 = S.sdma_tlb_stale, inv0 = S.sdma_tlb_invals;
+                    CHECK(gmc.gfxhub_enabled);
+                    memset(S.sysmem + 0x5000, 0, 4096);   /* the old pages: nothing may land there now */
+                    memset(S.sysmem + 0x1000, 0, 4096);
+                    memset(S.sysmem + 0x9000, 0, 4096);
+                    CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, xsrc, pg2, 3, 3 * 4096, win, 2) == RDNA3_OK);
+                    CHECK(!memcmp(S.sysmem + 0xd000, pat2, 4096) && !memcmp(S.sysmem + 0x11000, pat2 + 1024, 4096) &&
+                          !memcmp(S.sysmem + 0x15000, pat2 + 2048, 4096));
+                    CHECK(S.sysmem[0x5000] == 0 && S.sysmem[0x1000] == 0 && S.sysmem[0x9000] == 0);   /* not the old pages */
+                    CHECK(S.sdma_tlb_stale == st0 && S.sdma_tlb_invals >= inv0 + 4 && S.tlb_flushes >= g0 + 4);
+                    /* and back the same way (a page-on): the new pages are read, not the old */
+                    memset(S.vram + xsrc, 0, 3 * 4096);
+                    CHECK(rdna3_copy_pages_to_vram(&dev, &gmc, &sd, xsrc, pg2, 3, 3 * 4096, win, 2) == RDNA3_OK);
+                    CHECK(!memcmp(S.vram + xsrc, pat2, sizeof(pat2)) && S.sdma_tlb_stale == st0 && S.sdma_bad == 0);
+                    memcpy(S.sysmem + 0x5000, pat2, 4096);   /* the old pages as the first copy left them */
+                    memcpy(S.sysmem + 0x1000, pat2 + 1024, 4096);
+                    memcpy(S.sysmem + 0x9000, pat2 + 2048, 4096 - 100);
+                }
+                /* DRIVER-PLAN N54: the SDMA fence's system copy (a FENCE
+                 * packet to a GART page before the VRAM one) and sdma_gcr (a
+                 * GCR_REQ before and after a kernel copy / fill, an HDP flush
+                 * before it) */
+                {
+                    const uint64_t fo = gmc.gart_size - 40 * 4096;
+                    const uint64_t fl = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                                        RD_PTE_WRITEABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+                    uint32_t gcr0 = S.sdma_gcr, hdp0 = S.sdma_hdp;
+                    uint64_t dmc = rdna3_vram_mc(&dev, xsrc + 8192);
+                    CHECK(gmc11_gart_map(&dev, &gmc, fo, SYS_PHYS + 0x30000, 1, fl) == RDNA3_OK);
+                    gmc11_gart_tlb_flush(&dev, &gmc);
+                    memset(S.sysmem + 0x30000, 0, 4096);
+                    sd.fence_sys_mc = gmc.gart_start + fo + 0x80;
+                    sd.fence_sys_cpu = (volatile uint32_t *)(S.sysmem + 0x30000 + 0x80);
+                    CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), dmc, 64) == RDNA3_OK);
+                    CHECK(*sd.fence_sys_cpu == sd.fence_seq && sdma60_fence_sys_read(&sd) == sd.fence_seq &&
+                          sdma60_fence_read(&dev, &sd) == sd.fence_seq);
+                    CHECK(S.sdma_gcr == gcr0 && S.sdma_hdp == hdp0);   /* switch off: the stream as before */
+                    dev.coh = RD3_COH_SDMA_GCR;
+                    CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), dmc, 64) == RDNA3_OK);
+                    CHECK(S.sdma_gcr == gcr0 + 2 && S.sdma_hdp == hdp0 + 1 && *sd.fence_sys_cpu == sd.fence_seq);
+                    CHECK(sdma60_fill_sync(&dev, &sd, dmc, 0x12345678u, 256) == RDNA3_OK);
+                    CHECK(S.sdma_gcr == gcr0 + 4 && S.sdma_hdp == hdp0 + 2 && *sd.fence_sys_cpu == sd.fence_seq);
+                    CHECK(sdma60_copy_rect_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), 256, dmc, 512, 128, 4) == RDNA3_OK);
+                    CHECK(S.sdma_gcr == gcr0 + 6 && S.sdma_hdp == hdp0 + 4 /* its own + the switch's */);
+                    CHECK(S.sdma_bad == 0 && S.sdma_stuck == 0);
+                    dev.coh = 0;
+                    sd.fence_sys_mc = 0;
+                    sd.fence_sys_cpu = NULL;
+                    gmc11_gart_unmap(&dev, &gmc, fo, 1);
+                    gmc11_gart_tlb_flush(&dev, &gmc);
+                }
                 CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, src, pg, 1, 8192, win, 2) == RDNA3_EINVAL);
                 pg[1] |= 0x10;
                 CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, src, pg, 3, 8192, win, 2) == RDNA3_EINVAL);
@@ -11407,6 +11521,67 @@ static void run(const char *fwdir)
                 }
                 CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.cp_bad == 0 &&
                       S.cp_wait_stuck == 0 && gfx11_ring_space(&dev, &gr) == gr.buf_mask);
+
+                /* DRIVER-PLAN N54: the fence's system copy and the coherence
+                 * switches in the job's packets */
+                {
+                    const uint64_t fo = gmc.gart_size - 41 * 4096;
+                    const uint64_t fl = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                                        RD_PTE_WRITEABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+                    const uint32_t ev = (1u << 22) | (1u << 21) | (1u << 13) | (1u << 12) | (3u << 25) |
+                                        0x14u /* CACHE_FLUSH_AND_INV_TS_EVENT */ | (5u << 8);
+                    const uint32_t inv = (1u << 20) | (1u << 15) | (1u << 14);
+                    const uint64_t vwb = rdna3_vram_mc(&dev, gr.wb + RD_GFX_WB_FENCE);
+                    uint32_t rel0, polls0, hdp0, a, b;
+                    CHECK(gmc11_gart_map(&dev, &gmc, fo, SYS_PHYS + 0x31000, 1, fl) == RDNA3_OK);
+                    gmc11_gart_tlb_flush(&dev, &gmc);
+                    memset(S.sysmem + 0x31000, 0, 4096);
+                    gr.fence_sys_mc = gmc.gart_start + fo + 0x40;
+                    gr.fence_sys_cpu = (volatile uint32_t *)(S.sysmem + 0x31000 + 0x40);
+                    rel0 = S.cp_rel_n;
+                    seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    a = rel0 & 7; b = (rel0 + 1) & 7;
+                    CHECK(S.cp_rel_n == rel0 + 2);
+                    /* the system copy first: gfx_v11_0_ring_emit_fence's packet, DATA_SEL 1, no interrupt */
+                    CHECK(S.cp_rel_addr[a] == gr.fence_sys_mc && S.cp_rel_ev[a] == ev && S.cp_rel_sel[a] == (1u << 29));
+                    /* then the VRAM slot, with the interrupt as before */
+                    CHECK(S.cp_rel_addr[b] == vwb && S.cp_rel_ev[b] == ev &&
+                          S.cp_rel_sel[b] == ((1u << 29) | (gr.fence_irq ? 2u << 24 : 0)));
+                    CHECK(*gr.fence_sys_cpu == seq && gfx11_fence_sys_read(&gr) == seq && gfx11_fence_read(&dev, &gr) == seq);
+                    /* fence_inv + pipe_sync + hdp_end */
+                    dev.coh = RD3_COH_FENCE_INV | RD3_COH_PIPE_SYNC | RD3_COH_HDP_END;
+                    rel0 = S.cp_rel_n; polls0 = S.cp_mem_polls; hdp0 = S.hdp_engine_flushes;
+                    seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    a = rel0 & 7; b = (rel0 + 1) & 7;
+                    CHECK(S.cp_rel_n == rel0 + 2 && S.cp_rel_ev[a] == (ev | inv) && S.cp_rel_ev[b] == (ev | inv));
+                    CHECK(S.cp_mem_polls == polls0 + 1 && S.hdp_engine_flushes == hdp0 + 2 && S.cp_wait_stuck == 0);
+                    CHECK(gfx11_release_mem_event(&dev) == (ev | inv));
+                    /* a user fence gets the invalidations too */
+                    {
+                        rdna3_gfx_job_ext x;
+                        memset(&x, 0, sizeof(x));
+                        x.uf_addr = rdna3_vram_mc(&dev, dst + 64);
+                        rel0 = S.cp_rel_n;
+                        seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                        CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                        CHECK(S.cp_rel_n == rel0 + 3 && S.cp_rel_ev[rel0 & 7] == (ev | inv) &&
+                              S.cp_rel_sel[rel0 & 7] == (2u << 29));
+                    }
+                    /* switches off, no copy: one RELEASE_MEM, the stream as before N54 */
+                    dev.coh = 0;
+                    gr.fence_sys_mc = 0;
+                    gr.fence_sys_cpu = NULL;
+                    rel0 = S.cp_rel_n; polls0 = S.cp_mem_polls; hdp0 = S.hdp_engine_flushes;
+                    seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    CHECK(S.cp_rel_n == rel0 + 1 && S.cp_rel_addr[rel0 & 7] == vwb && S.cp_rel_ev[rel0 & 7] == ev);
+                    CHECK(S.cp_mem_polls == polls0 && S.hdp_engine_flushes == hdp0 + 1 && gfx11_fence_sys_read(&gr) == 0);
+                    CHECK(S.cp_bad == 0);
+                    gmc11_gart_unmap(&dev, &gmc, fo, 1);
+                    gmc11_gart_tlb_flush(&dev, &gmc);
+                }
 
                 /* KIQ, then KCQ0 (MEC1 pipe 0 queue 0) mapped by the KIQ's
                  * MAP_QUEUES; a compute job runs the same IB through the page

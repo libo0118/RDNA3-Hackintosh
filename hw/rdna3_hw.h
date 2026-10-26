@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include "amd_discovery.h"
+#include "rdna3_coh.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,6 +132,10 @@ typedef struct rdna3_dev {
     /* with amdgpu_exact: a display core drives the DCN
      * (amdgpu_device_has_dc_support; smu_v13_0_notify_display_change) */
     int      amdgpu_dc;
+    /* DRIVER-PLAN N54: the coherence switches (RD3_COH_*, common/rdna3_coh.h)
+     * the ring emitters read; the OS layer copies them in before each
+     * submission (0: the behaviour before N54) */
+    uint32_t coh;
 } rdna3_dev;
 
 /* ---- logging ---- */

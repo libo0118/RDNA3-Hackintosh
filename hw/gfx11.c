@@ -760,7 +760,7 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     /* emit_frame_size for what we emit: vm flush 5+5+7+2, gds switch 20,
      * mem sync 8, hdp 7, cntxcntl 3, frame 2+2, user fence 8, fence 8,
      * plus 4 per IB */
-    uint32_t i, seq, ndw = 19 + 20 + 8 + 7 + 3 + 4 + 8 + 8 + 4 * n, cond_exec = 0;
+    uint32_t i, seq, ndw = 19 + 20 + 8 + 7 + 3 + 4 + 8 + 8 + 4 * n + RD3_GFX_COH_DW, cond_exec = 0;
     uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_COND_EXE);
     int ctx_switch = ctx != r->last_ctx, secure;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
@@ -771,6 +771,9 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
+    /* DRIVER-PLAN N54 pipe_sync: amdgpu_vm_flush's pipeline sync at every job */
+    if ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq)
+        gfx11_emit_pipeline_sync(d, r);
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
     if (x && x->gds_switch)
@@ -794,6 +797,8 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     for (i = 0; i < n; i++)
         gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
     gfx11_emit_frame_cntl(d, r, 0, secure);
+    if (d->coh & RD3_COH_HDP_END)   /* DRIVER-PLAN N54 hdp_end */
+        gfx11_emit_hdp_flush(d, r);
     if (x && x->uf_addr)   /* the job's number: the fence emitted next */
         gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     /* amdgpu_ib_schedule: the postfix (shadowing off) and a second
@@ -816,15 +821,40 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
  * through the ring's emit_fence (with AMDGPU_FENCE_FLAG_INT, the EOP
  * interrupt, once the ring has one); the fence is that number in the
  * ring's writeback slot, there is no fence object */
+/* gfx_v11_0_ring_emit_fence's event dword: CACHE_FLUSH_AND_INV_TS_EVENT
+ * with GCR_SEQ | GL2_WB | GLM_INV | GLM_WB, CACHE_POLICY 3. DRIVER-PLAN
+ * N54 fence_inv adds GL2_INV | GL1_INV | GLV_INV (bits 20, 15, 14): no line
+ * of the job stays in a GPU cache. */
+uint32_t gfx11_release_mem_event(const rdna3_dev *d)
+{
+    uint32_t v = (1u << 22) /* GCR_SEQ */ | (1u << 21) /* GCR_GL2_WB */ |
+                 (1u << 13) /* GCR_GLM_INV */ | (1u << 12) /* GCR_GLM_WB */ |
+                 (3u << 25) /* CACHE_POLICY bypass */ |
+                 CACHE_FLUSH_AND_INV_TS_EVENT | (5u << 8) /* EVENT_INDEX */;
+    if (d->coh & RD3_COH_FENCE_INV)
+        v |= (1u << 20) /* GCR_GL2_INV */ | (1u << 15) /* GCR_GL1_INV */ | (1u << 14) /* GCR_GLV_INV */;
+    return v;
+}
+
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     uint64_t addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE);
     uint32_t seq = ++r->fence_seq;
+    if (r->fence_sys_mc) {
+        /* DRIVER-PLAN N54: the fence where amdgpu keeps it (adev->wb, system
+         * memory), first: the same packet, DATA_SEL 1, no interrupt (the
+         * VRAM one below raises it, after this one) */
+        gfx11_write(d, r, PACKET3(PACKET3_RELEASE_MEM, 6));
+        gfx11_write(d, r, gfx11_release_mem_event(d));
+        gfx11_write(d, r, 1u << 29);
+        gfx11_write(d, r, (uint32_t)r->fence_sys_mc);
+        gfx11_write(d, r, (uint32_t)(r->fence_sys_mc >> 32));
+        gfx11_write(d, r, seq);
+        gfx11_write(d, r, 0);
+        gfx11_write(d, r, 0);
+    }
     gfx11_write(d, r, PACKET3(PACKET3_RELEASE_MEM, 6));
-    gfx11_write(d, r, (1u << 22) /* GCR_SEQ */ | (1u << 21) /* GCR_GL2_WB */ |
-                      (1u << 13) /* GCR_GLM_INV */ | (1u << 12) /* GCR_GLM_WB */ |
-                      (3u << 25) /* CACHE_POLICY bypass */ |
-                      CACHE_FLUSH_AND_INV_TS_EVENT | (5u << 8) /* EVENT_INDEX */);
+    gfx11_write(d, r, gfx11_release_mem_event(d));
     /* DATA_SEL 1: low 32 bits; INT_SEL 2: interrupt once the write landed */
     gfx11_write(d, r, (1u << 29) | (r->fence_irq ? 2u << 24 : 0));
     gfx11_write(d, r, (uint32_t)addr);
@@ -835,13 +865,16 @@ uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
     return seq;
 }
 
+/* DRIVER-PLAN N54: the system-memory copy of the fence (0 without one) */
+uint32_t gfx11_fence_sys_read(const rdna3_gfx_ring *r)
+{
+    return r->fence_sys_cpu ? *r->fence_sys_cpu : 0;
+}
+
 void gfx11_emit_user_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint64_t seq)
 {
     gfx11_write(d, r, PACKET3(PACKET3_RELEASE_MEM, 6));
-    gfx11_write(d, r, (1u << 22) /* GCR_SEQ */ | (1u << 21) /* GCR_GL2_WB */ |
-                      (1u << 13) /* GCR_GLM_INV */ | (1u << 12) /* GCR_GLM_WB */ |
-                      (3u << 25) /* CACHE_POLICY bypass */ |
-                      CACHE_FLUSH_AND_INV_TS_EVENT | (5u << 8) /* EVENT_INDEX */);
+    gfx11_write(d, r, gfx11_release_mem_event(d));
     gfx11_write(d, r, 2u << 29);   /* DATA_SEL 2: 64 bits, INT_SEL 0 */
     gfx11_write(d, r, (uint32_t)addr);
     gfx11_write(d, r, (uint32_t)(addr >> 32));
@@ -2317,13 +2350,15 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
     rdna3_gfx_ring *r = &kcq->rb;
     /* vm flush 5+5+7, gds switch 20, mem sync 8, hdp 7, user fence 8,
      * fence 8, 4 per IB */
-    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n;
+    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n + RD3_GFX_COH_DW;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
     if (d->amdgpu_exact)
         return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
+    if ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq)   /* DRIVER-PLAN N54 pipe_sync */
+        gfx11_emit_pipeline_sync(d, r);
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
     if (x && x->gds_switch)
@@ -2337,6 +2372,8 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
         gfx11_write(d, r, (uint32_t)(ibs[i].va >> 32));
         gfx11_write(d, r, INDIRECT_BUFFER_VALID | ibs[i].ndw | (vmid << 24));
     }
+    if (d->coh & RD3_COH_HDP_END)   /* DRIVER-PLAN N54 hdp_end */
+        gfx11_emit_hdp_flush(d, r);
     if (x && x->uf_addr)
         gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     seq = gfx11_emit_fence(d, r);
@@ -3702,13 +3739,13 @@ static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uin
     int gfx = r->kind == RD_RING_GFX;
     int gds = x && x->gds_switch, pasid = x && x->pasid_mapping;
     /* amdgpu_vm_need_pipeline_sync */
-    int need_pipe = vmid && (pd_addr || gds);
+    int need_pipe = vmid && (pd_addr || gds || ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq));
     uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_COND_EXE);
     uint32_t i, seq, patch = 0, cond_exec = 0;
     /* the ring's emit_frame_size, roughly: vm flush part 5+7+5+19+5+20+8+5,
      * mem sync 8, COND_EXEC 5 twice, shadow 2 x 22, hdp 7, cntxcntl 3,
      * frames 2 per IB + 2, user fence 8, fence 8, 4 per IB */
-    uint32_t ndw = 74 + 8 + 10 + 44 + 7 + 3 + 2 + 8 + 8 + 6 * n;
+    uint32_t ndw = 74 + 8 + 10 + 44 + 7 + 3 + 2 + 8 + 8 + 6 * n + RD3_GFX_COH_DW;
     int ctx_switch = ctx != r->last_ctx, secure = 0;
 
     if (ring_wait_space(d, r, ndw))
@@ -3763,6 +3800,8 @@ static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uin
     }
     if (gfx)
         gfx11_emit_frame_cntl(d, r, 0, secure);
+    if (d->coh & RD3_COH_HDP_END)   /* DRIVER-PLAN N54 hdp_end */
+        gfx11_emit_hdp_flush(d, r);
     if (x && x->uf_addr)
         gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     if (gfx) {

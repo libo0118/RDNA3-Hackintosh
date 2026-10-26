@@ -253,6 +253,26 @@ private:
     rdna3_ih        *fIh1 = nullptr;
     bool             ihSysAlloc();
     void             ihSysFree();
+    /* DRIVER-PLAN N54: the system-memory copy of the ring fences (one page
+     * in the GART under the user-queue slots), the per-ring skew state
+     * (common/rdna3_coh.h) and the coherence switches' hooks */
+    IOBufferMemoryDescriptor *fCohMd = nullptr;
+    IODMACommand             *fCohDma = nullptr;
+    uint64_t                  fCohPa = 0;
+    bool                      fCohMapped = false;
+    IOSimpleLock             *fCohLock = nullptr;
+    rd3_coh_ring_state        fCohRing[3] = {};
+    void     cohInit();
+    void     cohSetup();
+    void     cohFree();
+    uint64_t cohGartOff() const;
+    bool     cohSelftest(uint32_t idx);
+    int      cohFence(uint32_t idx, uint32_t vram, bool have, uint32_t sys, uint32_t seq);
+    bool     cohSkewOpen(uint32_t ip, uint32_t ring) const;
+    void     cohSync(bool kcopy);
+    void     cohWaitIdle(uint32_t ip, uint32_t ring, uint64_t seq);
+    uint64_t cohPte(uint64_t pte, const rdna3_bo *bo);
+    void     cohVmFlushForced();
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */
     rdna3_gfx_ring  *fGfx  = nullptr;  /* level 8 */
     rdna3_mec_ring  *fKiq  = nullptr;  /* level 8, with doorbells */

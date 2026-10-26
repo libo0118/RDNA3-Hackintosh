@@ -121,6 +121,14 @@ typedef struct rdna3_gfx_ring {
     int      amdgpu_pad;
     /* the gfx ring's mqd_backup (async, rdna3amdgpu=1; 0 = none) */
     uint64_t mqd_backup;
+    /* DRIVER-PLAN N54: amdgpu keeps a ring's fence in adev->wb (GTT, system
+     * memory); ours is the VRAM wb slot. With fence_sys_mc set (a GART MC
+     * address of a snooped system page, 4-byte aligned) every fence is also
+     * written there, BEFORE the VRAM one, with the same RELEASE_MEM and no
+     * interrupt; fence_sys_cpu is the CPU's (cached) view of it. 0 / NULL:
+     * no copy (the stream as before N54). */
+    uint64_t fence_sys_mc;
+    volatile uint32_t *fence_sys_cpu;
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */
@@ -177,6 +185,13 @@ void gfx11_commit(rdna3_dev *d, rdna3_gfx_ring *r);
 void gfx11_emit_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw);
 /* gfx_v11_0_ring_emit_fence: RELEASE_MEM with cache flush, ++fence_seq */
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r);
+/* DRIVER-PLAN N54: RELEASE_MEM's event dword (fence_inv adds the
+ * invalidations), the system copy of the fence (0 without one), and the
+ * dwords a job may add for the coherence switches and the system fence
+ * (pipeline sync 7, HDP flush 7, the second RELEASE_MEM 8, slack) */
+uint32_t gfx11_release_mem_event(const rdna3_dev *d);
+uint32_t gfx11_fence_sys_read(const rdna3_gfx_ring *r);
+#define RD3_GFX_COH_DW 32
 /* the same RELEASE_MEM for a user fence (AMDGPU_CHUNK_ID_FENCE):
  * AMDGPU_FENCE_FLAG_64BIT (DATA_SEL 2), no interrupt, 'seq' at MC 'addr' */
 void gfx11_emit_user_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint64_t seq);

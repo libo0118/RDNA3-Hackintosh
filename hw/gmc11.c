@@ -121,6 +121,13 @@ void gmc11_gart_unmap(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint32_t pa
     rdna3_hdp_flush(d);
 }
 
+void gmc11_gart_tlb_flush(rdna3_dev *d, rdna3_gmc *g)
+{
+    mmhub302_flush_tlb(d, 0, 0);
+    if (g && g->gfxhub_enabled)
+        gfxhub303_flush_tlb(d, 0, 0);
+}
+
 /* ---------------------------- GFXHUB 3.0.3 ---------------------------- */
 
 void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd)

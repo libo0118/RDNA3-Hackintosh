@@ -300,6 +300,29 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     done
     [ "$_found" = 1 ] || echo "(no kernel log in this report)"
 } > "$dir/38-vram-heap.txt" 2>/dev/null
+# DRIVER-PLAN N54: the kernel's GPU-memory coherence switches and counters (debug.rdna3_coh, the
+# switches as the run ended, the kernel's 'coherence:' lines: first 60 and last 60);
+# tools/triage_reports.py 'coherence' (tools/triage_coherence.py)
+{
+    echo "== sysctl debug.rdna3_coh (the end of the run)"
+    _ch=$(sysctl -n debug.rdna3_coh 2>/dev/null)
+    if [ -n "$_ch" ]; then echo "debug.rdna3_coh: $_ch"
+    else echo "(no debug.rdna3_coh sysctl: a core older than DRIVER-PLAN N54, or not loaded)"; fi
+    sysctl debug 2>/dev/null | grep -E '^debug\.rdna3_coh_' || true
+    for _lf in 20-log-rdna3.txt 20-log-rdna3-sudo.txt; do
+        [ -s "$dir/$_lf" ] || continue
+        echo "== kernel log ($_lf)"
+        grep -h 'RDNA3: coherence:' "$dir/$_lf" > "$dir/.42.tmp" 2>/dev/null || true
+        _n=$(wc -l < "$dir/.42.tmp" | tr -d ' ')
+        if [ "$_n" -le 120 ]; then cat "$dir/.42.tmp"
+        else
+            head -60 "$dir/.42.tmp"
+            echo "== ... $((_n - 120)) line(s) left out between the first 60 and the last 60 =="
+            tail -60 "$dir/.42.tmp"
+        fi
+        rm -f "$dir/.42.tmp"
+    done
+} > "$dir/42-coherence.txt" 2>/dev/null
 # card run 2026-10-17d: the display bisect (rdna3vm step bisect, autoreport.sh
 # bisect_run): per step the switches set and read back, the owner's answer, the
 # looks' pipe lines and the counters; tools/triage_reports.py prints the table.
