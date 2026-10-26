@@ -1694,11 +1694,19 @@ bootwatch_run() {
         sleep "$BW_POLL"
     done
 }
-bootwatch_start() {   # in the background, once per boot (a re-exec of this script does not start a second one)
+bootwatch_start() {   # bootwatch_start [--updated]: in the background, once per boot
+    # The installed copy of this script starts the watchdog before it fetches the host's copy and re-execs into it
+    # (--updated): that watchdog runs the OLD code. Card run 2026-10-26 (-cpu host): the old one hung on ioreg and the
+    # fixed one never ran ("already running"). A re-exec into a newer copy therefore replaces the running watchdog.
     _bn=$(nvram boot-args 2>/dev/null | tr ' ' '\n' | sed -n 's/^rdna3bootwatch=\([0-9][0-9]*\)$/\1/p' | tail -n 1)
     BW_N=${_bn:-75}
     [ "$BW_N" -gt 0 ] 2>/dev/null || return 0
-    if [ -f "$BW_PIDFILE" ] && kill -0 "$(cat "$BW_PIDFILE" 2>/dev/null)" 2>/dev/null; then return 0; fi
+    _op=$(cat "$BW_PIDFILE" 2>/dev/null)
+    if [ -n "$_op" ] && kill -0 "$_op" 2>/dev/null; then
+        [ "${1:-}" = --updated ] || return 0
+        pkill -P "$_op" 2>/dev/null; kill "$_op" 2>/dev/null
+        echo "$(date +%T) bootwatch: the script was updated: the watchdog of the older copy (pid $_op) is replaced" >> "$BW_LOG" 2>/dev/null
+    fi
     ( bootwatch_run ) </dev/null >> "$BW_LOG" 2>&1 &
     echo $! > "$BW_PIDFILE" 2>/dev/null
     return 0
@@ -1717,7 +1725,7 @@ APPROVE=
 case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vmapprove=1 "*) APPROVE=1 ;; esac
 # the boot watchdog (above): from the start of a VM boot that runs tests, not in the install / approve boots (no card, nothing
 # to wait for) and not in a standalone or by-hand run (a person is looking)
-[ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ] && [ -z "$INSTALL_ONLY" ] && [ -z "$APPROVE" ] && [ -n "$HOST" ] && bootwatch_start
+[ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ] && [ -z "$INSTALL_ONLY" ] && [ -z "$APPROVE" ] && [ -n "$HOST" ] && bootwatch_start "${1:-}"
 
 if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ]; then
     rm -f /tmp/rdna3-progress.win

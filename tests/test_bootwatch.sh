@@ -213,6 +213,17 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
         fail "$sh stuck: the hung probe is not reported: $(head -30 "$f")"
     ls "$H"/bootwatch-*-1.spindump >/dev/null 2>&1 || fail "$sh stuck: no spindump on the host: $(ls "$H")"
     [ "$(grep -c '^ioreg' "$S/calls")" -le 2 ] || fail "$sh stuck: ioreg started again after it hung: $(grep -c '^ioreg' "$S/calls") calls"
+    # the installed (older) script started a watchdog; a plain start keeps it, the re-exec into the host's copy
+    # (--updated) replaces it (card run 2026-10-26: the old one hung on ioreg, the fixed one never ran)
+    run_scen $sh replace 'sleep 300 </dev/null >/dev/null 2>&1 & _old=$!; echo $_old > "$BW_PIDFILE"
+        bootwatch_start; [ "$(cat "$BW_PIDFILE")" = "$_old" ] && kill -0 $_old || echo "plain start replaced it" >> "$S/bad"
+        bootwatch_start --updated; sleep 1
+        kill -0 $_old 2>/dev/null && echo "old watchdog still runs" >> "$S/bad"
+        _new=$(cat "$BW_PIDFILE"); [ "$_new" != "$_old" ] && kill -0 "$_new" || echo "no new watchdog" >> "$S/bad"
+        pkill -P "$_new" 2>/dev/null; kill "$_new" 2>/dev/null; true'
+    S=$T/$sh-replace
+    [ ! -s "$S/bad" ] || fail "$sh replace: $(cat "$S/bad")"
+    grep -q 'watchdog of the older copy .* is replaced' "$S/bw.log" || fail "$sh replace: no log line: $(cat "$S/bw.log" 2>&1)"
     # no WindowServer process at all: said so, no sample is attempted
     run_scen $sh nows 'touch "$S/nows"; BW_MAXN=1; bootwatch_run'
     S=$T/$sh-nows
@@ -229,8 +240,8 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
 done
 
 # ---- the wiring in autoreport.sh
-grep -q '^\[ -z "\$STANDALONE" \] && \[ -z "\$BISECT_HAND" \] && \[ -z "\$INSTALL_ONLY" \] && \[ -z "\$APPROVE" \] && \[ -n "\$HOST" \] && bootwatch_start$' "$AR" ||
+grep -qxF '[ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ] && [ -z "$INSTALL_ONLY" ] && [ -z "$APPROVE" ] && [ -n "$HOST" ] && bootwatch_start "${1:-}"' "$AR" ||
     fail "the bootwatch_start call (not standalone / by hand / install / approve boots) is missing"
-a=$(grep -n '&& bootwatch_start$' "$AR" | cut -d: -f1); b=$(grep -n 'sleep \$((90 - \${w:-0}))' "$AR" | head -n1 | cut -d: -f1)
+a=$(grep -nF '&& bootwatch_start "${1:-}"' "$AR" | cut -d: -f1); b=$(grep -n 'sleep \$((90 - \${w:-0}))' "$AR" | head -n1 | cut -d: -f1)
 [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] || fail "bootwatch_start must come before the 90 s wait (line $a vs $b)"
 echo "test_bootwatch: ok"
