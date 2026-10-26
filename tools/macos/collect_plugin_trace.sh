@@ -130,6 +130,48 @@ for src in ${NVMTL_TRACE_DIR:-} $sysdir; do
     done
 done
 
+# DRIVER-PLAN N55: draw captures (NVMTL_CAPTURE_DRAW, metal/plugin/nvmtl_capture.h), one capture-<process>-<pid>-<k>.bin per
+# captured draw, into 33-plugin-capture/ (tools/capture_decode.py reads them). The same entry checks as the traces (no symlink,
+# a regular file with one link, this boot, a size cap), the same bounded exclusive copy, then the NVMTLCP1 magic from the copy.
+# An app's capture belongs to the app's user (no header uid to match): the owner is listed, never trusted for anything.
+ccap=${NVMTL_COLLECT_CAPBYTES:-67108864}; nc=0; cout="$dir/33-plugin-capture"
+ctot=${NVMTL_COLLECT_CAPTOTAL:-536870912}; csum=0   # all captures together: the report stays packable
+for src in ${NVMTL_TRACE_DIR:-} $sysdir; do
+    [ -n "$src" ] && [ -d "$src" ] && [ ! -L "$src" ] || continue
+    set -- $(ls -ldn "$src" 2>/dev/null)
+    case "${3:-x}" in 0|88|"$me") ;; *) continue ;; esac
+    for f in "$src"/capture-*.bin; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        b=$(basename "$f")
+        set -- $(ls -ldn "$f" 2>/dev/null)
+        line="${1:-?} ${2:-0} uid ${3:-x} size ${5:-0} $b"; links=${2:-0}; size=${5:-0}; why=""
+        if [ "$nc" -ge 64 ]; then why="past 64 captures"
+        elif [ -L "$f" ]; then why="a symlink"
+        elif [ ! -f "$f" ]; then why="not a regular file"
+        elif [ "$links" != 1 ]; then why="$links hard links"
+        elif [ "$size" -gt "$ccap" ] 2>/dev/null; then why="over $ccap bytes"
+        elif [ "$((csum + size))" -gt "$ctot" ] 2>/dev/null; then why="past the $ctot bytes of all captures (NVMTL_COLLECT_CAPTOTAL)"
+        elif [ "$size" -lt 16 ] 2>/dev/null; then why="shorter than a capture header"
+        elif [ ! -r "$f" ]; then why="unreadable: run with sudo"
+        elif [ -n "$boot" ] && [ "$(mtime_of "$f")" -lt "$((boot - tol))" ] 2>/dev/null; then why="written before this boot: an old capture"
+        fi
+        if [ -n "$why" ]; then note "REJECT capture $line: $why"; rejected=$((rejected + 1)); continue; fi
+        mkdir -p "$cout" 2>/dev/null || { note "REJECT capture $line: cannot create $cout"; continue; }
+        dest="$b"; k=0
+        while [ -e "$cout/$dest" ]; do k=$((k + 1)); dest="dup$k-$b"; done
+        if ! cap=$ccap bounded_copy "$f" "$cout/$dest"; then
+            rm -f "$cout/$dest"; note "REJECT capture $line: unreadable, or not what it was when checked"; rejected=$((rejected + 1)); continue
+        fi
+        if [ "$(head -c 8 "$cout/$dest" 2>/dev/null)" != NVMTLCP1 ]; then
+            rm -f "$cout/$dest"; note "REJECT capture $line: no NVMTLCP1 magic"; rejected=$((rejected + 1)); continue
+        fi
+        chmod 644 "$cout/$dest" 2>/dev/null
+        note "ACCEPT capture $line -> 33-plugin-capture/$dest"; nc=$((nc + 1)); csum=$((csum + size))
+    done
+done
+[ "$nc" -gt 0 ] && note "== draw captures collected: $nc (tools/capture_decode.py <report>)"
+[ "$(id -u)" = 0 ] && [ -n "${SUDO_UID:-}" ] && [ -d "$cout" ] && chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$cout" 2>/dev/null
+
 {
     echo "== plugin frame traces collected: $n (rejected: $rejected)"
     date -u '+collected %Y-%m-%d %H:%M:%S UTC'
