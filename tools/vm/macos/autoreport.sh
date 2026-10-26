@@ -1533,6 +1533,7 @@ BW_REPEAT=${BW_REPEAT:-60}
 BW_MAXN=${BW_MAXN:-30}
 BW_MAXSEC=${BW_MAXSEC:-2400}
 BW_PROBE_T=${BW_PROBE_T:-20}
+BW_BEAT=${BW_BEAT:-30}
 # with_limit above, for use inside $( ) and pipes: its timer's stdout is /dev/null, so the sleep it leaves behind does not hold the
 # pipe open until it ends (a `with_limit 20 ioreg | grep -q` would wait 20 s for EOF)
 bw_limit() {
@@ -1665,14 +1666,22 @@ bw_final() {   # bw_final <n> <state> <elapsed s> <snapshots>: how the watch end
         { echo "$(date +%T) cannot write $_o"; return 1; }
     if bw_put "$_o"; then rm -f "$_o"; else echo "$(date +%T) upload of ${_o#$BW_PEND} failed: kept for the next boot"; fi
 }
+bw_beat() {   # bw_beat <what>: the watch's own state to the host (bootwatch-<stamp>-live.log), before each probe it may
+    # hang in: a watch that never uploads a snapshot still says how far it got (card runs 2026-10-26 21:04 / 21:27)
+    _bf=${BW_PEND}bootwatch-$BW_STAMP-live.log
+    { echo "BOOTWATCH-LIVE: $(date +%T) after_s=$(( $(date +%s) - BW_T0 )) uptime_s=$(bw_uptime) snapshots=$_n stuck=$([ -e "$BW_STUCKF" ] && echo yes || echo no) next: $1"
+      tail -n 40 "$BW_LOG" 2>/dev/null; } > "$_bf" 2>/dev/null
+    bw_put "$_bf"; rm -f "$_bf"
+}
 bootwatch_run() {
     BW_STAMP=$(date +%Y%m%d-%H%M%S); BW_T0=$(date +%s)
     BW_STUCKF=${BW_PIDFILE%.pid}.stuck   # a probe hung (bw_limit); next to the pid file
     rm -f "$BW_STUCKF"
     echo "$(date +%T) bootwatch $BW_STAMP: waiting for WindowServer to open the GPU (trigger $BW_N s)"
-    _n=0; _next=$BW_N
+    _n=0; _next=$BW_N; _beat=0
     while :; do
         _el=$(( $(date +%s) - BW_T0 ))
+        if [ "$_el" -ge "$_beat" ]; then bw_beat "probe WindowServer's GPU client (ioreg)"; _beat=$((_el + BW_BEAT)); fi
         _st=$(bw_state)
         case "$_st" in
             gpu|login)
@@ -1687,6 +1696,7 @@ bootwatch_run() {
         if [ "$_el" -ge "$_next" ] && bw_acc_present; then
             _n=$((_n + 1))
             echo "$(date +%T) bootwatch: WindowServer has no GPU client after $_el s: snapshot $_n"
+            bw_beat "snapshot $_n (spindump, ioreg, sample, log)"
             bw_collect "$_n" "$_el"
             if [ "$_n" -ge "$BW_MAXN" ]; then bw_final $((_n + 1)) gave-up "$_el" "$_n"; return 0; fi
             _next=$(( $(date +%s) - BW_T0 + BW_REPEAT ))

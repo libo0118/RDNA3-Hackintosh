@@ -185,11 +185,11 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
     # 4. WindowServer is up before the trigger: nothing is written at all, nothing uploaded
     run_scen $sh early 'BW_N=30; touch "$S/wsgpu"; bootwatch_run'
     S=$T/$sh-early
-    [ ! -e "$S/host" ] && [ -z "$(ls "$S/pend")" ] && ! grep -q '^sample' "$S/calls" || fail "$sh early: wrote or uploaded something"
+    [ -z "$(ls "$S/host" 2>/dev/null | grep -v -- '-live\.log$')" ] && [ -z "$(ls "$S/pend")" ] && ! grep -q '^sample' "$S/calls" || fail "$sh early: wrote or uploaded something"
     # 5. no accelerator: no snapshot, the watch ends at BW_MAXSEC
     run_scen $sh noacc 'touch "$S/noacc"; BW_MAXSEC=3; bootwatch_run'
     S=$T/$sh-noacc
-    [ ! -e "$S/host" ] && [ -z "$(ls "$S/pend")" ] && ! grep -q '^sample' "$S/calls" || fail "$sh noacc: collected without an accelerator"
+    [ -z "$(ls "$S/host" 2>/dev/null | grep -v -- '-live\.log$')" ] && [ -z "$(ls "$S/pend")" ] && ! grep -q '^sample' "$S/calls" || fail "$sh noacc: collected without an accelerator"
     # 6. the host does not answer: the files stay pending under their names, and the run still ends
     run_scen $sh nohost 'touch "$S/nohost"; BW_MAXN=1; bootwatch_run'
     S=$T/$sh-nohost
@@ -213,6 +213,9 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
         fail "$sh stuck: the hung probe is not reported: $(head -30 "$f")"
     ls "$H"/bootwatch-*-1.spindump >/dev/null 2>&1 || fail "$sh stuck: no spindump on the host: $(ls "$H")"
     [ "$(grep -c '^ioreg' "$S/calls")" -le 2 ] || fail "$sh stuck: ioreg started again after it hung: $(grep -c '^ioreg' "$S/calls") calls"
+    # the watch says how far it got even without a snapshot (bootwatch-<stamp>-live.log)
+    S=$T/$sh-stuck; ls "$S"/host/bootwatch-*-live.log >/dev/null 2>&1 && grep -q '^BOOTWATCH-LIVE: .*stuck=' "$S"/host/bootwatch-*-live.log ||
+        fail "$sh stuck: no live log on the host: $(ls "$S/host")"
     # the installed (older) script started a watchdog; a plain start keeps it, the re-exec into the host's copy
     # (--updated) replaces it (card run 2026-10-26: the old one hung on ioreg, the fixed one never ran)
     run_scen $sh replace 'sleep 300 </dev/null >/dev/null 2>&1 & _old=$!; echo $_old > "$BW_PIDFILE"
