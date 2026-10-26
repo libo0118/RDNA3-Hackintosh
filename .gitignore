@@ -6,6 +6,7 @@ build/
 firmware/*.bin
 __pycache__/
 reports/
+reference/
 
 # agents' git worktrees (the manager merges their branches)
 .claude/worktrees/
