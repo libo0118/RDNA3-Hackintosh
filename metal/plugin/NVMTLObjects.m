@@ -3172,9 +3172,24 @@ static void nvmtl_cap_binding(nvmtl_capbuf *cb, NSMutableString *m, NSMutableArr
     if (cpu) { snprintf(nm, sizeof nm, "%s.cpu_draw", slot); nvmtl_cap_bytes(cb, nm, lo, (const uint8_t *)cpu + lo, hi - lo); }
     [later addObject:@[b, @(lo), @(hi), @(slot)]];
 }
-static void nvmtl_cap_finish(nvmtl_capbuf *cbuf, NSArray *later, unsigned k, uint64_t ord, NSString *who)
+/* N56: the draw's output as the GPU left it - the scissor rows of the colour target's surface VRAM (an IOSurface target the GPU writes
+   through its buffer alias, the image's own memory), read when the command buffer completed: it holds this draw and any later draw of the
+   same command buffer over those rows. Not read for a private target (no buffer alias): said in the file. */
+static void nvmtl_cap_target(nvmtl_capbuf *cbuf, NSArray *tgt)
 {
     extern nvk_queue *nvmtl_device_queue(void);
+    if (!tgt) return;
+    NVMTLTexture *t = tgt[0]; const size_t lo = [tgt[1] unsignedLongValue], n = [tgt[2] unsignedLongValue];
+    nvk_buffer st = {0};
+    if (nvmtl_vk_buffer_create(n, 1, &st) || !st.map) { nvmtl_cap_text(cbuf, "ERR ", "target.gpu_done", "staging buffer allocation failed"); if (st.buf) nvmtl_vk_buffer_destroy(&st); return; }
+    if (nvmtl_vk_copy_buffer_nohook(nvmtl_device_queue(), &t->_vramBuf, lo, &st, 0, n)) nvmtl_cap_text(cbuf, "ERR ", "target.gpu_done", "GPU read-back copy of the target failed");
+    else nvmtl_cap_bytes(cbuf, "target.gpu_done", lo, st.map, n);
+    nvmtl_vk_buffer_destroy(&st);
+}
+static void nvmtl_cap_finish(nvmtl_capbuf *cbuf, NSArray *later, NSArray *tgt, unsigned k, uint64_t ord, NSString *who)
+{
+    extern nvk_queue *nvmtl_device_queue(void);
+    nvmtl_cap_target(cbuf, tgt);
     for (NSArray *e in later) {
         NVMTLBuffer *b = e[0]; const size_t lo = [e[1] unsignedLongValue], hi = [e[2] unsignedLongValue]; const char *slot = [e[3] UTF8String]; char nm[64];
         const void *cpu = b->_shadow.map ? b->_shadow.map : (b->_hostPtr ? b->_hostPtr : b->_b.map);
@@ -3234,6 +3249,16 @@ static void nvmtl_capture_draw(NVMTLRenderCommandEncoder *enc, unsigned type, ui
     nvmtl_cap_meta(m, "target %ux%u vkformat=%u bpp=%u samples=%u iosurface=%u pass_format=%u load=%u", ri ? ri->w : 0, ri ? ri->h : 0, ri ? ri->fmt : 0, ri ? ri->bpp : 0,
                    enc->_passSamples, rr && rr->_surf ? (unsigned)IOSurfaceGetID(rr->_surf) : 0u, enc->_passFmt, enc->_load);
     if (rr && rr->_surf) nvmtl_cap_meta(m, "target_surface bytes_per_row=%zu width=%zu height=%zu", IOSurfaceGetBytesPerRow(rr->_surf), IOSurfaceGetWidth(rr->_surf), IOSurfaceGetHeight(rr->_surf));
+    NSArray *tgt = nil;   /* N56: the scissor rows of the target, read back at completion (nvmtl_cap_target) */
+    if (rr && rr->_surf && rr->_vramOn && ri && ri->h) {
+        const size_t row = IOSurfaceGetBytesPerRow(rr->_surf);
+        uint32_t y0 = enc->_hasSC ? enc->_sc[1] : 0, y1 = enc->_hasSC ? enc->_sc[1] + enc->_sc[3] : ri->h;
+        if (y1 > ri->h) y1 = ri->h;
+        if (y0 < y1 && row && (size_t)y1 * row <= rr->_vramBuf.size) {
+            tgt = @[rr, @((size_t)y0 * row), @((size_t)(y1 - y0) * row)];
+            nvmtl_cap_meta(m, "target_readback rows=%u..%u pitch=%zu bytes=%zu (the surface VRAM at completion: this draw and later draws of the command buffer)", y0, y1, row, (size_t)(y1 - y0) * row);
+        } else nvmtl_cap_meta(m, "target_readback none: rows %u..%u pitch %zu outside the %zu-byte surface buffer", y0, y1, row, rr->_vramBuf.size);
+    } else nvmtl_cap_meta(m, "target_readback none: %s", !rr ? "no colour target" : !rr->_surf ? "not an IOSurface" : !rr->_vramOn ? "a private image (no VRAM buffer alias)" : "no image");
     nvmtl_cap_meta(m, "viewport set=%d %g %g %g %g %g %g", enc->_hasVP, enc->_vp[0], enc->_vp[1], enc->_vp[2], enc->_vp[3], enc->_vp[4], enc->_vp[5]);
     nvmtl_cap_meta(m, "scissor set=%d %u %u %u %u", enc->_hasSC, enc->_sc[0], enc->_sc[1], enc->_sc[2], enc->_sc[3]);
     { char t[1600]; nvmtl_vk_trace_buffers(&enc->_cb->_c, t, sizeof t); nvmtl_cap_meta(m, "address_table%s", t); }   /* set (v/f), slot, address+offset/size as the table gets them */
@@ -3259,12 +3284,13 @@ static void nvmtl_capture_draw(NVMTLRenderCommandEncoder *enc, unsigned type, ui
     nvlog_uncapped("capture: draw #%llu (%s) taken as capture %d: %zu bytes so far, %lu buffer(s) to read back when the command buffer completes",
                    (unsigned long long)ord, who.UTF8String, k, cbuf->n, (unsigned long)later.count);
     for (NSArray *e in later) nvmtl_retain_resource(enc->_cb, e[0]);
+    if (tgt) nvmtl_retain_resource(enc->_cb, rr);
     [enc->_cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.status == MTLCommandBufferStatusError) {
             char t[600]; snprintf(t, sizeof t, "command_buffer_error=%s\n", done.error.description.UTF8String ?: "?");
             nvmtl_cap_text(cbuf, "META", "meta_done.txt", t);
         }
-        nvmtl_cap_finish(cbuf, later, (unsigned)k, ord, who);
+        nvmtl_cap_finish(cbuf, later, tgt, (unsigned)k, ord, who);
     }];
 }
 @implementation NVMTLRenderCommandEncoder

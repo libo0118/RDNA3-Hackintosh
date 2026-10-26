@@ -1030,7 +1030,12 @@ the capture) on the host's RADV and compare with `/tmp/cap/*-cpu_draw.pgm`. Cave
 a slice the app reused right away (Core Animation's buffer pool) may differ for the app's own reasons - trust differences only
 over bytes the draw read and `cpu_done` did not change; the read-back is a synchronous copy submitted from the completion
 handler WITHOUT the pre-submit hook (it does not flush pending managed uploads), but it is an extra submit, so a captured run is
-not timed exactly like an uncaptured one. The collector keeps at most 64 captures and 512 MiB (`NVMTL_COLLECT_CAPTOTAL`). No `capture-*.bin` but the switch was set:
+not timed exactly like an uncaptured one. The collector keeps at most 64 captures and 512 MiB (`NVMTL_COLLECT_CAPTOTAL`). A capture whose target is an IOSurface in VRAM (N56) also has `target.gpu_done`, the scissor rows of the surface at
+completion: the decoder's `target:` line says whether the GPU's pixels show the text the CPU coverage says (`MATCHES`, or how many
+covered pixels show no text and which columns) - this splits "the draw goes wrong" from "something after the draw breaks it".
+Replay a capture on the host's GPU with `tests/vk_capture_replay.c` (`cc -O2 -o /tmp/replay tests/vk_capture_replay.c -lvulkan -ldl -lm;
+/tmp/replay /tmp/cap/capture-Terminal-<pid>-<k> table -l <libnvmtl_translate.so>`): SAME = the shaders and RADV draw it right here.
+No `capture-*.bin` but the switch was set:
 the `capture:` lines say why (MALFORMED, another process named, budget, write failure).
 
 ## Plugin frame trace
