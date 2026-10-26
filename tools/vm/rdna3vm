@@ -638,6 +638,20 @@ qemu_common() {
     { echo "$cpu_line"; echo "-cpu $cpu_arg -smp $CPUS,sockets=1,cores=$cpu_cores_n,threads=$cpu_threads_n"; } > "$WORK/last-cpu.$$" &&
         mv -f "$WORK/last-cpu.$$" "$WORK/last-cpu" ||
         { rm -f "$WORK/last-cpu.$$"; echo "!! cannot write $WORK/last-cpu: the result will not say which CPU the VM had"; }
+    # SSH into the guest (macOS Remote Login, the same disk as the OSX-KVM VM and
+    # its key) on the same localhost port as that VM: window and card runs can
+    # be read live without booting the other VM, which drops our kexts from
+    # the Aux KC (owner's request 2026-10-26). Only one of the two VMs runs at
+    # a time (one disk); a port already taken is left alone. VM_SSH_PORT=0: off.
+    local sshfwd= sshport=${VM_SSH_PORT:-10022}
+    if [ "$sshport" != 0 ]; then
+        if ss -ltn 2>/dev/null | grep -qE "[:.]$sshport[[:space:]]"; then
+            echo "!! ssh into the guest: port $sshport is taken on this host, no forward this time"
+        else
+            sshfwd=",hostfwd=tcp:127.0.0.1:$sshport-:22"
+            echo "ssh into the guest: ssh -p $sshport <user>@localhost (macOS Remote Login)"
+        fi
+    fi
     QARGS=(-enable-kvm -machine q35,accel=kvm -m "${RAM_GB}G"
         -smp "$CPUS",sockets=1,cores="$cpu_cores_n",threads="$cpu_threads_n" -cpu "$cpu_arg"
         -device isa-applesmc,osk="$OSK" -smbios type=2
@@ -649,7 +663,7 @@ qemu_common() {
         -device ide-hd,bus=sata.2,drive=OpenCoreBoot
         -drive id=MacHDD,if=none,format=qcow2,file="$MACDISK"
         -device ide-hd,bus=sata.4,drive=MacHDD
-        -netdev user,id=net0 -device vmxnet3,netdev=net0,id=net0,mac=52:54:00:c9:18:27)
+        -netdev "user,id=net0$sshfwd" -device vmxnet3,netdev=net0,id=net0,mac=52:54:00:c9:18:27)
 }
 
 msrs() {   # macOS needs unknown MSRs ignored
