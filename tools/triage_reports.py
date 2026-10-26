@@ -4497,6 +4497,7 @@ def report(path, show_all):
         mtlallow = read_member(tar, "34-metal-allow.txt") or ""
         stamps_txt = read_member(tar, "35-build-stamps.txt") or ""
         pluginlog = read_member(tar, "26-log-metal-plugin.txt") or ""
+        cohtxt = read_member(tar, "42-coherence.txt") or ""   # DRIVER-PLAN N54
         # DRIVER-PLAN N50: the A/B ladder (rdna3vm step ladder): ladder.txt and each rung's plugin log slice
         ladder_txt = read_member(tar, "41-ladder.txt") or ""
         ladder_logs = {}
@@ -4787,13 +4788,30 @@ def report(path, show_all):
         n50_rows_ = [("WARN", "plugin A/B", "tools/triage_glyphs.py FAILED (%s: %s): the plugin's A/B rows are missing from this triage; the rest of it ran" % (type(e_).__name__, e_))]
     for lvl_, name_, text_ in n50_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
+    # DRIVER-PLAN N54: the kernel's coherence switches, the fence's system copy and its skew (tools/triage_coherence.py)
+    try:
+        from triage_coherence import coh_rows
+        coh_rows_ = coh_rows(cohtxt, log or "")
+    except ImportError:
+        coh_rows_ = [("WARN", "coherence", "tools/triage_coherence.py is missing next to triage_reports.py: 42-coherence.txt was NOT read")]
+    except Exception as e_:  # noqa: BLE001
+        coh_rows_ = [("WARN", "coherence", "tools/triage_coherence.py FAILED (%s: %s): the coherence rows are missing; the rest ran" % (type(e_).__name__, e_))]
+    for lvl_, name_, text_ in coh_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+        failed = failed or lvl_ == "FAIL"
     if ladder_txt:
+        try:
+            from triage_coherence import coh_ladder_rows as coh_ladder_rows_
+        except ImportError:
+            def coh_ladder_rows_(*_a):
+                return [("WARN", "ladder-coh", "tools/triage_coherence.py is missing next to triage_reports.py: the coherence ladder was NOT read")]
         try:
             from triage_glyphs import parse_ladder, ladder_rows, glyph_verdicts
             lv_, lr_, lp_ = parse_ladder(ladder_txt, ladder_logs)
             # the automatic glyph verdict reads the rungs' 1280-wide looks that sit next to the archive (<report>-scanoutladder-<rung>h-pipe<N>.ppm)
             gl_ = glyph_verdicts(lr_, path[:-len(".tar.gz")] if path.endswith(".tar.gz") else None)   # (None: said per rung, not skipped)
-            ladder_rows_ = ladder_rows(lr_, lv_, lp_, gl_)
+            # variant 4 (N54): the kernel's coherence switches, one per rung (tools/triage_coherence.py)
+            ladder_rows_ = coh_ladder_rows_(ladder_txt, lr_, lp_, gl_) if lv_ == 4 else ladder_rows(lr_, lv_, lp_, gl_)
         except ImportError:
             ladder_rows_ = [("WARN", "ladder", "tools/triage_glyphs.py is missing next to triage_reports.py: the ladder's rungs were NOT read")]
         except Exception as e_:  # noqa: BLE001

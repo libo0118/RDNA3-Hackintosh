@@ -60,6 +60,9 @@ int  gmc11_init(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_size);
 int  gmc11_gart_map(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint64_t pa,
                     uint32_t pages, uint64_t flags);
 void gmc11_gart_unmap(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint32_t pages);
+/* amdgpu_gart_invalidate_tlb: VMID0's TLB on every hub the GART is on (the
+ * MMHUB, and the GFXHUB once gfx11_gfxhub_enable ran): MMIO, engine 17 */
+void gmc11_gart_tlb_flush(rdna3_dev *d, rdna3_gmc *g);
 
 /* ---- GPU page faults (gmc_v11_0_process_interrupt) ----
  * A fault IV comes from client VMC (MMHUB) or GFX/UTCL2 (GFXHUB) with

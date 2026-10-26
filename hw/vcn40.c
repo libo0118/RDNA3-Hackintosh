@@ -42,9 +42,7 @@ static void mdelay(rdna3_dev *d, uint32_t ms)
 
 static uint32_t wb_read32(rdna3_dev *d, const rdna3_vcn_ring *r, uint32_t off)
 {
-    uint32_t v = 0;
-    rdna3_vram_read(d, r->wb + off, &v, 4);
-    return v;
+    return rdna3_vram_read32(d, r->wb + off);   /* one 32-bit load (N54) */
 }
 
 static uint8_t fws_read8(rdna3_dev *d, const rdna3_vcn *v, uint32_t i, uint32_t off)

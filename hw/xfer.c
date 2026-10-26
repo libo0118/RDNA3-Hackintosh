@@ -40,8 +40,12 @@ static int xfer(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_of
             gmc11_gart_unmap(d, g, win_off, n);
             break;
         }
-        /* the SDMA walks VMID0 through MMHUB: drop stale translations */
-        mmhub302_flush_tlb(d, 0, 0);
+        /* drop stale translations of the window (DRIVER-PLAN N54): SDMA 6.0
+         * walks VMID0 through the GFXHUB (sdma_v6_0_sw_init: ring->vm_hub =
+         * AMDGPU_GFXHUB(0)), so amdgpu_gart_invalidate_tlb flushes every hub;
+         * the MMHUB alone left the previous copy's pages in the GFXHUB's
+         * TLB and the SDMA copied to / from them */
+        gmc11_gart_tlb_flush(d, g);
         chunk = (uint64_t)n * 4096;
         if (chunk > len - done)
             chunk = len - done;
@@ -52,7 +56,7 @@ static int xfer(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_of
             ret = to_vram ? sdma60_copy_sync(d, r, gmc, vmc, bytes) : sdma60_copy_sync(d, r, vmc, gmc, bytes);
         }
         gmc11_gart_unmap(d, g, win_off, n);
-        mmhub302_flush_tlb(d, 0, 0);
+        gmc11_gart_tlb_flush(d, g);
         if (ret != RDNA3_OK)
             break;
         done += chunk;

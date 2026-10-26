@@ -26,13 +26,14 @@ fi
 # rdna3bisect=1 / 2 / 4 asks for it (rdna3vm step bisect / bisect-plugin /
 # bisect-agdc).
 BISECT=; BISECT_HAND=
-# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws | --ladder-glyphs;
-# in the VM the boot-arg rdna3ladder=1 / 2 / 3 (rdna3vm step ladder / ladder-ws / ladder-glyphs)
+# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws | --ladder-glyphs | --ladder-coh;
+# in the VM the boot-arg rdna3ladder=1 / 2 / 3 / 4 (rdna3vm step ladder / ladder-ws / ladder-glyphs / ladder-coh)
 LADDER=
 case "${1:-}" in
     --ladder) LADDER=1; BISECT_HAND=1; shift ;;
     --ladder-ws) LADDER=2; BISECT_HAND=1; shift ;;
     --ladder-glyphs) LADDER=3; BISECT_HAND=1; shift ;;
+    --ladder-coh) LADDER=4; BISECT_HAND=1; shift ;;
 esac
 case "${1:-}" in
     --bisect) BISECT=1; BISECT_HAND=1; shift ;;
@@ -1098,6 +1099,13 @@ LADDER_WS_RUNGS="radv-ws paranoid-ws"
 # (NO_SURFACE_SHARE / NO_SURFACE_PAGEOFF / MANAGED_EAGER_ZERO test the first character for '1', NO_BINDLESS likewise, NO_TEXBUF is set-or-not, SKIP_EMPTY is on unless it starts with '0').
 # This variant takes a SECOND hi-res look a few seconds after the first (`h2`): the verdict (tools/glyph_verdict.py) only counts the tick-line window that CHANGED between the two,
 # the rung's own live text, never a window that stands still (a restored one, another rung's, a frozen screen).
+# variant 4 (`rdna3vm step ladder-coh`, rdna3ladder=4, standalone --ladder-coh): DRIVER-PLAN N54, the KERNEL's coherence switches (common/rdna3_coh.h,
+# sysctl debug.rdna3_coh_<name>), after card run 2026-10-26b showed every plugin switch leaves the glyphs broken. A rung's switch is a sysctl
+# (`sysctl:NAME=VALUE`): set before the rung's apps start (they are new processes, so a mapping switch like uc reaches their memory), read back,
+# and put back after the rung (and by ladder_restore on an abort). WindowServer keeps running with the switch for the rung: the ring-level
+# switches reach its jobs too. Order: `baseline`, `coh-all` (every switch: the POSITIVE control - if the text is still broken with all of them,
+# the kernel's coherence is not the cause), then one switch per rung, the likeliest first. Two hi-res looks per rung as in variant 3.
+LADDER_COH_RUNGS="baseline coh-all fence-sys pipe-sync wait-idle uc fence-inv sdma-gcr vm-flush hdp-end"
 LADDER_GLYPHS_RUNGS="baseline managed-whole managed-check no-surface-share no-surface-pageoff fbfetch-zero managed-pages managed-eager-zero no-texbuf no-bindless dontcare-clears skip-empty-0 paranoid"
 ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
     case $1 in
@@ -1119,11 +1127,62 @@ ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
         no-bindless) echo "NVMTL_NO_BINDLESS=1" ;;
         dontcare-clears) echo "NVMTL_DONTCARE_CLEARS=1" ;;
         skip-empty-0) echo "NVMTL_SKIP_EMPTY=0" ;;
+        coh-all) echo "sysctl:debug.rdna3_coh_all=1" ;;
+        fence-sys) echo "sysctl:debug.rdna3_coh_fence_sys=1" ;;
+        pipe-sync) echo "sysctl:debug.rdna3_coh_pipe_sync=1" ;;
+        wait-idle) echo "sysctl:debug.rdna3_coh_wait_idle=1" ;;
+        uc) echo "sysctl:debug.rdna3_coh_uc=1" ;;
+        fence-inv) echo "sysctl:debug.rdna3_coh_fence_inv=1" ;;
+        sdma-gcr) echo "sysctl:debug.rdna3_coh_sdma_gcr=1" ;;
+        vm-flush) echo "sysctl:debug.rdna3_coh_vm_flush=1" ;;
+        hdp-end) echo "sysctl:debug.rdna3_coh_hdp_end=1" ;;
         *) return 1 ;;
     esac
 }
-ladder_env_args() {   # "A=1 B=2" -> "--env A=1 --env B=2"
-    for _le in $1; do printf '%s %s ' --env "$_le"; done
+ladder_env_args() {   # "A=1 B=2" -> "--env A=1 --env B=2" (a sysctl:NAME=VALUE switch is not an environment variable: ladder_sysctl_set)
+    for _le in $1; do case $_le in sysctl:*) ;; *) printf '%s %s ' --env "$_le" ;; esac; done
+}
+ladder_sysctl_set() {   # ladder_sysctl_set "<switches>": each sysctl:NAME=VALUE set, its old value remembered in _LADDER_SYSCTL_UNDO (DRIVER-PLAN N54)
+    for _ls in $1; do
+        case $_ls in sysctl:*=*) ;; *) continue ;; esac
+        _ls=${_ls#sysctl:}; _ln=${_ls%%=*}; _lv2=${_ls#*=}
+        _lo=$(sysctl -n "$_ln" 2>/dev/null)
+        if [ -z "$_lo" ]; then ladder_w "failed: sysctl $_ln does not exist (a core older than DRIVER-PLAN N54): the rung is the baseline again"; continue; fi
+        # a coherence switch is undone through the whole mask (coh_all=0 would also clear a mask the boot-arg rdna3coh set)
+        _lun=$_ln; _luv=$_lo
+        case $_ln in debug.rdna3_coh_*) _lun=debug.rdna3_coh_mask; _luv=$(sysctl -n debug.rdna3_coh_mask 2>/dev/null); _luv=${_luv:-0} ;; esac
+        sysctl -w "$_ln=$_lv2" >/dev/null 2>&1
+        _lb=$(sysctl -n "$_ln" 2>/dev/null)
+        case " $_LADDER_SYSCTL_UNDO " in *" $_lun="*) ;; *) _LADDER_SYSCTL_UNDO="$_LADDER_SYSCTL_UNDO $_lun=$_luv" ;; esac
+        ladder_w "sysctl: $_ln=$_lv2 (was $_lo, read back $_lb)"
+        [ "$_lb" = "$_lv2" ] || ladder_w "WARN: sysctl $_ln reads $_lb after it was set to $_lv2: the switch is NOT on"
+    done
+    return 0
+}
+ladder_coh_state() {   # ladder_coh_state start|end: debug.rdna3_coh as the rung starts / ends (every variant-4 rung, the baseline too: the triage checks the flags)
+    _lcs=$(sysctl -n debug.rdna3_coh 2>/dev/null | cut -c1-1500)
+    ladder_w "coh_$1: ${_lcs:-(no debug.rdna3_coh: a core older than DRIVER-PLAN N54)}"
+}
+ladder_sysctl_undo() {   # the values ladder_sysctl_set found, back and read back; one that does not stick is retried and kept in the list (a WARN each time)
+    [ -n "${_LADDER_SYSCTL_UNDO:-}" ] || return 0
+    _lkeep=
+    for _lu in $_LADDER_SYSCTL_UNDO; do
+        _lun=${_lu%%=*}; _luv=${_lu#*=}; _lgot=
+        for _ltry in 1 2 3; do
+            sysctl -w "$_lu" >/dev/null 2>&1
+            _lgot=$(sysctl -n "$_lun" 2>/dev/null)
+            [ "$_lgot" = "$_luv" ] && break
+            sleep 1
+        done
+        if [ "$_lgot" = "$_luv" ]; then
+            [ -n "${LF:-}" ] && ladder_w "sysctl: restored $_lu"
+        else
+            [ -n "${LF:-}" ] && ladder_w "WARN: sysctl $_lun NOT restored (is ${_lgot:-unreadable}, wanted $_luv): the rungs after this one run with it"
+            _lkeep="$_lkeep $_lu"
+        fi
+    done
+    _LADDER_SYSCTL_UNDO=$_lkeep
+    return 0
 }
 ladder_w() { printf '%s\n' "$*" >> "$LF"; }
 ladder_text_script() {   # the Terminal's text: a colored listing and fox lines, then a tick line a second in ONE fixed colour (bright white) and, every 4th second, a line of mixed glyphs
@@ -1271,6 +1330,8 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     else
         _rargs=$(ladder_env_args "$_renv")
         ladder_w "env: ${_rargs:-(nothing)}"
+        ladder_sysctl_set "$_renv"   # DRIVER-PLAN N54: the kernel's switches of the rung (variant 4)
+        [ "${_LADDER_V:-1}" = 4 ] && ladder_coh_state start
     fi
     _rt0=$(date +%s)
     ladder_w "started: $(date +%T)"
@@ -1294,7 +1355,7 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     bisect_look "ladder-${_rn}a" 12
     ladder_look_hires "ladder-${_rn}h"
     _rlooks="ladder-${_rn}a ladder-${_rn}h"
-    if [ "${_LADDER_V:-1}" = 3 ]; then
+    if [ "${_LADDER_V:-1}" = 3 ] || [ "${_LADDER_V:-1}" = 4 ]; then
         # the glyph hunt: a second hi-res look a few seconds later. The text script prints a line a second, so the rung's own window CHANGES between the two looks and
         # a window that does not (restored, another rung's, a frozen screen) is not the rung's text (tools/glyph_verdict.py verdict_files(later=...))
         sleep "${LADDER_LOOK2GAP:-3}"
@@ -1315,6 +1376,8 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     _LADDER_PIDS=
     sleep "${LADDER_AFTERQUIT:-2}"
     ladder_log_slice "$_rn" "$_rt0" "$_tp$_cp$_lwp"
+    [ "${_LADDER_V:-1}" = 4 ] && ladder_coh_state end
+    ladder_sysctl_undo
     ladder_w "== end rung $_rn"
     ladder_push
     return 0
@@ -1338,6 +1401,7 @@ ladder_push() {   # up to the host after every rung: a run cut short keeps what 
 ladder_restore() {   # the plugin's conf and allow list exactly as the run found them; the instances still running are quit
     [ -n "${_LADDER_PIDS:-}" ] && ladder_quit "$_LADDER_PIDS"
     _LADDER_PIDS=
+    ladder_sysctl_undo   # DRIVER-PLAN N54: a rung's kernel switch never outlives the run
     [ -n "${_LADDER_BASE_SET:-}" ] && [ -z "${_LADDER_WS:-}" ] && ladder_sweep   # (not after a WindowServer restart: the session's apps are all new then)
     bisect_plugin_restore
     if [ -n "${_LADDER_TEXTDIR:-}" ]; then rm -rf "${_LADDER_TEXTDIR:?}"; _LADDER_TEXTDIR=; fi
@@ -1355,15 +1419,15 @@ ladder_abort() {   # ladder_abort SIGNAME EXITCODE: the run is ending because of
 }
 ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServer rungs, 3 = the glyph hunt (ladder-glyphs); 0 when every rung ran
     _lv=$1; _LADDER_V=$1
-    _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_GLYPHS_RUNGS
+    _lrungs=$LADDER_RUNGS; [ "$_lv" = 3 ] && _lrungs=$LADDER_GLYPHS_RUNGS; [ "$_lv" = 4 ] && _lrungs=$LADDER_COH_RUNGS
     LD=${LADDER_OUT:-$HOME/rdna3-ladder}; LF=$LD/ladder.txt; BD=$LD; BF=$LF
     rm -rf "$LD"; mkdir -p "$LD" || { echo "== ladder: cannot make $LD"; return 1; }
     _btty=
     if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
-    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=; _LADDER_CUR=
+    _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=; _LADDER_CUR=; _LADDER_SYSCTL_UNDO=
     ladder_w "# rdna3 ladder v1"
-    ladder_w "variant: $_lv ($(case $_lv in (2) echo ladder-ws ;; (3) echo ladder-glyphs ;; (*) echo ladder ;; esac))"   # (pattern): bash 3.2 reads an unbalanced ) inside $( ) as its end
+    ladder_w "variant: $_lv ($(case $_lv in (2) echo ladder-ws ;; (3) echo ladder-glyphs ;; (4) echo ladder-coh ;; (*) echo ladder ;; esac))"   # (pattern): bash 3.2 reads an unbalanced ) inside $( ) as its end
     ladder_w "started: $(date +%T)"
     ladder_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
     ladder_w "console_user: $(bisect_console_user)"
@@ -1648,6 +1712,7 @@ case " $args " in
     *" rdna3ladder=1 "*) [ -n "$LADDER" ] || LADDER=1 ;;
     *" rdna3ladder=2 "*) [ -n "$LADDER" ] || LADDER=2 ;;
     *" rdna3ladder=3 "*) [ -n "$LADDER" ] || LADDER=3 ;;
+    *" rdna3ladder=4 "*) [ -n "$LADDER" ] || LADDER=4 ;;
 esac
 [ -n "$LADDER" ] && [ -z "$BISECT" ] && label="ladder-$LADDER"
 # rdna3bisect=3 (rdna3vm args "rdna3bisect=3" --stay): nothing runs at boot, so the bisect can be started by hand in

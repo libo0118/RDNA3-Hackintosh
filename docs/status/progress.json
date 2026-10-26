@@ -1,9 +1,9 @@
 {
  "amdgpu": {
-  "works": 523,
-  "ported": 1512,
-  "total": 1530,
-  "not_applicable": 642,
+  "works": 524,
+  "ported": 1513,
+  "total": 1531,
+  "not_applicable": 641,
   "works_pct": 34.2,
   "ported_pct": 98.8,
   "groups": [
@@ -897,7 +897,7 @@
      "7",
      "8"
     ],
-    "works": 18,
+    "works": 19,
     "ported": 9,
     "todo": 0,
     "items": {
@@ -906,6 +906,7 @@
      "amdgpu_fence_driver_hw_fini": "ported",
      "amdgpu_fence_driver_hw_init": "works",
      "amdgpu_fence_driver_isr_toggle": "ported",
+     "amdgpu_fence_driver_start_ring": "works",
      "amdgpu_fence_emit": "works",
      "amdgpu_fence_emit_polling": "works",
      "amdgpu_fence_fallback": "works",
@@ -933,7 +934,6 @@
      "amdgpu_fence_driver_clear_job_fences": "dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)",
      "amdgpu_fence_driver_init_ring": "dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)",
      "amdgpu_fence_driver_set_error": "dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)",
-     "amdgpu_fence_driver_start_ring": "dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)",
      "amdgpu_fence_driver_sw_fini": "dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)",
      "amdgpu_fence_driver_sw_init": "dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)",
      "amdgpu_fence_enable_signaling": "Linux dma_fence object glue",

@@ -49,9 +49,7 @@ static uint32_t order_base_2(uint32_t n)
 
 static uint32_t wb_read32(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t off)
 {
-    uint32_t v;
-    rdna3_vram_read(d, r->wb + off, &v, 4);
-    return v;
+    return rdna3_vram_read32(d, r->wb + off);   /* one 32-bit load (N54) */
 }
 
 void sdma60_write(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t v)
@@ -133,6 +131,14 @@ uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r)
 {
     uint64_t addr = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_FENCE);
     uint32_t seq = ++r->fence_seq;
+    if (r->fence_sys_mc) {
+        /* DRIVER-PLAN N54: amdgpu's place for the fence (adev->wb, system
+         * memory) first, the same packet (sdma_v6_0_ring_emit_fence, UC) */
+        sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_FENCE) | SDMA_PKT_FENCE_HEADER_MTYPE(0x3));
+        sdma60_write(d, r, (uint32_t)r->fence_sys_mc);
+        sdma60_write(d, r, (uint32_t)(r->fence_sys_mc >> 32));
+        sdma60_write(d, r, seq);
+    }
     sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_FENCE) | SDMA_PKT_FENCE_HEADER_MTYPE(0x3));
     sdma60_write(d, r, (uint32_t)addr);
     sdma60_write(d, r, (uint32_t)(addr >> 32));
@@ -142,6 +148,30 @@ uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r)
         sdma60_write(d, r, 0);   /* INT_CONTEXT 0 */
     }
     return seq;
+}
+
+uint32_t sdma60_fence_sys_read(const rdna3_sdma_ring *r)
+{
+    return r->fence_sys_cpu ? *r->fence_sys_cpu : 0;
+}
+
+/* DRIVER-PLAN N54 sdma_gcr: a kernel copy / fill between two
+ * sdma_v6_0_ring_emit_mem_sync (GL2 written back and invalidated before it
+ * reads and after it wrote), the HDP flushed before it reads what the CPU
+ * wrote through the BAR (the commit's MMIO flush already does that) */
+static void kcopy_begin(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    if (!(d->coh & RD3_COH_SDMA_GCR))
+        return;
+    rd3_coh_count(d->coh_count, 7);   /* sdma_gcr: a copy wrapped */
+    sdma60_emit_hdp_flush(d, r);
+    sdma60_emit_mem_sync(d, r);
+}
+
+static void kcopy_end(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    if (d->coh & RD3_COH_SDMA_GCR)
+        sdma60_emit_mem_sync(d, r);
 }
 
 void sdma60_emit_fence64(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t addr, uint64_t seq)
@@ -170,14 +200,36 @@ int sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq)
     return sdma60_wait_fence_us(d, r, seq, d->usec_timeout);
 }
 
+/* DRIVER-PLAN N54 fence_sys: the system copy of the fence must land too,
+ * inside the same bound (the kernel's copies: page-off, evict, clears); a
+ * copy that does not is logged and the VRAM fence taken */
 int sdma60_wait_fence_us(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq, uint32_t usec)
 {
+    const int want_sys = (d->coh & RD3_COH_FENCE_SYS) && r->fence_sys_cpu;
     uint32_t i, v = 0;
+    int vram = 0, held = 0;
     for (i = 0; i < usec; i++) {
-        v = wb_read32(d, r, RD_SDMA_WB_FENCE);
-        if ((int32_t)(v - seq) >= 0)
+        if (!vram) {
+            v = wb_read32(d, r, RD_SDMA_WB_FENCE);
+            vram = (int32_t)(v - seq) >= 0;
+        }
+        if (vram && (!want_sys || rd3_coh_seq_passed(*r->fence_sys_cpu, seq))) {
+            if (held)
+                rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_SYS);
             return RDNA3_OK;
+        }
+        held = vram;
         d->os.udelay(d->os.ctx, 1);
+    }
+    if (vram && want_sys && rd3_coh_seq_passed(*r->fence_sys_cpu, seq)) {   /* landed during the last delay */
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_SYS);
+        return RDNA3_OK;
+    }
+    if (vram) {
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_FALLBACK);
+        RERR(d, "SDMA%u: fence %u: its system copy (%u) did not land within %u us: the VRAM fence is taken", r->inst,
+             seq, *r->fence_sys_cpu, usec);
+        return RDNA3_OK;
     }
     RERR(d, "SDMA%u: fence %u timeout (last %u, rptr 0x%x, status 0x%08x)", r->inst, seq, v,
          wb_read32(d, r, RD_SDMA_WB_RPTR), RS(d, r->inst, regSDMA0_STATUS_REG));
@@ -377,6 +429,10 @@ int sdma60_soft_reset(rdna3_dev *d, rdna3_sdma_ring *r)
     rdna3_vram_fill(d, r->ring, 0, r->ring_size);
     rdna3_vram_write(d, r->wb + RD_SDMA_WB_RPTR, zero, sizeof(zero));
     rdna3_vram_write(d, r->wb + RD_SDMA_WB_FENCE, &seq, 4);
+    if (r->fence_sys_cpu) {   /* DRIVER-PLAN N54: the system copy says so too */
+        *r->fence_sys_cpu = seq;
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_FORCED);
+    }
     rdna3_hdp_flush(d);
     tmp = sdma_program(d, r);
     RLOG(d, "SDMA%u: soft reset %s, fences completed up to %u", r->inst,
@@ -405,7 +461,9 @@ int sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t ds
     uint32_t seq;
     if (!r->ready || !bytes || bytes > (1u << 30))
         return RDNA3_EINVAL;
+    kcopy_begin(d, r);
     sdma60_emit_copy(d, r, src, dst, bytes);
+    kcopy_end(d, r);
     seq = sdma60_emit_fence(d, r);
     sdma60_commit(d, r);
     return sdma60_wait_fence(d, r, seq);
@@ -417,6 +475,16 @@ int sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t ds
  * gives every VRAM BO ("always clear VRAM") */
 static uint32_t ring_space(rdna3_dev *d, rdna3_sdma_ring *r);
 
+/* amdgpu_ring_alloc: 'ndw' dwords free behind what the ring still holds,
+ * waited for up to usec_timeout; RDNA3_EBUSY when they never come */
+int sdma60_ring_reserve(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t ndw)
+{
+    uint32_t i;
+    for (i = 0; i < d->usec_timeout && ring_space(d, r) < ndw; i++)
+        d->os.udelay(d->os.ctx, 1);
+    return ring_space(d, r) < ndw ? RDNA3_EBUSY : RDNA3_OK;
+}
+
 int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t value, uint64_t len)
 {
     const uint64_t max = 0x3fffffe0ull;
@@ -425,7 +493,7 @@ int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t va
         return RDNA3_EINVAL;
     /* the fills and the fence must fit (amdgpu_ring_alloc), behind what
      * the ring still holds */
-    ndw = 5 * (uint32_t)((len + max - 1) / max) + 16;
+    ndw = 5 * (uint32_t)((len + max - 1) / max) + 16 + 16 + 4;   /* + N54's GCR / HDP and the system fence */
     for (i = 0; i < d->usec_timeout && ring_space(d, r) < ndw; i++)
         d->os.udelay(d->os.ctx, 1);
     if (ring_space(d, r) < ndw)
@@ -433,12 +501,14 @@ int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t va
     /* the wait grows with the size: 1 KiB per microsecond is far below
      * what the engine fills, and jobs queued before it count too */
     usec = d->usec_timeout + (uint32_t)(len >> 10 < 60000000ull ? len >> 10 : 60000000ull);
+    kcopy_begin(d, r);
     while (len) {
         uint32_t n = (uint32_t)(len < max ? len : max);
         sdma60_emit_fill(d, r, dst, value, n);
         dst += n;
         len -= n;
     }
+    kcopy_end(d, r);
     seq = sdma60_emit_fence(d, r);
     sdma60_commit(d, r);
     return sdma60_wait_fence_us(d, r, seq, usec);
@@ -463,11 +533,12 @@ int sdma60_copy_rect_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint32
         uint64_t len = (uint64_t)(rows - 1) * src_pitch + row_bytes;
         usec = d->usec_timeout + (uint32_t)(len >> 10);
         batch = (uint32_t)((len + max - 1) / max);
-        for (i = 0; i < d->usec_timeout && ring_space(d, r) < 7 * batch + 16; i++)
+        for (i = 0; i < d->usec_timeout && ring_space(d, r) < 7 * batch + 36; i++)
             d->os.udelay(d->os.ctx, 1);
-        if (ring_space(d, r) < 7 * batch + 16)
+        if (ring_space(d, r) < 7 * batch + 36)
             return RDNA3_EBUSY;
         sdma60_emit_hdp_flush(d, r);
+        kcopy_begin(d, r);
         while (len) {
             uint32_t n = (uint32_t)(len < max ? len : max);
             sdma60_emit_copy(d, r, src, dst, n);
@@ -475,6 +546,7 @@ int sdma60_copy_rect_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint32
             dst += n;
             len -= n;
         }
+        kcopy_end(d, r);
         seq = sdma60_emit_fence(d, r);
         sdma60_commit(d, r);
         return sdma60_wait_fence_us(d, r, seq, usec);
@@ -482,16 +554,17 @@ int sdma60_copy_rect_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint32
     /* row by row: a row of up to 4 MiB packets each */
     while (y < rows) {
         uint32_t per_row = (row_bytes + max - 1) / max, space;
-        for (i = 0; i < d->usec_timeout && ring_space(d, r) < 7 * per_row + 16; i++)
+        for (i = 0; i < d->usec_timeout && ring_space(d, r) < 7 * per_row + 36; i++)
             d->os.udelay(d->os.ctx, 1);
         space = ring_space(d, r);
-        if (space < 7 * per_row + 16)
+        if (space < 7 * per_row + 36)
             return RDNA3_EBUSY;
-        batch = (space - 16) / (7 * per_row);
+        batch = (space - 36) / (7 * per_row);
         if (batch > rows - y)
             batch = rows - y;
         if (y == 0)
             sdma60_emit_hdp_flush(d, r);
+        kcopy_begin(d, r);
         for (i = 0; i < batch; i++, y++) {
             uint64_t s = src + (uint64_t)y * src_pitch, t = dst + (uint64_t)y * dst_pitch;
             uint32_t left = row_bytes;
@@ -503,6 +576,7 @@ int sdma60_copy_rect_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint32
                 left -= n;
             }
         }
+        kcopy_end(d, r);
         seq = sdma60_emit_fence(d, r);
         sdma60_commit(d, r);
         /* the wait grows with the bytes of the batch (1 KiB per microsecond) */
@@ -819,18 +893,17 @@ void sdma60_vm_set_pte_pde(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint6
 /* Ported from sdma_v6_0_ring_get_rptr: the rptr writeback is in bytes */
 uint64_t sdma60_ring_get_rptr(rdna3_dev *d, rdna3_sdma_ring *r)
 {
-    uint64_t rptr = 0;
-    rdna3_vram_read(d, r->wb + RD_SDMA_WB_RPTR, &rptr, 8);
-    return rptr >> 2;
+    /* one 32-bit load (N54): a byte-wise read through the write-combined BAR can tear a carry and make
+     * ring_space() see free room the engine has not fetched yet; the ring is far below 4 GB, the low dword suffices */
+    return (uint64_t)rdna3_vram_read32(d, r->wb + RD_SDMA_WB_RPTR) >> 2;
 }
 
 /* Ported from sdma_v6_0_ring_get_wptr: the poll slot (bytes) with a doorbell */
 uint64_t sdma60_ring_get_wptr(rdna3_dev *d, rdna3_sdma_ring *r)
 {
-    uint64_t wptr = 0;
-    if (r->use_doorbell)
-        rdna3_vram_read(d, r->wb + RD_SDMA_WB_WPTR, &wptr, 8);
-    return wptr >> 2;
+    if (!r->use_doorbell)
+        return 0;
+    return (uint64_t)rdna3_vram_read32(d, r->wb + RD_SDMA_WB_WPTR) >> 2;   /* one 32-bit load (N54) */
 }
 
 /* Ported from sdma_v6_0_is_idle */
@@ -870,7 +943,7 @@ uint32_t sdma60_submit_job(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint
                            uint64_t uf_addr, uint64_t uf_seq_base)
 {
     uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_COND_EXE);
-    uint32_t i, seq, patch, cond_exec, ndw = 6 + 5 + 6 + 6 + 10 + 3 + 6 + 5 + 6 + 14 * n + 16 + 16;
+    uint32_t i, seq, patch, cond_exec, ndw = 6 + 5 + 6 + 6 + 10 + 3 + 6 + 5 + 6 + 14 * n + 16 + 16 + 8;   /* + N54: the fences' system copies */
     int need_pipe = vmid && pd_addr;   /* amdgpu_vm_need_pipeline_sync */
     if (!r->ready || !n)
         return 0;

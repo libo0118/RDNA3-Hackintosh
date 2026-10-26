@@ -270,36 +270,6 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         cp "$f" "$dir/36-stream-$(basename "$f")" && echo "stream: $(wc -c < "$f") bytes in 36-stream-$(basename "$f")"
     done
 } > "$dir/36-frame-trace.txt" 2>&1
-# card run 2026-10-17c: who holds the CPU-visible VRAM (the heap WindowServer's
-# framebuffers and the GEM BOs share): the core's per-owner report and the
-# kernel's refusal / summary lines; tools/triage_reports.py "VISIBLE VRAM"
-{
-    echo "== sysctl debug.rdna3_vram (the end of the run)"
-    _vh=$(sysctl -n debug.rdna3_vram 2>/dev/null)
-    if [ -n "$_vh" ]; then echo "debug.rdna3_vram: $_vh"
-    else echo "(no debug.rdna3_vram sysctl: kext older than card run 2026-10-17c, or not loaded)"; fi
-    # the refusal / summary lines of the kernel log; both log files (the sudo
-    # one is written later), the head and the tail of each with a marker
-    # between, so neither the first refusal nor the newest summary is cut
-    _found=0
-    for _lf in 20-log-rdna3.txt 20-log-rdna3-sudo.txt; do
-        [ -s "$dir/$_lf" ] || continue
-        _found=1
-        echo "== kernel log ($_lf)"
-        grep -h -e 'VRAM REFUSED' -e 'VRAM heap:' -e 'DRM/amdgpu UAPI ready' -e 'REFUSED by the framebuffer' \
-            -e 'could not give' -e 'range retired' -e 'VRAM: a ' -e 'VRAM: debug.rdna3_vram' \
-            -e 'GEM: .* VRAM BO' -e 'no VRAM and no GTT either' "$dir/$_lf" > "$dir/.38.tmp" 2>/dev/null || true
-        _n=$(wc -l < "$dir/.38.tmp" | tr -d ' ')
-        if [ "$_n" -le 200 ]; then cat "$dir/.38.tmp"
-        else
-            head -80 "$dir/.38.tmp"
-            echo "== ... $((_n - 200)) line(s) left out between the first 80 and the last 120 =="
-            tail -120 "$dir/.38.tmp"
-        fi
-        rm -f "$dir/.38.tmp"
-    done
-    [ "$_found" = 1 ] || echo "(no kernel log in this report)"
-} > "$dir/38-vram-heap.txt" 2>/dev/null
 # card run 2026-10-17d: the display bisect (rdna3vm step bisect, autoreport.sh
 # bisect_run): per step the switches set and read back, the owner's answer, the
 # looks' pipe lines and the counters; tools/triage_reports.py prints the table.
@@ -347,6 +317,60 @@ fi
 } > "$dir/35-build-stamps.txt" 2>&1
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
+# (38 and 42 come after the sudo log above: both read 20-log-rdna3-sudo.txt too; ECC round 1 of N54)
+# card run 2026-10-17c: who holds the CPU-visible VRAM (the heap WindowServer's
+# framebuffers and the GEM BOs share): the core's per-owner report and the
+# kernel's refusal / summary lines; tools/triage_reports.py "VISIBLE VRAM"
+{
+    echo "== sysctl debug.rdna3_vram (the end of the run)"
+    _vh=$(sysctl -n debug.rdna3_vram 2>/dev/null)
+    if [ -n "$_vh" ]; then echo "debug.rdna3_vram: $_vh"
+    else echo "(no debug.rdna3_vram sysctl: kext older than card run 2026-10-17c, or not loaded)"; fi
+    # the refusal / summary lines of the kernel log; both log files (the sudo
+    # one is written later), the head and the tail of each with a marker
+    # between, so neither the first refusal nor the newest summary is cut
+    _found=0
+    for _lf in 20-log-rdna3.txt 20-log-rdna3-sudo.txt; do
+        [ -s "$dir/$_lf" ] || continue
+        _found=1
+        echo "== kernel log ($_lf)"
+        grep -h -e 'VRAM REFUSED' -e 'VRAM heap:' -e 'DRM/amdgpu UAPI ready' -e 'REFUSED by the framebuffer' \
+            -e 'could not give' -e 'range retired' -e 'VRAM: a ' -e 'VRAM: debug.rdna3_vram' \
+            -e 'GEM: .* VRAM BO' -e 'no VRAM and no GTT either' "$dir/$_lf" > "$dir/.38.tmp" 2>/dev/null || true
+        _n=$(wc -l < "$dir/.38.tmp" | tr -d ' ')
+        if [ "$_n" -le 200 ]; then cat "$dir/.38.tmp"
+        else
+            head -80 "$dir/.38.tmp"
+            echo "== ... $((_n - 200)) line(s) left out between the first 80 and the last 120 =="
+            tail -120 "$dir/.38.tmp"
+        fi
+        rm -f "$dir/.38.tmp"
+    done
+    [ "$_found" = 1 ] || echo "(no kernel log in this report)"
+} > "$dir/38-vram-heap.txt" 2>/dev/null
+# DRIVER-PLAN N54: the kernel's GPU-memory coherence switches and counters (debug.rdna3_coh, the
+# switches as the run ended, the kernel's 'coherence:' lines: first 60 and last 60);
+# tools/triage_reports.py 'coherence' (tools/triage_coherence.py)
+{
+    echo "== sysctl debug.rdna3_coh (the end of the run)"
+    _ch=$(sysctl -n debug.rdna3_coh 2>/dev/null)
+    if [ -n "$_ch" ]; then echo "debug.rdna3_coh: $_ch"
+    else echo "(no debug.rdna3_coh sysctl: a core older than DRIVER-PLAN N54, or not loaded)"; fi
+    sysctl debug 2>/dev/null | grep -E '^debug\.rdna3_coh_' || true
+    for _lf in 20-log-rdna3.txt 20-log-rdna3-sudo.txt; do
+        [ -s "$dir/$_lf" ] || continue
+        echo "== kernel log ($_lf)"
+        grep -h 'RDNA3: coherence:' "$dir/$_lf" > "$dir/.42.tmp" 2>/dev/null || true
+        _n=$(wc -l < "$dir/.42.tmp" | tr -d ' ')
+        if [ "$_n" -le 120 ]; then cat "$dir/.42.tmp"
+        else
+            head -60 "$dir/.42.tmp"
+            echo "== ... $((_n - 120)) line(s) left out between the first 60 and the last 60 =="
+            tail -60 "$dir/.42.tmp"
+        fi
+        rm -f "$dir/.42.tmp"
+    done
+} > "$dir/42-coherence.txt" 2>/dev/null
 
 # the discovery blob, decoded when the host tools are built
 if [ -x "$root/tools/macos/ioreg_discovery.sh" ]; then

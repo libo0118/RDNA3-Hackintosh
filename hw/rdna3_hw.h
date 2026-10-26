@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include "amd_discovery.h"
+#include "rdna3_coh.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,6 +132,13 @@ typedef struct rdna3_dev {
     /* with amdgpu_exact: a display core drives the DCN
      * (amdgpu_device_has_dc_support; smu_v13_0_notify_display_change) */
     int      amdgpu_dc;
+    /* DRIVER-PLAN N54: the coherence switches (RD3_COH_*, common/rdna3_coh.h)
+     * the ring emitters read; the OS layer copies them in before each
+     * submission (0: the behaviour before N54) */
+    uint32_t coh;
+    /* the work they did (RD3_COH_CNT_* / bit index; owned by the OS layer,
+     * NULL = not counted) */
+    uint64_t *coh_count;
 } rdna3_dev;
 
 /* ---- logging ---- */
@@ -190,6 +198,8 @@ static inline uint64_t rdna3_vram_pa(const rdna3_dev *d, uint64_t off) { return 
 volatile uint8_t *rdna3_vram_cpu(rdna3_dev *d, uint64_t off, uint64_t len);
 void rdna3_vram_write(rdna3_dev *d, uint64_t off, const void *src, uint64_t len);
 void rdna3_vram_read(rdna3_dev *d, uint64_t off, void *dst, uint64_t len);
+/* one aligned 32-bit load of a value the GPU writes (fences, wptr writebacks) */
+uint32_t rdna3_vram_read32(rdna3_dev *d, uint64_t off);
 void rdna3_vram_fill(rdna3_dev *d, uint64_t off, uint8_t v, uint64_t len);
 /* Indirect access through MM_INDEX/MM_DATA (works for all of VRAM). */
 void rdna3_vram_mm_read(rdna3_dev *d, uint64_t off, uint32_t *dst, uint32_t dwords);

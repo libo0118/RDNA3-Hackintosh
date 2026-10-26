@@ -65,6 +65,11 @@ typedef struct rdna3_sdma_ring {
     uint32_t vm_inv_eng;
     int      amdgpu_pad;
     int      burst_nop;
+    /* DRIVER-PLAN N54: the system-memory copy of the fence (see
+     * rdna3_gfx_ring.fence_sys_mc): a FENCE packet to it before the VRAM
+     * one; 0 / NULL: none */
+    uint64_t fence_sys_mc;
+    volatile uint32_t *fence_sys_cpu;
 } rdna3_sdma_ring;
 
 #define RD_SDMA_WB_RPTR  0
@@ -109,6 +114,10 @@ int  sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 uint32_t sdma60_fence_read(rdna3_dev *d, rdna3_sdma_ring *r);   /* amdgpu_fence_read */
 /* emit a fence write of ++fence_seq; returns that sequence number */
 uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r);
+/* DRIVER-PLAN N54: the system-memory copy of the fence (0 without one) */
+uint32_t sdma60_fence_sys_read(const rdna3_sdma_ring *r);
+/* amdgpu_ring_alloc: wait (usec_timeout) until 'ndw' dwords are free */
+int sdma60_ring_reserve(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t ndw);
 /* a user fence (AMDGPU_CHUNK_ID_FENCE): sdma_v6_0_ring_emit_fence with
  * AMDGPU_FENCE_FLAG_64BIT and no interrupt - two FENCE packets, low then
  * high dword of 'seq' at MC address 'addr' (8-byte aligned) */

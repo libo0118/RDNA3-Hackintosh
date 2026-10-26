@@ -77,6 +77,8 @@ $(BUILD)/test_vbl_irq: tests/test_vbl_irq.c common/rdna3_vbl_irq.h common/rdna3_
 # DRIVER-PLAN N38: a head's presents without blocking WindowServer (the flip queue)
 $(BUILD)/test_gpu_busy: tests/test_gpu_busy.c common/rdna3_gpu_busy.h common/rdna3_gpu_util.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_gpu_busy.c
+$(BUILD)/test_coh: tests/test_coh.c common/rdna3_coh.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_coh.c
 
 $(BUILD)/test_flip_queue: tests/test_flip_queue.c common/rdna3_flip_queue.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_queue.c
@@ -190,7 +192,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_gpu_time_queue $(BUILD)/test_ab_switch $(BUILD)/test_surf_census $(BUILD)/test_surfin_cache $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_msdl $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_coh $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_gpu_time_queue $(BUILD)/test_ab_switch $(BUILD)/test_surf_census $(BUILD)/test_surfin_cache $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_msdl $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -221,6 +223,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	$(BUILD)/test_tcall
 	$(BUILD)/test_flip_queue
 	$(BUILD)/test_gpu_busy
+	$(BUILD)/test_coh
 	$(BUILD)/test_fb_policy
 	$(BUILD)/test_swap_copy
 	$(BUILD)/test_write_gen
@@ -249,6 +252,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	python3 -I -B tests/test_triage_gpuq.py
 	python3 -I -B tests/test_triage_n48.py
 	python3 -I -B tests/test_triage_glyphs.py
+	python3 -I -B tests/test_triage_coherence.py
 	python3 -I -B tests/test_lookimg.py
 	python3 -I -B tests/test_glyph_verdict.py
 	python3 -I -B tests/test_fb_class.py
