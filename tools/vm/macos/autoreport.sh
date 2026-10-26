@@ -1573,7 +1573,10 @@ bw_ws_gpu() {   # 0: WindowServer has a user client of the accelerator or the co
     return 1
 }
 bw_state() {   # login | gpu | wait
-    case "$(bw_console_user)" in ""|root|loginwindow) ;; *) echo login; return ;; esac
+    # a user on the console is not a desktop: auto-login hands /dev/console to the user before WindowServer is up, and in
+    # the -cpu host hang (card run 2026-10-26 21:27) the console was 'shrek' within 40 s while WindowServer never drew -
+    # the watch took that for a login and ended after 34 s. The Dock runs only once the session really started.
+    case "$(bw_console_user)" in ""|root|loginwindow) ;; *) pgrep -x Dock >/dev/null 2>&1 && { echo login; return; } ;; esac
     if bw_ws_gpu; then echo gpu; else echo wait; fi
 }
 bw_put() {   # bw_put <pending file>: to the host under its name without the pending prefix

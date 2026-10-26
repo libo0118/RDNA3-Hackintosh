@@ -84,6 +84,9 @@ echo "  300     1 Ss      0.0       01:50 -     /System/Library/CoreServices/log
 EOF2
 cat > "$T/bin/pgrep" <<'EOF2'
 #!/bin/sh
+# pgrep -x NAME: WindowServer is 412 unless $S/nows; the Dock runs unless $S/nodock
+for a; do n=$a; done
+[ "$n" = Dock ] && { [ -e "$S/nodock" ] && exit 1; echo 642; exit 0; }
 [ -e "$S/nows" ] && exit 1
 echo 412
 EOF2
@@ -216,6 +219,11 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
     # the watch says how far it got even without a snapshot (bootwatch-<stamp>-live.log)
     S=$T/$sh-stuck; ls "$S"/host/bootwatch-*-live.log >/dev/null 2>&1 && grep -q '^BOOTWATCH-LIVE: .*stuck=' "$S"/host/bootwatch-*-live.log ||
         fail "$sh stuck: no live log on the host: $(ls "$S/host")"
+    # auto-login: a user owns the console but there is no Dock (no desktop): not a login, the watch goes on and collects
+    run_scen $sh autologin 'echo shrek > "$S/user"; touch "$S/nodock"; BW_MAXN=1; bootwatch_run'
+    S=$T/$sh-autologin
+    ls "$S"/host/bootwatch-*-1.txt >/dev/null 2>&1 && ! grep -q 'state=login' "$S"/host/bootwatch-*.txt ||
+        fail "$sh autologin: a console user without a Dock ended the watch: $(ls "$S/host" 2>&1)"
     # the installed (older) script started a watchdog; a plain start keeps it, the re-exec into the host's copy
     # (--updated) replaces it (card run 2026-10-26: the old one hung on ioreg, the fixed one never ran)
     run_scen $sh replace 'sleep 300 </dev/null >/dev/null 2>&1 & _old=$!; echo $_old > "$BW_PIDFILE"
