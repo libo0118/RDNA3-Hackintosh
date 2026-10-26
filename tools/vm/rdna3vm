@@ -2408,6 +2408,7 @@ cmd_reports() {
     echo "  and the frame trace next to the report: *-trace-stream.bin, *-drmtrace-stream.bin, *-trace-sec.bin"
     echo "  with their *.size files (the archive holds copies as 36-stream-*.bin), and the plugin's"
     echo "  WindowServer traces sent during the A/B: *-plugin-*-WindowServer-*.trace"
+    echo "  and bootwatch-*.txt: the boot watchdog's evidence when WindowServer never opened the GPU (docs/AFTER-TESTS.md)"
 }
 
 case "${1:-}" in

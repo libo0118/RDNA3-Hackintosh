@@ -80,6 +80,7 @@ exactly what to run next. One round = one report batch → one fix → one retes
    PNGs in the `.gz`; the triage reads both); its
    `00-triage.txt` is the host's triage, `00-host.txt` the commit and CI run). Expected:
    `rdna3-report-*.tar.gz`, `*-tests.txt`, `serial-*.log`, `host-*.log`,
+   (`bootwatch-*.txt` when WindowServer never opened the GPU: see "WindowServer never opened the GPU" below)
    and once `linux-reference/`. If something needed is missing, ask for those
    exact files (in Polish) and stop.
 2. Run `python3 tools/triage_reports.py reports/<date> --all`.
@@ -1012,6 +1013,39 @@ the VM is enough).
   text with a Unicode-aware Python scan.
 - The kext cannot be compiled locally (no macOS SDK): kext-side changes are
   verified only by the CI run — read them twice before pushing.
+
+## WindowServer never opened the GPU (the boot watchdog)
+
+Card runs 2026-10-26e/f: the kext and the AGDC came up, the serial log ends at `VMID 1 for accelerator` (no WindowServer VMID, no
+`newUserClient`), once with `busy timeout[0], (60s): 'AGPMEnabler'`, the screen stayed black, the owner killed the VM and macOS's
+unified log of that boot was gone. Since then every VM boot that runs tests starts a watchdog in the background
+(`# BOOTWATCH-BEGIN` in `tools/vm/macos/autoreport.sh`; it never blocks the boot and ends itself):
+
+- Every 5 s it asks "does WindowServer own a user client of `RDNA3Accelerator` / `RDNA3Accel` in the ioreg" (`IOUserClientCreator =
+  "pid N, WindowServer"`) and "is anybody logged in". Either one ends the watch.
+- `rdna3bootwatch=N` s after its start (boot-arg, default 75, `rdna3bootwatch=0` switches it off) with the accelerator in the ioreg and
+  neither true, it collects `bootwatch-<YYYYMMDD-HHMMSS>-<n>.txt` and sends it to the host share at once (after each section, so a killed
+  VM leaves what was done; a failed upload waits in `/var/db/rdna3-pending-*` for the next boot), then again every 60 s (at most 30
+  times / 40 min), and calls `sync` so the unified log reaches the disk. A boot below the accelerator's level (no `RDNA3Accelerator`)
+  and the install / approve boots write nothing.
+- A file holds: the `BOOTWATCH:` header (n, trigger_s, after_s, uptime_s, console_user), `ps` of WindowServer / loginwindow / AGPM
+  (state, wchan), `launchctl list`, the `RDNA3Accelerator` / `RDNA3Accel` ioreg essentials (clients with their creators, MetalPlugin keys,
+  `RDNA3,*` properties), `kextstat`, the plugin's `rdna3mtl.conf` and allow list, the kernel's own `dmesg` RDNA3/AGDC/AGPM lines,
+  `sample WindowServer 5` (spindump when `sample` gives nothing; "NOT RUNNING" when there is no WindowServer), and `log show --last 3m`
+  of WindowServer, loginwindow and the RDNA3 / NVMTL / AGPM / AGDC lines. Missing tools are named in the file.
+- When WindowServer gets its client (or somebody logs in) after all, the last file is `BOOTWATCH-END: state=gpu|login after_s=...`;
+  `gave-up` / `timeout` means the watch ended with WindowServer still without the GPU.
+- The VM's own log of the watchdog: `/var/db/rdna3-bootwatch.log` (a `rdna3vm window` boot, by hand).
+
+Triage (`tools/triage_bootwatch.py`, printed before everything else, also when macOS never sent a report): **`FAIL BOOTWATCH:
+WindowServer did not reach the GPU within 75 s (...)`** with the top of WindowServer's main-thread stack (the frames that held every sample:
+deepest first), the number of snapshots and the console user; **`WARN BOOTWATCH`** when it got there only later (the time is in the row). Read the
+stack first: a thread in `IOServiceOpen` / `IOAccelOpen` -> the kernel side (`serial-*.log` around `newUserClient`, the core's
+`debug.rdna3_*` counters); in `dlopen` / the Metal plugin (`RDNA3MTLDriver`, `NVMTL:` lines in the `log show` section) -> the plugin
+(conf in the same file, `rdna3mtl.conf`); `mach_msg` to `AGPMEnabler` / the AGDC -> `ioreg` section and the AGPM lines; WindowServer NOT RUNNING
+-> launchd / `loginwindow` lines. The files are not part of the `rdna3-report-*` tarball (that never comes in this failure); `rdna3vm result`
+packs them with the rest. The first boot after an `autoreport.sh` update runs the old script until it has fetched the new one (the watchdog
+starts with the new one).
 
 ## Plugin draw capture (DRIVER-PLAN N55)
 
