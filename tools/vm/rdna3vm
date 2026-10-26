@@ -1215,6 +1215,15 @@ QUEUE=$WORK/queue
 PENDING_STEPS="big4"
 
 
+# the queue runner's journal lines of the last 6 h (`rdna3vm queue status`, `rdna3vm result`); queue_journal [--short].
+# NOT journalctl -u 'rdna3vm-queue-*': the glob makes journalctl list every unit of every journal file first
+# (115 s on a 4 GB journal, 2026-10-26, most of what `rdna3vm result` waited for); --since alone reads the last
+# hours in 1.5 s and tools/vm/queue_journal.py keeps the runner's units
+queue_journal() {
+    { sudo -n journalctl --no-pager -q -o json --since "-6h" 2>/dev/null ||
+      journalctl --no-pager -q -o json --since "-6h" 2>/dev/null; } | python3 "$ROOT/tools/vm/queue_journal.py" "$@" || true
+}
+
 cmd_queue() {
     load_conf
     local n
@@ -1224,9 +1233,7 @@ cmd_queue() {
         else
             say "no queue running$([ -s "$QUEUE" ] && echo "; left: $(tr '\n' ' ' < "$QUEUE")")"
         fi
-        { sudo -n journalctl --no-pager -q -o short --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null ||
-          journalctl --no-pager -q -o short --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null; } |
-            grep -E "== (queue|the VM|giving)" | tail -n 8
+        queue_journal --short | grep -E "== (queue|the VM|giving)" | tail -n 8
         return 0
     fi
     if [ $# -gt 0 ]; then
@@ -2218,6 +2225,23 @@ result_file() {
     echo "$HOME/Downloads/rdna3-result.tar.xz"
 }
 
+# the time of the phases of `rdna3vm result` (the owner waited minutes for it and could not tell where):
+# phase_start, then phase NAME after each step prints "  NAME 3.4 s". bash 3.2 (macOS) has no EPOCHREALTIME:
+# whole seconds there
+now_ms() {
+    local t=${EPOCHREALTIME:-}
+    if [ -n "$t" ]; then t=${t/[.,]/}; echo $((t / 1000)); else echo $((SECONDS * 1000)); fi
+}
+phase_start() {
+    PHASE_T0=$(now_ms)
+    PHASE_ALL0=$PHASE_T0
+}
+phase() {
+    local t=$(now_ms)
+    printf '  [%s %d.%d s]\n' "$1" $(( (t - PHASE_T0) / 1000 )) $(( (t - PHASE_T0) % 1000 / 100 ))
+    PHASE_T0=$t
+}
+
 cmd_result_show() {
     local f=${1:-$(result_file)} tmp
     [ -f "$f" ] || die "no $f (run 'rdna3vm result' first)"
@@ -2276,7 +2300,9 @@ cmd_result() {
     fi
     tmp=$(mktemp -d)
     mkdir -p "$tmp/rdna3-result"
+    phase_start
     for f in "${sel[@]}"; do cp "$WORK/reports/$f" "$tmp/rdna3-result/" 2>/dev/null || sudo cat "$WORK/reports/$f" > "$tmp/rdna3-result/$f"; done
+    phase "copy ${#sel[@]} files"
     git -C "$ROOT" log -1 --format='repo %h %s' > "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
     sed 's/^/run-note: /' "$WORK/last-run-note" >> "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
     # the VM's CPU of the newest run (qemu_common): the QEMU model or the host CPU with the AMD patches
@@ -2291,8 +2317,7 @@ cmd_result() {
       echo; echo "== newest files in $WORK/reports"; ls -lt "$WORK/reports" 2>/dev/null | head -15
       # the queue runner (a systemd unit): which steps ran, why it stopped
       echo; echo "== queue runner (last 60 lines)"; echo "left in the queue: $(tr '\n' ' ' < "$QUEUE" 2>/dev/null)"
-      { sudo -n journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null ||
-        journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null; } | tail -n 60
+      queue_journal | tail -n 60
       # the host kernel on the card between the steps (amdgpu probe after
       # the VM, vfio-pci, suspend/resume), this boot and the one before
       for b in -1 0; do
@@ -2303,26 +2328,34 @@ cmd_result() {
               tail -n 80
       done; } \
         >> "$tmp/rdna3-result/00-host.txt" || true   # set -e + pipefail: ls dies of SIGPIPE behind head
+    phase "host info: git, share log, queue journal, kernel log"
     # no picture of its own in the result: the triage would write a PNG next to every look (80 MB more, nothing xz can share)
     RDNA3_NO_PICTURES=1 python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
+    phase "triage"
     # the per-test list goes into the result too (before the tarball is made)
     checklist --no-color --width 400 "$tmp/rdna3-result/00-triage.txt" > "$tmp/rdna3-result/00-checklist.txt" || true
+    phase "checklist"
     mkdir -p "$(dirname "$out")"
     packed=$(du -sk "$tmp/rdna3-result" | cut -f1)
     case "$out" in
-    *.xz) XZ_OPT="-9 -T1" tar -cJf "$out.tmp" -C "$tmp" rdna3-result || { rm -f "$out.tmp"; die "tar -cJ failed: $out"; } ;;
+    # xz -9's 64 MiB dictionary (all the looks are one desktop), but the match finder hc4 with nice=64 depth=16 instead
+    # of bt4's 273 / 512: 7 s instead of 25 s for 150 MB, 8.10 MB instead of 8.06 MB (2026-10-26c). Not -T0: a block
+    # smaller than the data forgets the desktop (32 MiB blocks: 14 MB, 16 MiB: 21 MB) and xz's default block is
+    # 3x the dictionary, so -T0 is one thread here anyway. Any xz reads it.
+    *.xz) XZ_OPT="--lzma2=preset=9,mode=normal,mf=hc4,nice=64,depth=16 -T1" tar -cJf "$out.tmp" -C "$tmp" rdna3-result || { rm -f "$out.tmp"; die "tar -cJ failed: $out"; } ;;
     *)
         # one lossless picture per look: PNG (checked by decoding it again; a look that does not round-trip stays a PPM and is named)
         python3 -I "$ROOT/tools/lookimg.py" --to-png "$tmp/rdna3-result" || warn "the looks could not be turned into PNGs: they stay PPMs ($(du -sk "$tmp/rdna3-result" | cut -f1) kB)"
         tar -czf "$out.tmp" -C "$tmp" rdna3-result || { rm -f "$out.tmp"; die "tar -cz failed: $out"; } ;;
     esac
     mv -f "$out.tmp" "$out"
+    phase "pack $(basename "$out")"
     # one file to send: the other extension of an earlier run goes (a stale 167 MB .tar.gz next to the new one is the one that gets sent)
     case "$out" in
         "$HOME/Downloads/rdna3-result.tar.xz") rm -f "$HOME/Downloads/rdna3-result.tar.gz" ;;
         "$HOME/Downloads/rdna3-result.tar.gz") rm -f "$HOME/Downloads/rdna3-result.tar.xz" ;;
     esac
-    say "Result: $out ($(( ($(wc -c < "$out") + 524288) / 1048576 )) MB packed from $((packed / 1024)) MB, ${#sel[@]} files)"
+    say "Result: $out ($(( ($(wc -c < "$out") + 524288) / 1048576 )) MB packed from $((packed / 1024)) MB, ${#sel[@]} files, $(( ($(now_ms) - PHASE_ALL0) / 1000 )) s)"
     printf '  %s\n' "${sel[@]}"
     echo
     checklist "$tmp/rdna3-result/00-triage.txt"

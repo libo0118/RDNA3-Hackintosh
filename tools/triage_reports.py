@@ -41,6 +41,10 @@ try:
 except ImportError:
     triage_bisect = None
 
+try:
+    from triage_tar import open_tar  # noqa: E402  (tools/triage_tar.py: a report archive read once)
+except ImportError:
+    open_tar = tarfile.open
 U64 = 1 << 64
 
 
@@ -391,7 +395,7 @@ def main_pipe(path, txt):
     props_txt = ""
     if os.path.exists(path):
         try:
-            with tarfile.open(path) as tar:
+            with open_tar(path) as tar:
                 props_txt = read_member(tar, "11-ioreg-props.txt") or ""
         except (OSError, tarfile.TarError):
             pass
@@ -888,7 +892,7 @@ def n41_lines(path, args=""):
     """[(level, name, text)] of n41_rows from the report archive, for the SUMMARY"""
     if not os.path.exists(path):
         return []
-    with tarfile.open(path) as tar:
+    with open_tar(path) as tar:
         sv = read_member(tar, "29-surface-vram.txt") or ""
         log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt") or ""
         cd = read_member(tar, "24-log-coredisplay.txt") or ""
@@ -1057,7 +1061,7 @@ def kernel_text(report, d):
     out = ""
     if os.path.exists(report):
         try:
-            with tarfile.open(report) as tar:
+            with open_tar(report) as tar:
                 out = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt") or ""
         except (OSError, tarfile.TarError):
             pass
@@ -1813,7 +1817,7 @@ def trace_inputs(path):
     out, sizes = [], {}
     if os.path.exists(path):
         try:
-            with tarfile.open(path) as tar:
+            with open_tar(path) as tar:
                 for m in tar.getmembers():
                     if not m.isfile():
                         continue
@@ -1891,7 +1895,7 @@ def _trace_lines(path, txt, klog="", args=""):
     ftxt = ""
     if os.path.exists(path):
         try:
-            with tarfile.open(path) as tar:
+            with open_tar(path) as tar:
                 args = args or read_member(tar, "01-boot-args.txt") or ""
                 ftxt = read_member(tar, "36-frame-trace.txt") or ""
         except (OSError, tarfile.TarError):
@@ -1984,7 +1988,7 @@ def read_tar_member(path, suffix):
     if not os.path.exists(path):
         return ""
     try:
-        with tarfile.open(path) as tar:
+        with open_tar(path) as tar:
             return read_member(tar, suffix) or ""
     except (OSError, tarfile.TarError):
         return ""
@@ -2022,6 +2026,26 @@ def plugin_stale_reason(path):
         has = "a plugin older than the repo's"
     return ("the VM's plugin is STALE: %s - %s; rebuild it in the VM (tools/vm/macos/build_metal.sh, "
             "docs/TESTING-VM.md) before the next card run" % (text, has))
+
+
+_PLUGIN_TRIAGE = {}   # (archive path, A/B window) -> what plugin_trace.triage_ex made of it (the summary and the per-report part both ask)
+
+
+def _plugin_triage_ex(plugin_trace, path, abw):
+    """plugin_trace.triage_ex(path, ab_window=abw), once per archive: it decodes every WindowServer trace
+    (3 s of the triage each time). A copy is handed out, the callers may keep what they get."""
+    import copy
+    try:
+        st = os.stat(path)
+        key = (os.path.abspath(path), st.st_mtime_ns, st.st_size, repr(abw))
+    except OSError:
+        key = None   # no archive (snapshots next to it only, or nothing): not worth keeping
+    if key is not None and key in _PLUGIN_TRIAGE:
+        return copy.deepcopy(_PLUGIN_TRIAGE[key])
+    r = plugin_trace.triage_ex(path, ab_window=abw)
+    if key is not None:
+        _PLUGIN_TRIAGE[key] = copy.deepcopy(r)
+    return r
 
 
 def plugin_trace_lines(path, cdlog="", txt=""):
@@ -2077,7 +2101,7 @@ def plugin_trace_lines(path, cdlog="", txt=""):
                     "plugin trace NOT decoded: tools/plugin_trace.py is not next to this script (%s)" % e))
         return out + tail()
     try:
-        r = plugin_trace.triage_ex(path, ab_window=abw)
+        r = _plugin_triage_ex(plugin_trace, path, abw)
     except Exception as e:   # noqa: BLE001 - the report is untrusted input
         return out + [("FAIL", "plugin trace not decoded: %s: %s" % (type(e).__name__, str(e)[:200]))] + tail()
     for lv, t in r["lines"]:
@@ -2153,7 +2177,7 @@ def vram_heap_lines(path, txt, log):
     arc = ""
     if os.path.exists(path):
         try:
-            with tarfile.open(path) as tar:
+            with open_tar(path) as tar:
                 arc = read_member(tar, "38-vram-heap.txt") or ""
         except (OSError, tarfile.TarError):
             pass
@@ -2269,7 +2293,7 @@ def latch_lines(path, txt, args=""):
     sv = log = ioreg = ""
     if os.path.exists(path):
         try:
-            with tarfile.open(path) as tar:
+            with open_tar(path) as tar:
                 sv = read_member(tar, "29-surface-vram.txt") or ""
                 log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt") or ""
                 args = args or read_member(tar, "01-boot-args.txt") or ""
@@ -4483,7 +4507,7 @@ def stale_kext_lines(*dirs):
 def report(path, show_all):
     global STALE_KEXTS_SHOWN
     failed = False
-    with tarfile.open(path) as tar:
+    with open_tar(path) as tar:
         args = read_member(tar, "01-boot-args.txt")
         props_txt = read_member(tar, "11-ioreg-props.txt")
         log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
@@ -5012,7 +5036,7 @@ def summary(path, serial=None):
     the user is made of"""
     log = args = props_txt = ""
     if os.path.exists(path):   # else only the tests file came (collect.sh did not finish)
-        with tarfile.open(path) as tar:
+        with open_tar(path) as tar:
             log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
             args = read_member(tar, "01-boot-args.txt")
             props_txt = read_member(tar, "11-ioreg-props.txt") or ""
@@ -5388,7 +5412,7 @@ def main():
         cd = ""
         if os.path.exists(p):
             try:
-                with tarfile.open(p) as tar:
+                with open_tar(p) as tar:
                     cd = read_member(tar, "24-log-coredisplay.txt") or ""
             except (OSError, tarfile.TarError):
                 pass

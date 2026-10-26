@@ -255,20 +255,64 @@ def ppm_to_png(path, remove=False):
     return out
 
 
+def _convert_one(p):
+    """a worker of to_png_dir: ("ok", bytes before, bytes after) or ("err", message)"""
+    try:
+        b = os.path.getsize(p)
+        out = ppm_to_png(p, remove=True)
+        return "ok", b, os.path.getsize(out)
+    except (OSError, ValueError) as e:
+        return "err", "%s: %s" % (os.path.basename(p), e)
+
+
+def _jobs():
+    """RDNA3_TRIAGE_JOBS, else the CPUs this process may use (1 = serial)"""
+    try:
+        n = int(os.environ.get("RDNA3_TRIAGE_JOBS", "") or 0)
+    except ValueError:
+        n = 0
+    if n >= 1:
+        return n
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
 def to_png_dir(d):
-    """every d/*.ppm -> .png with the PPM removed; (converted, kept, bytes before, bytes after, [problems])"""
+    """every d/*.ppm -> .png with the PPM removed; (converted, kept, bytes before, bytes after, [problems]).
+    One process per CPU (a 1280x720 look takes 0.5 s of pure Python; 60 looks were 30 s): each file is
+    independent, the results are put together in file order, so the answer is the same as one by one"""
     n = kept = before = after = 0
     problems = []
-    for p in sorted(glob.glob(os.path.join(glob.escape(d), "*.ppm"))):
+    files = sorted(glob.glob(os.path.join(glob.escape(d), "*.ppm")))
+    results = None
+    workers = min(_jobs(), len(files))
+    if workers > 1:
         try:
-            b = os.path.getsize(p)
-            out = ppm_to_png(p, remove=True)
+            import multiprocessing
+            pool = multiprocessing.get_context("fork").Pool(workers)
+            try:
+                results = pool.map(_convert_one, files, chunksize=1)
+            except BaseException:
+                pool.terminate()
+                pool.join()
+                raise
+            pool.close()
+            pool.join()
+        except (OSError, ValueError, ImportError, EOFError):
+            results = None   # no pool here: one by one (a file the workers already finished is a PNG now, its PPM gone: skipped)
+            files = [p for p in files if os.path.exists(p)]
+    if results is None:
+        results = [_convert_one(p) for p in files]
+    for r in results:
+        if r[0] == "ok":
             n += 1
-            before += b
-            after += os.path.getsize(out)
-        except (OSError, ValueError) as e:
+            before += r[1]
+            after += r[2]
+        else:
             kept += 1
-            problems.append("%s: %s" % (os.path.basename(p), e))
+            problems.append(r[1])
     return n, kept, before, after, problems
 
 
