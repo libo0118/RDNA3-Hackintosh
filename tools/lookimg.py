@@ -117,6 +117,8 @@ def decode_png(data):
         if zlib.crc32(tag + body) & 0xffffffff != struct.unpack(">I", data[pos + 8 + n:pos + 12 + n])[0]:
             raise ValueError("bad CRC in PNG chunk %r" % tag)
         if tag == b"IHDR":
+            if n != 13:
+                raise ValueError("bad PNG IHDR length %d" % n)
             ihdr = struct.unpack(">IIBBBBB", body)
         elif tag == b"IDAT":
             idat.append(body)
@@ -132,8 +134,13 @@ def decode_png(data):
     if w < 1 or h < 1 or w > MAX_DIM or h > MAX_DIM:
         raise ValueError("unsupported PNG size %dx%d" % (w, h))
     stride = w * chans
+    want = h * (stride + 1)
     try:
-        raw = zlib.decompress(b"".join(idat))
+        # capped: a crafted IDAT cannot inflate past what the header says the pixels need
+        dec = zlib.decompressobj()
+        raw = dec.decompress(b"".join(idat), want + 1)
+        if len(raw) > want or dec.unconsumed_tail:
+            raise ValueError("PNG pixel data is longer than %dx%d needs" % (w, h))
     except zlib.error as e:
         raise ValueError("bad PNG data: %s" % e) from None
     if len(raw) < h * (stride + 1):
@@ -228,8 +235,15 @@ def ppm_to_png(path, remove=False):
     png = encode_png(w, h, px)
     out = os.path.splitext(path)[0] + ".png"
     tmp = out + ".part"
-    with open(tmp, "wb") as f:
-        f.write(png)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(png)
+    except BaseException:
+        try:
+            os.unlink(tmp)   # a full disk or a Ctrl-C must not leave a .part in the result
+        except OSError:
+            pass
+        raise
     if remove:
         w2, h2, px2 = decode_png(png)
         if (w2, h2) != (w, h) or px2 != px:

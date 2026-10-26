@@ -213,9 +213,16 @@ M6_ORDER = ("Chess", "Maps", "Settings", "desktop")
 M6_FROZEN_FRACTION = 0.01   # of the pixels: below this between every two looks = frozen
 
 
+_LOOKIMG_WARNED = []
+
+
 def ppm_pixels(path):
     """(width, height, rgb bytes) of a look (binary PPM or PNG), or None"""
     if lookimg is None:
+        if not _LOOKIMG_WARNED:   # once: the looks exist but cannot be read (M6 frozen screens, M4, pictures all skipped)
+            _LOOKIMG_WARNED.append(path)
+            print("   WARN looks              tools/lookimg.py is missing next to this triage: the scanout looks (%s ...) are NOT read "
+                  "(frozen-screen, colour and picture checks skipped)" % os.path.basename(path))
         return None
     try:
         return lookimg.read_look(path)
