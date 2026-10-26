@@ -1766,21 +1766,28 @@ cmd__passthrough() {
           $VMTOOL monitor "$mon" "info pci" 2>&1 | sed 's/^/  /'
       done; } &
     # the boot watchdog (autoreport.sh bootwatch_run: WindowServer never
-    # opened the GPU) uploads bootwatch-<stamp>-<n>.txt about 4-5 min after
-    # the start (the report daemon starts about 2 min in, then 75 s): say on
-    # the console when its evidence is on the host, so a hung boot is not
-    # stopped before it (card run 2026-10-26, -cpu host: stopped at 2 min)
-    { local f seen=" "
+    # opened the GPU) uploads bootwatch-<stamp>-<n>.txt, the first about
+    # 4-5 min after the start (the report daemon starts about 2 min in, then
+    # 75 s), then one a minute. The owner cannot see this console while the
+    # card is in the VM (no other GPU), and a hung boot stopped by hand
+    # before the upload leaves nothing (card run 2026-10-26, -cpu host,
+    # stopped at 2 min): once two snapshots (a minute apart: stuck in the
+    # same place or not) or the watchdog's end are on the host, the VM is
+    # stopped here and the card goes back to Linux.
+    rm -f "$WORK/bootwatch-stop"
+    { local f n=0 seen=" "
       while kill -0 $qpid 2>/dev/null; do
           sleep 5
           for f in "$WORK"/reports/bootwatch-*.txt; do
               [ -f "$f" ] && [ "$f" -nt "$WORK/boot-start" ] || continue
               case "$seen" in *" $f "*) continue ;; esac
-              seen="$seen$f "
-              if grep -q '^BOOTWATCH-END' "$f" 2>/dev/null; then
-                  echo "== BOOTWATCH: $(basename "$f"): the watchdog is done ($(grep -m1 '^BOOTWATCH-END' "$f" | cut -c1-90)); the VM may be stopped now (Esc x3)"
-              else
-                  echo "== BOOTWATCH: $(basename "$f") arrived: WindowServer has not opened the GPU; the evidence is on the host, the VM may be stopped now (Esc x3)"
+              seen="$seen$f "; n=$((n + 1))
+              echo "== BOOTWATCH: $(basename "$f") arrived: WindowServer has not opened the GPU"
+              if [ $n -ge 2 ] || grep -q '^BOOTWATCH-END' "$f" 2>/dev/null; then
+                  echo "== BOOTWATCH: the evidence is on the host: stopping the VM"
+                  echo "$(basename "$f")" > "$WORK/bootwatch-stop"
+                  sleep 5; kill $qpid 2>/dev/null
+                  break 2
               fi
           done
       done; } &
@@ -1811,6 +1818,9 @@ cmd__passthrough() {
         kill -0 $pk 2>/dev/null || { echo "== emergency exit (power button / Ctrl+Ctrl, Esc x3): stopping the VM"; how=emergency; }
         kill -0 $tm 2>/dev/null || { echo "== $limit min limit: stopping the VM"; how=timeout; }
         kill $qpid; sleep 3; kill -9 $qpid 2>/dev/null || true
+    elif [ -f "$WORK/bootwatch-stop" ]; then
+        echo "== the VM was stopped after the boot watchdog's evidence ($(cat "$WORK/bootwatch-stop")): WindowServer never opened the GPU"
+        how=bootwatch
     else
         echo "== the VM shut down by itself"
     fi
