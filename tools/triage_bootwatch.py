@@ -96,6 +96,73 @@ def sample_frames(text):
     return "", []
 
 
+DEADLOCK = re.compile(r"^Deadlock:\s+(.*)$", re.M)
+THREAD_HEAD = re.compile(r'^\s+Thread (0x[0-9a-f]+)\s+(?:Thread name "([^"]*)")?')
+FRAME_IMAGE = re.compile(r"\(([A-Za-z0-9_.]+) \+ \d+\)")
+OUR_KEXTS = ("RDNA3Accelerator", "RDNA3Accel", "RDNA3Framebuffer", "RDNA3AGDC")
+
+
+def spindump_deadlocks(text):
+    """the kernel's own deadlock verdicts in a bootwatch spindump (card run 2026-10-26j, DRIVER-PLAN N58: AppleGPUWrangler and
+    our thread call): ([cycle lines, unique], [(thread, name, [images of its stack, outermost first, 'kernel' left out])] of
+    every thread spindump marks 'part of a deadlock')"""
+    cycles = []
+    for m in DEADLOCK.finditer(text):
+        c = " ".join(m.group(1).split())
+        if c not in cycles:
+            cycles.append(c)
+    threads, seen = [], set()
+    cur, block = None, []
+
+    def flush():
+        if cur and any("part of a deadlock" in l for l in block) and cur[0] not in seen:
+            seen.add(cur[0])
+            imgs = []
+            for l in block:
+                for im in FRAME_IMAGE.findall(l):
+                    if im != "kernel" and im not in imgs:
+                        imgs.append(im)
+            threads.append((cur[0], cur[1], imgs))
+    for line in text.splitlines():
+        h = THREAD_HEAD.match(line)
+        if h:
+            flush()
+            cur, block = (h.group(1), h.group(2) or ""), []
+        elif cur is not None:
+            if not line.strip():
+                flush()
+                cur, block = None, []
+            else:
+                block.append(line)
+    flush()
+    return cycles, threads
+
+
+def _deadlock_notes(paths):
+    """(text suffix, detail lines) of the spindumps of one boot; files that cannot be read are named"""
+    cycles, threads, bad = [], [], []
+    for p in paths:
+        try:
+            c, t = spindump_deadlocks(open(p, errors="replace").read())
+        except OSError as e:
+            bad.append("%s: %s" % (os.path.basename(p), e))
+            continue
+        cycles += [x for x in c if x not in cycles]
+        threads += [x for x in t if x[0] not in {y[0] for y in threads}]
+    detail = ["   %s: NOT read" % b for b in bad]
+    if not cycles:
+        return "", detail
+    ours = sorted({im for _, _, imgs in threads for im in imgs if im in OUR_KEXTS})
+    text = "; KERNEL DEADLOCK (spindump): %s" % cycles[0][:200]
+    if ours:
+        text += (" - OUR %s in the cycle: a lock-order bug of ours, read the threads below (DRIVER-PLAN N58, card run 2026-10-26j: "
+                 "AppleGPUWrangler against the display machine)" % ", ".join(ours))
+    detail.append("   spindump deadlock(s): %s" % " | ".join(c[:220] for c in cycles))
+    for tid, name, imgs in threads:
+        detail.append("       thread %s %s: %s" % (tid, name or "?", " > ".join(imgs) or "kernel only"))
+    return text, detail
+
+
 def _state_of(text):
     """a short phrase for what the file says about WindowServer: from the ps section"""
     if re.search(r"^WindowServer: NOT RUNNING", text, re.M):
@@ -165,6 +232,10 @@ def bootwatch_rows(*dirs):
                     % (trig, stamp, len(snaps), last.get("after_s", "?"), last.get("console_user", "?") or "none",
                        ", " + notes if notes else "", ended))
             level = "FAIL"
+        dl_text, dl_detail = _deadlock_notes(sorted({p for d in dirs if d and os.path.isdir(d)
+                                                    for p in glob.glob(os.path.join(d, "bootwatch-%s-*.spindump" % stamp))}))
+        text += dl_text
+        detail.extend(dl_detail)
         if frames:
             text += "; top of stack: " + " < ".join(f[:70] for f in frames[:3])
             detail.append("   bootwatch-%s: %s, deepest frame first:" % (stamp, frames_who))

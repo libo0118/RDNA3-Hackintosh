@@ -111,6 +111,53 @@ with tempfile.TemporaryDirectory() as d:
     if len(r) != 1:
         fails.append("rows doubled: %r" % (r,))
 
+# card run 2026-10-26j (DRIVER-PLAN N58): the boot's spindump says the kernel deadlocked, with our thread call in the cycle
+SPIN_DEADLOCK = """Date/Time:        2026-10-26 13:55:10.000 -0700
+Deadlock:         kernel_task [0] thread 0x6a7 "AppleGPUWrangler" -> kernel_task [0] thread 0x136 "thread call high #9" -> kernel_task [0] thread 0x6a7 "AppleGPUWrangler"
+Blocked by Deadlock: 10 tasks - kernel_task [0], WindowServer [204]
+
+Process:          kernel_task [0]
+Deadlocked:       2 threads - Thread 0x6a7 "AppleGPUWrangler", Thread 0x136 "thread call high #9"
+
+  Thread 0x136    Thread name "thread call high #9"    305 samples (1-305)    priority 93 (base 93)
+ *305  ??? (kernel + 12702) [0xffffff80002eb19e]
+   *305  ??? (RDNA3Accelerator + 179057) [0xffffff7f9664eb71]
+     *305  ??? (IOAcceleratorFamily2 + 3052) [0xffffff7f95261bec]
+       *305  ??? (IOGraphicsFamily + 131240) [0xffffff7f953ff0a8]
+         *305  ??? (kernel + 1989367) [0xffffff80004cdaf7] (blocked by turnstile waiting for kernel_task [0] thread 0x6a7 - part of a deadlock)
+
+  Thread 0x137    Thread name "thread call high #10"    305 samples (1-305)    priority 93 (base 93)
+ *305  ??? (IOGraphicsFamily + 101536) [0xffffff7f953f7ca0]
+   *305  ??? (kernel + 1989367) [0xffffff80004cdaf7] (blocked by turnstile waiting for kernel_task [0] thread 0x6a7 - ends in a deadlock)
+
+  Thread 0x6a7    Thread name "AppleGPUWrangler"    305 samples (1-305)    priority 93 (base 81)
+ *305  ??? (AppleGPUWrangler + 23046) [0xffffff7f94a16a06]
+   *305  ??? (IOGraphicsFamily + 115533) [0xffffff7f953fb34d]
+     *305  ??? (IOAcceleratorFamily2 + 251657) [0xffffff7f9529e709]
+       *305  ??? (kernel + 1989367) [0xffffff80004cdaf7] (blocked by turnstile with priority 93 waiting for kernel_task [0] thread 0x136 - part of a deadlock)
+
+"""
+cyc, thr = tb.spindump_deadlocks(SPIN_DEADLOCK)
+if len(cyc) != 1 or "AppleGPUWrangler" not in cyc[0] or [t[0] for t in thr] != ["0x136", "0x6a7"] \
+        or thr[0][2] != ["RDNA3Accelerator", "IOAcceleratorFamily2", "IOGraphicsFamily"]:
+    fails.append("spindump deadlock parse: %r %r" % (cyc, thr))
+if tb.spindump_deadlocks(SPINDUMP) != ([], []):
+    fails.append("a spindump without a deadlock gave one")
+with tempfile.TemporaryDirectory() as d:
+    write(d, "bootwatch-20261026-120000-1.txt", body(1, 78))
+    write(d, "bootwatch-20261026-120000-1.spindump", SPIN_DEADLOCK)
+    write(d, "bootwatch-20261026-120000-2.spindump", SPIN_DEADLOCK)   # the second look: the same cycle, said once
+    r = tb.bootwatch_rows(d)
+    if len(r) != 1 or r[0][0] != "FAIL" or "KERNEL DEADLOCK" not in r[0][2] or "OUR RDNA3Accelerator in the cycle" not in r[0][2] \
+            or r[0][2].count("KERNEL DEADLOCK") != 1 or not any("thread 0x136" in l for l in r[0][3]):
+        fails.append("deadlock row: %r" % (r,))
+    # without the spindump: no deadlock words
+    os.remove(os.path.join(d, "bootwatch-20261026-120000-1.spindump"))
+    os.remove(os.path.join(d, "bootwatch-20261026-120000-2.spindump"))
+    r = tb.bootwatch_rows(d)
+    if "DEADLOCK" in r[0][2]:
+        fails.append("deadlock without a spindump: %r" % (r,))
+
 # it got there late: WARN, not FAIL; a user logging in the same; a gave-up END stays FAIL
 for state, level in (("gpu", "WARN"), ("login", "WARN"), ("gave-up", "FAIL"), ("timeout", "FAIL")):
     with tempfile.TemporaryDirectory() as d:
