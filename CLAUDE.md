@@ -13,8 +13,9 @@
   (`POST /api/v1/repos/Voten641/RDNA3-Hackintosh/actions/workflows/build.yml/dispatches`
   with the token from `FORGEJO_TOKEN` in the git-ignored `.env`; never write
   the token anywhere). Use the runners freely, as often as is useful:
-  dispatch `build.yml` after every push of code (the macOS job is the only
-  real Xcode build, `kextlibs` symbol check and macOS run of the host tests),
+  dispatch `build.yml` after every push of code (the macOS jobs are the only
+  real Xcode build and `kextlibs` symbol check (`kext`, its artifact ready in about 2 minutes)
+  and the macOS run of the host tests (`macos-tests`, after it)),
   and use them for any extra check or experiment. Never use hosted runners:
   every job stays on `runs-on: linux` / `runs-on: macOS`. Run `build.yml`
   with `full: "false"` (kext + host tests: all `rdna3vm update` takes);

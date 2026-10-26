@@ -162,8 +162,6 @@ jobs:
       - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)
         continue-on-error: true
         run: make -C userspace probes
-      - name: Host tests on macOS
-        run: make test tools
       - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: RDNA3Accel-kext
@@ -191,6 +189,17 @@ jobs:
           name: RDNA3-pkg
           path: build/pkg/
           if-no-files-found: error
+
+  # the host tests on macOS (BSD tools, bash 3.2) in a job of their own, after the kext job: the
+  # kext artifact rdna3vm update waits for is uploaded about 2 minutes into a run instead of
+  # after these 10 minutes (one macOS runner: needs keeps the kext job first)
+  macos-tests:
+    needs: kext
+    runs-on: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests on macOS
+        run: make test tools
 
   metal:
     needs: changes
