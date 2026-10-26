@@ -893,7 +893,9 @@ int gpuvm_map(rdna3_dev *d, rdna3_vm *vm, uint64_t va, uint64_t pages,
     /* VRAM (gpuvm_map_linear) with amdgpu_vm_pte_fragment fragments unless
      * rdna3vmfrag=0; system pages always 4 KiB PTEs */
     r = ptb_write(d, vm, va, pages, pa_fn, ctx, pte_flags, !d->vm_frag_off && pa_fn == linear_pa);
-    if (!r && !d->vm_frag_off)
+    /* also after a failed write: the part already written may cut a
+     * neighbour's fragment, which must not keep claiming those pages */
+    if (!d->vm_frag_off)
         ptb_refrag_edges(d, vm, va, pages);
     rdna3_hdp_flush(d);
     return r;
