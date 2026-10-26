@@ -97,6 +97,60 @@ static int model_deadlocks(const void *const fb[], const void *const wl[], unsig
     return has_cycle();
 }
 
+/* ECC review of 0535fd7: a head publishes while the thread waits for the
+ * gates planned at entry ('entry' -> 'late' framebuffers; wl[] is fixed
+ * per head). The old code ran the body under the entry plan's gates and
+ * registered every published head; the new one plans again inside the
+ * innermost gate, tries again while that plan needs a gate not held, and
+ * registers only the heads of the plan it ran under. A registration is
+ * modelled as found_framebuffer: the accelerator lock, then that head's
+ * controller gate (the new pipe asks its framebuffer). Returns the heads
+ * registered; *cycle says whether the lock graph with AppleGPUWrangler's
+ * gate -> accelerator lock for every published head has a cycle. */
+static unsigned late_head(const void *const entry[], const void *const late[], const void *const wl[], unsigned heads,
+                          int newCode, int *cycle, unsigned *tries)
+{
+    memset(edge, 0, sizeof(edge));
+    struct rd3_fbgate_plan p, now;
+    const void *held[RD3_FBGATE_MAX];
+    const void *const *fbAtPlan = entry;
+    unsigned t;
+    for (t = 1; ; t++) {
+        rd3_fbgate_plan(fbAtPlan, wl, heads, &p);
+        for (unsigned k = 0; k < p.n; k++)
+            held[k] = wl[p.head[k]];
+        rd3_fbgate_plan(late, wl, heads, &now);   /* the heads once every gate is held */
+        if (!newCode || rd3_fbgate_covered(held, p.n, wl, &now) || t == RD3_FBGATE_TRIES)
+            break;
+        fbAtPlan = late;   /* planned again: the late head is published by now */
+    }
+    *tries = t;
+    unsigned published = 0;
+    for (unsigned h = 0; h < heads; h++)
+        if (late[h])
+            published |= 1u << h;
+    unsigned reg = newCode ? rd3_fbgate_registrable(published, 0, now.gated) : published;
+    if (newCode && !rd3_fbgate_covered(held, p.n, wl, &now))
+        reg = 0;   /* tries used up: nothing registered */
+    int seq[3 * NLOCKS];
+    unsigned n = 0;
+    for (unsigned k = 0; k < p.n; k++)
+        seq[n++] = gate_of(wl, p.head[k]);
+    for (unsigned h = 0; h < heads; h++)
+        if (reg & (1u << h)) {
+            seq[n++] = L_ACCEL;
+            seq[n++] = gate_of(wl, h);
+        }
+    take_seq(seq, n);
+    for (unsigned h = 0; h < heads; h++)
+        if (published & (1u << h)) {
+            int w[2] = { gate_of(wl, h), L_ACCEL };
+            take_seq(w, 2);
+        }
+    *cycle = has_cycle();
+    return reg;
+}
+
 int main(void)
 {
     int fbA, fbB, wlX, wlY;
@@ -146,6 +200,29 @@ int main(void)
         CHECK(p.n == RD3_FBGATE_MAX && p.head[RD3_FBGATE_MAX - 1] == RD3_FBGATE_MAX - 1);
         CHECK(p.gated == (1u << RD3_FBGATE_MAX) - 1);
     }
+    /* the late head (review of 0535fd7): head 1 publishes, on its own controller, while the thread waits for head 0's gate */
+    {
+        int cyc;
+        unsigned tries;
+        const void *entry[2] = { &fbA, 0 }, *late[2] = { &fbA, &fbB }, *wl[2] = { &wlX, &wlY };
+        CHECK(late_head(entry, late, wl, 2, 0, &cyc, &tries) == 0x3 && cyc);    /* old: head 1 registered ungated */
+        CHECK(late_head(entry, late, wl, 2, 1, &cyc, &tries) == 0x3 && !cyc && tries == 2);   /* new: planned again */
+        /* on head 0's controller: the held gate covers it, no second try */
+        const void *wlS[2] = { &wlX, &wlX };
+        CHECK(late_head(entry, late, wlS, 2, 1, &cyc, &tries) == 0x3 && !cyc && tries == 1);
+        /* the covered check itself */
+        struct rd3_fbgate_plan nowp;
+        const void *held1[1] = { &wlX };
+        rd3_fbgate_plan(late, wl, 2, &nowp);
+        CHECK(!rd3_fbgate_covered(held1, 1, wl, &nowp));
+        rd3_fbgate_plan(late, wlS, 2, &nowp);
+        CHECK(rd3_fbgate_covered(held1, 1, wlS, &nowp));
+        CHECK(rd3_fbgate_covered(held1, 0 + 1, wl, &(struct rd3_fbgate_plan){ 0, { 0 }, 0, 0 }));
+    }
+    /* a head publishing during the body itself is outside the mask the body runs with */
+    CHECK(rd3_fbgate_registrable(0x3, 0x0, 0x1) == 0x1);
+    CHECK(rd3_fbgate_registrable(0x3, 0x1, 0x3) == 0x2);
+    CHECK(rd3_fbgate_registrable(0x2, 0x0, 0x1) == 0x0);
     if (fails) { printf("test_fbgate: %d FAILED\n", fails); return 1; }
     printf("test_fbgate: all checks passed\n");
     return 0;

@@ -77,4 +77,38 @@ static inline void rd3_fbgate_plan(const void *const fb[], const void *const wl[
     }
 }
 
+/* A head can publish while the thread waits for a gate (fbPublished sets
+ * fFBs[] without fRegLock; head 1 published behind AppleGPUWrangler's
+ * message in card run 2026-10-26j), so the plan made before the waits can
+ * be stale once every gate is held (ECC review of 0535fd7). Inside the
+ * innermost gate the heads are planned again: when every workloop of the
+ * new plan is one already held ('held', 'nheld' entries), the body runs
+ * with the new plan's 'gated' mask; otherwise every gate is opened and the
+ * whole thing tried again, at most RD3_FBGATE_TRIES times. The body then
+ * registers only heads of that mask: one publishing during the body itself
+ * waits for its own boot-arg thread call (queued by fbPublished after it
+ * set fFBs[], so that call sees it) or the next debug.rdna3accelfb write. */
+#define RD3_FBGATE_TRIES 4u
+
+static inline int rd3_fbgate_covered(const void *const held[], unsigned nheld, const void *const wl[],
+                                     const struct rd3_fbgate_plan *now)
+{
+    for (unsigned k = 0; k < now->n; k++) {
+        unsigned j;
+        for (j = 0; j < nheld; j++)
+            if (held[j] == wl[now->head[k]])
+                break;
+        if (j == nheld)
+            return 0;
+    }
+    return 1;
+}
+
+/* the heads the walk may hand to the display machine: published, not yet
+ * registered, inside a held gate */
+static inline unsigned rd3_fbgate_registrable(unsigned published, unsigned registered, unsigned gated)
+{
+    return published & ~registered & gated;
+}
+
 #endif /* RDNA3_FBGATE_H */

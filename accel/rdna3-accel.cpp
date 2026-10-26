@@ -849,7 +849,7 @@ public:
         }
         return -1;
     }
-    unsigned registerPendingLocked(const char *why) {
+    unsigned registerPendingLocked(const char *why, unsigned gated) {
         unsigned added = 0;
         for (unsigned i = 0; i < kRd3MaxFB; i++) {
             IOService *fb = fFBs[i];
@@ -860,6 +860,12 @@ public:
                 break;
             }
             if (fFBRegistered & (1u << i)) continue;
+            if (!rd3_fbgate_registrable(1u << i, fFBRegistered, gated)) {
+                ALOG("  %s: index %u published after its controller gate was planned (gated 0x%x): NOT registered now, "
+                     "stopping (N58 lock order); its own boot-arg thread call or the next debug.rdna3accelfb write "
+                     "registers it", why, i, gated);
+                break;
+            }
             /* the family may have registered this framebuffer itself and
              * given it a pipe already (card run 39: head 0 was known, the
              * count stayed 1 -> 1, the head was never marked piped, and
@@ -945,70 +951,109 @@ public:
         RDNA3Accelerator *me;
         IOWorkLoop *wl[kRd3MaxFB];
         unsigned n, k;
-        void (*body)(RDNA3Accelerator *, int);
+        void (*body)(RDNA3Accelerator *, int, unsigned);
         int how;
-        bool ran;
+        bool ran, stale;
+        unsigned gated, nowGated;
     };
-    /* one gate per level: IOWorkLoop::runAction closes the gate through the
-     * workloop's own (virtual) closeGate - closeGate / openGate themselves
-     * are protected - and the innermost level runs the body */
-    static IOReturn fbGateStep(OSObject *, void *arg0, void *, void *, void *) {
-        FbGateRun *r = (FbGateRun *)arg0;
-        if (r->k < r->n) {
-            IOWorkLoop *wl = r->wl[r->k++];
-            return wl->runAction(&RDNA3Accelerator::fbGateStep, r->me, r);
-        }
-        r->body(r->me, r->how);
-        r->ran = true;
-        return kIOReturnSuccess;
-    }
-    /* call with fRegLock held */
-    void runInFbGates(const char *why, void (*body)(RDNA3Accelerator *, int), int how) {
-        const void *fb[kRd3MaxFB], *wlOf[kRd3MaxFB];
-        IOWorkLoop *got[kRd3MaxFB];
+    /* the published heads and their controller workloops, planned */
+    void fbGatePlan(const void *fb[], const void *wlOf[], IOWorkLoop *got[], struct rd3_fbgate_plan *p) {
         for (unsigned i = 0; i < kRd3MaxFB; i++) {
             IOService *f = fFBs[i];
             got[i] = f ? f->getWorkLoop() : nullptr;
             fb[i] = f;
             wlOf[i] = got[i];
         }
-        struct rd3_fbgate_plan p;
-        rd3_fbgate_plan(fb, wlOf, kRd3MaxFB, &p);
-        FbGateRun r = { this, {}, 0, 0, body, how, false };
-        for (unsigned k = 0; k < p.n; k++) {
-            r.wl[r.n] = got[p.head[k]];
-            r.wl[r.n++]->retain();
-        }
-        if (p.noWl)
-            ALOG("N58 %s: inside %u framebuffer controller gate(s) (heads 0x%x), then the display machine; head(s) 0x%x "
-                 "published WITHOUT a controller workloop: not gated, the IOGraphics lock cycle stays possible for them",
-                 why, p.n, p.gated, p.noWl);
-        else
-            ALOG("N58 %s: inside %u framebuffer controller gate(s) (heads 0x%x), then the display machine "
-                 "(IOGraphics' order: gate, then the accelerator lock)", why, p.n, p.gated);
-        IOReturn ret = fbGateStep(nullptr, &r, nullptr, nullptr, nullptr);
-        if (!r.ran)
-            ALOG("N58 %s: a controller workloop refused the action (runAction 0x%x at gate %u of %u): NOTHING registered "
-                 "or delivered", why, (unsigned)ret, r.k, r.n);
-        for (unsigned k = 0; k < r.n; k++)
-            r.wl[k]->release();
+        rd3_fbgate_plan(fb, wlOf, kRd3MaxFB, p);
     }
-    static void registerBody(RDNA3Accelerator *a, int how) { a->registerFramebufferLocked(how); }
+    /* one gate per level: IOWorkLoop::runAction closes the gate through the
+     * workloop's own (virtual) closeGate - closeGate / openGate themselves
+     * are protected. The innermost level plans the heads again (one may
+     * have published while this thread waited for a gate) and runs the
+     * body only when every gate the heads need now is held. */
+    static IOReturn fbGateStep(OSObject *, void *arg0, void *, void *, void *) {
+        FbGateRun *r = (FbGateRun *)arg0;
+        if (r->k < r->n) {
+            IOWorkLoop *wl = r->wl[r->k++];
+            return wl->runAction(&RDNA3Accelerator::fbGateStep, r->me, r);
+        }
+        const void *fb[kRd3MaxFB], *wlOf[kRd3MaxFB], *held[kRd3MaxFB];
+        IOWorkLoop *got[kRd3MaxFB];
+        struct rd3_fbgate_plan now;
+        r->me->fbGatePlan(fb, wlOf, got, &now);
+        for (unsigned k = 0; k < r->n; k++)
+            held[k] = r->wl[k];
+        r->nowGated = now.gated;
+        if (!rd3_fbgate_covered(held, r->n, wlOf, &now)) {
+            r->stale = true;
+            return kIOReturnSuccess;
+        }
+        r->gated = now.gated;
+        r->body(r->me, r->how, now.gated);
+        r->ran = true;
+        return kIOReturnSuccess;
+    }
+    /* call with fRegLock held */
+    void runInFbGates(const char *why, void (*body)(RDNA3Accelerator *, int, unsigned), int how) {
+        unsigned prevGated = 0;
+        for (unsigned t = 1; t <= RD3_FBGATE_TRIES; t++) {
+            const void *fb[kRd3MaxFB], *wlOf[kRd3MaxFB];
+            IOWorkLoop *got[kRd3MaxFB];
+            struct rd3_fbgate_plan p;
+            fbGatePlan(fb, wlOf, got, &p);
+            FbGateRun r = { this, {}, 0, 0, body, how, false, false, 0, 0 };
+            for (unsigned k = 0; k < p.n; k++) {
+                r.wl[r.n] = got[p.head[k]];
+                r.wl[r.n++]->retain();
+            }
+            if (t > 1)
+                ALOG("N58 %s: head(s) 0x%x published while this thread waited for the gates of heads 0x%x: planning again "
+                     "(try %u of %u)", why, p.gated & ~prevGated, prevGated, t, RD3_FBGATE_TRIES);
+            if (p.noWl)
+                ALOG("N58 %s: inside %u framebuffer controller gate(s) (heads 0x%x), then the display machine; head(s) "
+                     "0x%x published WITHOUT a controller workloop: not gated, not registered now", why, p.n, p.gated, p.noWl);
+            else
+                ALOG("N58 %s: inside %u framebuffer controller gate(s) (heads 0x%x), then the display machine "
+                     "(IOGraphics' order: gate, then the accelerator lock)", why, p.n, p.gated);
+            IOReturn ret = fbGateStep(nullptr, &r, nullptr, nullptr, nullptr);
+            for (unsigned k = 0; k < r.n; k++)
+                r.wl[k]->release();
+            if (r.ran)
+                return;
+            if (!r.stale) {
+                ALOG("N58 %s: a controller workloop refused the action (runAction 0x%x at gate %u of %u): NOTHING "
+                     "registered or delivered", why, (unsigned)ret, r.k, r.n);
+                return;
+            }
+            prevGated = p.gated;
+        }
+        ALOG("N58 %s: heads kept publishing while this thread waited for their gates (%u tries, last 0x%x): NOTHING "
+             "registered or delivered; write debug.rdna3accelfb again", why, RD3_FBGATE_TRIES, prevGated);
+    }
+    static void registerBody(RDNA3Accelerator *a, int how, unsigned gated) { a->registerFramebufferLocked(how, gated); }
     void registerFramebuffer(int how) {
         if (fRegLock) IOLockLock(fRegLock);
         runInFbGates("registerFramebuffer", &RDNA3Accelerator::registerBody, how);
         if (fRegLock) IOLockUnlock(fRegLock);
     }
-    bool registerFramebufferLocked(int how) {
+    /* gated: the heads inside a held controller gate (runInFbGates, N58);
+     * only those are handed to the display machine */
+    bool registerFramebufferLocked(int how, unsigned gated) {
         if (!fDM) { ALOG("registerFramebuffer(%d): no display machine", how); return false; }
         if (!fFB) { ALOG("registerFramebuffer(%d): no framebuffer has published yet", how); return false; }
         unsigned before = fDM->getFramebufferCount();
         ALOG("registerFramebuffer(%d): framebuffer count before = %u", how, before);
         if (how == 2) {
+            unsigned published = 0;
+            for (unsigned i = 0; i < kRd3MaxFB; i++) if (fFBs[i]) published |= 1u << i;
             if (before != 0) ALOG("  already %u -- refusing to re-run the family's sweep", before);
+            else if (published & ~gated)
+                ALOG("  head(s) 0x%x published outside the held controller gates (gated 0x%x): refusing the family's sweep "
+                     "now, it would register them with the accelerator lock before their gate (N58); write 2 again",
+                     published & ~gated, gated);
             else { ALOG("  re-running IOAccelDisplayMachine::start(pci) -- the family's own sweep"); fDM->start(fPCI); }
         } else {
-            registerPendingLocked("sysctl");
+            registerPendingLocked("sysctl", gated);
         }
         unsigned after = fDM->getFramebufferCount();
         ALOG("  framebuffer count after = %u", after);
@@ -1090,8 +1135,8 @@ public:
         *handler = uc;
         return kIOReturnSuccess;
     }
-    static void scanoutBody(RDNA3Accelerator *a, int how) {
-        if (a->registerFramebufferLocked(1))
+    static void scanoutBody(RDNA3Accelerator *a, int how, unsigned gated) {
+        if (a->registerFramebufferLocked(1, gated))
             ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED; the registration just delivered the mode "
                  "change -- not delivering it twice", how);
         else {
