@@ -31,10 +31,10 @@ RV=$ROOT/tools/vm/rdna3vm
 export ROOT
 
 FUNCS="approve_markers approve_marker_any approve_marker_text approve_marker_clear run_note old_driver_note
-bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result approve_cmd host_opt
+bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result cmd_result_show result_file approve_cmd host_opt
 bundle_source_hashes"
 for f in $FUNCS; do sed -n "/^$f() {/,/^}/p" "$RV"; done > "$T/fn.sh"
-[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 16 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
+[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 18 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
 
 export WORK=$T/work
 mkdir -p "$WORK/reports"
@@ -251,6 +251,22 @@ RDNA3VM_RESULT=$T/res.tar.gz run "echo '10:00:00 == the VM ran an older thing' >
 grep -q '== the VM ran an older thing' "$T/out.txt" || fail "result: does not print the note"
 tar -xzOf "$T/res.tar.gz" rdna3-result/00-host.txt | grep -q '^run-note: 10:00:00 == the VM ran an older thing' || fail "result: 00-host.txt lacks the note"
 [ -s "$WORK/last-run-note" ] || fail "result: cleared the note (only install_first does)"
+
+# the looks in the result: .tar.gz = one PNG per look (the PPM goes, checked by decoding it again), .tar.xz = the PPMs raw (xz shares the desktop between
+# looks) and no PNG of the triage's own next to them
+mkppm() { { printf 'P6\n8 4\n255\n'; head -c 96 /dev/zero | tr '\0' '\177'; } > "$WORK/reports/rdna3-report-x-scanoutladder-baselineh-pipe0.ppm"; }
+RDNA3VM_RESULT=$T/res-gz.tar.gz run "touch \$WORK/run-start; $(declare -f mkppm); mkppm; sleep() { :; }; echo hi > \$WORK/reports/serial-2.log; cmd_result"
+tar -tzf "$T/res-gz.tar.gz" | grep -q 'rdna3-result/rdna3-report-x-scanoutladder-baselineh-pipe0\.png$' || fail "result .gz: the look is not a PNG: $(tar -tzf "$T/res-gz.tar.gz")"
+! tar -tzf "$T/res-gz.tar.gz" | grep -q '\.ppm$' || fail "result .gz: a PPM is still in the archive"
+grep -q 'Result: .*res-gz.tar.gz (.* MB packed from' "$T/out.txt" || fail "result .gz: no size in the output: $(grep Result "$T/out.txt")"
+if command -v xz >/dev/null 2>&1; then
+    RDNA3VM_RESULT=$T/res-xz.tar.xz run "touch \$WORK/run-start; $(declare -f mkppm); mkppm; sleep() { :; }; echo hi > \$WORK/reports/serial-3.log; cmd_result"
+    tar -tf "$T/res-xz.tar.xz" | grep -q 'rdna3-result/rdna3-report-x-scanoutladder-baselineh-pipe0\.ppm$' || fail "result .xz: the PPM is not in the archive: $(tar -tf "$T/res-xz.tar.xz")"
+    ! tar -tf "$T/res-xz.tar.xz" | grep -q '\.png$' || fail "result .xz: a PNG of the triage is in the archive"
+    tar -xOf "$T/res-xz.tar.xz" rdna3-result/00-host.txt | grep -q '^repo ' || fail "result .xz: 00-host.txt is not readable"
+    RDNA3VM_RESULT=$T/res-xz.tar.xz run "cmd_result --show"
+    grep -q 'res-xz.tar.xz' "$T/out.txt" || fail "result --show of an .xz file: $(cat "$T/out.txt")"
+fi
 
 # ---- L1: the queue sets the marker aside and says the step ran on the old driver
 run "printf 'play\n5\n' > \$QUEUE; step_args() { echo a; }; echo approve > \$WORK/pass-1; cmd__queue"

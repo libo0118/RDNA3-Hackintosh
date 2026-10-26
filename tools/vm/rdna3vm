@@ -19,7 +19,8 @@
 #                                                 with the Mac model of step S
 #   rdna3vm reports                               what came back
 #   rdna3vm result                                the last run's reports in ONE file to send
-#                                                 (~/Downloads/rdna3-result.tar.gz, replaced each time)
+#                                                 (~/Downloads/rdna3-result.tar.xz, replaced each time;
+#                                                 .tar.gz when the host has no xz)
 #                                                 and every test's PASS / FAIL on its own line
 #   rdna3vm result --show [FILE]                  print that list again from the last result file,
 #                                                 without collecting anything
@@ -2205,15 +2206,26 @@ checklist() {   # checklist [--no-color] TRIAGE-FILE
 }
 
 # 'rdna3vm result --show [FILE]': the list again from a result file, nothing collected
+# the result file: RDNA3VM_RESULT, else the newest of ~/Downloads/rdna3-result.tar.{xz,gz}
+result_file() {
+    local f
+    [ -n "${RDNA3VM_RESULT:-}" ] && { echo "$RDNA3VM_RESULT"; return; }
+    for f in "$HOME/Downloads/rdna3-result.tar.xz" "$HOME/Downloads/rdna3-result.tar.gz"; do
+        [ -f "$f" ] && { echo "$f"; return; }
+    done
+    echo "$HOME/Downloads/rdna3-result.tar.xz"
+}
+
 cmd_result_show() {
-    local f=${1:-${RDNA3VM_RESULT:-$HOME/Downloads/rdna3-result.tar.gz}} tmp
+    local f=${1:-$(result_file)} tmp
     [ -f "$f" ] || die "no $f (run 'rdna3vm result' first)"
     tmp=$(mktemp -d)
     # the triage again (the rules may be newer than the file); the stored list for an old file
-    if tar -xzOf "$f" rdna3-result/00-triage.txt > "$tmp/triage.txt" 2>/dev/null && [ -s "$tmp/triage.txt" ]; then
+    # (tar -xOf: it finds out by itself whether the file is gzip or xz)
+    if tar -xOf "$f" rdna3-result/00-triage.txt > "$tmp/triage.txt" 2>/dev/null && [ -s "$tmp/triage.txt" ]; then
         say "$f"
         checklist "$tmp/triage.txt"
-    elif tar -xzOf "$f" rdna3-result/00-checklist.txt 2>/dev/null; then
+    elif tar -xOf "$f" rdna3-result/00-checklist.txt 2>/dev/null; then
         :
     else
         rm -rf "$tmp"
@@ -2223,8 +2235,16 @@ cmd_result_show() {
 }
 
 cmd_result() {
-    local out=${RDNA3VM_RESULT:-$HOME/Downloads/rdna3-result.tar.gz} tmp f
+    local out=${RDNA3VM_RESULT:-} tmp f packed
     local -a sel
+    # xz when the host has it: the looks of one run are the same desktop over and over (a ladder: 142 MB of PPMs, 8 MB as .tar.xz, 90 MB as .tar.gz), so they
+    # stay raw PPMs. Without xz the looks are turned into PNGs (lossless, about half the size) and the archive is gzip
+    if [ -z "$out" ]; then
+        if command -v xz >/dev/null 2>&1; then out=$HOME/Downloads/rdna3-result.tar.xz; else out=$HOME/Downloads/rdna3-result.tar.gz; fi
+    fi
+    case "$out" in
+        *.xz) command -v xz >/dev/null 2>&1 || die "$out needs xz (not installed): use a .tar.gz name (RDNA3VM_RESULT)" ;;
+    esac
     if [ "${1:-}" = "--show" ]; then shift; cmd_result_show "$@"; return; fi
     [ -d "$WORK/reports" ] || die "no $WORK/reports yet"
     # what the last run could not print itself (cmd__once runs without a terminal)
@@ -2281,12 +2301,26 @@ cmd_result() {
               tail -n 80
       done; } \
         >> "$tmp/rdna3-result/00-host.txt" || true   # set -e + pipefail: ls dies of SIGPIPE behind head
-    python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
+    # no picture of its own in the result: the triage would write a PNG next to every look (80 MB more, nothing xz can share)
+    RDNA3_NO_PICTURES=1 python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
     # the per-test list goes into the result too (before the tarball is made)
     checklist --no-color --width 400 "$tmp/rdna3-result/00-triage.txt" > "$tmp/rdna3-result/00-checklist.txt" || true
     mkdir -p "$(dirname "$out")"
-    tar -czf "$out.tmp" -C "$tmp" rdna3-result && mv -f "$out.tmp" "$out"
-    say "Result: $out ($(du -h "$out" | cut -f1), ${#sel[@]} files)"
+    packed=$(du -sk "$tmp/rdna3-result" | cut -f1)
+    case "$out" in
+    *.xz) XZ_OPT="-9 -T1" tar -cJf "$out.tmp" -C "$tmp" rdna3-result || { rm -f "$out.tmp"; die "tar -cJ failed: $out"; } ;;
+    *)
+        # one lossless picture per look: PNG (checked by decoding it again; a look that does not round-trip stays a PPM and is named)
+        python3 -I "$ROOT/tools/lookimg.py" --to-png "$tmp/rdna3-result" || warn "the looks could not be turned into PNGs: they stay PPMs ($(du -sk "$tmp/rdna3-result" | cut -f1) kB)"
+        tar -czf "$out.tmp" -C "$tmp" rdna3-result || { rm -f "$out.tmp"; die "tar -cz failed: $out"; } ;;
+    esac
+    mv -f "$out.tmp" "$out"
+    # one file to send: the other extension of an earlier run goes (a stale 167 MB .tar.gz next to the new one is the one that gets sent)
+    case "$out" in
+        "$HOME/Downloads/rdna3-result.tar.xz") rm -f "$HOME/Downloads/rdna3-result.tar.gz" ;;
+        "$HOME/Downloads/rdna3-result.tar.gz") rm -f "$HOME/Downloads/rdna3-result.tar.xz" ;;
+    esac
+    say "Result: $out ($(( ($(wc -c < "$out") + 524288) / 1048576 )) MB packed from $((packed / 1024)) MB, ${#sel[@]} files)"
     printf '  %s\n' "${sel[@]}"
     echo
     checklist "$tmp/rdna3-result/00-triage.txt"

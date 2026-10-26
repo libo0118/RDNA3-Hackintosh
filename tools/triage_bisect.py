@@ -62,6 +62,12 @@ import os
 import re
 import sys
 
+try:
+    import lookimg
+except ImportError:   # run from another directory without tools/ on the path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import lookimg
+
 # a lit pipe with at most this much of its picture not black is a black screen
 # (the same line as triage_reports.BLACK_PCT)
 BLACK_PCT = 3
@@ -208,20 +214,15 @@ def parse(text):
 
 
 def read_ppm(path):
-    """(w, h, rgb bytes) of a binary PPM, or None"""
+    """(w, h, rgb bytes) of a look: a binary PPM or a PNG (path with .ppm; the .png of the same name is read when the .ppm is gone: `rdna3vm result` packs PNGs
+    without xz), or None"""
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError:
+        w, h, px = lookimg.read_look(path)
+    except (OSError, ValueError):
         return None
-    m = re.match(rb"P6\s+(?:#[^\n]*\s+)*(\d+)\s+(\d+)\s+(\d+)\s", data)
-    if not m:
-        return None
-    w, h = int(m.group(1)), int(m.group(2))
     if w * h == 0:   # every fraction divides by the pixel count
         return None
-    px = data[m.end():m.end() + w * h * 3]
-    return (w, h, px) if len(px) == w * h * 3 else None
+    return (w, h, px)
 
 
 def ppm_not_black_pct(img):
