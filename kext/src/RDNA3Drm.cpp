@@ -1089,6 +1089,17 @@ int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t si
             LOG("drm: AMDGPU_CS from pid %d refused (%d) (%u such)", proc_selfpid(), r, fCsFailLogs + 1);
         fCsFailLogs++;
     }
+    /* DRIVER-PLAN N54 wait_idle: the CS waits for its own fence with the
+     * lock dropped (as drmFenceWait; the file stays in flight meanwhile) */
+    uint32_t wip = 0, wring = 0;
+    uint64_t wseq = 0;
+    if (!r && gb && gb == fBringup && nr == RD_NR_AMDGPU(DRM_AMDGPU_CS) && gb->cohTakeWait(&wip, &wring, &wseq)) {
+        IOLockUnlock(fDrmLock);
+        gb->cohWaitIdle(wip, wring, wseq);
+        IOLockLock(fDrmLock);
+    } else if (gb && gb == fBringup) {
+        (void)gb->cohTakeWait(&wip, &wring, &wseq);   /* a refused CS leaves none behind */
+    }
     if (--f->inflight == 0)
         IOLockWakeup(fDrmLock, &f->inflight, false);
     IOLockUnlock(fDrmLock);

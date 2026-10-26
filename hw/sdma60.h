@@ -116,6 +116,8 @@ uint32_t sdma60_fence_read(rdna3_dev *d, rdna3_sdma_ring *r);   /* amdgpu_fence_
 uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r);
 /* DRIVER-PLAN N54: the system-memory copy of the fence (0 without one) */
 uint32_t sdma60_fence_sys_read(const rdna3_sdma_ring *r);
+/* amdgpu_ring_alloc: wait (usec_timeout) until 'ndw' dwords are free */
+int sdma60_ring_reserve(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t ndw);
 /* a user fence (AMDGPU_CHUNK_ID_FENCE): sdma_v6_0_ring_emit_fence with
  * AMDGPU_FENCE_FLAG_64BIT and no interrupt - two FENCE packets, low then
  * high dword of 'seq' at MC address 'addr' (8-byte aligned) */

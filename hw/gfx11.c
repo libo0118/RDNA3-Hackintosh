@@ -312,9 +312,7 @@ uint32_t gfx11_csb_fill(uint32_t *buf, uint32_t max_dw)
 
 static uint32_t wb_read32(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t off)
 {
-    uint32_t v;
-    rdna3_vram_read(d, r->wb + off, &v, 4);
-    return v;
+    return rdna3_vram_read32(d, r->wb + off);   /* one 32-bit load (N54) */
 }
 
 void gfx11_write(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t v)
@@ -772,8 +770,10 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     if (ring_wait_space(d, r, ndw))
         return 0;
     /* DRIVER-PLAN N54 pipe_sync: amdgpu_vm_flush's pipeline sync at every job */
-    if ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq)
+    if ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq) {
         gfx11_emit_pipeline_sync(d, r);
+        rd3_coh_count(d->coh_count, 2);
+    }
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
     if (x && x->gds_switch)
@@ -797,8 +797,10 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     for (i = 0; i < n; i++)
         gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
     gfx11_emit_frame_cntl(d, r, 0, secure);
-    if (d->coh & RD3_COH_HDP_END)   /* DRIVER-PLAN N54 hdp_end */
+    if (d->coh & RD3_COH_HDP_END) {   /* DRIVER-PLAN N54 hdp_end */
         gfx11_emit_hdp_flush(d, r);
+        rd3_coh_count(d->coh_count, 5);
+    }
     if (x && x->uf_addr)   /* the job's number: the fence emitted next */
         gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     /* amdgpu_ib_schedule: the postfix (shadowing off) and a second
@@ -840,6 +842,8 @@ uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     uint64_t addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE);
     uint32_t seq = ++r->fence_seq;
+    if (d->coh & RD3_COH_FENCE_INV)
+        rd3_coh_count(d->coh_count, 1);   /* fence_inv: emitted */
     if (r->fence_sys_mc) {
         /* DRIVER-PLAN N54: the fence where amdgpu keeps it (adev->wb, system
          * memory), first: the same packet, DATA_SEL 1, no interrupt (the
@@ -914,14 +918,30 @@ int gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)
     return (int32_t)(wb_read32(d, r, RD_GFX_WB_FENCE) - seq) >= 0;
 }
 
-/* amdgpu_fence_wait_polling */
+/* amdgpu_fence_wait_polling. DRIVER-PLAN N54 fence_sys: the system copy
+ * of the fence must land too, inside the same bound (a copy that does not
+ * is logged and the VRAM fence taken) */
 int gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)
 {
+    const int want_sys = (d->coh & RD3_COH_FENCE_SYS) && r->fence_sys_cpu;
+    int vram = 0, held = 0;
     uint32_t i;
     for (i = 0; i < d->usec_timeout; i++) {
-        if (gfx11_fence_passed(d, r, seq))
+        if (!vram)
+            vram = gfx11_fence_passed(d, r, seq);
+        if (vram && (!want_sys || rd3_coh_seq_passed(*r->fence_sys_cpu, seq))) {
+            if (held)
+                rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_SYS);
             return RDNA3_OK;
+        }
+        held = vram;
         d->os.udelay(d->os.ctx, 1);
+    }
+    if (vram) {
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_KWAIT_FALLBACK);
+        RERR(d, "GFX: fence %u: its system copy (%u) did not land within %u us: the VRAM fence is taken", seq,
+             *r->fence_sys_cpu, d->usec_timeout);
+        return RDNA3_OK;
     }
     RERR(d, "GFX: fence %u timeout (last %u)", seq, wb_read32(d, r, RD_GFX_WB_FENCE));
     return RDNA3_ETIME;
@@ -2357,8 +2377,10 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
         return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
-    if ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq)   /* DRIVER-PLAN N54 pipe_sync */
+    if ((d->coh & RD3_COH_PIPE_SYNC) && r->fence_seq) {   /* DRIVER-PLAN N54 pipe_sync */
         gfx11_emit_pipeline_sync(d, r);
+        rd3_coh_count(d->coh_count, 2);
+    }
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
     if (x && x->gds_switch)
@@ -2372,8 +2394,10 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
         gfx11_write(d, r, (uint32_t)(ibs[i].va >> 32));
         gfx11_write(d, r, INDIRECT_BUFFER_VALID | ibs[i].ndw | (vmid << 24));
     }
-    if (d->coh & RD3_COH_HDP_END)   /* DRIVER-PLAN N54 hdp_end */
+    if (d->coh & RD3_COH_HDP_END) {   /* DRIVER-PLAN N54 hdp_end */
         gfx11_emit_hdp_flush(d, r);
+        rd3_coh_count(d->coh_count, 5);
+    }
     if (x && x->uf_addr)
         gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     seq = gfx11_emit_fence(d, r);
@@ -2573,6 +2597,10 @@ void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r)
     if (r->wb == UINT64_MAX)
         return;
     rdna3_vram_write(d, r->wb + RD_GFX_WB_FENCE, &r->fence_seq, 4);
+    if (r->fence_sys_cpu) {   /* DRIVER-PLAN N54: the system copy says so too */
+        *r->fence_sys_cpu = r->fence_seq;
+        rd3_coh_count(d->coh_count, RD3_COH_CNT_FORCED);
+    }
 }
 
 int gfx11_soft_reset(rdna3_dev *d, rdna3_gfx_ring *r, struct rdna3_mec_ring *kiq,
@@ -3757,8 +3785,11 @@ static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uin
     if (pd_addr || gds || need_pipe) {
         if (gfx)
             patch = gfx11_emit_init_cond_exec(d, r, cond_addr);
-        if (need_pipe)
+        if (need_pipe) {
             gfx11_emit_pipeline_sync(d, r);
+            if (d->coh & RD3_COH_PIPE_SYNC)
+                rd3_coh_count(d->coh_count, 2);
+        }
         if (pd_addr)
             gfx11_emit_vm_flush(d, r, vmid, pd_addr);
         if (pasid)   /* amdgpu_gmc_emit_pasid_mapping -> gmc_v11_0_emit_pasid_mapping */
@@ -3800,8 +3831,10 @@ static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uin
     }
     if (gfx)
         gfx11_emit_frame_cntl(d, r, 0, secure);
-    if (d->coh & RD3_COH_HDP_END)   /* DRIVER-PLAN N54 hdp_end */
+    if (d->coh & RD3_COH_HDP_END) {   /* DRIVER-PLAN N54 hdp_end */
         gfx11_emit_hdp_flush(d, r);
+        rd3_coh_count(d->coh_count, 5);
+    }
     if (x && x->uf_addr)
         gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     if (gfx) {

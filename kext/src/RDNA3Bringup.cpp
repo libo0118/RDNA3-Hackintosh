@@ -2511,8 +2511,14 @@ void RDNA3Bringup::forceFences()
         gfx11_force_fence_completion(fDev, &fKcq->rb);
     if (fKiq)
         gfx11_force_fence_completion(fDev, &fKiq->rb);
-    if (fSdma && fSdma->wb != UINT64_MAX)
+    if (fSdma && fSdma->wb != UINT64_MAX) {
         rdna3_vram_write(fDev, fSdma->wb + RD_SDMA_WB_FENCE, &fSdma->fence_seq, 4);
+        if (fSdma->fence_sys_cpu) {   /* N54: the system copy too */
+            *fSdma->fence_sys_cpu = fSdma->fence_seq;
+            rd3_coh_count(fDev->coh_count, RD3_COH_CNT_FORCED);
+        }
+    }
+    cohRingsForced();
     for (uint32_t i = 0; fVcn && i < RD_VCN_MAX_INST; i++)
         if (fVcn->ring_enc[i].ring_size)
             rdna3_vram_write(fDev, fVcn->ring_enc[i].wb + RD_VCN_WB_FENCE, &fVcn->ring_enc[i].fence_seq, 4);
@@ -2609,6 +2615,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         HLOG("SDMA0 soft reset");
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ring != UINT64_MAX &&
         sdma60_soft_reset(fDev, fSdma) == RDNA3_OK) {
+        cohRingsForced();   /* N54: the soft reset forced the SDMA fences, the copy too */
         busyEndAll(RD3_BUSY_SDMA, "the SDMA0 soft reset");   /* N49: its fences read as done */
         fSdmaResets++;
         fResetCount++;
@@ -2637,6 +2644,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         if (rr == RDNA3_OK) {
             fResetCount++;   /* gpu_reset_counter */
             gfx11_force_fence_completion(fDev, r);
+            cohRingsForced();   /* N54 */
             busyEndAll(ip == AMDGPU_HW_IP_GFX ? RD3_BUSY_GFX : RD3_BUSY_COMPUTE, "the MES ring reset");   /* N49 */
             for (uint32_t id = 1; id < 16; id++)
                 if (fVmByVmid[id]) {
@@ -3586,8 +3594,14 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
     int r = submitRing(v, ip, ring, ibs, n, job, ufMc, seq);
     if (!r)
         busySubmit(ip, ring, *seq, (int32_t)v->ownerPid, irq0);   /* N49: amdgpu's scheduled timestamp */
-    if (!r && (fDev->coh & RD3_COH_WAIT_IDLE))
-        cohWaitIdle(ip, ring, *seq);   /* N54 wait_idle */
+    if (!r && (fDev->coh & RD3_COH_WAIT_IDLE)) {
+        /* N54 wait_idle: done by the DRM ioctl after the CS finished its
+         * bookkeeping, with the DRM lock dropped (cohTakeWait) */
+        fCohWait.ip = ip;
+        fCohWait.ring = ring;
+        fCohWait.seq = *seq;
+        fCohWait.pending = true;
+    }
     if (!r && ufSlot >= 0) {
         fUfSlot[ufSlot].ip = ip;
         fUfSlot[ufSlot].ring = ring;
@@ -3657,10 +3671,9 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
     x.init_shadow = job->init_shadow ? 1 : 0;
     /* DRIVER-PLAN N54 vm_flush: amdgpu_vm_flush at every job, not only
      * after the VM changed */
-    if ((fDev->coh & RD3_COH_VM_FLUSH) && (ip == AMDGPU_HW_IP_GFX || ip == AMDGPU_HW_IP_COMPUTE)) {
-        v->gfxFlush = v->compFlush = v->dmaFlush = true;
-        cohVmFlushForced();
-    }
+    const bool vmForced = (fDev->coh & RD3_COH_VM_FLUSH) && (ip == AMDGPU_HW_IP_GFX || ip == AMDGPU_HW_IP_COMPUTE);
+    if (vmForced)
+        v->gfxFlush = v->compFlush = v->dmaFlush = true;   /* counted once the job is on the ring */
     /* rdna3amdgpu=1: amdgpu_vm_flush's pasid_mapping_needed (the VMID's IH
      * LUT entry holds another PASID) */
     if (fAmdgpuExact && v->vmid < 16 && v->pasid && fVmidPasid[v->vmid] != v->pasid) {
@@ -3694,6 +3707,10 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
         return 0;
     }
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
+        /* amdgpu_ring_alloc (ECC round 1 of N54): per IB up to 7 NOPs + 6,
+         * the user fence 8, the fence with its system copy and the trap 10 */
+        if (sdma60_ring_reserve(fDev, fSdma, 13 * n + 32) != RDNA3_OK)
+            return -RD_EBUSY;
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
         fSdmaLastVmid = v->vmid;
@@ -3724,6 +3741,8 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
         memcpy(fGds[v->vmid], want, sizeof(want));
         fGdsKnown[v->vmid] = true;
         v->gfxFlush = false;
+        if (vmForced)
+            cohVmFlushForced();
         *seq = s;
         return 0;
     }
@@ -3746,6 +3765,8 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
         memcpy(fGds[v->vmid], want, sizeof(want));
         fGdsKnown[v->vmid] = true;
         v->compFlush = false;
+        if (vmForced)
+            cohVmFlushForced();
         *seq = s;
         return 0;
     }
@@ -3767,7 +3788,7 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
  * debug.rdna3_coh_mask, debug.rdna3_coh_all (runtime, no reboot; the
  * boot-arg rdna3coh=<mask> sets them from the start), each change logged,
  * the jobs that ran under each counted, and debug.rdna3_coh the report
- * (key=value; tools/macos/collect.sh 39-coherence.txt, triage 'coherence'). */
+ * (key=value; tools/macos/collect.sh 42-coherence.txt, triage 'coherence'). */
 
 static volatile UInt32 gCohFlags = RD3_COH_DEFAULT;
 static struct {
@@ -3776,8 +3797,17 @@ static struct {
     volatile SInt64 uc_bo, uc_switch, vmflush_forced, kcopy, kcopy_gcr;
     volatile SInt64 wait_waits, wait_timeouts, wait_us, wait_max_us, changes;
 } gCoh;
-/* the self-test of each ring's copy: 0 not set up, 1 ok, -1 failed, -2 no
- * page / GART, -3 ring not up */
+/* the work each switch did, the kernel waits and the forced completions
+ * (RD3_COH_CNT_*; fDev->coh_count points here: hw/ counts what it emits) */
+static uint64_t gCohWork[RD3_COH_NCNT];
+static void cohWork(uint32_t i)
+{
+    if (i < RD3_COH_NCNT)
+        OSIncrementAtomic64((volatile SInt64 *)&gCohWork[i]);
+}
+/* the self-test of each ring's copy: 0 not set up, 1 ok, -1 the copy did not
+ * land (the VRAM fence did), -2 no system page / GART slot, -3 ring not up,
+ * -4 the VRAM fence did not land either (the ring did not run the test) */
 static volatile SInt32 gCohSelftest[3];
 static const char *const kCohRingName[3] = { "gfx", "comp", "sdma" };
 static bool gCohSysctl;
@@ -3796,13 +3826,16 @@ static uint64_t cohNowNs()
     return ns;
 }
 
-static void cohSetFlags(UInt32 v, const char *why)
+/* flags = (flags & ~clear) | set, as one compare-and-swap (two sysctl
+ * writers at once lose neither change) */
+static void cohUpdateFlags(UInt32 set, UInt32 clear, const char *why)
 {
     char s[128];
-    const UInt32 old = gCohFlags;
-    v &= RD3_COH_ALL;
-    while (!OSCompareAndSwap(gCohFlags, v, &gCohFlags))
-        ;
+    UInt32 old, v;
+    do {
+        old = gCohFlags;
+        v = ((old & ~clear) | set) & RD3_COH_ALL;
+    } while (!OSCompareAndSwap(old, v, &gCohFlags));
     if (old == v)
         return;
     OSIncrementAtomic64(&gCoh.changes);
@@ -3820,6 +3853,14 @@ static int cohReport(char *b, size_t n)
                      (int)gCohSelftest[2], (long long)gCoh.jobs);
     for (uint32_t i = 0; i < RD3_COH_NBITS && o > 0 && (size_t)o < n; i++)
         o += snprintf(b + o, n - (size_t)o, " jobs_%s=%lld", rd3_coh_name(i), (long long)gCoh.bit_jobs[i]);
+    /* what each switch DID (the triage judges a rung by these) */
+    for (uint32_t i = 0; i < RD3_COH_NBITS && o > 0 && (size_t)o < n; i++)
+        o += snprintf(b + o, n - (size_t)o, " work_%s=%llu", rd3_coh_name(i), (unsigned long long)gCohWork[i]);
+    if (o > 0 && (size_t)o < n)
+        o += snprintf(b + o, n - (size_t)o, " kwait_sys=%llu kwait_fallback=%llu forced=%llu",
+                      (unsigned long long)gCohWork[RD3_COH_CNT_KWAIT_SYS],
+                      (unsigned long long)gCohWork[RD3_COH_CNT_KWAIT_FALLBACK],
+                      (unsigned long long)gCohWork[RD3_COH_CNT_FORCED]);
     if (o > 0 && (size_t)o < n)
         o += snprintf(b + o, n - (size_t)o,
                       " checks=%lld sys_held=%lld skews=%lld skews_closed=%lld skew_sum_us=%lld skew_max_us=%lld"
@@ -3848,17 +3889,17 @@ static int rdna3_coh_switch_sysctl SYSCTL_HANDLER_ARGS
         if (v != 0 && v != 1)
             return EINVAL;
         snprintf(why, sizeof why, "debug.rdna3_coh_%s=%d", rd3_coh_name((uint32_t)arg2), v);
-        cohSetFlags(v ? (gCohFlags | (1u << arg2)) : (gCohFlags & ~(1u << arg2)), why);
+        cohUpdateFlags(v ? (1u << arg2) : 0u, v ? 0u : (1u << arg2), why);
     } else if (arg2 == -1) {
         if (v != 0 && v != 1)
             return EINVAL;
         snprintf(why, sizeof why, "debug.rdna3_coh_all=%d", v);
-        cohSetFlags(v ? RD3_COH_ALL : 0u, why);
+        cohUpdateFlags(v ? RD3_COH_ALL : 0u, RD3_COH_ALL, why);
     } else {
         if (v < 0 || (UInt32)v > RD3_COH_ALL)
             return EINVAL;
         snprintf(why, sizeof why, "debug.rdna3_coh_mask=0x%x", v);
-        cohSetFlags((UInt32)v, why);
+        cohUpdateFlags((UInt32)v, RD3_COH_ALL, why);
     }
     return 0;
 }
@@ -3885,7 +3926,7 @@ static int rdna3_coh_report_sysctl SYSCTL_HANDLER_ARGS
 RD3_COH_OID(fence_sys, 0, "N54: 1 = the CPU trusts the system-memory copy of the ring fences (amdgpu's adev->wb), 0 = the VRAM fence");
 RD3_COH_OID(fence_inv, 1, "N54: 1 = the end-of-job RELEASE_MEM also invalidates GL2 / GL1 / GLV");
 RD3_COH_OID(pipe_sync, 2, "N54: 1 = every job waits for the previous one's fence on its ring (pipeline sync)");
-RD3_COH_OID(wait_idle, 3, "N54: 1 = the CS ioctl returns after its job's fence passed (CPU wait, bounded 200 ms)");
+RD3_COH_OID(wait_idle, 3, "N54: 1 = the CS ioctl returns after its job's fence passed (CPU wait without the DRM lock, bounded 200 ms)");
 RD3_COH_OID(uc, 4, "N54: 1 = new user mappings MTYPE_UC (restart the app)");
 RD3_COH_OID(hdp_end, 5, "N54: 1 = an HDP flush after the IBs as well");
 RD3_COH_OID(vm_flush, 6, "N54: 1 = a VM flush (TLB invalidate) at every job");
@@ -3908,7 +3949,7 @@ void RDNA3Bringup::cohInit()
 {
     uint32_t m = RD3_COH_DEFAULT;
     if (PE_parse_boot_argn("rdna3coh", &m, sizeof(m)))
-        cohSetFlags(m, "boot-arg rdna3coh");
+        cohUpdateFlags(m, RD3_COH_ALL, "boot-arg rdna3coh");
     if (!fCohLock)
         fCohLock = IOSimpleLockAlloc();
     if (!fCohLock)
@@ -3959,7 +4000,7 @@ uint64_t RDNA3Bringup::cohGartOff() const
 }
 
 /* one fence on ring idx with its copy: both land, the copy first */
-bool RDNA3Bringup::cohSelftest(uint32_t idx)
+int RDNA3Bringup::cohSelftest(uint32_t idx)
 {
     uint32_t seq, vram = 0, sys = 0, i;
     if (idx == 2) {
@@ -3976,12 +4017,17 @@ bool RDNA3Bringup::cohSelftest(uint32_t idx)
         vram = idx == 2 ? sdma60_fence_read(fDev, fSdma) : gfx11_fence_read(fDev, idx == 0 ? fGfx : &fKcq->rb);
         sys = idx == 2 ? sdma60_fence_sys_read(fSdma) : gfx11_fence_sys_read(idx == 0 ? fGfx : &fKcq->rb);
         if (vram == seq && sys == seq)
-            return true;
+            return 1;
         IODelay(100);
+    }
+    if (!rd3_coh_seq_passed(vram, seq)) {
+        BLOG("coherence: %s ring: the self-test's fence did not land in VRAM either (seq %u, VRAM %u, copy %u): the "
+             "ring did not run it; no copy on this ring", kCohRingName[idx], seq, vram, sys);
+        return -4;
     }
     BLOG("coherence: %s ring: the fence's system copy did NOT land (seq %u, VRAM %u, copy %u): the ring keeps the "
          "VRAM fence only", kCohRingName[idx], seq, vram, sys);
-    return false;
+    return -1;
 }
 
 /* at the end of hwInit (also after a reset or a wake: the GART table and the
@@ -3993,6 +4039,7 @@ void RDNA3Bringup::cohSetup()
                            RD_PTE_WRITEABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);   /* the uf / uq slots' (cached TT) */
     rdna3_gfx_ring *g[2] = { fGfx && fGfx->ready ? fGfx : nullptr,
                              fKcq && fKcq->rb.ready ? &fKcq->rb : nullptr };
+    fDev->coh_count = gCohWork;   /* the forced completions of a reset are counted from here on */
     if (fGfx) { fGfx->fence_sys_mc = 0; fGfx->fence_sys_cpu = nullptr; }
     if (fKcq) { fKcq->rb.fence_sys_mc = 0; fKcq->rb.fence_sys_cpu = nullptr; }
     if (fSdma) { fSdma->fence_sys_mc = 0; fSdma->fence_sys_cpu = nullptr; }
@@ -4047,7 +4094,7 @@ void RDNA3Bringup::cohSetup()
         cpu[i * 16] = gfx11_fence_read(fDev, g[i]);   /* the copy starts where the ring is */
         g[i]->fence_sys_cpu = &cpu[i * 16];
         g[i]->fence_sys_mc = mc + i * 64;
-        gCohSelftest[i] = cohSelftest(i) ? 1 : -1;
+        gCohSelftest[i] = cohSelftest(i);
         if (gCohSelftest[i] < 0) {
             g[i]->fence_sys_mc = 0;
             g[i]->fence_sys_cpu = nullptr;
@@ -4057,14 +4104,14 @@ void RDNA3Bringup::cohSetup()
         cpu[32] = sdma60_fence_read(fDev, fSdma);
         fSdma->fence_sys_cpu = &cpu[32];
         fSdma->fence_sys_mc = mc + 128;
-        gCohSelftest[2] = cohSelftest(2) ? 1 : -1;
+        gCohSelftest[2] = cohSelftest(2);
         if (gCohSelftest[2] < 0) {
             fSdma->fence_sys_mc = 0;
             fSdma->fence_sys_cpu = nullptr;
         }
     }
     BLOG("coherence: the ring fences also go to system memory (GART 0x%llx, bus 0x%llx): self-test gfx %d, comp %d, "
-         "sdma %d (1 ok, -1 failed, -3 ring not up); the CPU trusts the %s copy (debug.rdna3_coh_fence_sys)",
+         "sdma %d (1 ok, -1 the copy did not land, -3 ring not up, -4 the ring did not run the test); the CPU trusts the %s copy (debug.rdna3_coh_fence_sys)",
          (unsigned long long)mc, (unsigned long long)fCohPa, (int)gCohSelftest[0], (int)gCohSelftest[1],
          (int)gCohSelftest[2], (gCohFlags & RD3_COH_FENCE_SYS) ? "SYSTEM" : "VRAM");
 }
@@ -4081,6 +4128,8 @@ int RDNA3Bringup::cohFence(uint32_t idx, uint32_t vram, bool have, uint32_t sys,
     rd3_coh_fence_check(&fCohRing[idx], f, 1, seq, vram, sys, cohNowNs(), &o);
     IOSimpleLockUnlock(fCohLock);
     OSIncrementAtomic64(&gCoh.checks);
+    if (o.from_sys && o.passed)
+        cohWork(0);   /* fence_sys: an answer from the system copy */
     if (o.from_sys && !o.passed && rd3_coh_seq_passed(vram, seq))
         OSIncrementAtomic64(&gCoh.sys_held);
     if (o.skew_new) {
@@ -4119,6 +4168,7 @@ void RDNA3Bringup::cohSync(bool kcopy)
 {
     const UInt32 f = gCohFlags;
     fDev->coh = f;
+    fDev->coh_count = gCohWork;
     if (kcopy) {
         OSIncrementAtomic64(&gCoh.kcopy);
         if (f & RD3_COH_SDMA_GCR)
@@ -4134,11 +4184,27 @@ void RDNA3Bringup::cohSync(bool kcopy)
 }
 
 /* wait_idle: the submission's own fence, bounded */
+bool RDNA3Bringup::cohTakeWait(uint32_t *ip, uint32_t *ring, uint64_t *seq)
+{
+    if (!fCohWait.pending)
+        return false;
+    fCohWait.pending = false;
+    *ip = fCohWait.ip;
+    *ring = fCohWait.ring;
+    *seq = fCohWait.seq;
+    return true;
+}
+
+/* wait_idle: the submission's own fence, bounded; called WITHOUT the DRM
+ * lock (RDNA3Accel::drmIoctl, as drmFenceWait), so the other clients go on */
 void RDNA3Bringup::cohWaitIdle(uint32_t ip, uint32_t ring, uint64_t seq)
 {
     const uint64_t t0 = cohNowNs();
     uint64_t us = 0;
-    bool done;
+    bool done = fenceSignaledRaw(ip, ring, seq) != 0;
+    if (done)
+        return;   /* already done: no wait, not counted */
+    cohWork(3);
     while (!(done = fenceSignaledRaw(ip, ring, seq) != 0)) {
         us = (cohNowNs() - t0) / 1000;
         if (us >= RD3_COH_WAIT_IDLE_MAX_US)
@@ -4168,14 +4234,31 @@ uint64_t RDNA3Bringup::cohPte(uint64_t pte, const rdna3_bo *bo)
     pte = rd3_coh_pte(gCohFlags, pte, bo ? bo->flags : 0, &why);
     if (why == 1)
         OSIncrementAtomic64(&gCoh.uc_bo);
-    else if (why == 2)
+    else if (why == 2) {
         OSIncrementAtomic64(&gCoh.uc_switch);
+        cohWork(4);
+    }
     return pte;
+}
+
+/* the fences were forced (a reset, amdgpu_fence_driver_force_completion):
+ * hw/ wrote the system copies too; no skew or stale state of before stays */
+void RDNA3Bringup::cohRingsForced()
+{
+    if (!fCohLock)
+        return;
+    IOSimpleLockLock(fCohLock);
+    for (uint32_t i = 0; i < 3; i++) {
+        fCohRing[i].skew_open = 0;
+        fCohRing[i].stale = 0;
+    }
+    IOSimpleLockUnlock(fCohLock);
 }
 
 void RDNA3Bringup::cohVmFlushForced()
 {
     OSIncrementAtomic64(&gCoh.vmflush_forced);
+    cohWork(6);
 }
 
 /* the newest fence seq of each (IP, ring) the trace has recorded as
@@ -4368,17 +4451,22 @@ int RDNA3Bringup::fenceSignaledRaw(uint32_t ip, uint32_t ring, uint64_t seq)
         return vcn40_fence_passed(fDev, &fVcn->jpeg, (uint32_t)seq);
     if (ring != 0)
         return 1;
-    /* DRIVER-PLAN N54: the VRAM fence first, then its system copy (cohFence) */
+    /* DRIVER-PLAN N54: the VRAM fence first (one 32-bit load through the
+     * write-combined BAR mapping, fVram), then its system copy (cohFence);
+     * WC loads are weakly ordered, so an lfence keeps the copy's load after */
     if (ip == AMDGPU_HW_IP_DMA && fSdma) {
         const uint32_t v = sdma60_fence_read(fDev, fSdma);
+        __asm__ volatile("lfence" ::: "memory");   /* the BAR is mapped write-combined: no WC load may pass the copy's */
         return cohFence(2, v, fSdma->fence_sys_cpu != nullptr, sdma60_fence_sys_read(fSdma), (uint32_t)seq);
     }
     if (ip == AMDGPU_HW_IP_GFX && fGfx) {
         const uint32_t v = gfx11_fence_read(fDev, fGfx);
+        __asm__ volatile("lfence" ::: "memory");   /* the BAR is mapped write-combined: no WC load may pass the copy's */
         return cohFence(0, v, fGfx->fence_sys_cpu != nullptr, gfx11_fence_sys_read(fGfx), (uint32_t)seq);
     }
     if (ip == AMDGPU_HW_IP_COMPUTE && fKcq) {
         const uint32_t v = gfx11_fence_read(fDev, &fKcq->rb);
+        __asm__ volatile("lfence" ::: "memory");   /* the BAR is mapped write-combined: no WC load may pass the copy's */
         return cohFence(1, v, fKcq->rb.fence_sys_cpu != nullptr, gfx11_fence_sys_read(&fKcq->rb), (uint32_t)seq);
     }
     return 1;

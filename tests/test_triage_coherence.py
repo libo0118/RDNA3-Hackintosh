@@ -57,7 +57,7 @@ check(levels(r, "fence skew") == ["WARN"] and "debug.rdna3_coh_fence_sys=1" in t
 r = coh_rows(dump(flags="0x1", jobs=9, jobs_fence_sys=9, skews=1, skews_closed=1, skew_sum_us=3, sys_held=2,
                   skew_spins=7), "")
 check("it WAS on" in text(r, "fence skew") and levels(r, "coherence switches") == ["WARN"] and
-      "fence_sys (9 jobs)" in text(r, "coherence switches") and "SYSTEM" in text(r, "fence copy"), "fence_sys on")
+      "fence_sys (9 jobs)" in text(r, "coherence switches") and "END of the run: on" in text(r, "fence copy"), "fence_sys on")
 # stale: FAIL
 r = coh_rows(dump(stale=1, skews=1), "")
 check("FAIL" in levels(r, "fence skew"), "stale: FAIL")
@@ -66,6 +66,14 @@ r = coh_rows(dump(selftest="gfx:-1,comp:1,sdma:1"), "")
 check(levels(r, "fence copy") == ["FAIL"] and "gfx" in text(r, "fence copy"), "self-test failed: FAIL")
 r = coh_rows(dump(selftest="gfx:-2,comp:-2,sdma:-2"), "")
 check(levels(r, "fence copy") == ["WARN"], "no GART: WARN")
+r = coh_rows(dump(selftest="gfx:1,comp:-3,sdma:0"), "")
+check(levels(r, "fence copy") == ["WARN"] and "comp -3" in text(r, "fence copy"), "a ring not tested: WARN, never PASS")
+r = coh_rows(dump(selftest="gfx:1,comp:1,sdma:-4"), "")
+check(levels(r, "fence copy") == ["WARN"] and "did not run its self-test" in text(r, "fence copy"), "-4: WARN")
+r = coh_rows(dump(checks=0), "")
+check(levels(r, "fence copy") == ["WARN"] and "no fence check" in text(r, "fence copy"), "no checks: WARN, never PASS")
+r = coh_rows(dump(work_pipe_sync=40, kwait_fallback=2, forced=1), "")
+check(levels(r, "coherence work") == ["WARN"] and "pipe_sync 40" in text(r, "coherence work"), "work row, a fallback WARNs")
 # switches during the run, off at the end; wait_idle timeouts; uc maps; sdma gcr
 r = coh_rows(dump(jobs=50, jobs_pipe_sync=50, jobs_wait_idle=20, wait_waits=20, wait_timeouts=1, wait_us=900,
                   wait_max_us=200000, uc_bo=2, uc_switch=30, kcopy_gcr=4, changes=2),
@@ -75,41 +83,77 @@ check(levels(r, "wait idle") == ["WARN"] and levels(r, "uncached maps") == ["INF
       "wait idle / uc / gcr rows")
 check("pipe_sync=1" in text(r, "coherence changes"), "the change line")
 
-# the variant-4 ladder (autoreport.sh LADDER_COH_RUNGS): switches read back, this rung's jobs, the conclusion
-from triage_coherence import coh_ladder_rows, LADDER_COH_RUNGS  # noqa: E402
+# the variant-4 ladder (autoreport.sh LADDER_COH_RUNGS): flags at the start, switches read back, the work each did in the rung, the conclusion
+from triage_coherence import coh_ladder_rows, LADDER_COH_RUNGS, LADDER_COH_FLAGS  # noqa: E402
 from triage_glyphs import parse_ladder  # noqa: E402
+
+BITS = ("fence_sys", "fence_inv", "pipe_sync", "wait_idle", "uc", "hdp_end", "vm_flush", "sdma_gcr")
+
+
+def state(flags, work):
+    return "flags=0x%x selftest=gfx:1,comp:1,sdma:1 stale=0 %s" % (flags, " ".join("work_%s=%d" % (b, work.get(b, 0)) for b in BITS))
 
 
 def ladder(rungs):
+    """rungs: (name, [(sysctl, value, readback)], start flags or None, {bit: work over the rung} or None for no coh_end, extra lines)"""
     out = ["# rdna3 ladder v1", "variant: 4 (ladder-coh)"]
-    for name, sets, jobs in rungs:
+    for name, sets, flags, work, extra in rungs:
         out += ["== rung " + name, "scope: apps", "looks: ladder-%sa ladder-%sh ladder-%sh2" % (name, name, name), "answer: -"]
         for n, v, rb in sets:
             out.append("sysctl: %s=%s (was 0, read back %s)" % (n, v, rb))
-        if sets:
-            out.append("coh_start: flags=0x4 jobs=100 jobs_pipe_sync=100 jobs_fence_sys=3")
-            out.append("coh_end: flags=0x4 jobs=%d jobs_pipe_sync=%d jobs_fence_sys=3" % (100 + jobs, 100 + jobs))
+        if flags is not None:
+            out.append("coh_start: " + state(flags, dict((b, 100) for b in BITS)))
+        if work is not None:
+            out.append("coh_end: " + state(flags or 0, dict((b, 100 + work.get(b, 0)) for b in BITS)))
+        out += extra
         out.append("== end rung " + name)
     out.append("== end")
     return "\n".join(out) + "\n"
 
 
-lt = ladder([("baseline", [], 0), ("coh-all", [("debug.rdna3_coh_all", "1", "1")], 50),
-             ("pipe-sync", [("debug.rdna3_coh_pipe_sync", "1", "1")], 40),
-             ("uc", [("debug.rdna3_coh_uc", "1", "0")], 0)])
+ALLW = {"fence_sys": 5, "fence_inv": 9, "pipe_sync": 9, "hdp_end": 9}
+lt = ladder([("baseline", [], 0, {}, []),
+             ("coh-all", [("debug.rdna3_coh_all", "1", "1")], 0xff, ALLW, []),
+             ("pipe-sync", [("debug.rdna3_coh_pipe_sync", "1", "1")], 4, {"pipe_sync": 40}, []),
+             ("wait-idle", [("debug.rdna3_coh_wait_idle", "1", "1")], 8, {}, []),                 # on, did nothing
+             ("uc", [("debug.rdna3_coh_uc", "1", "0")], 0x10, {"uc": 3}, []),                    # read back 0
+             ("fence-inv", [("debug.rdna3_coh_fence_inv", "1", "1")], 0x2 | 0x4, {"fence_inv": 7},  # contaminated by pipe_sync
+              ["WARN: sysctl debug.rdna3_coh_mask NOT restored (is 6, wanted 0): the rungs after this one run with it"]),
+             ("hdp-end", [("debug.rdna3_coh_hdp_end", "1", "1")], 0x20, None, [])])             # no coh_end
 lv, lr, lp = parse_ladder(lt)
-check(lv == 4 and set(lr) == {"baseline", "coh-all", "pipe-sync", "uc"}, "parse_ladder reads variant 4")
-gl = {"baseline": {"verdict": "broken", "text": "3 broken stacks"}, "coh-all": {"verdict": "clean", "text": ""},
-      "pipe-sync": {"verdict": "clean", "text": ""}, "uc": {"verdict": "broken", "text": ""}}
+check(lv == 4 and "pipe-sync" in lr and "hdp-end" in lr, "parse_ladder reads variant 4")
+gl = dict((n, {"verdict": "broken", "text": ""}) for n in lr)
+gl["pipe-sync"]["verdict"] = "clean"
+gl["wait-idle"]["verdict"] = "clean"
+gl["fence-inv"]["verdict"] = "clean"
+gl["hdp-end"]["verdict"] = "clean"
 r = coh_ladder_rows(lt, lr, lp, gl)
-check("40 job(s) ran under it" in text(r, "ladder-coh pipe-sync") and levels(r, "ladder-coh pipe-sync") == ["INFO"], "pipe-sync rung: this rung's jobs")
+check(levels(r, "ladder-coh baseline") == ["INFO"], "baseline with flags 0: clean default")
+check(levels(r, "ladder-coh pipe-sync") == ["INFO"] and "work_pipe_sync +40" in text(r, "ladder-coh pipe-sync"), "pipe-sync: the rung's work")
+check(levels(r, "ladder-coh wait-idle") == ["WARN"] and "did NOTHING" in text(r, "ladder-coh wait-idle"), "on but no work: not engaged")
 check(levels(r, "ladder-coh uc") == ["WARN"] and "NOT on" in text(r, "ladder-coh uc"), "uc read back 0: not engaged")
-check(levels(r, "ladder-coh verdict") == ["FAIL"] and "pipe-sync" in text(r, "ladder-coh verdict"), "conclusion names the switch")
+check(levels(r, "ladder-coh fence-inv") == ["WARN"] and "CONTAMINATED" in text(r, "ladder-coh fence-inv"), "a leaked switch: contaminated")
+check("NOT restored" in text(r, "ladder-coh put-back") and levels(r, "ladder-coh put-back") == ["WARN"], "a failed put-back is a loud row")
+check(levels(r, "ladder-coh hdp-end") == ["WARN"] and "NO debug.rdna3_coh at the rung's end" in text(r, "ladder-coh hdp-end"), "no coh_end: not engaged")
+check(levels(r, "ladder-coh verdict") == ["FAIL"] and "pipe-sync" in text(r, "ladder-coh verdict") and
+      "wait-idle" not in text(r, "ladder-coh verdict") and "fence-inv" not in text(r, "ladder-coh verdict") and
+      "hdp-end" not in text(r, "ladder-coh verdict"), "the conclusion names only the engaged switch")
 check(levels(r, "ladder-coh fence-sys") == ["WARN"] and "did not run" in text(r, "ladder-coh fence-sys"), "a rung that did not run")
 gl["pipe-sync"]["verdict"] = "broken"
-gl["coh-all"]["verdict"] = "broken"
 r = coh_ladder_rows(lt, lr, lp, gl)
 check(levels(r, "ladder-coh verdict") == ["WARN"] and "NOT the cause" in text(r, "ladder-coh verdict"), "all on and still broken")
+# a baseline started with a switch on (the boot-arg rdna3coh): no conclusion at all
+lt2 = ladder([("baseline", [], 0x4, {}, []), ("pipe-sync", [("debug.rdna3_coh_pipe_sync", "1", "1")], 4, {"pipe_sync": 4}, [])])
+lv2, lr2, lp2 = parse_ladder(lt2)
+r = coh_ladder_rows(lt2, lr2, lp2, {"baseline": {"verdict": "broken"}, "pipe-sync": {"verdict": "clean"}})
+check("CONTAMINATED" in text(r, "ladder-coh baseline") and "rdna3coh" in text(r, "ladder-coh baseline") and
+      levels(r, "ladder-coh verdict") == ["WARN"], "a switch-on baseline: WARN, no verdict")
+# a baseline without coh_start (an older autoreport): not a clean default either
+lt3 = ladder([("baseline", [], None, None, [])])
+lv3, lr3, lp3 = parse_ladder(lt3)
+r = coh_ladder_rows(lt3, lr3, lp3, {"baseline": {"verdict": "broken"}})
+check(levels(r, "ladder-coh baseline") == ["WARN"] and "NO debug.rdna3_coh" in text(r, "ladder-coh baseline"), "no coh_start: WARN")
+check(LADDER_COH_FLAGS["baseline"] == 0 and LADDER_COH_FLAGS["coh-all"] == 0xff and LADDER_COH_FLAGS["uc"] == 0x10, "expected flags")
 check(LADDER_COH_RUNGS[0] == "baseline" and LADDER_COH_RUNGS[1] == "coh-all", "rung order")
 ar = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "vm", "macos", "autoreport.sh")).read()
 import re as _re  # noqa: E402
@@ -117,6 +161,7 @@ m = _re.search(r'^LADDER_COH_RUNGS="([^"]*)"$', ar, _re.M)
 check(m is not None and tuple(m.group(1).split()) == LADDER_COH_RUNGS, "autoreport.sh's LADDER_COH_RUNGS == triage_coherence's")
 for rung, sysname in [(k, v) for k, v in __import__("triage_coherence").LADDER_COH_SWITCH.items()]:
     check(("%s) echo \"sysctl:%s=1\" ;;" % (rung, sysname)) in ar, "autoreport.sh sets %s for %s" % (sysname, rung))
+check("ladder_coh_state start" in ar and "ladder_coh_state end" in ar and "NOT restored" in ar, "autoreport.sh records every rung's state and checks the put-back")
 
 if FAILS:
     print("test_triage_coherence: %d FAILED" % len(FAILS))

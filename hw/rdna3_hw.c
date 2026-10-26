@@ -267,6 +267,22 @@ volatile uint8_t *rdna3_vram_cpu(rdna3_dev *d, uint64_t off, uint64_t len)
     return d->vram_cpu + off;
 }
 
+/* one aligned 32-bit load (amdgpu_fence_read: le32_to_cpu(*ring->fence_drv.
+ * cpu_addr)): a value the GPU updates (fence, wptr writeback) must not be
+ * read a byte at a time, or a carry the GPU writes between two byte loads
+ * gives a value no write ever had (0x1FF -> 0x200 read as 0x2FF: a fence
+ * 255 jobs early). DRIVER-PLAN N54, ECC round 1. */
+uint32_t rdna3_vram_read32(rdna3_dev *d, uint64_t off)
+{
+    volatile uint8_t *src = (off & 3) ? NULL : rdna3_vram_cpu(d, off, 4);
+    uint32_t v = 0;
+    if (!src) {
+        rdna3_vram_read(d, off, &v, 4);
+        return v;
+    }
+    return *(const volatile uint32_t *)(const volatile void *)src;
+}
+
 void rdna3_vram_write(rdna3_dev *d, uint64_t off, const void *src, uint64_t len)
 {
     volatile uint8_t *dst = rdna3_vram_cpu(d, off, len);

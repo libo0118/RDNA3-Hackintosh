@@ -1332,8 +1332,8 @@ below is next: the kernel's GPU memory ordering and caches. Each rule can be tur
 | `fence_sys` | the CPU trusts the system-memory copy of the ring fence (amdgpu keeps the fence in `adev->wb`, GTT) instead of the VRAM wb slot | a CPU read after a fence saw system memory before the GPU's writes landed: make it the default |
 | `fence_inv` | the end-of-job RELEASE_MEM also invalidates GL2 / GL1 / GLV (`gfx_v11_0_ring_emit_fence` only writes back) | a stale GPU cache line survives a job |
 | `pipe_sync` | every job waits for the previous one's fence (`gfx_v11_0_ring_emit_pipeline_sync`; amdgpu emits it for same-ring dependencies, which this driver never tracks) | two jobs (two processes sharing a surface) overlapped on the ring: implicit sync is missing |
-| `wait_idle` | the CS ioctl returns after its own fence (CPU wait, 200 ms bound) | as pipe_sync, or the CPU acted on a job too early |
-| `uc` | new user mappings MTYPE_UC (`gmc_v11_0_get_vm_pte`'s override for every BO; apps restarted after the switch) | the GL2 holds stale lines of a surface another VMID or the CPU wrote |
+| `wait_idle` | the CS ioctl returns after its own fence (CPU wait with the DRM lock dropped, 200 ms bound: other clients go on) | as pipe_sync, or the CPU acted on a job too early |
+| `uc` | new user mappings MTYPE_UC (`gmc_v11_0_get_vm_pte`'s override for every BO). Only mappings made AFTER the switch: the rung's new Terminal / Chess get it, WindowServer's existing mappings (its windows, the surfaces it imported before) stay NC | the GL2 holds stale lines of a surface another VMID or the CPU wrote |
 | `hdp_end` | an HDP flush after the IBs too (HDP 6.0 has no read cache: amdgpu has nothing to invalidate) | CPU writes through the BAR reached VRAM late |
 | `vm_flush` | a TLB flush at every job (`amdgpu_vm_flush` only when the VM changed) | a stale translation after a map / unmap |
 | `sdma_gcr` | kernel SDMA copies (page-off, copy forward, clears) between GCR_REQ GL2 write-back+invalidate and an HDP flush | the kernel's copies read or left stale lines |
@@ -1342,16 +1342,25 @@ below is next: the kernel's GPU memory ordering and caches. Each rule can be tur
 `rdna3vm step ladder-coh` (`rdna3ladder=4`, standalone `sudo sh autoreport.sh --standalone --ladder-coh`) runs the rungs `baseline`, `coh-all`, then one
 switch each (fence-sys, pipe-sync, wait-idle, uc, fence-inv, sdma-gcr, vm-flush, hdp-end), Terminal + Chess as new instances per rung, two hi-res looks,
 the switch set before the apps start, read back, put back after the rung (`ladder.txt`: `sysctl: NAME=1 (was 0, read back 1)`, `coh_start:` /
-`coh_end:` = `debug.rdna3_coh` around the rung). The triage prints `ladder-coh <rung>` rows (the switch on? how many jobs ran under it in that rung, the
-glyph verdict, the answer) and `ladder-coh verdict`: **FAIL naming the switch** whose text is clean while the baseline's is broken (make that rule the
+`coh_end:` = `debug.rdna3_coh` around EVERY rung, the baseline too; a put-back is read back, retried, and a `WARN: sysctl ... NOT restored` keeps it on
+the undo list). A rung counts as engaged only when it started with exactly its own flags (0 for baseline, all for coh-all: anything else is
+CONTAMINATED, e.g. a switch an earlier rung left on or the boot-arg `rdna3coh`) and its switch DID work during the rung (`work_<name>` grew:
+answers taken from the fence copy, pipeline syncs / HDP flushes / invalidating fences emitted, CS waits that really waited, UC mappings made, forced
+VM flushes of submitted jobs, kernel copies wrapped in GCR; a missing `coh_start` / `coh_end` is not engaged). The triage prints `ladder-coh <rung>`
+rows (flags, the work, the glyph verdict, the answer), `ladder-coh put-back` for a switch that did not go back, and `ladder-coh verdict` (only
+engaged rungs can name a cure; a baseline that is not a clean default gives no verdict): **FAIL naming the switch** whose text is clean while the baseline's is broken (make that rule the
 default after one confirming run), **FAIL "only with every switch"** (two rules: bisect `debug.rdna3_coh_mask`), **WARN "broken even with every switch"**:
 the kernel's ordering and caches are excluded, the translator and the plugin are left. By hand: `sudo sysctl -w debug.rdna3_coh_pipe_sync=1`, open a NEW
 Terminal (and Chess), look, `sudo sysctl -w debug.rdna3_coh_pipe_sync=0`.
 
 Every report (collect.sh `42-coherence.txt`, triage rows `coherence switches`, `fence copy`, `fence skew`, `wait idle`, `uncached maps`, `sdma gcr`):
 
-- `fence copy` PASS: each ring's fence also lands in a system page (self-test at bring-up and after every reset / wake). FAIL: that copy did not land
-  (kernel line `coherence: <ring> ring: the fence's system copy did NOT land`): the ring keeps the VRAM fence only, `fence_sys` does nothing there.
+- `fence copy` PASS: the gfx, comp AND sdma fences also land in a system page (self-test 1 on all three at bring-up and after every reset / wake)
+  and fence checks read the copies. FAIL: a copy did not land (-1; kernel line `coherence: <ring> ring: the fence's system copy did NOT land`):
+  that ring keeps the VRAM fence only. WARN: -2 (no system page or GART slot), -3 (the ring was not up), -4 (the ring did not run the self-test's
+  fence at all), 0 (never set up), or no check read a copy. With `fence_sys` the kernel's own waits (the page-off / evict / clear copies on SDMA,
+  `gfx11_wait_fence`) need the copy too within their bound; `coherence work` WARNs on `kwait_fallback` (a copy that did not land in time, logged).
+  A reset's forced fence completion writes the copies as well (`forced`).
 - `fence skew` WARN: `skews` times a VRAM fence value was visible before its system copy, which the ring writes FIRST (`coherence: <ring> fence N: VRAM
   says ..., its system copy ...`, first 8 then every 1024th): the window in which the plugin's completion witness saw "fence early". The next run then
   sets `fence_sys`. PASS: none in `checks` checks. FAIL `stale`: a copy stayed 50 ms behind (broken page or GART slot); the VRAM fence answers there.
@@ -1360,7 +1369,11 @@ Every report (collect.sh `42-coherence.txt`, triage rows `coherence switches`, `
 Fixed in N54 without a switch (ports): the kernel's SDMA transfer window (page-off, evict / restore: `hw/xfer.c`) flushed only the MMHUB's TLB, while
 SDMA 6.0 translates through the GFXHUB (`sdma_v6_0_sw_init`: `vm_hub = AMDGPU_GFXHUB(0)`; `amdgpu_gart_invalidate_tlb` flushes every hub): a copy
 larger than the window, or one after another copy with other pages, went to / came from the previous pages (sim: `S.sdma_tlb_stale`). And a BO
-created COHERENT / UNCACHED / EXT_COHERENT is mapped MTYPE_UC whatever its VA flags say (`gmc_v11_0_get_vm_pte`; `uc_bo` counts them).
+created COHERENT / UNCACHED / EXT_COHERENT is mapped MTYPE_UC whatever its VA flags say (`gmc_v11_0_get_vm_pte`; `uc_bo` counts them). And
+(ECC round 1) the CPU read every GPU-written 32-bit value (the ring fences, the IH wptr writeback) one BYTE at a time through the write-combined BAR
+mapping: a carry the GPU wrote between two byte loads gave a value no write ever had (0x1FF -> 0x200 read as 0x2FF: a fence up to 255 jobs early,
+once per 256 fences at most, when the read races the write): `rdna3_vram_read32` is one aligned load, as `amdgpu_fence_read`. This is a second,
+certain candidate for the witness's "fence early".
 
 ### Surface-in cost and the cache (N51)
 

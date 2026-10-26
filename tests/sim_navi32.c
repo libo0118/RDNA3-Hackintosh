@@ -11036,6 +11036,9 @@ static void run(const char *fwdir)
                     CHECK(*sd.fence_sys_cpu == sd.fence_seq && sdma60_fence_sys_read(&sd) == sd.fence_seq &&
                           sdma60_fence_read(&dev, &sd) == sd.fence_seq);
                     CHECK(S.sdma_gcr == gcr0 && S.sdma_hdp == hdp0);   /* switch off: the stream as before */
+                    uint64_t cnt[RD3_COH_NCNT];
+                    memset(cnt, 0, sizeof(cnt));
+                    dev.coh_count = cnt;
                     dev.coh = RD3_COH_SDMA_GCR;
                     CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), dmc, 64) == RDNA3_OK);
                     CHECK(S.sdma_gcr == gcr0 + 2 && S.sdma_hdp == hdp0 + 1 && *sd.fence_sys_cpu == sd.fence_seq);
@@ -11044,7 +11047,22 @@ static void run(const char *fwdir)
                     CHECK(sdma60_copy_rect_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), 256, dmc, 512, 128, 4) == RDNA3_OK);
                     CHECK(S.sdma_gcr == gcr0 + 6 && S.sdma_hdp == hdp0 + 4 /* its own + the switch's */);
                     CHECK(S.sdma_bad == 0 && S.sdma_stuck == 0);
+                    CHECK(cnt[7] == 3);   /* sdma_gcr: three kernel copies wrapped */
+                    /* fence_sys: the kernel's wait needs the copy too; a copy that
+                     * never lands is a logged fallback to the VRAM fence */
+                    dev.coh = RD3_COH_FENCE_SYS;
+                    CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), dmc, 64) == RDNA3_OK);
+                    CHECK(cnt[RD3_COH_CNT_KWAIT_FALLBACK] == 0 && *sd.fence_sys_cpu == sd.fence_seq);
+                    {
+                        static volatile uint32_t elsewhere;
+                        elsewhere = 0;
+                        sd.fence_sys_cpu = &elsewhere;   /* the CPU looks where the GPU does not write */
+                        CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, xsrc), dmc, 64) == RDNA3_OK);
+                        CHECK(cnt[RD3_COH_CNT_KWAIT_FALLBACK] == 1);
+                        sd.fence_sys_cpu = (volatile uint32_t *)(S.sysmem + 0x30000 + 0x80);
+                    }
                     dev.coh = 0;
+                    dev.coh_count = NULL;
                     sd.fence_sys_mc = 0;
                     sd.fence_sys_cpu = NULL;
                     gmc11_gart_unmap(&dev, &gmc, fo, 1);
@@ -11549,7 +11567,10 @@ static void run(const char *fwdir)
                     CHECK(S.cp_rel_addr[b] == vwb && S.cp_rel_ev[b] == ev &&
                           S.cp_rel_sel[b] == ((1u << 29) | (gr.fence_irq ? 2u << 24 : 0)));
                     CHECK(*gr.fence_sys_cpu == seq && gfx11_fence_sys_read(&gr) == seq && gfx11_fence_read(&dev, &gr) == seq);
-                    /* fence_inv + pipe_sync + hdp_end */
+                    /* fence_inv + pipe_sync + hdp_end, and what each emitted */
+                    uint64_t cnt[RD3_COH_NCNT];
+                    memset(cnt, 0, sizeof(cnt));
+                    dev.coh_count = cnt;
                     dev.coh = RD3_COH_FENCE_INV | RD3_COH_PIPE_SYNC | RD3_COH_HDP_END;
                     rel0 = S.cp_rel_n; polls0 = S.cp_mem_polls; hdp0 = S.hdp_engine_flushes;
                     seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
@@ -11558,6 +11579,12 @@ static void run(const char *fwdir)
                     CHECK(S.cp_rel_n == rel0 + 2 && S.cp_rel_ev[a] == (ev | inv) && S.cp_rel_ev[b] == (ev | inv));
                     CHECK(S.cp_mem_polls == polls0 + 1 && S.hdp_engine_flushes == hdp0 + 2 && S.cp_wait_stuck == 0);
                     CHECK(gfx11_release_mem_event(&dev) == (ev | inv));
+                    CHECK(cnt[1] == 1 && cnt[2] == 1 && cnt[5] == 1 && cnt[0] == 0 && cnt[7] == 0);
+                    /* a forced completion (a reset) writes the copy too */
+                    gr.fence_seq += 3;
+                    gfx11_force_fence_completion(&dev, &gr);
+                    CHECK(*gr.fence_sys_cpu == gr.fence_seq && gfx11_fence_read(&dev, &gr) == gr.fence_seq &&
+                          cnt[RD3_COH_CNT_FORCED] == 1);
                     /* a user fence gets the invalidations too */
                     {
                         rdna3_gfx_job_ext x;
@@ -11571,6 +11598,7 @@ static void run(const char *fwdir)
                     }
                     /* switches off, no copy: one RELEASE_MEM, the stream as before N54 */
                     dev.coh = 0;
+                    dev.coh_count = NULL;
                     gr.fence_sys_mc = 0;
                     gr.fence_sys_cpu = NULL;
                     rel0 = S.cp_rel_n; polls0 = S.cp_mem_polls; hdp0 = S.hdp_engine_flushes;

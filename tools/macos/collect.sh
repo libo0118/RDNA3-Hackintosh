@@ -270,6 +270,54 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         cp "$f" "$dir/36-stream-$(basename "$f")" && echo "stream: $(wc -c < "$f") bytes in 36-stream-$(basename "$f")"
     done
 } > "$dir/36-frame-trace.txt" 2>&1
+# card run 2026-10-17d: the display bisect (rdna3vm step bisect, autoreport.sh
+# bisect_run): per step the switches set and read back, the owner's answer, the
+# looks' pipe lines and the counters; tools/triage_reports.py prints the table.
+# autoreport.sh removes the folder at the start of every other run, so an old
+# one is never packed
+if [ -s "$HOME/rdna3-bisect/bisect.txt" ]; then
+    cp "$HOME/rdna3-bisect/bisect.txt" "$dir/39-bisect.txt" 2>/dev/null
+fi
+# DRIVER-PLAN N50: the A/B ladder (rdna3vm step ladder, autoreport.sh ladder_run): ladder.txt (one block per rung: the switches it ran with,
+# the looks, the owner's answer, the rung's log file) and each rung's plugin log slice; tools/triage_reports.py prints one row per rung
+if [ -s "$HOME/rdna3-ladder/ladder.txt" ]; then
+    cp "$HOME/rdna3-ladder/ladder.txt" "$dir/41-ladder.txt" 2>/dev/null
+    for _lf in "$HOME"/rdna3-ladder/*.log; do
+        [ -f "$_lf" ] && cp "$_lf" "$dir/41-ladder-$(basename "$_lf")" 2>/dev/null
+    done
+fi
+# N1: which processes the Metal plugin served and why. The list, the
+# boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
+# every process that loaded it: "allow mode: <mode>; <process>: <reason>"
+{
+    echo "== /Library/GPUBundles/rdna3mtl-allow.txt"
+    cat /Library/GPUBundles/rdna3mtl-allow.txt 2>&1 || echo "(not readable)"
+    echo "== boot-args"; nvram boot-args 2>&1
+    echo "== the plugin's decision per process (24-log-coredisplay.txt, 26-log-metal-plugin.txt)"
+    grep -h 'allow mode' "$dir/24-log-coredisplay.txt" "$dir/26-log-metal-plugin.txt" 2>/dev/null \
+        | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -200
+} > "$dir/34-metal-allow.txt" 2>&1
+# N50: the plugin's conf file as the plugin reads it (the A/B profile of a run is in it: NVMTL_RADV_DEBUG, NVMTL_PARANOID, ...); the plugin also logs
+# `conf: set ...` and `vk: ab switches` per process, this is the file itself
+{
+    echo "== /Library/GPUBundles/rdna3mtl/rdna3mtl.conf"
+    cat /Library/GPUBundles/rdna3mtl/rdna3mtl.conf 2>&1 || echo "(no conf file: the defaults)"
+} > "$dir/34-metal-conf.txt" 2>&1
+# which source the Metal plugin and RADV in this machine were built from
+# (build_metal.sh / build_radv.sh write the stamps; tools/triage_reports.py
+# compares them with the checkout: STALE PLUGIN/RADV). The kext was current
+# but the plugin and RADV were not on card run 2026-10-15.
+{
+    for st in "plugin /Library/GPUBundles/rdna3mtl/metal.stamp" "radv /Library/Application Support/RDNA3VM/bin/radv.stamp"; do
+        name=${st%% *}; file=${st#* }
+        echo "== $name ($file)"
+        if [ -r "$file" ]; then cat "$file"
+        else echo "no stamp (built before stamps existed, or installed from a CI artifact)"; fi
+    done
+} > "$dir/35-build-stamps.txt" 2>&1
+[ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
+    run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
+# (38 and 42 come after the sudo log above: both read 20-log-rdna3-sudo.txt too; ECC round 1 of N54)
 # card run 2026-10-17c: who holds the CPU-visible VRAM (the heap WindowServer's
 # framebuffers and the GEM BOs share): the core's per-owner report and the
 # kernel's refusal / summary lines; tools/triage_reports.py "VISIBLE VRAM"
@@ -323,53 +371,6 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         rm -f "$dir/.42.tmp"
     done
 } > "$dir/42-coherence.txt" 2>/dev/null
-# card run 2026-10-17d: the display bisect (rdna3vm step bisect, autoreport.sh
-# bisect_run): per step the switches set and read back, the owner's answer, the
-# looks' pipe lines and the counters; tools/triage_reports.py prints the table.
-# autoreport.sh removes the folder at the start of every other run, so an old
-# one is never packed
-if [ -s "$HOME/rdna3-bisect/bisect.txt" ]; then
-    cp "$HOME/rdna3-bisect/bisect.txt" "$dir/39-bisect.txt" 2>/dev/null
-fi
-# DRIVER-PLAN N50: the A/B ladder (rdna3vm step ladder, autoreport.sh ladder_run): ladder.txt (one block per rung: the switches it ran with,
-# the looks, the owner's answer, the rung's log file) and each rung's plugin log slice; tools/triage_reports.py prints one row per rung
-if [ -s "$HOME/rdna3-ladder/ladder.txt" ]; then
-    cp "$HOME/rdna3-ladder/ladder.txt" "$dir/41-ladder.txt" 2>/dev/null
-    for _lf in "$HOME"/rdna3-ladder/*.log; do
-        [ -f "$_lf" ] && cp "$_lf" "$dir/41-ladder-$(basename "$_lf")" 2>/dev/null
-    done
-fi
-# N1: which processes the Metal plugin served and why. The list, the
-# boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
-# every process that loaded it: "allow mode: <mode>; <process>: <reason>"
-{
-    echo "== /Library/GPUBundles/rdna3mtl-allow.txt"
-    cat /Library/GPUBundles/rdna3mtl-allow.txt 2>&1 || echo "(not readable)"
-    echo "== boot-args"; nvram boot-args 2>&1
-    echo "== the plugin's decision per process (24-log-coredisplay.txt, 26-log-metal-plugin.txt)"
-    grep -h 'allow mode' "$dir/24-log-coredisplay.txt" "$dir/26-log-metal-plugin.txt" 2>/dev/null \
-        | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -200
-} > "$dir/34-metal-allow.txt" 2>&1
-# N50: the plugin's conf file as the plugin reads it (the A/B profile of a run is in it: NVMTL_RADV_DEBUG, NVMTL_PARANOID, ...); the plugin also logs
-# `conf: set ...` and `vk: ab switches` per process, this is the file itself
-{
-    echo "== /Library/GPUBundles/rdna3mtl/rdna3mtl.conf"
-    cat /Library/GPUBundles/rdna3mtl/rdna3mtl.conf 2>&1 || echo "(no conf file: the defaults)"
-} > "$dir/34-metal-conf.txt" 2>&1
-# which source the Metal plugin and RADV in this machine were built from
-# (build_metal.sh / build_radv.sh write the stamps; tools/triage_reports.py
-# compares them with the checkout: STALE PLUGIN/RADV). The kext was current
-# but the plugin and RADV were not on card run 2026-10-15.
-{
-    for st in "plugin /Library/GPUBundles/rdna3mtl/metal.stamp" "radv /Library/Application Support/RDNA3VM/bin/radv.stamp"; do
-        name=${st%% *}; file=${st#* }
-        echo "== $name ($file)"
-        if [ -r "$file" ]; then cat "$file"
-        else echo "no stamp (built before stamps existed, or installed from a CI artifact)"; fi
-    done
-} > "$dir/35-build-stamps.txt" 2>&1
-[ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
-    run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 
 # the discovery blob, decoded when the host tools are built
 if [ -x "$root/tools/macos/ioreg_discovery.sh" ]; then

@@ -93,17 +93,32 @@ def coh_rows(cohtxt, log):
         rows.append(("WARN", "fence copy", "no self-test result in debug.rdna3_coh (%s)" % c.get("selftest", "missing")))
     else:
         bad = [r for r, v in st.items() if v == -1]
+        hung = [r for r, v in st.items() if v == -4]
         nog = [r for r, v in st.items() if v == -2]
+        other = [r for r, v in st.items() if v not in (1, -1, -2, -4)]
         ok = [r for r, v in st.items() if v == 1]
         if bad:
             rows.append(("FAIL", "fence copy", "the system-memory copy of the %s fence did NOT land in its self-test: "
                          "those rings keep the VRAM fence only (kernel log 'coherence: ... did NOT land')" % "/".join(bad)))
-        elif nog:
-            rows.append(("WARN", "fence copy", "no system page / GART for the fence copy (%s): nothing measured" % "/".join(nog)))
-        else:
-            rows.append(("PASS", "fence copy", "the fences of %s also land in system memory (self-test ok); the CPU "
-                         "trusted the %s copy" % ("/".join(ok) or "no ring",
-                                                  "SYSTEM" if flags & 1 else "VRAM")))
+        if hung:
+            rows.append(("WARN", "fence copy", "the %s ring did not run its self-test fence at all (-4): no copy there" % "/".join(hung)))
+        if nog:
+            rows.append(("WARN", "fence copy", "no system page / GART slot for the fence copy (-2) on %s: nothing measured there" % "/".join(nog)))
+        if other:
+            rows.append(("WARN", "fence copy", "no self-test on %s (%s: 0 = never set up, -3 = the ring was not up): no copy there" % (
+                "/".join(other), ", ".join("%s %d" % (r, st[r]) for r in other))))
+        if len(ok) == 3 and c.get("checks", 0) > 0:
+            rows.append(("PASS", "fence copy", "the fences of gfx/comp/sdma also land in system memory (self-test ok, %d checks "
+                         "read the copy); fence_sys at the END of the run: %s" % (c["checks"], "on" if flags & 1 else "off")))
+        elif len(ok) == 3:
+            rows.append(("WARN", "fence copy", "the copies passed their self-test but no fence check read them (no job?)"))
+    # what the switches did over the run (the ladder judges rungs by these deltas)
+    work = ["%s %d" % (b, c["work_" + b]) for b in COH_BITS if isinstance(c.get("work_" + b), int) and c["work_" + b] > 0]
+    if work or c.get("kwait_sys", 0) or c.get("kwait_fallback", 0) or c.get("forced", 0):
+        rows.append(("WARN" if c.get("kwait_fallback", 0) else "INFO", "coherence work",
+                     "%s; kernel waits held by the copy %s, gave up on it %s (WARN: a copy that did not land in time), forced "
+                     "completions %s" % (", ".join(work) or "no switch did work", c.get("kwait_sys", 0),
+                                         c.get("kwait_fallback", 0), c.get("forced", 0))))
 
     checks = c.get("checks", 0)
     skews = c.get("skews", 0)
@@ -146,15 +161,21 @@ LADDER_COH_RUNGS = ("baseline", "coh-all", "fence-sys", "pipe-sync", "wait-idle"
 LADDER_COH_SWITCH = {"coh-all": "debug.rdna3_coh_all", "fence-sys": "debug.rdna3_coh_fence_sys", "pipe-sync": "debug.rdna3_coh_pipe_sync",
                      "wait-idle": "debug.rdna3_coh_wait_idle", "uc": "debug.rdna3_coh_uc", "fence-inv": "debug.rdna3_coh_fence_inv",
                      "sdma-gcr": "debug.rdna3_coh_sdma_gcr", "vm-flush": "debug.rdna3_coh_vm_flush", "hdp-end": "debug.rdna3_coh_hdp_end"}
+# the flags each rung must START with (anything else: a switch leaked from an earlier rung or set by the boot-arg rdna3coh)
+LADDER_COH_FLAGS = dict([("baseline", 0), ("coh-all", (1 << len(COH_BITS)) - 1)] +
+                        [(r, 1 << COH_BITS.index(LADDER_COH_SWITCH[r][len("debug.rdna3_coh_"):])) for r in LADDER_COH_RUNGS[2:]])
+# the work counter (debug.rdna3_coh work_<name>) that says the rung's switch DID something; coh-all needs the ring-level ones
+LADDER_COH_WORK = {r: ("work_" + LADDER_COH_SWITCH[r][len("debug.rdna3_coh_"):],) for r in LADDER_COH_RUNGS[2:]}
+LADDER_COH_WORK["coh-all"] = ("work_fence_sys", "work_fence_inv", "work_pipe_sync", "work_hdp_end")
 
 
 def coh_ladder_switches(ladder_txt):
-    """{rung: {"set": [(name, value, readback)], "failed": [line], "coh_end": counters}} from ladder.txt's sysctl lines"""
+    """{rung: {"set": [(name, value, readback)], "failed": [line], "putback": [line], "coh_start": counters, "coh_end": counters}}"""
     out, cur = {}, None
     for line in (ladder_txt or "").splitlines():
         m = re.match(r"^== rung (\S+?)(?::.*)?$", line)
         if m:
-            cur = out.setdefault(m.group(1), {"set": [], "failed": [], "coh_start": {}, "coh_end": {}})
+            cur = out.setdefault(m.group(1), {"set": [], "failed": [], "putback": [], "coh_start": None, "coh_end": None})
             continue
         if line.startswith("== end rung"):
             cur = None
@@ -165,19 +186,30 @@ def coh_ladder_switches(ladder_txt):
         if m:
             cur["set"].append((m.group(1), m.group(2), m.group(4)))
             continue
-        if (line.startswith("failed: sysctl") or line.startswith("WARN: sysctl")) and "put back" not in line:
+        if line.startswith("WARN: sysctl") and ("NOT restored" in line or "put back" in line):
+            cur["putback"].append(line[:200])
+            continue
+        if line.startswith("failed: sysctl") or line.startswith("WARN: sysctl"):
             cur["failed"].append(line[:200])
             continue
-        if line.startswith("coh_start: "):
-            cur["coh_start"] = coh_counters("debug.rdna3_coh: " + line[len("coh_start: "):])
-        if line.startswith("coh_end: "):
-            cur["coh_end"] = coh_counters("debug.rdna3_coh: " + line[len("coh_end: "):])
+        for k in ("coh_start", "coh_end"):
+            if line.startswith(k + ": "):
+                cur[k] = coh_counters("debug.rdna3_coh: " + line[len(k) + 2:])
     return out
 
 
+def _delta(s, key):
+    """the counter's growth over the rung, or None when either end is missing"""
+    a, b = s.get("coh_start") or {}, s.get("coh_end") or {}
+    if isinstance(a.get(key), int) and isinstance(b.get(key), int):
+        return b[key] - a[key]
+    return None
+
+
 def coh_ladder_rows(ladder_txt, rungs, problems=(), glyphs=None):
-    """the rows of a variant-4 ladder: per rung whether its switch was on (set, read back, jobs ran under it), the automatic glyph verdict and the
-    owner's answer; then the conclusion (the first single switch whose text is clean while the baseline's is broken)."""
+    """the rows of a variant-4 ladder: per rung whether its switch was on, ALONE (the flags at its start), and did work (the delta of its work
+    counter), the automatic glyph verdict and the owner's answer; then the conclusion (a single switch whose text is clean while the baseline's
+    is broken). A rung whose state was not recorded, whose flags were wrong or whose switch did nothing is NOT engaged and never names a cure."""
     rows = []
     glyphs = glyphs or {}
     sw = coh_ladder_switches(ladder_txt)
@@ -189,41 +221,72 @@ def coh_ladder_rows(ladder_txt, rungs, problems=(), glyphs=None):
         if not r:
             rows.append(("WARN", "ladder-coh " + name, "did not run (cut short, or an older autoreport.sh)"))
             continue
-        s = sw.get(name, {"set": [], "failed": [], "coh_end": {}})
+        s = sw.get(name, {"set": [], "failed": [], "putback": [], "coh_start": None, "coh_end": None})
+        for pb in s["putback"]:
+            rows.append(("WARN", "ladder-coh put-back", "%s: %s" % (name, pb)))
+        engaged, why = True, []
+        start = s.get("coh_start")
+        flags = start.get("flags") if start else None
+        if not start or not isinstance(flags, int):
+            engaged = False
+            why.append("NO debug.rdna3_coh at the rung's start (coh_start missing or unreadable): not engaged")
+        elif flags != LADDER_COH_FLAGS[name]:
+            engaged = False
+            why.append("CONTAMINATED: the rung started with flags 0x%x, it must be 0x%x%s" % (
+                flags, LADDER_COH_FLAGS[name], " (the boot-arg rdna3coh, or a switch an earlier rung did not put back)"
+                if name == "baseline" else ""))
         want = LADDER_COH_SWITCH.get(name)
-        engaged, why = True, ""
         if want:
             hit = [x for x in s["set"] if x[0] == want]
             if not hit or hit[0][2] != hit[0][1]:
-                engaged, why = False, "the switch was NOT on (%s)" % ("; ".join(s["failed"]) or "no sysctl line for " + want)
+                engaged = False
+                why.append("the switch was NOT on (%s)" % ("; ".join(s["failed"]) or "no sysctl line for " + want))
+            if not s.get("coh_end"):
+                engaged = False
+                why.append("NO debug.rdna3_coh at the rung's end: its work is unknown, not engaged")
             else:
-                bit = want[len("debug.rdna3_coh_"):]
-                key = "jobs_" + bit if bit != "all" else "jobs"
-                e_, b_ = s["coh_end"].get(key), (s.get("coh_start") or {}).get(key, 0)
-                jobs = e_ - b_ if isinstance(e_, int) and isinstance(b_, int) else None   # the counters run for the whole boot: this rung's share
-                why = "%s=1, %s job(s) ran under it" % (want, jobs if jobs is not None else "?")
-                if jobs == 0:
-                    engaged, why = False, why + ": no job, the rung proves nothing"
+                deltas = [(k, _delta(s, k)) for k in LADDER_COH_WORK[name]]
+                if any(d is None for _, d in deltas):
+                    engaged = False
+                    why.append("the work counter(s) %s are missing from the dump: not engaged" % ", ".join(k for k, d in deltas if d is None))
+                elif any(d <= 0 for _, d in deltas):
+                    engaged = False
+                    why.append("the switch did NOTHING in this rung (%s): not engaged" % ", ".join("%s +%d" % (k, d) for k, d in deltas))
+                else:
+                    why.append("on, did work: " + ", ".join("%s +%d" % (k, d) for k, d in deltas))
+            if name == "fence-sys" and s.get("coh_end"):
+                st = _selftest(s["coh_end"])
+                if st and any(v != 1 for v in st.values()):
+                    engaged = False
+                    why.append("the fence copy is not up on every ring (self-test %s)" % s["coh_end"].get("selftest"))
+                if (_delta(s, "stale") or 0) > 0:
+                    engaged = False
+                    why.append("the copy went STALE during the rung")
+        elif engaged:
+            why.append("nothing set, flags 0 (the default)")
         g = glyphs.get(name) or {}
         gv = g.get("verdict", "none")
         verdict[name] = (gv, engaged)
         ans = {"y": "the owner said RIGHT", "n": "the owner said WRONG"}.get(r.get("verdict"), "no answer")
         lv = "WARN" if (not engaged or r.get("cut")) else "INFO"
         rows.append((lv, "ladder-coh " + name, "%s; glyphs: %s%s; %s%s" % (
-            why or "nothing set (the default)", gv, (" (" + g.get("text", "")[:160] + ")") if g.get("text") else "", ans,
+            "; ".join(why), gv, (" (" + g.get("text", "")[:160] + ")") if g.get("text") else "", ans,
             "; CUT SHORT" if r.get("cut") else "")))
-    base = verdict.get("baseline", ("none", True))[0]
+    base = verdict.get("baseline", ("none", False))
     cured = [n for n in LADDER_COH_RUNGS[2:] if verdict.get(n, ("none", False)) == ("clean", True)]
     allv = verdict.get("coh-all", ("none", False))
-    if base == "broken" and cured:
+    if not base[1]:
+        rows.append(("WARN", "ladder-coh verdict", "no conclusion: the baseline rung is not a clean default (see its row)"))
+    elif base[0] == "broken" and cured:
         rows.append(("FAIL", "ladder-coh verdict", "the baseline's text is broken and CLEAN with %s: that kernel rule is the cause "
                      "(docs/DRIVER-PLAN.md N54: make it the default after a confirming run)" % ", ".join(cured)))
-    elif base == "broken" and allv == ("clean", True):
+    elif base[0] == "broken" and allv == ("clean", True):
         rows.append(("FAIL", "ladder-coh verdict", "clean only with EVERY switch on (coh-all), with none alone: two rules together; "
                      "bisect the mask (debug.rdna3_coh_mask)"))
-    elif base == "broken" and allv[0] == "broken" and allv[1]:
+    elif base[0] == "broken" and allv[0] == "broken" and allv[1]:
         rows.append(("WARN", "ladder-coh verdict", "broken even with every kernel coherence switch on (coh-all): the kernel's "
                      "ordering and caches are NOT the cause (look at the translator / the plugin)"))
     else:
-        rows.append(("INFO", "ladder-coh verdict", "no automatic conclusion (baseline %s, coh-all %s): read the rows and the looks" % (base, allv[0])))
+        rows.append(("INFO", "ladder-coh verdict", "no automatic conclusion (baseline %s, coh-all %s%s): read the rows and the looks" % (
+            base[0], allv[0], "" if allv[1] else " not engaged")))
     return rows

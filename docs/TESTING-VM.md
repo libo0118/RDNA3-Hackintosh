@@ -668,6 +668,7 @@ DRIVER-PLAN N50 (broken glyphs in Terminal / Maps, tile-shaped blocks in Chess; 
 rdna3vm step ladder       # the app rungs: about 26 minutes
 rdna3vm step ladder-ws    # and the two WindowServer rungs: about 45 minutes, you log in after each restart
 rdna3vm step ladder-glyphs     # the glyph hunt: 13 rungs, about 25 minutes (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...)
+rdna3vm step ladder-coh        # the kernel coherence switches (DRIVER-PLAN N54): 10 rungs, about 17 minutes (baseline, all, then one sysctl debug.rdna3_coh_<name> each; docs/AFTER-TESTS.md "Kernel coherence switches")
 ```
 
 The step is the `play` profile (the desktop on the Metal plugin) with `rdna3ladder=1` / `2` instead of `rdna3play=1`; no other test runs. Per rung

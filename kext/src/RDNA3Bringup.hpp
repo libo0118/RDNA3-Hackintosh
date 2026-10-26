@@ -119,6 +119,10 @@ public:
     int   fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs,
                     bool *capHit = nullptr);
     int   recoverHang(uint32_t ip, uint32_t ring, uint64_t seq) { return recover(ip, ring, seq); }
+    /* DRIVER-PLAN N54 wait_idle: the CS ioctl takes the wait submit left
+     * (under fDrmLock) and runs it with the lock dropped */
+    bool  cohTakeWait(uint32_t *ip, uint32_t *ring, uint64_t *seq);
+    void  cohWaitIdle(uint32_t ip, uint32_t ring, uint64_t seq);
     /* DRIVER-PLAN N49: the kernel rings' busy time and the GPU time per
      * process (common/rdna3_gpu_busy.h, amdgpu_ctx_fence_time's model) for
      * Activity Monitor. busyTake: the fences read, stale jobs flushed, the
@@ -262,15 +266,18 @@ private:
     bool                      fCohMapped = false;
     IOSimpleLock             *fCohLock = nullptr;
     rd3_coh_ring_state        fCohRing[3] = {};
+    /* wait_idle's pending wait: set by submit, taken by the DRM ioctl
+     * before it drops the lock (both under fDrmLock) */
+    struct { uint64_t seq; uint32_t ip, ring; bool pending; } fCohWait = {};
     void     cohInit();
     void     cohSetup();
     void     cohFree();
     uint64_t cohGartOff() const;
-    bool     cohSelftest(uint32_t idx);
+    int      cohSelftest(uint32_t idx);
+    void     cohRingsForced();
     int      cohFence(uint32_t idx, uint32_t vram, bool have, uint32_t sys, uint32_t seq);
     bool     cohSkewOpen(uint32_t ip, uint32_t ring) const;
     void     cohSync(bool kcopy);
-    void     cohWaitIdle(uint32_t ip, uint32_t ring, uint64_t seq);
     uint64_t cohPte(uint64_t pte, const rdna3_bo *bo);
     void     cohVmFlushForced();
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */

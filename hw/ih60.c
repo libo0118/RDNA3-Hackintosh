@@ -194,7 +194,7 @@ static uint32_t get_wptr(rdna3_dev *d, rdna3_ih *ih)
 {
     uint32_t wptr, tmp;
 
-    rdna3_vram_read(d, ih->wptr_wb, &wptr, 4);
+    wptr = rdna3_vram_read32(d, ih->wptr_wb);   /* one 32-bit load (N54) */
     if (!REG_GET_FIELD(wptr, IH_RB_WPTR, RB_OVERFLOW))
         return wptr & ih->ptr_mask;
     wptr = ROSS(d, regIH_RB_WPTR);

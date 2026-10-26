@@ -1157,17 +1157,31 @@ ladder_sysctl_set() {   # ladder_sysctl_set "<switches>": each sysctl:NAME=VALUE
         ladder_w "sysctl: $_ln=$_lv2 (was $_lo, read back $_lb)"
         [ "$_lb" = "$_lv2" ] || ladder_w "WARN: sysctl $_ln reads $_lb after it was set to $_lv2: the switch is NOT on"
     done
-    [ -z "$_LADDER_SYSCTL_UNDO" ] || ladder_w "coh_start: $(sysctl -n debug.rdna3_coh 2>/dev/null | cut -c1-1200)"
     return 0
 }
-ladder_sysctl_undo() {   # the values ladder_sysctl_set found, back (newest first is not needed: one switch per name)
+ladder_coh_state() {   # ladder_coh_state start|end: debug.rdna3_coh as the rung starts / ends (every variant-4 rung, the baseline too: the triage checks the flags)
+    _lcs=$(sysctl -n debug.rdna3_coh 2>/dev/null | cut -c1-1500)
+    ladder_w "coh_$1: ${_lcs:-(no debug.rdna3_coh: a core older than DRIVER-PLAN N54)}"
+}
+ladder_sysctl_undo() {   # the values ladder_sysctl_set found, back and read back; one that does not stick is retried and kept in the list (a WARN each time)
     [ -n "${_LADDER_SYSCTL_UNDO:-}" ] || return 0
-    [ -n "${LF:-}" ] && ladder_w "coh_end: $(sysctl -n debug.rdna3_coh 2>/dev/null | cut -c1-1200)"
+    _lkeep=
     for _lu in $_LADDER_SYSCTL_UNDO; do
-        sysctl -w "$_lu" >/dev/null 2>&1 || { [ -n "${LF:-}" ] && ladder_w "WARN: sysctl $_lu could NOT be put back"; }
-        [ -n "${LF:-}" ] && ladder_w "sysctl: restored $_lu"
+        _lun=${_lu%%=*}; _luv=${_lu#*=}; _lgot=
+        for _ltry in 1 2 3; do
+            sysctl -w "$_lu" >/dev/null 2>&1
+            _lgot=$(sysctl -n "$_lun" 2>/dev/null)
+            [ "$_lgot" = "$_luv" ] && break
+            sleep 1
+        done
+        if [ "$_lgot" = "$_luv" ]; then
+            [ -n "${LF:-}" ] && ladder_w "sysctl: restored $_lu"
+        else
+            [ -n "${LF:-}" ] && ladder_w "WARN: sysctl $_lun NOT restored (is ${_lgot:-unreadable}, wanted $_luv): the rungs after this one run with it"
+            _lkeep="$_lkeep $_lu"
+        fi
     done
-    _LADDER_SYSCTL_UNDO=
+    _LADDER_SYSCTL_UNDO=$_lkeep
     return 0
 }
 ladder_w() { printf '%s\n' "$*" >> "$LF"; }
@@ -1317,6 +1331,7 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
         _rargs=$(ladder_env_args "$_renv")
         ladder_w "env: ${_rargs:-(nothing)}"
         ladder_sysctl_set "$_renv"   # DRIVER-PLAN N54: the kernel's switches of the rung (variant 4)
+        [ "${_LADDER_V:-1}" = 4 ] && ladder_coh_state start
     fi
     _rt0=$(date +%s)
     ladder_w "started: $(date +%T)"
@@ -1361,6 +1376,7 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     _LADDER_PIDS=
     sleep "${LADDER_AFTERQUIT:-2}"
     ladder_log_slice "$_rn" "$_rt0" "$_tp$_cp$_lwp"
+    [ "${_LADDER_V:-1}" = 4 ] && ladder_coh_state end
     ladder_sysctl_undo
     ladder_w "== end rung $_rn"
     ladder_push

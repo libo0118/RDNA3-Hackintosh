@@ -63,6 +63,29 @@
 #define RD3_COH_ALL        ((1u << RD3_COH_NBITS) - 1u)
 #define RD3_COH_DEFAULT    0u
 
+/* ---- the work each switch did (ECC round 1 of N54: a rung counts as
+ * engaged only from these, never from the jobs that merely ran while the
+ * bit was set). Index = the switch's bit: fence_sys the CPU answers taken
+ * from the system copy, fence_inv the fences emitted with the
+ * invalidations, pipe_sync the pipeline syncs emitted, wait_idle the CS
+ * ioctls that really waited, uc the mappings made UC by the switch, hdp_end
+ * the HDP flushes emitted after IBs, vm_flush the forced VM flushes of
+ * jobs that were submitted, sdma_gcr the kernel copies wrapped in GCR. Then
+ * the kernel's own waits (gfx11_wait_fence, sdma60_wait_fence_us) the
+ * system copy held back with fence_sys, the waits that gave up on the copy
+ * and took the VRAM fence, and the forced fence completions (resets). The
+ * OS layer owns the array (rdna3_dev.coh_count, NULL = not counted). */
+#define RD3_COH_CNT_KWAIT_SYS      (RD3_COH_NBITS + 0u)
+#define RD3_COH_CNT_KWAIT_FALLBACK (RD3_COH_NBITS + 1u)
+#define RD3_COH_CNT_FORCED         (RD3_COH_NBITS + 2u)
+#define RD3_COH_NCNT               (RD3_COH_NBITS + 3u)
+
+static inline void rd3_coh_count(uint64_t *c, uint32_t i)
+{
+    if (c && i < RD3_COH_NCNT)
+        c[i]++;
+}
+
 /* the sysctl leaf of each bit: debug.rdna3_coh_<name> */
 static inline const char *rd3_coh_name(uint32_t bit)
 {
