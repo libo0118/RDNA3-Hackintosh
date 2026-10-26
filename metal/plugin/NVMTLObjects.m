@@ -3111,6 +3111,154 @@ static void nvmtl_sample_counter(NVMTLCommandBuffer *cb, id sb, NSUInteger i, id
 }
 
 unsigned nvmtl_apps1_resolve_miss, nvmtl_apps1_resolve_extra, nvmtl_apps1_ds_resolve_miss;
+/* DRIVER-PLAN N55: NVMTL_CAPTURE_DRAW (nvmtl_capture.h). Off by default; never changes what is drawn. A captured draw keeps its pipeline's
+ * SPIR-V / AIR / constants, the draw, and the bytes of every bound buffer as the CPU had them at the draw and as the CPU and the GPU had
+ * them once the command buffer completed, in one file per draw under /var/tmp/rdna3-nvmtl; tools/capture_decode.py reads it. */
+#include "nvmtl_capture.h"
+#include <sys/stat.h>
+#include <stdarg.h>
+#define NVMTL_CAP_DIR "/var/tmp/rdna3-nvmtl"   /* nvmtl_trace.h NVT_SHARED_DIR: the trace directory the collector reads */
+static nvmtl_cap_spec g_cap;
+static _Atomic uint64_t g_cap_ord;
+static _Atomic unsigned g_cap_taken, g_cap_written, g_cap_failed;
+static _Atomic unsigned long long g_cap_bytes;
+static int nvmtl_capture_on(void)
+{
+    static int on = -1; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NVMTL_CAPTURE_DRAW"); char why[96] = "";
+        if (!e) { on = 0; return; }
+        if (nvmtl_cap_parse(e, &g_cap, why, sizeof why)) { on = 0; nvlog_uncapped("capture: NVMTL_CAPTURE_DRAW=\"%.120s\" is MALFORMED (%s) - nothing is captured; the form is <shader>:<first>[:<count>[:<every>]][@<process>]", e, why); return; }
+        on = nvmtl_cap_proc_match(&g_cap, getprogname());
+        nvlog_uncapped("capture: NVMTL_CAPTURE_DRAW=\"%.120s\" - %s: draws whose vertex or fragment function contains \"%s\", ordinals %u, %u+%u ... (%u draw(s)), "
+                       "one file each in " NVMTL_CAP_DIR "/capture-%s-%d-<k>.bin when the command buffer completes (at most %u MiB per draw, %u MiB per process)",
+                       e, on ? "ON in this process" : "OFF in this process (another process is named)", g_cap.shader, g_cap.first, g_cap.first, g_cap.every, g_cap.count,
+                       getprogname() ?: "?", (int)getpid(), NVMTL_CAP_DRAW_BYTES >> 20, NVMTL_CAP_PROC_BYTES >> 20);
+    });
+    return on;
+}
+static void nvmtl_cap_meta(NSMutableString *m, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void nvmtl_cap_meta(NSMutableString *m, const char *fmt, ...) {
+    char b[1024]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a); [m appendFormat:@"%s\n", b]; }
+static void nvmtl_cap_function(nvmtl_capbuf *cb, NSMutableString *m, const char *stage, id fobj, BOOL withAir)
+{
+    if (!fobj || ![fobj isKindOfClass:[NVMTLFunction class]]) { nvmtl_cap_meta(m, "%s_function=none", stage); return; }
+    NVMTLFunction *f = fobj; char nm[32];
+    nvmtl_cap_meta(m, "%s_function=%s spirv_bytes=%lu air_bytes=%lu constants=%lu", stage, f->_fname.UTF8String ?: "?", (unsigned long)f->_spirv.length,
+                   (unsigned long)[f->_air lengthOfBytesUsingEncoding:NSUTF8StringEncoding], (unsigned long)f->_fc.count);
+    snprintf(nm, sizeof nm, "%s.spv", stage); if (f->_spirv.length) nvmtl_cap_rec(cb, "SPV ", nm, f->_spirv.bytes, f->_spirv.length);
+    if (f->_fc.count) {   /* the fc cache's own key: {stage, entry, constants} */
+        NSData *j = [NSJSONSerialization dataWithJSONObject:@{ @"stage": f->_stage ?: @"", @"entry": f->_fname ?: @"", @"constants": f->_fc } options:NSJSONWritingSortedKeys error:NULL];
+        snprintf(nm, sizeof nm, "%s.fc.json", stage); if (j) nvmtl_cap_rec(cb, "FC  ", nm, j.bytes, j.length);
+        else nvmtl_cap_meta(m, "%s_constants=NOT SERIALIZABLE", stage);
+    }
+    if (withAir && f->_air) { snprintf(nm, sizeof nm, "%s.ll", stage); nvmtl_cap_text(cb, "AIR ", nm, f->_air.UTF8String); }
+}
+/* one binding: the CPU copy now, and the entry the completion handler reads again (CPU and GPU) */
+static void nvmtl_cap_binding(nvmtl_capbuf *cb, NSMutableString *m, NSMutableArray *later, NSMutableArray *seen, const char *slot, NVMTLBuffer *b, NSUInteger off)
+{
+    if (!b || ![(id)b isKindOfClass:[NVMTLBuffer class]]) { nvmtl_cap_meta(m, "buffer %s: not a plugin buffer", slot); return; }
+    const uint64_t addr = nvmtl_vk_buffer_address(&b->_b);
+    const NSUInteger prior = [seen indexOfObjectIdenticalTo:b];
+    const void *cpu = b->_shadow.map ? b->_shadow.map : (b->_hostPtr ? b->_hostPtr : b->_b.map);
+    size_t lo = 0, hi = 0; const int take = nvmtl_cap_range(b->_b.size, off, NVMTL_CAP_BUF_BYTES, &lo, &hi);
+    nvmtl_cap_meta(m, "buffer %s: off=%lu len=%zu storage=%lu managed_shadow=%d cpu_visible=%d gpu_addr=0x%llx bound_addr=0x%llx label=%s range=%zu..%zu%s",
+                   slot, (unsigned long)off, b->_b.size, (unsigned long)b->_storage, b->_shadow.map != NULL, cpu != NULL, (unsigned long long)addr,
+                   (unsigned long long)(addr + off), b->_label.UTF8String ?: "-", lo, hi,
+                   prior != NSNotFound ? " (same buffer as an earlier binding: bytes kept once, under that name)" : "");
+    if (prior != NSNotFound || !take) return;
+    [seen addObject:b];
+    char nm[64];
+    if (cpu) { snprintf(nm, sizeof nm, "%s.cpu_draw", slot); nvmtl_cap_bytes(cb, nm, lo, (const uint8_t *)cpu + lo, hi - lo); }
+    [later addObject:@[b, @(lo), @(hi), @(slot)]];
+}
+static void nvmtl_cap_finish(nvmtl_capbuf *cbuf, NSArray *later, unsigned k, uint64_t ord, NSString *who)
+{
+    extern nvk_queue *nvmtl_device_queue(void);
+    for (NSArray *e in later) {
+        NVMTLBuffer *b = e[0]; const size_t lo = [e[1] unsignedLongValue], hi = [e[2] unsignedLongValue]; const char *slot = [e[3] UTF8String]; char nm[64];
+        const void *cpu = b->_shadow.map ? b->_shadow.map : (b->_hostPtr ? b->_hostPtr : b->_b.map);
+        if (cpu) { snprintf(nm, sizeof nm, "%s.cpu_done", slot); nvmtl_cap_bytes(cbuf, nm, lo, (const uint8_t *)cpu + lo, hi - lo); }
+        if (cpu && !b->_shadow.map) continue;   /* shared / host memory: the GPU read these very bytes */
+        nvk_buffer st = {0}; snprintf(nm, sizeof nm, "%s.gpu_done", slot);
+        if (nvmtl_vk_buffer_create(hi - lo, 1, &st) || !st.map) { nvmtl_cap_text(cbuf, "ERR ", nm, "staging buffer allocation failed"); if (st.buf) nvmtl_vk_buffer_destroy(&st); continue; }
+        if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, lo, &st, 0, hi - lo)) nvmtl_cap_text(cbuf, "ERR ", nm, "GPU read-back copy failed");
+        else nvmtl_cap_bytes(cbuf, nm, lo, st.map, hi - lo);
+        nvmtl_vk_buffer_destroy(&st);
+    }
+    char path[256]; snprintf(path, sizeof path, NVMTL_CAP_DIR "/capture-%s-%d-%u.bin", getprogname() ?: "unknown", (int)getpid(), k);
+    mkdir(NVMTL_CAP_DIR, 01777);
+    const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0640);
+    size_t done = 0;
+    if (fd >= 0) { while (done < cbuf->n) { const ssize_t w = write(fd, cbuf->p + done, cbuf->n - done); if (w <= 0) break; done += (size_t)w; } close(fd); }
+    if (fd < 0 || done != cbuf->n) {
+        atomic_fetch_add(&g_cap_failed, 1);
+        nvlog_uncapped("capture: draw #%llu (%s) NOT written: %s %s (%zu of %zu bytes)", (unsigned long long)ord, who.UTF8String, path, strerror(errno), done, cbuf->n);
+    } else {
+        atomic_fetch_add(&g_cap_written, 1);
+        nvlog_uncapped("capture: draw #%llu (%s) -> %s: %zu bytes, %u records, %u DROPPED by the byte caps%s [%u of %u written]", (unsigned long long)ord, who.UTF8String,
+                       path, cbuf->n, cbuf->recs, cbuf->dropped, cbuf->oom ? ", OUT OF MEMORY on the way" : "", atomic_load(&g_cap_written), g_cap.count);
+    }
+    nvmtl_cap_free(cbuf); free(cbuf);
+}
+static void nvmtl_capture_draw(NVMTLRenderCommandEncoder *enc, unsigned type, uint64_t start, uint64_t count, uint64_t instances, uint64_t baseInstance,
+                               NVMTLBuffer *ib, NSUInteger ibOff, int idx32, int64_t baseVertex)
+{
+    if (!nvmtl_capture_on() || !enc || !enc->_ps) return;
+    NVMTLRenderPipelineState *ps = enc->_ps;
+    if (!nvmtl_cap_name_match(&g_cap, ps->_vname.UTF8String, ps->_fname.UTF8String)) return;
+    const uint64_t ord = atomic_fetch_add(&g_cap_ord, 1) + 1;
+    const int k = nvmtl_cap_hit(&g_cap, ord);
+    if (k < 0) return;
+    NSString *who = [NSString stringWithFormat:@"%@ / %@", ps->_vname ?: @"-", ps->_fname ?: @"-"];
+    if (atomic_load(&g_cap_bytes) >= NVMTL_CAP_PROC_BYTES) { nvlog_uncapped("capture: draw #%llu (%s) NOT captured - the process's %u MiB are used", (unsigned long long)ord, who.UTF8String, NVMTL_CAP_PROC_BYTES >> 20); return; }
+    nvmtl_capbuf *cbuf = calloc(1, sizeof *cbuf);
+    if (!cbuf || nvmtl_cap_init(cbuf, NVMTL_CAP_DRAW_BYTES)) { free(cbuf); nvlog_uncapped("capture: draw #%llu NOT captured - out of memory", (unsigned long long)ord); return; }
+    atomic_fetch_add(&g_cap_taken, 1);
+    NSMutableString *m = [NSMutableString string]; NSMutableArray *later = [NSMutableArray array], *seen = [NSMutableArray array];
+    nvmtl_cap_meta(m, "process=%s pid=%d capture=%d ordinal=%llu spec=%s:%u:%u:%u@%s", getprogname() ?: "?", (int)getpid(), k, (unsigned long long)ord,
+                   g_cap.shader, g_cap.first, g_cap.count, g_cap.every, g_cap.proc[0] ? g_cap.proc : "*");
+    nvmtl_cap_meta(m, "draw type=%u start=%llu count=%llu instances=%llu base_instance=%llu indexed=%d index_u32=%d index_offset=%lu base_vertex=%lld", type,
+                   (unsigned long long)start, (unsigned long long)count, (unsigned long long)instances, (unsigned long long)baseInstance, ib != nil, idx32,
+                   (unsigned long)ibOff, (long long)baseVertex);
+    nvmtl_cap_meta(m, "pipeline vertex=%s fragment=%s blend=%s vdesc=%s", ps->_vname.UTF8String ?: "-", ps->_fname.UTF8String ?: "-", ps->_blend.UTF8String ?: "-", ps->_vdesc.UTF8String ?: "-");
+    NVMTLTexture *rt = enc->_target; nvk_image *ri = rt ? [rt nvi] : NULL; NVMTLTexture *rr = rt ? (rt->_parent ?: rt) : nil;
+    nvmtl_cap_meta(m, "target %ux%u vkformat=%u bpp=%u samples=%u iosurface=%u pass_format=%u load=%u", ri ? ri->w : 0, ri ? ri->h : 0, ri ? ri->fmt : 0, ri ? ri->bpp : 0,
+                   enc->_passSamples, rr && rr->_surf ? (unsigned)IOSurfaceGetID(rr->_surf) : 0u, enc->_passFmt, enc->_load);
+    if (rr && rr->_surf) nvmtl_cap_meta(m, "target_surface bytes_per_row=%zu width=%zu height=%zu", IOSurfaceGetBytesPerRow(rr->_surf), IOSurfaceGetWidth(rr->_surf), IOSurfaceGetHeight(rr->_surf));
+    nvmtl_cap_meta(m, "viewport set=%d %g %g %g %g %g %g", enc->_hasVP, enc->_vp[0], enc->_vp[1], enc->_vp[2], enc->_vp[3], enc->_vp[4], enc->_vp[5]);
+    nvmtl_cap_meta(m, "scissor set=%d %u %u %u %u", enc->_hasSC, enc->_sc[0], enc->_sc[1], enc->_sc[2], enc->_sc[3]);
+    { char t[1600]; nvmtl_vk_trace_buffers(&enc->_cb->_c, t, sizeof t); nvmtl_cap_meta(m, "address_table%s", t); }   /* set (v/f), slot, address+offset/size as the table gets them */
+    static NSMutableSet *airDone; static os_unfair_lock airLk = OS_UNFAIR_LOCK_INIT;
+    id vf = ps->_linkedVert ?: (id)ps->_descriptor.vertexFunction, ff = ps->_linkedFrag ?: (id)ps->_descriptor.fragmentFunction;
+    BOOL vAir, fAir;
+    os_unfair_lock_lock(&airLk); if (!airDone) airDone = [NSMutableSet new];
+    vAir = ![airDone containsObject:ps->_vname ?: @""]; fAir = ![airDone containsObject:ps->_fname ?: @""];
+    if (ps->_vname) [airDone addObject:ps->_vname]; if (ps->_fname) [airDone addObject:ps->_fname];
+    os_unfair_lock_unlock(&airLk);
+    nvmtl_cap_function(cbuf, m, "vertex", vf, vAir);
+    nvmtl_cap_function(cbuf, m, "fragment", ff, fAir);
+    for (int set = 0; set < 2; set++) {
+        NSDictionary *at = set ? enc->_fbufAt : enc->_vbufAt;
+        for (NSNumber *i in [at.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            NSArray *e = at[i]; char slot[16]; snprintf(slot, sizeof slot, "%c%lu", set ? 'f' : 'v', (unsigned long)i.unsignedLongValue);
+            if ([e isKindOfClass:[NSArray class]] && e.count >= 2) nvmtl_cap_binding(cbuf, m, later, seen, slot, e[0], [e[1] unsignedLongValue]);
+        }
+    }
+    if (ib) nvmtl_cap_binding(cbuf, m, later, seen, "index", ib, ibOff);
+    nvmtl_cap_text(cbuf, "META", "meta.txt", m.UTF8String);
+    atomic_fetch_add(&g_cap_bytes, (unsigned long long)cbuf->n * 3);   /* the completion adds up to two more copies of the buffers */
+    nvlog_uncapped("capture: draw #%llu (%s) taken as capture %d: %zu bytes so far, %lu buffer(s) to read back when the command buffer completes",
+                   (unsigned long long)ord, who.UTF8String, k, cbuf->n, (unsigned long)later.count);
+    for (NSArray *e in later) nvmtl_retain_resource(enc->_cb, e[0]);
+    [enc->_cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        if (done.status == MTLCommandBufferStatusError) {
+            char t[600]; snprintf(t, sizeof t, "command_buffer_error=%s\n", done.error.description.UTF8String ?: "?");
+            nvmtl_cap_text(cbuf, "META", "meta_done.txt", t);
+        }
+        nvmtl_cap_finish(cbuf, later, (unsigned)k, ord, who);
+    }];
+}
 @implementation NVMTLRenderCommandEncoder
 - (NSUInteger)tileWidth { return 0; }
 - (NSUInteger)tileHeight { return 0; }
@@ -3565,6 +3713,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (nvmtl_vk_cmd_set_topology(&_cb->_c, (unsigned)type)) return;
     if ([self nvmtlVertexInputs]) return;
     nvtrace("  direct start %lu count %lu instances %lu", (unsigned long)start, (unsigned long)count, (unsigned long)instances);
+    nvmtl_capture_draw(self, (unsigned)type, start, count, instances, baseInstance, nil, 0, 0, 0);
     nvmtl_vk_cmd_draw(&_cb->_c, (uint32_t)start, (uint32_t)count, (uint32_t)instances, (uint32_t)baseInstance);
 }
 - (int)nvmtlVertexInputs {
@@ -3829,6 +3978,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (nvmtl_vk_cmd_set_topology(&_cb->_c, (unsigned)type)) return;
     if ([self nvmtlVertexInputs]) return;
     nvtrace("  indexed count %lu u32 %d off %lu instances %lu baseVertex %ld", (unsigned long)count, it == MTLIndexTypeUInt32, (unsigned long)off, (unsigned long)instances, (long)baseVertex);
+    nvmtl_capture_draw(self, (unsigned)type, 0, count, instances, baseInstance, b, off, it == MTLIndexTypeUInt32, baseVertex);
     nvmtl_vk_cmd_draw_indexed(&_cb->_c, &b->_b, off, (uint32_t)count, it == MTLIndexTypeUInt32,
                               (uint32_t)instances, (int32_t)baseVertex, (uint32_t)baseInstance);
 }

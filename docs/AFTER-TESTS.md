@@ -1009,6 +1009,22 @@ the VM is enough).
 - The kext cannot be compiled locally (no macOS SDK): kext-side changes are
   verified only by the CI run — read them twice before pushing.
 
+## Plugin draw capture (DRIVER-PLAN N55)
+
+When the owner set `NVMTL_CAPTURE_DRAW=<shader>:<first>[:<count>[:<every>]][@<process>]` (rdna3mtl.conf or the
+environment; e.g. `buffer_image_blit:60:24:11@Terminal`), the report has `33-plugin-capture/capture-*.bin`, one per
+captured draw (`metal/plugin/nvmtl_capture.h`), and the process log the `capture:` lines (switch ON / MALFORMED, each draw
+taken and written, anything DROPPED or NOT written). Decode:
+
+    python3 tools/capture_decode.py rdna3-report-*.tar.gz --out /tmp/cap
+
+Read it as: per buffer, `cpu_draw vs gpu_done` DIFFER over bytes the draw reads (for buffer_image_blit the per-rect lines
+say which glyph read which differing bytes) = the GPU drew from bytes the app did not give it: an upload or coherence
+bug, chase the managed upload / kernel path for that range; `cpu_draw vs cpu_done` changed = the app or the plugin rewrote
+the bytes while the GPU needed them; everything SAME = the inputs were right: replay the draw (SPIR-V, constants, buffers in
+the capture) on the host's RADV and compare with `/tmp/cap/*-cpu_draw.pgm`. No `capture-*.bin` but the switch was set:
+the `capture:` lines say why (MALFORMED, another process named, budget, write failure).
+
 ## Plugin frame trace
 
 Every process that loads the Metal plugin writes a binary trace of what it did
