@@ -119,10 +119,13 @@ BW_POLL=1; BW_REPEAT=1; BW_MAXN=2; BW_MAXSEC=40; BW_N=1
 eval "$SCEN"
 EOF2
 
+# timeout(1) is GNU coreutils: macOS has none, perl's alarm does the same there
+tmo() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else perl -e 'alarm shift; exec @ARGV' "$@"; fi; }
+
 run_scen() {   # run_scen <shell> <name> <scenario body> [bin dir]: a fresh state directory
     local sh=$1 name=$2 body=$3 bin=${4:-$T/bin}
     S=$T/$sh-$name; mkdir -p "$S"; : > "$S/calls"
-    SCEN=$body timeout 120 "$sh" "$T/scen.sh" "$S" "$bin" "$T/block.sh" > "$S/out.txt" 2>&1 ||
+    SCEN=$body tmo 120 "$sh" "$T/scen.sh" "$S" "$bin" "$T/block.sh" > "$S/out.txt" 2>&1 ||
         fail "$sh $name: the scenario failed: $(tail -5 "$S/out.txt")"
 }
 
