@@ -498,6 +498,9 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
             *info = s;
             if (native && s.abi != RD_XNU_SCANOUT_ABI)
                 native = 0;
+            /* nothing to read (a too-big or unreadable surface): no picture-sized allocation for it */
+            if (!s.nrows || s.out_w > RD_XNU_SCANOUT_NATIVE_MAX || s.out_h > RD_XNU_SCANOUT_NATIVE_MAX)
+                return 0;
             if (need > *cap) {
                 uint8_t *n = realloc(*img, need);
                 if (!n) {
@@ -512,7 +515,8 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
         if (!s.nrows || s.out_w != info->out_w || s.out_h != info->out_h || row + s.nrows > s.out_h)
             return row;
         if (native) {
-            if (!s.ncols || s.col0 != col || col + s.ncols > s.out_w)
+            if (!s.ncols || s.col0 != col || col + s.ncols > s.out_w
+                || (size_t)s.nrows * s.ncols * 3 > sizeof(s.rgb))   /* never past rgb[], whatever the kext says */
                 return row;
             for (r = 0; r < s.nrows; r++)
                 memcpy(*img + ((size_t)(row + r) * s.out_w + col) * 3, s.rgb + (size_t)r * s.ncols * 3,
