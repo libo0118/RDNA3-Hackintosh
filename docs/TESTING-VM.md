@@ -204,6 +204,7 @@ steps:
 | `bisect-plugin` | the same for the Metal plugin's switches (`rdna3mtl.conf`, the allow list); **restarts WindowServer three times** | run it last, after `bisect`; log in again at the login window each time unless the guest logs in by itself |
 | `bisect-agdc` | the same bisect on the **agdc profile** (WindowServer on our Metal plugin, the card busy): `swap_mode`, `swap_gen`, `flipbuf_present`, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` in 13 combinations of 30 s each, 6.5 min ([Display bisect on the agdc profile](#display-bisect-on-the-agdc-profile-step-bisect-agdc)) | the plain `bisect` runs the default profile, where the AGDC is idle and WindowServer draws on the CPU: use this one for the real desktop. **Sit at the monitors for the whole run**; same announcements as `bisect`. Step 7 turns `iop` off while WindowServer runs: the picture may stay wrong afterwards (shut macOS down from the report's end as usual) |
 | `ladder` | DRIVER-PLAN N50, the broken glyphs / tile blocks: the Metal plugin's A/B switches one rung at a time in ONE run (8 rungs, about 29 min; [The A/B ladder](#the-ab-ladder-steps-ladder-and-ladder-ws)) | nothing to type, nothing to answer: Terminal and Chess open and close by themselves on the desktop, look at the screen; the report has one row per rung. `ladder-ws` (about 45 min) adds the WindowServer rungs, which restart the desktop: **log in at the login window each time** |
+| `apps` | the app survey: fifteen real apps (Chess, Terminal, TextEdit, Calculator, Notes, Safari with a text / canvas / WebGL page, Preview with a PDF and a JPEG, Maps, System Settings, App Store, Photos, Image Capture, QuickTime Player, Mission Control, Launchpad) opened one after another on the DEFAULT driver, a look of both screens each (about 25 min; [The app survey](#the-app-survey-step-apps)) | read the `app <name>` rows and look at the `scanoutapps-*` pictures; [AFTER-TESTS](AFTER-TESTS.md) "The app survey" |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
@@ -698,6 +699,23 @@ mark); `fbfetch-zero` (framebuffer fetch returns zero); `managed-pages` (ranges 
 uploaded); `no-texbuf`; `no-bindless`; `dontcare-clears`; `skip-empty-0` (`NVMTL_SKIP_EMPTY=0`); `paranoid`, the NEGATIVE control. Each rung takes a second hi-res look three seconds after the
 first (`...h2`): the glyph verdict only counts the tick-line window that CHANGED between them, the rung's own live text.
 Apps are quit with SIGINT, then SIGTERM, then SIGKILL (no System Events, no Automation prompt); `41-ladder.txt` says how each instance ended.
+
+### The app survey (step `apps`)
+
+```sh
+rdna3vm step apps         # about 25 minutes; nothing to answer, the apps open and close by themselves
+```
+
+The `play` profile with `rdna3ladder=5` (`autoreport.sh --apps` by hand, in the guest's Terminal): the default driver and plugin settings, no switch of any kind. One after another,
+the guest opens Chess, Terminal (the tick text), TextEdit (an RTF), Calculator, Notes, Safari (stages: a text / CSS page, a canvas animation, a WebGL cube; local files the run writes),
+Preview (a PDF and a JPEG), Maps, System Settings (appearance, wallpaper, displays), App Store, Photos, Image Capture, QuickTime Player (a 12 s movie the run carries), Mission Control
+(with Calculator and TextEdit open) and Launchpad (`Apps` on macOS 26). It needs no network. Per app and stage it takes a 320-wide and a hi-res look of both pipes, then checks whether the
+app is still running (a death is a crash when a report appeared), whether the Metal plugin is loaded in it, whether WindowServer kept its pid, collects its log slice, and quits it (SIGINT,
+TERM, KILL; an instance you had open before the run is left alone). The report: `41-ladder.txt` (variant 5), `41-ladder-<app>.log`, `41-ladder-<app>-sys.log`,
+`41-ladder-<app>-crash.log`, the looks `scanoutapps-<app>[-<stage>]a|h-pipe*.ppm`; the triage prints a row per app. What it cannot do headless: type or click in an app (System Events
+needs Accessibility / Automation consent), record the screen (Screen Recording consent), sign in (App Store, Photos, Notes may show a welcome or sign-in sheet: that is recorded by the
+look). Whether an app drew is for the pictures. How to read it: [AFTER-TESTS](AFTER-TESTS.md), "The app survey". The host tests are `tests/test_apps_step.sh` and
+`tests/test_triage_apps.py`; the PDF and the movie the run carries are made by `tools/apps_assets.py`.
 
 ### Tests that already passed
 

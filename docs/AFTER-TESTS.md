@@ -1466,6 +1466,56 @@ mapping: a carry the GPU wrote between two byte loads gave a value no write ever
 once per 256 fences at most, when the read races the write): `rdna3_vram_read32` is one aligned load, as `amdgpu_fence_read`. This is a second,
 certain candidate for the witness's "fence early".
 
+#### The app survey: `rdna3vm step apps`
+
+After card run 2026-10-26 the driver draws Terminal and Chess on the card, and those were almost the only apps tried. The `apps` step opens fifteen real apps one
+after another with the **default** driver and plugin settings (no `NVMTL_*` switch, no sysctl, no conf edit, no WindowServer restart) and leaves evidence of each, so
+that one run gives the list of what is still visibly broken. It is `ladder` variant 5 (`rdna3ladder=5`, `autoreport.sh --apps`; the APPS block of
+`tools/vm/macos/autoreport.sh`), about 25 minutes. The apps, in order, and what each is given (the content is made by the run itself, offline; `open` is all it can do
+headless: key presses and menu clicks need System Events, which asks the owner for Accessibility / Automation consent, so there are none):
+
+| app (`app <name>` row) | what is on screen when it is looked at |
+|---|---|
+| `chess`, `terminal` | the known-good references (Terminal: the ladder's colour listing and a tick line a second; the only app with an automatic glyph verdict) |
+| `textedit` | an RTF with fonts, sizes, colours, bold / italic / underline |
+| `calculator`, `notes` | the app alone (Notes may show its welcome sheet) |
+| `safari` | three stages in one Safari: `text` (CSS gradients, shadows, blur, a rotating and a fading box, SVG, a table, text from 9 to 28 px), `canvas` (a 2D canvas animation with a frame counter on the page), `webgl` (a rotating cube; the page prints the WebGL renderer string or `NO WEBGL`) |
+| `preview` | `pdf` (two pages: two fonts, an axial and a radial shading) and `image` (the PDF's first page as a JPEG made by `sips`) |
+| `maps` | the app alone (no network: the map stays empty; record what it shows) |
+| `settings` | three panes: `appearance`, `wallpaper`, `displays` |
+| `appstore`, `photos`, `imagecapture` | the app alone (they may ask for an account or show a welcome sheet: record what they show) |
+| `quicktime` | a 12 s H.264 movie the run carries (stages `play` at 3 s and `later` at 8 s: the picture must have moved) |
+| `mission-control` | Calculator and TextEdit open, then Mission Control (stage `mc`), then the toggle again (`closed`: did it close?) |
+| `launchpad` | Launchpad, or `Apps` on macOS 26 (stage `apps`), then the toggle again (`closed`) |
+
+**What the run records per app** (`41-ladder.txt`, one `== rung <app>` block; the triage prints one row `app <name>`): the stages, a 320-wide look and a hi-res look of
+both pipes per stage (`<report>-scanoutapps-<app>[-<stage>]a|h-pipe<N>.ppm`, the result file has them as PNGs; the Terminal has a second hi-res look `h2` for the glyph verdict),
+the pids and whether each was still alive after each stage (`died: pid N was gone after stage X`), which processes have the Metal plugin mapped (`plugin:`; Safari's WebKit GPU
+process is listed under `helpers:`, DRIVER-PLAN N1 says its sandbox may refuse the plugin), WindowServer's pid before and after (`ws_before` / `ws_after`; a change is
+`WindowServer restarted`: the survey waits up to two minutes for the desktop and stops if nobody is logged in again), the crash reports (`.ips`) written meanwhile (`crash:` lines;
+a report of the app or of WindowServer / Dock is summarised in `41-ladder-<app>-crash.log`), and two log slices: `41-ladder-<app>.log` (the plugin's `NVMTL` lines of the app's
+processes) and `41-ladder-<app>-sys.log` (the app's own Metal / GPU / error lines, WindowServer's and the kernel's `RDNA3` lines of the same minutes). Then the app is quit
+(SIGINT, TERM, KILL; an instance that was running before the rung is the owner's and is left alone).
+
+**How to read the result.**
+
+1. `rdna3vm result`, then the `app <name>` rows of the triage (`00-triage.txt`). The first word after the app's title is the run's verdict: `ran` (alive at the end, no crash
+   report), `crashed (report: ...)` (FAIL; the crash summary is in the row, the frames in `41-ladder-<app>-crash.log`), `exited by itself ... with no crash report` (FAIL: killed by
+   the system or quit; read `-sys.log`), `did not open` (WARN: the app is missing on this macOS, or never started: the row names the open exit code), `was already running`
+   (WARN: the owner's own instance, nothing was quit), `WindowServer restarted` / `WindowServer / Dock crashed` (FAIL: the desktop session was rebuilt under that app: that app,
+   or the one before it, is the suspect; read `23-windowserver-crash.txt` and the kernel log of the run).
+2. A row that says only `ran` does **not** say it drew. Whether an app DREW and how is the screenshots' verdict: open the `scanoutapps-<app>...h-pipe0.png` of each app (and
+   `pipe1` for the second monitor) and compare with the Terminal and Chess rows, which are the references. Note per app: window missing, black / stale rectangles, broken
+   glyphs, tile blocks, wrong colours, an animation that did not move between `a` and `h` (or `play` and `later`), a window that stayed after the quit.
+3. The WARN notes of a row that ran: `the Metal plugin is NOT loaded in any process of the app` (the app draws on Apple's software path or not on the GPU), `no census: SUMMARY`
+   (it drew nothing through the plugin, or ended before the plugin's 10 s tick), `Metal/NVMTL error`, `GPU restart/hang` and `VM fault` with the first matching line (the line is in
+   `41-ladder-<app>-sys.log`; a `VM fault` with a `gfx` ring line is the kernel's: go to [Kernel coherence switches](#kernel-coherence-switches-n54-rdna3vm-step-ladder-coh) and the VM-fault
+   rows of the same report), `N other error/fault line(s)` (counted, usually harmless).
+4. What stays broken goes into DRIVER-PLAN as one line per app with the screenshot's name; a broken **glyph** in an app other than Terminal is judged by eye, and the fix path is the
+   glyph hunt (`ladder-glyphs`, `ladder-coh`) run with that app instead of Terminal.
+
+The host tests are `tests/test_apps_step.sh` (the guest script on the host with stubs, under sh / bash / dash) and `tests/test_triage_apps.py`.
+
 ### Surface-in cost and the cache (N51)
 
 Card run 2026-10-25e, WindowServer: the surface-in checks were 38 % of the encode time (1605 ms of 4256 in 3948 encoders, 104 us per call). Joined by command buffer

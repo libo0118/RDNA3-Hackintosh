@@ -618,16 +618,19 @@ def _judge_rung(task):
         return {"verdict": "none", "text": "the glyph check FAILED (%s: %s)" % (type(e).__name__, e)}
 
 
-def glyph_verdicts(rungs, prefix):
+def glyph_verdicts(rungs, prefix, only=None):
     """{rung: {"verdict", "text"}} of the automatic glyph check (tools/glyph_verdict.py) on the rung's hires look(s): `<prefix>-scanout<look>-pipe<N>.ppm` (or .png), prefix
-    = the report's path without .tar.gz; the `h2` look of the glyph hunt is the second look that identifies the live window. A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
+    = the report's path without .tar.gz; the `h2` look of the glyph hunt is the second look that identifies the live window. `only`: the rung names to judge (the app survey judges
+    the Terminal alone; the others are left out of the answer). A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
     try:
         import glyph_verdict as gv
         import lookimg
     except ImportError:
-        return {n: {"verdict": "none", "text": "tools/glyph_verdict.py is missing next to triage_glyphs.py: the glyphs were NOT checked"} for n in rungs}
+        return {n: {"verdict": "none", "text": "tools/glyph_verdict.py is missing next to triage_glyphs.py: the glyphs were NOT checked"} for n in rungs if only is None or n in only}
     out, todo = {}, []
     for name, r in rungs.items():
+        if only is not None and name not in only:
+            continue
         files, later = [], []
         looks_ = r.get("looks") or []
         if not any(l.endswith("h") for l in looks_):

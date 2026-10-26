@@ -4843,12 +4843,17 @@ def report(path, show_all):
             def coh_ladder_rows_(*_a):
                 return [("WARN", "ladder-coh", "tools/triage_coherence.py is missing next to triage_reports.py: the coherence ladder was NOT read")]
         try:
+            from triage_apps import apps_rows as apps_rows_   # variant 5: the app survey
+        except ImportError:
+            def apps_rows_(*_a):
+                return [("WARN", "apps", "tools/triage_apps.py is missing next to triage_reports.py: the app survey was NOT read")]
+        try:
             from triage_glyphs import parse_ladder, ladder_rows, glyph_verdicts
             lv_, lr_, lp_ = parse_ladder(ladder_txt, ladder_logs)
-            # the automatic glyph verdict reads the rungs' hi-res looks (native size; 1280 wide from older kexts) that sit next to the archive (<report>-scanoutladder-<rung>h-pipe<N>.ppm)
-            gl_ = glyph_verdicts(lr_, path[:-len(".tar.gz")] if path.endswith(".tar.gz") else None)   # (None: said per rung, not skipped)
-            # variant 4 (N54): the kernel's coherence switches, one per rung (tools/triage_coherence.py)
-            ladder_rows_ = coh_ladder_rows_(ladder_txt, lr_, lp_, gl_) if lv_ == 4 else ladder_rows(lr_, lv_, lp_, gl_)
+            # the glyph verdict reads the hi-res looks beside the archive (<report>-scanoutladder-<rung>h-pipe<N>.ppm); survey (5): Terminal only
+            gl_ = glyph_verdicts(lr_, path[:-len(".tar.gz")] if path.endswith(".tar.gz") else None, ("terminal",) if lv_ == 5 else None)
+            # 5: the app survey, 4: the coherence switches (N54)
+            ladder_rows_ = apps_rows_(ladder_txt, lr_, lp_, gl_, ladder_logs) if lv_ == 5 else coh_ladder_rows_(ladder_txt, lr_, lp_, gl_) if lv_ == 4 else ladder_rows(lr_, lv_, lp_, gl_)
         except ImportError:
             ladder_rows_ = [("WARN", "ladder", "tools/triage_glyphs.py is missing next to triage_reports.py: the ladder's rungs were NOT read")]
         except Exception as e_:  # noqa: BLE001

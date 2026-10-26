@@ -301,6 +301,8 @@ test: $(BUILD)/test_attr_ring $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUI
 	tests/test_bisect_step.sh
 	tests/test_play_step.sh
 	tests/test_ladder_step.sh
+	tests/test_apps_step.sh
+	python3 -I -B tests/test_triage_apps.py
 	tests/test_bootwatch.sh
 	tests/test_approve_gate.sh
 	tests/test_forgejo_update.sh
