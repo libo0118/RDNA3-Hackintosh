@@ -17,6 +17,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import glyph_verdict as gv  # noqa: E402
+import lookimg  # noqa: E402
 
 fails = []
 
@@ -222,8 +223,68 @@ for bad, why in ((b"P5\n1 1\n255\n\0", "not P6"), (b"P6\n1280 720\n255\n\0\0", "
 w, h, pix = gv.parse_ppm(b"P6\n# a comment\n64 64\n255\n" + bytes(64 * 64 * 3))
 check((w, h, len(pix)) == (64, 64, 64 * 64 * 3), "parse_ppm with a comment")
 
+# ---- the same looks as PNG (`rdna3vm result` without xz packs them so): the same verdicts, through the .png names and through the names the card wrote
+def png_of(ppm_bytes):
+    return lookimg.encode_png(*lookimg.decode_ppm(ppm_bytes))
+
+
+def put(path, windows, seed=3, png=False):
+    data = render(windows, seed=seed)
+    open(path, "wb").write(png_of(data) if png else data)
+
+
+live1 = [Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, seed=5)), static_clean]
+live2 = [Window(1100, 330, 80, 24, tick_lines(22, broken_from=37, seed=6, first=3)), static_clean]
+raw = render(live1)
+check(gv.analyze_ppm(png_of(raw)) == gv.analyze_ppm(raw), "analyze_ppm: a PNG gives the PPM's stacks")
+check(gv.parse_ppm(png_of(raw)) == gv.parse_ppm(raw), "parse_ppm: a PNG gives the PPM's pixels")
+for bad, why in ((png_of(raw)[:-30], "a truncated PNG"), (png_of(render([], w=32, h=32)), "a 32x32 PNG"), (b"GIF89a" + bytes(100), "a GIF")):
+    try:
+        gv.parse_ppm(bad)
+        check(False, "parse_ppm accepted %s" % why)
+    except ValueError:
+        pass
+q1, q2 = os.path.join(tmp, "q1-pipe0.png"), os.path.join(tmp, "q2-pipe0.png")
+put(q1, live1, png=True); put(q2, live2, png=True)
+v = gv.verdict_files([q1], later=[q2])
+check(v["verdict"] == "broken" and len(v["stacks"]) == 1 and len(v["static"]) == 1 and v["pipes"] == ["0"], "PNG looks, live broken + static clean: %r" % (v["text"],))
+put(q1, [Window(1100, 330, 80, 24, tick_lines(22, seed=5))], png=True)
+v = gv.verdict_files([q1])
+check(v["verdict"] == "clean", "one PNG look, clean: %r" % (v["text"],))
+# one pipe a PPM, the other a PNG, and a look whose PPM is gone: the name the card wrote is read as the PNG
+put(p0a, [static_clean]); put(p0b, [static_clean])
+put(p1a[:-4] + ".png", [Window(1100, 330, 80, 24, tick_lines(22, seed=5))], png=True); put(p1b[:-4] + ".png", [Window(1100, 330, 80, 24, tick_lines(22, seed=6, first=3))], png=True)
+v = gv.verdict_files([p0a, p1a], later=[p1b, p0b])
+check(v["verdict"] == "clean" and len(v["stacks"]) == 1 and len(v["static"]) == 1, "pipe 0 PPM + pipe 1 PNG: %r" % (v["text"],))
+v = gv.verdict_files([os.path.join(tmp, "z-pipe0.png")])
+check(v["verdict"] == "none" and "no look could be read" in v["text"], "a PNG that is not there: %r" % (v["text"],))
+open(q1, "wb").write(png_of(render([static_clean]))[:100])
+v = gv.verdict_files([q1])
+check(v["verdict"] == "none" and "unreadable" in v["text"] or "no look could be read" in v["text"], "a cut PNG is named, not an exception: %r" % (v["text"],))
+
+# ---- the card run 2026-10-26b text: ONE fixed colour (bright white) and a line of mixed glyphs after every 4th tick line. The mixed line ends differently, so
+# it is not a tick line; the ticks around it are still one stack (nothing in the picture changes the verdict). The window can also start with a mixed line.
+MIXED = "          ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 !#$%&()*+,-./:;<=>?@[]^_{|}~"
+WHITE = (250, 250, 250)
+
+
+def with_mixed(n, **kw):
+    out = []
+    for k, line in enumerate(tick_lines(n, colour=WHITE, **kw)):
+        out.append(line)
+        if (k + 1) % 4 == 0:
+            out.append((MIXED, WHITE, {}))
+    return out
+
+
+for n, skip in ((14, 0), (18, 1), (22, 3)):
+    st = analyze([Window(100, 100, 80, 30, with_mixed(n)[skip:])], seed=4)
+    check(len(st) == 1 and st[0]["verdict"] == "clean" and st[0]["lines"] >= n - 4 - 1, "fixed colour + mixed lines (%d ticks, skip %d): %r" % (n, skip, [(s["lines"], s["twinned"], s["verdict"]) for s in st]))
+st = analyze([Window(100, 100, 80, 30, with_mixed(22, broken_from=37))], seed=4)
+check(len(st) == 1 and st[0]["verdict"] == "broken", "fixed colour + mixed lines, broken: %r" % ([(s["lines"], s["twinned"], s["verdict"]) for s in st],))
+
 # ---- the card run 2026-10-25f's looks, when the report is here (it is not committed): live windows broken, the restored ones clean
-REP = os.environ.get("RDNA3_REPORT_25F") or os.path.join(ROOT, "reports", "2026-10-25f", "rdna3-result")
+REP = os.environ.get("RDNA3_REPORT_25F") or os.path.join(os.environ.get("RDNA3_REPORTS") or os.path.join(ROOT, "reports"), "2026-10-25f", "rdna3-result")
 looks = {r: sorted(glob.glob(os.path.join(REP, "*-scanoutladder-%sh-pipe*.ppm" % r))) for r in ("baseline", "radv", "sync", "managed", "alignguard", "paranoid", "loadbarrier")}
 if all(looks.values()):
     for r, files in looks.items():
@@ -232,10 +293,30 @@ if all(looks.values()):
     v = gv.verdict_files(looks["paranoid"])
     check(any(s["verdict"] == "clean" for s in v["stacks"]) and any(s["verdict"] == "broken" for s in v["stacks"]),
           "2026-10-25f paranoid: the live window is broken, the window Terminal restored from the previous rung is clean: %r" % (v["text"],))
+    # the same look as PNG (what `rdna3vm result` sends without xz): the same stacks, the same verdict
+    ppm = open(looks["baseline"][0], "rb").read()
+    check(gv.analyze_ppm(png_of(ppm)) == gv.analyze_ppm(ppm), "2026-10-25f baseline: the PNG gives the PPM's stacks")
     print("test_glyph_verdict: the real 2026-10-25f looks checked")
 else:
     print("test_glyph_verdict: (the 2026-10-25f looks are not on this machine: the real-data case is skipped)")
 
+# ---- the card run 2026-10-26b, when the report is here: every rung's looks have NO tick Terminal on them (Chess opened on top of it; the one Terminal that is
+# visible is the progress window, a log). The verdict is `none` with the hint to look at the pictures, never clean or broken; its PNG copies say the same.
+REP26B = os.path.join(os.environ.get("RDNA3_REPORTS") or os.path.join(ROOT, "reports"), "2026-10-26b", "rdna3-result")
+base26 = sorted(glob.glob(os.path.join(REP26B, "*scanoutladder-baselineh-pipe*.ppm")))
+later26 = sorted(glob.glob(os.path.join(REP26B, "*scanoutladder-baselineh2-pipe*.ppm")))
+if base26 and later26:
+    v = gv.verdict_files(base26, later=later26)
+    check(v["verdict"] == "none" and "no stack of >= 8" in v["text"] and "behind Chess" in v["text"], "2026-10-26b baseline: no Terminal on the screen: %r" % (v["text"],))
+    bindless = sorted(glob.glob(os.path.join(REP26B, "*scanoutladder-no-bindlessh-pipe*.ppm")))
+    check(bindless and gv.verdict_files(bindless)["verdict"] == "none", "2026-10-26b no-bindless: the progress window is a log, not tick lines")
+    pngs = []
+    for f in base26:
+        w_, h_, px_ = lookimg.read_look(f)
+        pngs.append(os.path.join(tmp, os.path.basename(f)[:-4] + ".png"))
+        open(pngs[-1], "wb").write(lookimg.encode_png(w_, h_, px_))
+    check(gv.verdict_files(pngs)["text"] == gv.verdict_files(base26)["text"], "2026-10-26b baseline: the PNG copies give the same text")
+    print("test_glyph_verdict: the real 2026-10-26b looks checked")
 if fails:
     print("test_glyph_verdict: FAIL")
     for f in fails:
