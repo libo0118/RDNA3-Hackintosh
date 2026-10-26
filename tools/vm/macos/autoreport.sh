@@ -1321,16 +1321,18 @@ ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
     _rt0=$(date +%s)
     ladder_w "started: $(date +%T)"
     # each app's instances are listed right before its own open and polled for right after it: the window in which another instance could be taken for ours
+    # Chess first, the tick Terminal second: a new window opens in front, and both open in the top left. Terminal first (card run 2026-10-26b) put Chess over it in
+    # every rung and the glyph verdict had no tick lines to read ("no stack of >= 8 tick lines"); the text window is the evidence, Chess only has to draw
+    _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
+    # shellcheck disable=SC2086
+    as_user open -n -a Chess $_rargs >/dev/null 2>&1
+    _cp=$(ladder_wait_new Chess "$_cb")
     _tb=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
     # -ApplePersistenceIgnoreState: a new Terminal instance restores the windows the previous one had saved (card run 2026-10-25f: the text of the rung before,
     # static and drawn clean, next to the live window, which looked like a clean picture in one rung); without it the only text on screen is this rung's
     as_user open -n -a Terminal $_rargs "$_LADDER_TEXT" --args -ApplePersistenceIgnoreState YES >/dev/null 2>&1
     _tp=$(ladder_wait_new Terminal "$_tb")
-    _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
-    # shellcheck disable=SC2086
-    as_user open -n -a Chess $_rargs >/dev/null 2>&1
-    _cp=$(ladder_wait_new Chess "$_cb")
     _LADDER_PIDS="$_tp$_cp"
     ladder_w "pids: Terminal=${_tp:-none}Chess=${_cp:-none}"
     [ -n "$_tp" ] && [ -n "$_cp" ] || ladder_w "WARN: an app did not start (Terminal: ${_tp:-no} Chess: ${_cp:-no}): the rung proves little"

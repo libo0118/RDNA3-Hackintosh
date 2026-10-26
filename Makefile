@@ -253,6 +253,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	python3 -I -B tests/test_triage_n48.py
 	python3 -I -B tests/test_triage_glyphs.py
 	python3 -I -B tests/test_triage_coherence.py
+	python3 -I -B tests/test_lookimg.py
 	python3 -I -B tests/test_glyph_verdict.py
 	python3 -I -B tests/test_fb_class.py
 	python3 -I -B tests/test_triage_iop_log.py

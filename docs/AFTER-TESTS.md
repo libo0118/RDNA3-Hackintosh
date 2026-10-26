@@ -75,7 +75,9 @@ exactly what to run next. One round = one report batch → one fix → one retes
 ## 1. Intake (start of every round)
 
 1. Collect the user's files into `reports/<yyyy-mm-dd>/` (usually one
-   `rdna3-result.tar.gz` from `rdna3vm result`: unpack it there; its
+   `rdna3-result.tar.xz` (`.tar.gz` when the owner's host has no xz) from
+   `rdna3vm result`: `tar xf` it there (the looks are raw PPMs in the `.xz`,
+   PNGs in the `.gz`; the triage reads both); its
    `00-triage.txt` is the host's triage, `00-host.txt` the commit and CI run). Expected:
    `rdna3-report-*.tar.gz`, `*-tests.txt`, `serial-*.log`, `host-*.log`,
    and once `linux-reference/`. If something needed is missing, ask for those
@@ -1222,14 +1224,15 @@ process has a key the rung did NOT ask for ("not default: X", also a conf line l
 picture was RIGHT with: X" names the discriminator. Reading it: a rung whose WARN says the switch did not reach the plugin proves nothing (the `--env` was not
 taken: check `34-metal-conf.txt` and `26-log-metal-plugin.txt`); without your answers, compare `ladder-<rung>h` pictures by eye (the text is the quickest test).
 
-**The glyph verdict (automatic).** Each rung's 1280-wide look (`<report>-scanoutladder-<rung>h-pipe<N>.ppm`, next to the archive) is read by `tools/glyph_verdict.py`
-(pure Python; the triage prints it in the `ladder <rung>` row as `glyphs (automatic, tools/glyph_verdict.py): ...`, and the `ladder glyphs` row says which rungs made the baseline's
+**The glyph verdict (automatic).** Each rung's 1280-wide look (`<report>-scanoutladder-<rung>h-pipe<N>.ppm`, or `.png` when `rdna3vm result` had no xz and packed PNGs; next to the archive) is read by `tools/glyph_verdict.py`
+(pure Python, PPM and PNG via `tools/lookimg.py`; the triage prints it in the `ladder <rung>` row as `glyphs (automatic, tools/glyph_verdict.py): ...`, and the `ladder glyphs` row says which rungs made the baseline's
 broken text clean). Terminal prints a tick line a second that ends in the same text, in one colour; drawn right, two such lines are the same picture, drawn wrong (random
 strokes) every line is different. The tool finds stacks of at least 8 text lines of an even pitch in the look (colour agnostic, no knowledge of the window's place), keeps the
 lines that end at the same column (a log window, a listing: ragged ends, never taken for tick lines), cuts the right half of each (after the time stamp) as a black-and-white
 strip and counts the lines that have a TWIN (another line within 12 % of its ink; the 1920 -> 1280 sampling drops one row in three, so lines fall into three classes of
 rows seen and each class has several lines). `CLEAN` = at least 80 % of the lines have a twin, `BROKEN` = at most 50 %, `unclear` between, `none` = no tick stack (the text window was not
-on a screen: the rung proves nothing). Every stack on the screens is judged and the WORST decides: a window that Terminal restored from its saved state shows the text of the
+on a screen: the rung proves nothing; card run 2026-10-26b: all 13 rungs `none`, the pictures show Chess on top of the tick Terminal, which the ladder opened first;
+it now opens Chess first, so the Terminal is the window in front: open the pictures before trusting a `none`). Every stack on the screens is judged and the WORST decides: a window that Terminal restored from its saved state shows the text of the
 previous rung, static and drawn clean, next to the live one (the ladder now opens Terminal with `-ApplePersistenceIgnoreState YES`, but a look of an older run has them). Read the numbers:
 live broken text 9 to 30 % of the lines have a twin; static (restored) text 95 to 100 %. Checked on the card run 2026-10-25f's looks (`tests/test_glyph_verdict.py`, also on synthetic looks).
 

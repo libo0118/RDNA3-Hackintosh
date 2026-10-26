@@ -12,7 +12,8 @@ boot-args, the bring-up stage reached, every check below as PASS / FAIL /
 -- (not reached at that level), the kext's ERROR lines and the tail of
 the serial log. The first FAIL is where docs/AFTER-TESTS.md starts.
 The pictures of what each display pipe scanned (<report>-scanout-pipe<N>.ppm,
-rdna3_drminfo --scanout) are turned into PNGs next to them.
+rdna3_drminfo --scanout) are turned into PNGs next to them (a look that is a PNG
+already - `rdna3vm result` without xz packs PNGs - is read as it is; tools/lookimg.py).
 Exit status: 0 all reached checks pass, 1 something failed.
 """
 import contextlib
@@ -31,6 +32,10 @@ try:
     import rdna3_trace  # noqa: E402  (tools/rdna3_trace.py: the kernel's per-frame trace)
 except ImportError:      # a copy of this file alone (the tests' fake checkouts)
     rdna3_trace = None
+try:
+    import lookimg  # noqa: E402  (tools/lookimg.py: the scanout looks, PPM or PNG)
+except ImportError:
+    lookimg = None
 try:
     import triage_bisect  # noqa: E402  (tools/triage_bisect.py: the display bisect's table)
 except ImportError:
@@ -155,38 +160,19 @@ def fb_source_hash(files=FB_HASH_FILES):
 
 
 def ppm_to_png(path):
-    """binary PPM (P6, maxval 255) -> PNG next to it; returns the PNG path"""
-    data = open(path, "rb").read()
-    m = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
-    if not m:
-        raise ValueError("not a P6 PPM: " + path)
-    w, h = int(m.group(1)), int(m.group(2))
-    px = data[m.end():m.end() + w * h * 3]
-    if len(px) < w * h * 3:
-        raise ValueError("short PPM: " + path)
-    raw = b"".join(b"\0" + px[y * w * 3:(y + 1) * w * 3] for y in range(h))
-
-    def chunk(t, b):
-        return struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b) & 0xffffffff)
-    out = os.path.splitext(path)[0] + ".png"
-    with open(out, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
-                chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
-    return out
+    """binary PPM (P6, maxval 255) -> PNG next to it (tools/lookimg.py); returns the PNG path"""
+    if lookimg is None:
+        raise ValueError("tools/lookimg.py is missing: no PNG made of " + path)
+    return lookimg.ppm_to_png(path)
 
 
 def count_color(path, rgb, tol=40):
-    """pixels of a P6 PPM within 'tol' of colour 'rgb' (each channel); the
+    """pixels of a look (PPM or PNG) within 'tol' of colour 'rgb' (each channel); the
     total; None when it is no picture"""
-    try:
-        data = open(path, "rb").read()
-    except OSError:
+    img = ppm_pixels(path)
+    if img is None:
         return None
-    m = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
-    if not m:
-        return None
-    w, h = int(m.group(1)), int(m.group(2))
-    px = data[m.end():m.end() + w * h * 3]
+    w, h, px = img
     hit = 0
     for i in range(0, len(px) - 2, 3):
         if abs(px[i] - rgb[0]) <= tol and abs(px[i + 1] - rgb[1]) <= tol and abs(px[i + 2] - rgb[2]) <= tol:
@@ -222,24 +208,26 @@ HEX_SHA = re.compile(r"[0-9a-f]{7,40}\Z")
 # old frame while WindowServer drew into A3 BOs no swap scanned out). A
 # clock tick in the menu bar is far below the threshold, a window is far
 # above it.
-M6_LOOK = re.compile(r"-scanoutm6([A-Za-z]+)-pipe(\d+)\.ppm$")
+M6_LOOK = re.compile(r"-scanoutm6([A-Za-z]+)-pipe(\d+)\.(?:ppm|png)$")
 M6_ORDER = ("Chess", "Maps", "Settings", "desktop")
 M6_FROZEN_FRACTION = 0.01   # of the pixels: below this between every two looks = frozen
 
 
+_LOOKIMG_WARNED = []
+
+
 def ppm_pixels(path):
-    """(width, height, rgb bytes) of a binary PPM, or None"""
+    """(width, height, rgb bytes) of a look (binary PPM or PNG), or None"""
+    if lookimg is None:
+        if not _LOOKIMG_WARNED:   # once: the looks exist but cannot be read (M6 frozen screens, M4, pictures all skipped)
+            _LOOKIMG_WARNED.append(path)
+            print("   WARN looks              tools/lookimg.py is missing next to this triage: the scanout looks (%s ...) are NOT read "
+                  "(frozen-screen, colour and picture checks skipped)" % os.path.basename(path))
+        return None
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError:
+        return lookimg.read_look(path)
+    except (OSError, ValueError):
         return None
-    m = re.match(rb"P6\s+(?:#[^\n]*\s+)*(\d+)\s+(\d+)\s+(\d+)\s", data)
-    if not m:
-        return None
-    w, h = int(m.group(1)), int(m.group(2))
-    px = data[m.end():m.end() + w * h * 3]
-    return (w, h, px) if len(px) == w * h * 3 else None
 
 
 def changed_fraction(a, b):
@@ -375,7 +363,7 @@ def m6_screens(prefix):
     """{pipe: (look names in order, the largest change between two
     consecutive looks)} of the M6 hi-res pictures"""
     by_pipe = {}
-    for ppm in glob.glob(prefix + "-scanoutm6*-pipe*.ppm"):
+    for ppm in (lookimg.look_files(glob.escape(prefix) + "-scanoutm6*-pipe*") if lookimg else []):
         m = M6_LOOK.search(ppm)
         if m:
             by_pipe.setdefault(int(m.group(2)), []).append((m.group(1), ppm))
@@ -5230,12 +5218,12 @@ def summary(path, serial=None):
             out.append(("  VMID %d" % vmid, "%dx %s at %s%s: %s" % (n, hub, addr, " (%s)" % client if client else "",
                                                                      who)[:150]))
     if "== rdna3_drminfo --scanout (look m4)" in txt:
-        pics = sorted(glob.glob(path[:-len(".tar.gz")] + "-scanoutm4-pipe*.ppm"))
+        pics = lookimg.look_files(glob.escape(path[:-len(".tar.gz")]) + "-scanoutm4-pipe*") if lookimg else []
         seen = []
         for ppm in pics:
             c = count_color(ppm, (255, 0, 255))
             if c:
-                seen.append("%s %d of %d" % (os.path.basename(ppm).split("-")[-1][:-4], c[0], c[1]))
+                seen.append("%s %d of %d" % (os.path.splitext(os.path.basename(ppm).split("-")[-1])[0], c[0], c[1]))
         best = max([count_color(p_, (255, 0, 255))[0] for p_ in pics if count_color(p_, (255, 0, 255))] or [0])
         # card run 49: the window was on the screen (the user saw it pink)
         # while mtlprobe counted no presented callback: with WindowServer
@@ -5294,7 +5282,7 @@ def main():
         sys.exit(__doc__)
     if sys.argv[1] == "--picture":
         for p in sys.argv[2:]:
-            print(ppm_to_png(p))
+            print(p if p.endswith(".png") else ppm_to_png(p))
         return
     d = d0 = sys.argv[1]
     # a collected 'rdna3vm result' archive unpacks to <dir>/rdna3-result/
@@ -5534,11 +5522,14 @@ def main():
                     print("   FAIL A3 display: %d display surface(s) imported (rdna3a3display=1) and no legacy swap "
                           "ever scanned one out" % a3c["a3display_imported"])
                     failed = True
-            for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout*-pipe*.ppm")):
-                try:
-                    print("     picture: " + ppm_to_png(ppm))
-                except (OSError, ValueError) as e:
-                    print("     picture: " + str(e))
+            # the pictures to look at: a PPM gets a PNG next to it (the Read tool and viewers show PNGs); a look that is a PNG already is just named.
+            # `rdna3vm result` sets RDNA3_NO_PICTURES: its archive must not carry a second copy of every look
+            if not os.environ.get("RDNA3_NO_PICTURES") and lookimg:
+                for pic in lookimg.look_files(glob.escape(p[:-len(".tar.gz")]) + "-scanout*-pipe*"):
+                    try:
+                        print("     picture: " + (ppm_to_png(pic) if pic.endswith(".ppm") else pic))
+                    except (OSError, ValueError) as e:
+                        print("     picture: " + str(e))
             if "== rdna3_modetest list" in txt:
                 # scaled modes: what macOS listed, each switch, the pipes after it
                 ml = txt[txt.index("== rdna3_modetest list"):]

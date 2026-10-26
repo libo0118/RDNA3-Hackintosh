@@ -607,10 +607,11 @@ def rung_engaged(name, st, bst):
 
 
 def glyph_verdicts(rungs, prefix):
-    """{rung: {"verdict", "text"}} of the automatic glyph check (tools/glyph_verdict.py) on the rung's hires look(s): `<prefix>-scanout<look>-pipe<N>.ppm`, prefix
+    """{rung: {"verdict", "text"}} of the automatic glyph check (tools/glyph_verdict.py) on the rung's hires look(s): `<prefix>-scanout<look>-pipe<N>.ppm` (or .png), prefix
     = the report's path without .tar.gz; the `h2` look of the glyph hunt is the second look that identifies the live window. A rung with no look file is left out; ImportError / a bad file is a `none` with the reason, never an exception."""
     try:
         import glyph_verdict as gv
+        import lookimg
     except ImportError:
         return {n: {"verdict": "none", "text": "tools/glyph_verdict.py is missing next to triage_glyphs.py: the glyphs were NOT checked"} for n in rungs}
     out = {}
@@ -624,11 +625,11 @@ def glyph_verdicts(rungs, prefix):
             continue
         for look in looks_:
             if look.endswith("h"):
-                files += sorted(glob.glob(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*.ppm"))
+                files += lookimg.look_files(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*")
             elif look.endswith("h2"):
-                later += sorted(glob.glob(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*.ppm"))
+                later += lookimg.look_files(glob.escape(prefix) + "-scanout" + glob.escape(look) + "-pipe*")
         if not files:
-            out[name] = {"verdict": "none", "text": "the glyphs were NOT judged: no hires look file next to the report (%s-scanout%s-pipe*.ppm): they are uploaded beside the archive and were not sent, or not kept with it" % (os.path.basename(prefix), [l for l in looks_ if l.endswith("h")][0])}
+            out[name] = {"verdict": "none", "text": "the glyphs were NOT judged: no hires look file next to the report (%s-scanout%s-pipe*.ppm or .png): they are uploaded beside the archive and were not sent, or not kept with it" % (os.path.basename(prefix), [l for l in looks_ if l.endswith("h")][0])}
             continue
         try:
             # a rung with a second look (the glyph hunt) is judged on the window that changed between the two, its own live text

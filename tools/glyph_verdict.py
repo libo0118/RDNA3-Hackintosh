@@ -5,7 +5,7 @@ at the left). Drawn right, two tick lines are the same picture of that text. Dra
 turn into random strokes) every line is different, because the garbage is different every time. So the verdict does not need to know what
 the glyphs should look like, only that identical text is drawn identically:
 
-  1. in the look (a PPM, 1280 wide, nearest-neighbour sampled from the scanout: tools/triage_reports.py `--picture` makes PNGs of the same files) it
+  1. in the look (a PPM or a PNG - tools/lookimg.py reads both -, 1280 wide, nearest-neighbour sampled from the scanout; `--picture` of tools/triage_reports.py makes PNGs) it
      finds stacks of text lines: runs of >= 8 bands of rows that have many horizontal edges, at an even pitch, with a gap between them;
   2. in each stack it keeps the lines whose right edge is the same (the tick lines: a log window or a directory listing has ragged edges, so a
      window of changing text is never taken for one);
@@ -21,8 +21,16 @@ Pure Python (no PIL, no numpy): the report host's triage must run anywhere. Chec
 broken live one. Limits: a text window that is not on a screen is `none` (the rung proves nothing); text that is wrong in the SAME way on every line
 (a constant wrong glyph) would pass, the eye and the owner's y / n are the check for that."""
 import itertools
+import os
 import re
+import sys
 from collections import Counter
+
+try:
+    import lookimg
+except ImportError:   # run from another directory without tools/ on the path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import lookimg
 
 MIN_BANDS = 8        # a stack of fewer lines proves nothing
 TWIN_TOL = 0.12      # a twin differs in at most this share of its ink
@@ -36,32 +44,12 @@ INK_DIFF = 90        # distance (sum of the three channels) from the window's ba
 
 
 def parse_ppm(data):
-    """(width, height, pixels) of a binary PPM (P6, 8 bit), or ValueError"""
-    if data[:2] != b"P6":
-        raise ValueError("not a binary PPM (P6)")
-    toks, i, n = [], 2, len(data)
-    while len(toks) < 3 and i < n:
-        while i < n and data[i:i + 1].isspace():
-            i += 1
-        if data[i:i + 1] == b"#":
-            while i < n and data[i:i + 1] != b"\n":
-                i += 1
-            continue
-        j = i
-        while j < n and not data[j:j + 1].isspace():
-            j += 1
-        toks.append(data[i:j]); i = j
-    if len(toks) < 3 or i >= n:
-        raise ValueError("truncated PPM header")
-    try:
-        w, h, mx = int(toks[0]), int(toks[1]), int(toks[2])
-    except ValueError:
-        raise ValueError("bad PPM header") from None
-    if mx != 255 or w < 64 or h < 64 or w > 8192 or h > 8192:
-        raise ValueError("unsupported PPM: %sx%s max %s" % (w, h, mx))
-    pix = data[i + 1:i + 1 + w * h * 3]
-    if len(pix) != w * h * 3:
-        raise ValueError("truncated PPM pixels")
+    """(width, height, pixels) of a binary PPM (P6, 8 bit) or a PNG (8 bit RGB, RGBA, grey), 64..8192 each way, or ValueError. (The name is from the PPM-only days.)"""
+    if data[:2] != b"P6" and data[:8] != lookimg.PNG_MAGIC:
+        raise ValueError("not a binary PPM (P6) or a PNG")
+    w, h, pix = lookimg.decode(data)
+    if w < 64 or h < 64 or w > 8192 or h > 8192:
+        raise ValueError("unsupported look: %sx%s" % (w, h))
     return w, h, pix
 
 
@@ -209,7 +197,7 @@ def _analyze_stack(pix, w, h, st, tol):
 
 
 def analyze_ppm(data, tol=TWIN_TOL):
-    """the tick stacks of one look: [{"lines", "twinned", "share", "verdict", "rect", ...}], biggest first; [] when there is none. ValueError: not a PPM"""
+    """the tick stacks of one look (the bytes of a PPM or a PNG): [{"lines", "twinned", "share", "verdict", "rect", ...}], biggest first; [] when there is none. ValueError: not a picture"""
     w, h, pix = parse_ppm(data)
     L = []
     for y in range(h):
@@ -254,7 +242,7 @@ def changed_pixels(data_a, data_b, rect, pitch=None):
 
 
 def _pipe_of(path):
-    m = re.search(r"-pipe(\d+)\.ppm$", path.replace("\\", "/"))
+    m = re.search(r"-pipe(\d+)\.(?:ppm|png)$", path.replace("\\", "/"))
     return m.group(1) if m else None
 
 
@@ -306,7 +294,7 @@ def verdict_files(paths, tol=TWIN_TOL, later=None):
         elif later is not None and static:
             why = "no LIVE tick stack: the %d tick stack(s) on the screens did not change between the two looks (restored or frozen text, not the rung's own)" % len(static)
         else:
-            why = "no stack of >= %d tick lines in the look%s" % (MIN_BANDS, "" if len(paths) == 1 else "s")
+            why = ("no stack of >= %d tick lines in the look%s (is the tick Terminal on the screen, not behind Chess? open the pictures)") % (MIN_BANDS, "" if len(paths) == 1 else "s")
         return {"verdict": "none", "text": why + ("; pipes judged: " + ", ".join(sorted(pipes)) if pipes else ""), "stacks": [], "static": static, "pipes": sorted(pipes)}
     worst = min(stacks, key=lambda r: (_ORDER[r["verdict"]], r["share"]))
     text = "%s: %d of %d tick lines have a twin (%.0f %%)" % (worst["verdict"].upper(), worst["twinned"], worst["lines"], 100.0 * worst["share"])

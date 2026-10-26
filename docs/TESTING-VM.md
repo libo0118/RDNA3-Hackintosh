@@ -856,7 +856,9 @@ rdna3vm result
 
 It packs every report written since the last `step` / `args` / `queue`
 started (plus a triage summary) into **one** file,
-`~/Downloads/rdna3-result.tar.gz`, replaced each time it runs. Send that file.
+`~/Downloads/rdna3-result.tar.xz` (`.tar.gz` when the host has no `xz`), replaced each time it runs.
+Send that file. It prints its size: a ladder run is a few MB as `.xz` (the looks of one run are the same desktop, xz stores it once; as gzip it would be
+about 85 MB even with the looks as PNGs).
 
 It also prints every test on its own line, `PASS` / `FAIL` / `WARN` /
 `INFO` / `NOT RUN`, with the counts and the triage's verdict at the end

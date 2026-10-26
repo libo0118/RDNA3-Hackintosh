@@ -238,6 +238,8 @@ for SH in sh bash dash; do
         [ -f "$T/home/rdna3-scanout/ladder-${r}a/scanout-pipe0.ppm" ] && [ -f "$T/home/rdna3-scanout/ladder-${r}h/scanout-pipe0.ppm" ] || fail "$SH: rung $r: both looks' pictures"
     done
     grep -q "^open -n -a Terminal .*$T/text.command --args -ApplePersistenceIgnoreState YES\$" "$T/stub.log" || fail "$SH: the Terminal is not opened with the text script and without state restoration"
+    # the tick Terminal opens AFTER Chess in every rung: both open in the top left, the newer window is in front (card run 2026-10-26b: Chess on top hid the text)
+    [ "$(grep '^open -n -a ' "$T/stub.log" | awk 'NR % 2 == 1 { print $4 }' | sort -u | tr '\n' ' ')" = "Chess " ] && [ "$(grep '^open -n -a ' "$T/stub.log" | awk 'NR % 2 == 0 { print $4 }' | sort -u | tr '\n' ' ')" = "Terminal " ] || fail "$SH: Chess is not opened before the Terminal in every rung"
     [ "$(grep -c '^open -n -a Terminal ' "$T/stub.log")" = "$(grep -c -e '^open -n -a Terminal .*-ApplePersistenceIgnoreState YES$' "$T/stub.log")" ] || fail "$SH: a Terminal was opened that restores the last rung's windows"
     ! grep -q '^open -n -a Chess .*--args' "$T/stub.log" || fail "$SH: Chess was opened with --args (only the Terminal's restored windows are a problem)"
     [ -x "$T/text.command" ] && grep -q 'ls -laG' "$T/text.command" || fail "$SH: the text script"
@@ -337,7 +339,7 @@ PYEOF
     # an instance that shrugs off SIGINT is TERMed, one that shrugs off both is KILLed, one that survives even that is reported; each line says how it ended
     fresh
     run 1 stubborn IGNORE_INT=1
-    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1000' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores SIGINT is not TERMed"
+    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1001 1000$' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores SIGINT is not TERMed"
     [ "$(grep -c '^quit: pid [0-9]* ended by SIGTERM after ' "$T/stubborn/ladder.txt")" = 14 ] && ! grep -q 'ended by SIGINT' "$T/stubborn/ladder.txt" || fail "$SH: how the instances ended (TERM): $(grep '^quit' "$T/stubborn/ladder.txt" | sort | uniq -c | head -3)"
     fresh
     run 1 killed IGNORE_INT=1 IGNORE_TERM=1
