@@ -3,6 +3,7 @@
  * tools/capture_decode.py --check must read back (the Makefile runs both), so the C writer and the Python reader cannot drift.
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 #define _POSIX_C_SOURCE 200809L   /* openat, fstatat, mkdtemp, symlink under -std=c99 */
+#define _DARWIN_C_SOURCE          /* macOS: O_NOFOLLOW and mkdtemp are hidden by a strict _POSIX_C_SOURCE */
 #include "nvmtl_capture.h"
 #include <assert.h>
 static int fails;

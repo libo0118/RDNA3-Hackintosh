@@ -255,12 +255,12 @@ tar -xzOf "$T/res.tar.gz" rdna3-result/00-host.txt | grep -q '^run-note: 10:00:0
 # the looks in the result: .tar.gz = one PNG per look (the PPM goes, checked by decoding it again), .tar.xz = the PPMs raw (xz shares the desktop between
 # looks) and no PNG of the triage's own next to them
 mkppm() { { printf 'P6\n8 4\n255\n'; head -c 96 /dev/zero | tr '\0' '\177'; } > "$WORK/reports/rdna3-report-x-scanoutladder-baselineh-pipe0.ppm"; }
-RDNA3VM_RESULT=$T/res-gz.tar.gz run "touch \$WORK/run-start; $(declare -f mkppm); mkppm; sleep() { :; }; echo hi > \$WORK/reports/serial-2.log; cmd_result"
+RDNA3VM_RESULT=$T/res-gz.tar.gz run "touch -t 202001010000 \$WORK/run-start; $(declare -f mkppm); mkppm; sleep() { :; }; echo hi > \$WORK/reports/serial-2.log; cmd_result"
 tar -tzf "$T/res-gz.tar.gz" | grep -q 'rdna3-result/rdna3-report-x-scanoutladder-baselineh-pipe0\.png$' || fail "result .gz: the look is not a PNG: $(tar -tzf "$T/res-gz.tar.gz")"
 ! tar -tzf "$T/res-gz.tar.gz" | grep -q '\.ppm$' || fail "result .gz: a PPM is still in the archive"
 grep -q 'Result: .*res-gz.tar.gz (.* MB packed from' "$T/out.txt" || fail "result .gz: no size in the output: $(grep Result "$T/out.txt")"
 if command -v xz >/dev/null 2>&1; then
-    RDNA3VM_RESULT=$T/res-xz.tar.xz run "touch \$WORK/run-start; $(declare -f mkppm); mkppm; sleep() { :; }; echo hi > \$WORK/reports/serial-3.log; cmd_result"
+    RDNA3VM_RESULT=$T/res-xz.tar.xz run "touch -t 202001010000 \$WORK/run-start; $(declare -f mkppm); mkppm; sleep() { :; }; echo hi > \$WORK/reports/serial-3.log; cmd_result"
     tar -tf "$T/res-xz.tar.xz" | grep -q 'rdna3-result/rdna3-report-x-scanoutladder-baselineh-pipe0\.ppm$' || fail "result .xz: the PPM is not in the archive: $(tar -tf "$T/res-xz.tar.xz")"
     ! tar -tf "$T/res-xz.tar.xz" | grep -q '\.png$' || fail "result .xz: a PNG of the triage is in the archive"
     tar -xOf "$T/res-xz.tar.xz" rdna3-result/00-host.txt | grep -q '^repo ' || fail "result .xz: 00-host.txt is not readable"
