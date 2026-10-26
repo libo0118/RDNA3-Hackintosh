@@ -13,7 +13,10 @@ int main(void)
     /* amdgpu's ring: VRAM, 2 MiB aligned VA and VRAM, fragments >= 64 KiB */
     CHECK(rdna3_bigpage_problems(1, va, pa, 9) == 0);
     CHECK(rdna3_bigpage_problems(1, va, pa, RD_BIGPAGE_FRAG) == 0);
-    /* our default GPUVM path: 4 KiB PTEs */
+    /* card run 2026-10-26h, the ring as our default GPUVM path maps it since then (VA 0x800000200000 -> PA 0x1a200000,
+     * smallest fragment 5) and as it did before (rdna3vmfrag=0: 4 KiB PTEs, fragment 0) */
+    CHECK(rdna3_bigpage_problems(1, 0x800000200000ull, 0x1a200000ull, 5) == 0);
+    CHECK(rdna3_bigpage_problems(1, 0x800000200000ull, 0x1a200000ull, 0) == RD_BIGPAGE_FRAG_SMALL);
     CHECK(rdna3_bigpage_problems(1, va, pa, 0) == RD_BIGPAGE_FRAG_SMALL);
     CHECK(rdna3_bigpage_problems(1, va, pa, 3) == RD_BIGPAGE_FRAG_SMALL);
     /* VRAM only 4 KiB aligned under a 64 KiB aligned VA: one 64 KiB translation spans two physical 64 KiB pages */

@@ -95,6 +95,9 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         /* stage 4 item J: amdgpu's exact sequence where the verified
          * profile differs; off by default (ladder step amdgpu) */
         fAmdgpuExact = rd3_arg("rdna3amdgpu", 0) != 0;
+        /* DRIVER-PLAN N57: VRAM mappings with amdgpu_vm_pte_fragment
+         * fragments on the default GPUVM path; rdna3vmfrag=0 = 4 KiB PTEs */
+        fVmFrag = rd3_arg("rdna3vmfrag", 1) != 0;
         {
             /* user queues (amdgpu.user_queue=1), off by default like
              * amdgpu's: they need the MES scheduler, so rdna3userq=1 brings
@@ -681,6 +684,7 @@ void RDNA3Bringup::run()
     rdna3_dev_init(fDev, &os, fMmio->getLength());
     fDev->vram_size = fVramSize;
     fDev->amdgpu_exact = fAmdgpuExact ? 1 : 0;
+    fDev->vm_frag_off = fVmFrag ? 0 : 1;
     /* amdgpu_device_has_dc_support: the display side drives the DCN */
     fDev->amdgpu_dc = fDmubMode ? 1 : 0;
     publish("RDNA3,AmdgpuExact", fAmdgpuExact ? 1 : 0);
@@ -1059,6 +1063,16 @@ bool RDNA3Bringup::hwInit()
                 __sync_synchronize();   /* publish the pool before fVmReady */
                 fVmReady = true;
                 publish("RDNA3,VMTablePages", fPtPool->npages);
+                /* DRIVER-PLAN N57: how user VRAM mappings get their PTE fragments */
+                publish("RDNA3,VMFragments", fAmdgpuExact ? 2 : fVmFrag ? 1 : 0);
+                if (fAmdgpuExact)
+                    BLOG("VM: VRAM mappings through amdgpu_vm_ptes_update: amdgpu_vm_pte_fragment fragments, huge PDEs (rdna3amdgpu=1)");
+                else if (fVmFrag)
+                    BLOG("VM: VRAM mappings with amdgpu_vm_pte_fragment PTE fragments (up to 1 MiB, capped at the physical "
+                         "alignment; system pages 4 KiB); rdna3vmfrag=0 = 4 KiB PTEs");
+                else
+                    BLOG("VM: VRAM mappings with 4 KiB PTEs without fragments (rdna3vmfrag=0): the attribute ring's BIG_PAGE "
+                         "is WRONG with this (DRIVER-PLAN N57)");
                 /* the accelerator's VM first, before any DRM client can
                  * take the VMIDs (WindowServer's IOSurface maps need it) */
                 fOwner->platformVmReady();
@@ -3309,15 +3323,15 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
  * ring, SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE = 1: translated in 64 KiB pages).
  * The VA, the backing (contiguous VRAM and its physical address, or GTT
  * system pages), the smallest PTE fragment of the mapping
- * (gpuvm_map_fragment: amdgpu_vm_pte_fragment with rdna3amdgpu=1, 4 KiB
- * PTEs otherwise) and whether that holds what BIG_PAGE assumes
+ * (gpuvm_map_fragment: amdgpu_vm_pte_fragment's steps; 4 KiB PTEs with
+ * rdna3vmfrag=0) and whether that holds what BIG_PAGE assumes
  * (common/rdna3_attr_ring.h). The first 16, then every 1024th; a mapping
  * that does not hold is always logged. */
 void RDNA3Bringup::discardableMapNote(const rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size)
 {
     const bool vram = bo->placement == AMDGPU_GEM_DOMAIN_VRAM;
     const uint64_t pa = vram ? rdna3_vram_pa(fDev, bo->vram_offset + offset) : 0;
-    const unsigned frag = vram ? gpuvm_map_fragment(fDev, va, size / 4096) : 0;
+    const unsigned frag = vram ? gpuvm_map_fragment(fDev, va, pa, size / 4096) : 0;
     const unsigned bad = rdna3_bigpage_problems(vram, va, pa, frag);
     const uint32_t n = ++fDiscardMapLogs;
     if (!bad && n > 16 && (n & 1023))
@@ -3330,7 +3344,9 @@ void RDNA3Bringup::discardableMapNote(const rdna3_bo *bo, uint64_t va, uint64_t 
         BLOG("GEM_VA DISCARDABLE #%u: VA 0x%llx + %llu KiB -> contiguous VRAM 0x%llx (PA 0x%llx), PTE fragment %u (%llu KiB, %s): "
              "BIG_PAGE %s%s", n, (unsigned long long)va, (unsigned long long)(size >> 10),
              (unsigned long long)(bo->vram_offset + offset), (unsigned long long)pa, frag, 4ull << frag,
-             fAmdgpuExact ? "amdgpu_vm_pte_fragment" : "4 KiB PTEs, rdna3amdgpu=0", bad ? "WRONG:" : "ok", why);
+             fAmdgpuExact ? "amdgpu_vm_pte_fragment"
+                          : fVmFrag ? "amdgpu_vm_pte_fragment in 4 KiB PTEs, rdna3amdgpu=0" : "4 KiB PTEs, rdna3vmfrag=0",
+             bad ? "WRONG:" : "ok", why);
     else
         BLOG("GEM_VA DISCARDABLE #%u: VA 0x%llx + %llu KiB -> GTT system pages (not contiguous VRAM), PTE fragment 0 (4 KiB, "
              "scattered): BIG_PAGE WRONG:%s", n, (unsigned long long)va, (unsigned long long)(size >> 10), why);

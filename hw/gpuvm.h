@@ -63,9 +63,12 @@ uint64_t gpuvm_lookup(rdna3_dev *d, rdna3_vm *vm, uint64_t va);
 /* amdgpu_gmc_pd_addr(root) */
 uint64_t gpuvm_pd_addr(rdna3_dev *d, rdna3_vm *vm);
 
-/* the smallest PTE fragment a contiguous (VRAM) mapping gets: amdgpu_vm_pte_fragment's
- * steps with rdna3amdgpu=1, 0 (4 KiB PTEs) otherwise */
-unsigned int gpuvm_map_fragment(const rdna3_dev *d, uint64_t va, uint64_t pages);
+/* the smallest PTE fragment a contiguous (VRAM) mapping of 'pages' at 'va',
+ * backed from physical address 'pa', gets: amdgpu_vm_pte_fragment's steps
+ * (rdna3amdgpu=1: from the VA as amdgpu; default path: also capped at the
+ * PA's alignment and at 1 MiB, see ptb_fragment), 0 (4 KiB PTEs) with
+ * rdna3vmfrag=0 */
+unsigned int gpuvm_map_fragment(const rdna3_dev *d, uint64_t va, uint64_t pa, uint64_t pages);
 
 /* gmc_v11_0_get_vm_pte flags for an AMDGPU_VM_PAGE_* request */
 uint64_t gpuvm_pte_flags(uint32_t amdgpu_va_flags, int system_memory);

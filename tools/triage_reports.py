@@ -4825,8 +4825,10 @@ def report(path, show_all):
         failed = failed or lvl_ == "FAIL"
     # DRIVER-PLAN N57: the GFX11 attribute ring (DISCARDABLE BOs) - placement, PTE fragment, the plugin's RADV_ATTR_RING_BIG_PAGE (tools/triage_attr_ring.py)
     try:
-        from triage_attr_ring import attr_ring_rows
-        ar_rows_ = attr_ring_rows(log or "", (cdlog or "") + "\n" + (pluginlog or ""))
+        from triage_attr_ring import attr_ring_rows, report_serial
+        # card run 2026-10-26h: the N57 lines may be only in the serial log next to the report
+        ar_sname_, ar_serial_ = report_serial(path)
+        ar_rows_ = attr_ring_rows(log or "", (cdlog or "") + "\n" + (pluginlog or ""), ar_serial_, ar_sname_)
     except ImportError:
         ar_rows_ = [("WARN", "attribute ring", "tools/triage_attr_ring.py is missing next to triage_reports.py: the attribute ring's placement was NOT read")]
     except Exception as e_:  # noqa: BLE001

@@ -14,8 +14,9 @@
  * 4 KiB pages), the VA is 64 KiB aligned, VA and physical address are
  * congruent modulo 64 KiB (one 64 KiB VA page = one 64 KiB physical page),
  * and the PTEs say so: amdgpu maps VRAM with fragments
- * (amdgpu_vm_pte_fragment, AMDGPU_PTE_FRAG >= 4 = 64 KiB); our GPUVM writes
- * fragment 0 (4 KiB) PTEs unless rdna3amdgpu=1.
+ * (amdgpu_vm_pte_fragment, AMDGPU_PTE_FRAG >= 4 = 64 KiB); so does our
+ * GPUVM since card run 2026-10-26h (hw/gpuvm.c ptb_fragment; before it,
+ * and with rdna3vmfrag=0, fragment 0 = 4 KiB PTEs: the run's broken text).
  *
  * SPDX-License-Identifier: MIT
  */

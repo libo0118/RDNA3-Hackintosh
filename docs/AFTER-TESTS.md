@@ -1290,10 +1290,17 @@ CLEAN under a BROKEN baseline. The kernel logs every DISCARDABLE BO (`GEM DISCAR
 aligned yes, 2 MiB aligned yes)`; in GTT: `... GTT, VRAM was asked for and refused - WRONG for the attribute ring ...`) and its mapping (`GEM_VA
 DISCARDABLE #n: VA 0x... + 4224 KiB -> contiguous VRAM 0x... (PA 0x...), PTE fragment F (... KiB, 4 KiB PTEs, rdna3amdgpu=0): BIG_PAGE ok | WRONG: ...`);
 the triage row `attribute ring` recomputes the verdict: PASS = VRAM, 64 KiB aligned, VA and PA congruent modulo 64 KiB, PTE fragment >= 4 (64 KiB);
-FAIL otherwise (the default GPUVM path writes 4 KiB PTEs, fragment 0, so the default kext is FAIL; `rdna3amdgpu=1` maps with amdgpu's fragments);
-WARN = no line (a kext before N57). `attr ring switch` lists the processes where RADV_ATTR_RING_BIG_PAGE=0 was on. Action: attrring CLEAN with the
-baseline BROKEN -> the kernel side of the ring is the cause: port amdgpu_vm_pte_fragment fragments for VRAM mappings to the default path (cross-check
-with `rdna3vm step amdgpu`), keep the ring in VRAM. attrring still BROKEN -> not BIG_PAGE: replay a capture on the card's own RADV (N56).
+FAIL otherwise (a kext before card run 2026-10-26h's fix, or `rdna3vmfrag=0`, writes 4 KiB PTEs, fragment 0: FAIL); WARN = no line in the archive's
+kernel log nor in the newest `serial-*.log` next to the report (a kext before N57). The row reads both (2026-10-26h: the lines were only in the serial
+log) and says `[from serial-....log ...]` when only the serial log had them. `attr ring switch` lists the processes where RADV_ATTR_RING_BIG_PAGE=0 was on.
+**Card run 2026-10-26h:** attrring CLEAN (glyph verdict 17/17), baseline BROKEN, the ring contiguous VRAM 2 MiB aligned with `PTE fragment 0`: the cause.
+The fix (DRIVER-PLAN N57): the default GPUVM path maps VRAM with amdgpu_vm_pte_fragment fragments (at most 1 MiB per PTE, capped at the physical
+alignment); the init line `VM: VRAM mappings with amdgpu_vm_pte_fragment PTE fragments ...` and `RDNA3,VMFragments = 1` say it is on, the ring's line
+now reads `PTE fragment 5 (128 KiB, amdgpu_vm_pte_fragment in 4 KiB PTEs, rdna3amdgpu=0): BIG_PAGE ok`. From then on: baseline CLEAN and `attribute ring`
+PASS = fixed (attrring stays in the ladder as the regression check, it must be clean too); baseline still BROKEN with `attribute ring` PASS -> the TLB
+or the SPI wants more than the PTE fragment: `rdna3vm step amdgpu` (huge PDEs, amdgpu's own update path) as the cross-check; new VM faults
+(`RDNA3,VMFaults`, `LastFaultAddr` inside a BO) after the fix -> boot once with `rdna3vmfrag=0` to tell the fragments apart, send the log.
+attrring still BROKEN -> not BIG_PAGE: replay a capture on the card's own RADV (N56).
 
 Evidence: `ladder.txt` (archive member `41-ladder.txt`, uploaded after every rung as `<report>-ladder.txt`), each rung's `41-ladder-<rung>.log` and the looks
 `<report>-scanoutladder-<rung>[a|h]-pipe<P>.ppm`. `tools/triage_reports.py` prints one row per rung (`ladder <rung>`: what it set, whether the plugin's own

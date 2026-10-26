@@ -5,6 +5,8 @@ mapped (`GEM_VA DISCARDABLE #n: ...`, RDNA3Bringup::discardableMapNote); the plu
 `attrring` rung, `vk: RADV_ATTR_RING_BIG_PAGE=...`). The verdict is recomputed here from the numbers (common/rdna3_attr_ring.h): VRAM, a 64 KiB
 aligned VA congruent with the physical address modulo 64 KiB, and a PTE fragment of at least 64 KiB (4); anything else is FAIL.
 Kept in a module of its own so that tools/triage_reports.py only gains one call; tests/test_triage_attr_ring.py."""
+import glob
+import os
 import re
 
 BIGPAGE = 64 << 10
@@ -32,10 +34,35 @@ def bigpage_problems(vram, va, pa, frag):
     return p
 
 
+def report_serial(report_path):
+    """(name, text) of the newest serial-*.log next to a report (rdna3vm's headless install boot, serial-install-*, never loads the
+    accelerator), or (None, ""). Card run 2026-10-26h: the N57 lines were only in the serial log, the archive's kernel log had none."""
+    d = os.path.dirname(os.path.abspath(report_path)) if report_path else ""
+    if not d:
+        return None, ""
+    serials = sorted((f for f in glob.glob(os.path.join(d, "serial-*.log")) if not os.path.basename(f).startswith("serial-install-")),
+                     key=os.path.getmtime)
+    if not serials:
+        return None, ""
+    try:
+        with open(serials[-1], errors="replace") as f:
+            return os.path.basename(serials[-1]), f.read()
+    except OSError as e:
+        return os.path.basename(serials[-1]), "RDNA3-triage: serial log not readable (%s)\n" % (e.strerror or e)
+
+
 def parse(klog):
-    """(creates, maps): creates [{n, kib, align_kib, where, vram, off}], maps [{n, va, kib, vram, off, pa, frag, how, kernel}]"""
+    """(creates, maps): creates [{n, kib, align_kib, where, vram, off}], maps [{n, va, kib, vram, off, pa, frag, how, kernel}]; a line
+    that is both in the report's kernel log and in the serial log (the same #n) counts once"""
     creates, maps = [], []
+    seen = set()
     for line in (klog or "").splitlines():
+        m = _CREATE.search(line) or _MAP_VRAM.search(line) or _MAP_GTT.search(line)
+        if m:
+            key = (m.re.pattern, int(m.group(1)))
+            if key in seen:
+                continue
+            seen.add(key)
         m = _CREATE.search(line)
         if m:
             vram = m.group(5) is not None
@@ -69,11 +96,15 @@ def plugin_switch(pluginlog):
     return got, rej
 
 
-def attr_ring_rows(klog="", pluginlog=""):
+def attr_ring_rows(klog="", pluginlog="", serial="", serial_name=None):
     """[(level, name, text)]: `attribute ring` (where the DISCARDABLE BOs landed and how they are mapped) and `attr ring switch` (RADV_ATTR_RING_BIG_PAGE
-    in the plugin's processes)."""
+    in the plugin's processes). klog: the report's kernel log; serial: the serial log of the same run (report_serial), read too."""
     rows = []
-    creates, maps = parse(klog)
+    creates, maps = parse((klog or "") + "\n" + (serial or ""))
+    if serial and (creates or maps) and not any(_CREATE.search(x) or _MAP_VRAM.search(x) or _MAP_GTT.search(x) for x in (klog or "").splitlines()):
+        src = " [from %s: the report's kernel log has none of these lines]" % (serial_name or "the serial log")
+    else:
+        src = ""
     sw, rej = plugin_switch(pluginlog)
     off = sorted(k for k, v in sw.items() if v == "0")
     on = sorted(k for k, v in sw.items() if v != "0")
@@ -87,9 +118,10 @@ def attr_ring_rows(klog="", pluginlog=""):
     for r in rej[:3]:
         rows.append(("WARN", "attr ring switch", "NVMTL_ATTR_RING_BIG_PAGE=%s: the switch did not reach RADV" % r))
     if not creates and not maps:
-        if (klog or "").strip():
-            rows.append(("WARN", "attribute ring", "no `GEM DISCARDABLE` / `GEM_VA DISCARDABLE` line in the kernel log: a kext older than DRIVER-PLAN N57, or no RADV queue "
-                         "made its GFX11 attribute ring (no client drew); the ring's placement and PTEs are UNKNOWN"))
+        if (klog or "").strip() or (serial or "").strip():
+            rows.append(("WARN", "attribute ring", "no `GEM DISCARDABLE` / `GEM_VA DISCARDABLE` line in the kernel log (%s): a kext older than DRIVER-PLAN N57, or "
+                         "no RADV queue made its GFX11 attribute ring (no client drew); the ring's placement and PTEs are UNKNOWN"
+                         % ("archive and %s" % serial_name if serial_name else "archive only, no serial log next to the report")))
         return rows
     gtt = [c for c in creates if not c["vram"]]
     bad = []
@@ -119,6 +151,8 @@ def attr_ring_rows(klog="", pluginlog=""):
     if not maps:
         rows.append(("WARN", "attribute ring", "%d DISCARDABLE BO(s) created (%s) but no `GEM_VA DISCARDABLE` line: the mapping and its PTE fragment are UNKNOWN "
                      "(the log lost it, or the VM is record-only)" % (len(creates), cdesc)))
+    if src:
+        rows[:] = [(lv_, nm_, t_ + src) if nm_ == "attribute ring" else (lv_, nm_, t_) for lv_, nm_, t_ in rows]
     disagree = [m["n"] for m in maps if (m["kernel"] == "ok") != (not bigpage_problems(m["vram"], m["va"], m["pa"], m["frag"]))]
     if disagree:
         rows.append(("WARN", "attribute ring", "the kernel's own BIG_PAGE verdict differs from the triage's for #%s: common/rdna3_attr_ring.h and tools/triage_attr_ring.py disagree"
