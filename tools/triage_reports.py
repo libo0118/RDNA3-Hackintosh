@@ -137,7 +137,7 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h", "common/rdna3_flip_queue.h",
                     "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h",
-                    "common/rdna3_gpu_util.h")
+                    "common/rdna3_gpu_util.h", "common/rdna3_fbgate.h")
 
 
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs

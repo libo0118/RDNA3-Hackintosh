@@ -1043,7 +1043,12 @@ deepest first), the number of snapshots and the console user; **`WARN BOOTWATCH`
 stack first: a thread in `IOServiceOpen` / `IOAccelOpen` -> the kernel side (`serial-*.log` around `newUserClient`, the core's
 `debug.rdna3_*` counters); in `dlopen` / the Metal plugin (`RDNA3MTLDriver`, `NVMTL:` lines in the `log show` section) -> the plugin
 (conf in the same file, `rdna3mtl.conf`); `mach_msg` to `AGPMEnabler` / the AGDC -> `ioreg` section and the AGPM lines; WindowServer NOT RUNNING
--> launchd / `loginwindow` lines. The files are not part of the `rdna3-report-*` tarball (that never comes in this failure); `rdna3vm result`
+-> launchd / `loginwindow` lines. **`KERNEL DEADLOCK (spindump)`** in the row: the watchdog's `bootwatch-*.spindump` holds the kernel's own
+`Deadlock:` verdict; the detail lines list the images in each deadlocked thread's stack. Our kext in the cycle is a lock-order bug of ours:
+resolve the frames (`RDNA3Accelerator + N` is the offset from the kext's `__TEXT`; the Apple kexts' from their fileset entries in
+`reference/macos-26.4.1/kc/SystemKernelExtensions.kc`) as in DRIVER-PLAN N58 (card run 2026-10-26j: the boot-arg thread call against
+AppleGPUWrangler; since then the serial log has `N58 ...: inside <n> framebuffer controller gate(s)` before each registration; a head
+"WITHOUT a controller workloop" there or a "refused the action" line is the first thing to read). The files are not part of the `rdna3-report-*` tarball (that never comes in this failure); `rdna3vm result`
 packs them with the rest. The first boot after an `autoreport.sh` update runs the old script until it has fetched the new one (the watchdog
 starts with the new one).
 

@@ -25,6 +25,8 @@
 #include "../common/rdna3_surf_pending.h"
 #include "../common/rdna3_gpu_util.h"   // N49: Activity Monitor's GPU numbers
 #include "../common/rdna3_tcall.h"   // thread calls stopped with public KPIs only (macOS 26: card run 2026-10-25b)
+#include "../common/rdna3_fbgate.h"  // N58: the framebuffers' controller gates before the display machine
+#include <IOKit/IOWorkLoop.h>
 #include <mach/mach_time.h>
 #include <sys/kauth.h>
 #include <sys/random.h>
@@ -163,6 +165,7 @@ static const int kRd3VerifiedDarwin = 24;
 #endif
 static int gRd3AccelArmed = 0;
 static const unsigned kRd3MaxFB = 4;
+static_assert(kRd3MaxFB <= RD3_FBGATE_MAX, "rd3_fbgate_plan looks at RD3_FBGATE_MAX heads");
 static unsigned gRd3HeadsPublished = 0, gRd3HeadsRegistered = 0;
 static unsigned gRd3HeadsPiped = 0;
 
@@ -846,7 +849,7 @@ public:
         }
         return -1;
     }
-    unsigned registerPendingLocked(const char *why) {
+    unsigned registerPendingLocked(const char *why, unsigned gated) {
         unsigned added = 0;
         for (unsigned i = 0; i < kRd3MaxFB; i++) {
             IOService *fb = fFBs[i];
@@ -857,6 +860,12 @@ public:
                 break;
             }
             if (fFBRegistered & (1u << i)) continue;
+            if (!rd3_fbgate_registrable(1u << i, fFBRegistered, gated)) {
+                ALOG("  %s: index %u published after its controller gate was planned (gated 0x%x): NOT registered now, "
+                     "stopping (N58 lock order); its own boot-arg thread call or the next debug.rdna3accelfb write "
+                     "registers it", why, i, gated);
+                break;
+            }
             /* the family may have registered this framebuffer itself and
              * given it a pipe already (card run 39: head 0 was known, the
              * count stayed 1 -> 1, the head was never marked piped, and
@@ -921,21 +930,130 @@ public:
         ALOG("  debug.rdna3accelfb now reads 1 -- armed-only Metal clients may have a device THIS BOOT ONLY "
              "(heads published 0x%x, registered 0x%x, piped 0x%x)", gRd3HeadsPublished, gRd3HeadsRegistered, gRd3HeadsPiped);
     }
+    /* N58 (card run 2026-10-26j, kernel stackshot: every -cpu host boot
+     * hung there): the display machine's entry points this driver calls
+     * itself (found_framebuffer, display_mode_will_change / did_change,
+     * start) take the accelerator lock (IOGraphicsAccelerator2 +0x88) and
+     * then, per pipe, IOFramebuffer::getAttributeExt closes the framebuffer
+     * controller's gate. IOGraphics takes them the other way round: its
+     * framebuffer notifications (IOAccelDisplayPipe::display_change_handler,
+     * the family's own caller of these) and IOFramebuffer::message ->
+     * probeAccelerator -> requestProbe run INSIDE the controller gate and
+     * then take the accelerator lock. A thread call delivering the mode
+     * change while AppleGPUWrangler messaged the head that had just
+     * published was a lock cycle. So the gates come first, as in IOGraphics:
+     * the controller workloop of every published head (IOFramebuffer::
+     * getWorkLoop, the IOGraphicsControllerWorkLoop whose gate getAttributeExt
+     * and message close; recursive for its owner), once each, in head order
+     * (common/rdna3_fbgate.h), always under fRegLock. Lock order:
+     * fRegLock -> controller gates -> accelerator lock. */
+    struct FbGateRun {
+        RDNA3Accelerator *me;
+        IOWorkLoop *wl[kRd3MaxFB];
+        unsigned n, k;
+        void (*body)(RDNA3Accelerator *, int, unsigned);
+        int how;
+        bool ran, stale;
+        unsigned gated, nowGated;
+    };
+    /* the published heads and their controller workloops, planned */
+    void fbGatePlan(const void *fb[], const void *wlOf[], IOWorkLoop *got[], struct rd3_fbgate_plan *p) {
+        for (unsigned i = 0; i < kRd3MaxFB; i++) {
+            IOService *f = fFBs[i];
+            got[i] = f ? f->getWorkLoop() : nullptr;
+            fb[i] = f;
+            wlOf[i] = got[i];
+        }
+        rd3_fbgate_plan(fb, wlOf, kRd3MaxFB, p);
+    }
+    /* one gate per level: IOWorkLoop::runAction closes the gate through the
+     * workloop's own (virtual) closeGate - closeGate / openGate themselves
+     * are protected. The innermost level plans the heads again (one may
+     * have published while this thread waited for a gate) and runs the
+     * body only when every gate the heads need now is held. */
+    static IOReturn fbGateStep(OSObject *, void *arg0, void *, void *, void *) {
+        FbGateRun *r = (FbGateRun *)arg0;
+        if (r->k < r->n) {
+            IOWorkLoop *wl = r->wl[r->k++];
+            return wl->runAction(&RDNA3Accelerator::fbGateStep, r->me, r);
+        }
+        const void *fb[kRd3MaxFB], *wlOf[kRd3MaxFB], *held[kRd3MaxFB];
+        IOWorkLoop *got[kRd3MaxFB];
+        struct rd3_fbgate_plan now;
+        r->me->fbGatePlan(fb, wlOf, got, &now);
+        for (unsigned k = 0; k < r->n; k++)
+            held[k] = r->wl[k];
+        r->nowGated = now.gated;
+        if (!rd3_fbgate_covered(held, r->n, wlOf, &now)) {
+            r->stale = true;
+            return kIOReturnSuccess;
+        }
+        r->gated = now.gated;
+        r->body(r->me, r->how, now.gated);
+        r->ran = true;
+        return kIOReturnSuccess;
+    }
+    /* call with fRegLock held */
+    void runInFbGates(const char *why, void (*body)(RDNA3Accelerator *, int, unsigned), int how) {
+        unsigned prevGated = 0;
+        for (unsigned t = 1; t <= RD3_FBGATE_TRIES; t++) {
+            const void *fb[kRd3MaxFB], *wlOf[kRd3MaxFB];
+            IOWorkLoop *got[kRd3MaxFB];
+            struct rd3_fbgate_plan p;
+            fbGatePlan(fb, wlOf, got, &p);
+            FbGateRun r = { this, {}, 0, 0, body, how, false, false, 0, 0 };
+            for (unsigned k = 0; k < p.n; k++) {
+                r.wl[r.n] = got[p.head[k]];
+                r.wl[r.n++]->retain();
+            }
+            if (t > 1)
+                ALOG("N58 %s: head(s) 0x%x published while this thread waited for the gates of heads 0x%x: planning again "
+                     "(try %u of %u)", why, p.gated & ~prevGated, prevGated, t, RD3_FBGATE_TRIES);
+            if (p.noWl)
+                ALOG("N58 %s: inside %u framebuffer controller gate(s) (heads 0x%x), then the display machine; head(s) "
+                     "0x%x published WITHOUT a controller workloop: not gated, not registered now", why, p.n, p.gated, p.noWl);
+            else
+                ALOG("N58 %s: inside %u framebuffer controller gate(s) (heads 0x%x), then the display machine "
+                     "(IOGraphics' order: gate, then the accelerator lock)", why, p.n, p.gated);
+            IOReturn ret = fbGateStep(nullptr, &r, nullptr, nullptr, nullptr);
+            for (unsigned k = 0; k < r.n; k++)
+                r.wl[k]->release();
+            if (r.ran)
+                return;
+            if (!r.stale) {
+                ALOG("N58 %s: a controller workloop refused the action (runAction 0x%x at gate %u of %u): NOTHING "
+                     "registered or delivered", why, (unsigned)ret, r.k, r.n);
+                return;
+            }
+            prevGated = p.gated;
+        }
+        ALOG("N58 %s: heads kept publishing while this thread waited for their gates (%u tries, last 0x%x): NOTHING "
+             "registered or delivered; write debug.rdna3accelfb again", why, RD3_FBGATE_TRIES, prevGated);
+    }
+    static void registerBody(RDNA3Accelerator *a, int how, unsigned gated) { a->registerFramebufferLocked(how, gated); }
     void registerFramebuffer(int how) {
         if (fRegLock) IOLockLock(fRegLock);
-        registerFramebufferLocked(how);
+        runInFbGates("registerFramebuffer", &RDNA3Accelerator::registerBody, how);
         if (fRegLock) IOLockUnlock(fRegLock);
     }
-    bool registerFramebufferLocked(int how) {
+    /* gated: the heads inside a held controller gate (runInFbGates, N58);
+     * only those are handed to the display machine */
+    bool registerFramebufferLocked(int how, unsigned gated) {
         if (!fDM) { ALOG("registerFramebuffer(%d): no display machine", how); return false; }
         if (!fFB) { ALOG("registerFramebuffer(%d): no framebuffer has published yet", how); return false; }
         unsigned before = fDM->getFramebufferCount();
         ALOG("registerFramebuffer(%d): framebuffer count before = %u", how, before);
         if (how == 2) {
+            unsigned published = 0;
+            for (unsigned i = 0; i < kRd3MaxFB; i++) if (fFBs[i]) published |= 1u << i;
             if (before != 0) ALOG("  already %u -- refusing to re-run the family's sweep", before);
+            else if (published & ~gated)
+                ALOG("  head(s) 0x%x published outside the held controller gates (gated 0x%x): refusing the family's sweep "
+                     "now, it would register them with the accelerator lock before their gate (N58); write 2 again",
+                     published & ~gated, gated);
             else { ALOG("  re-running IOAccelDisplayMachine::start(pci) -- the family's own sweep"); fDM->start(fPCI); }
         } else {
-            registerPendingLocked("sysctl");
+            registerPendingLocked("sysctl", gated);
         }
         unsigned after = fDM->getFramebufferCount();
         ALOG("  framebuffer count after = %u", after);
@@ -1017,6 +1135,15 @@ public:
         *handler = uc;
         return kIOReturnSuccess;
     }
+    static void scanoutBody(RDNA3Accelerator *a, int how, unsigned gated) {
+        if (a->registerFramebufferLocked(1, gated))
+            ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED; the registration just delivered the mode "
+                 "change -- not delivering it twice", how);
+        else {
+            ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED, re-delivering the mode change", how);
+            a->deliverModeChange();
+        }
+    }
     static void triggerFromSysctl(int how) {
         if (!gAccel) { ALOG("sysctl debug.rdna3accelfb=%d but no RDNA3Accelerator is running", how); return; }
         if (how >= 4) gRd3Aperture = 1;
@@ -1024,13 +1151,7 @@ public:
             gRd3Scanout = 1;
             ALOG("  level %d: registering any published head that has no pipe yet", how);
             if (gAccel->fRegLock) IOLockLock(gAccel->fRegLock);
-            if (gAccel->registerFramebufferLocked(1))
-                ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED; the registration just delivered the mode "
-                     "change -- not delivering it twice", how);
-            else {
-                ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED, re-delivering the mode change", how);
-                gAccel->deliverModeChange();
-            }
+            gAccel->runInFbGates("debug.rdna3accelfb>=3", &RDNA3Accelerator::scanoutBody, how);
             if (gAccel->fRegLock) IOLockUnlock(gAccel->fRegLock);
             return;
         }
