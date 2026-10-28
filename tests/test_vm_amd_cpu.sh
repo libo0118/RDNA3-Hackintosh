@@ -459,7 +459,7 @@ mk_kext() {   # mk_kext DIR NAME VERSION
 mk_kext "$T/kstate" Lilu 1.6.8; mk_kext "$T/kstate" VirtualSMC 1.3.3
 mk_kext "$T/ready" Lilu 1.7.2; mk_kext "$T/ready" RestrictEvents 1.1.6
 adds() { python3 -I -c "import plistlib,sys; print(' '.join(a['BundlePath'] for a in plistlib.load(open(sys.argv[1],'rb'))['Kernel']['Add']))" "$1"; }
-fver() { sed -n '/CFBundleVersion/{n;s/.*<string>\(.*\)<.string>.*/\1/p}' "$1/Contents/Info.plist"; }
+fver() { sed -n '/CFBundleVersion/{n;s/.*<string>\(.*\)<.string>.*/\1/p;}' "$1/Contents/Info.plist"; }   # ';}': BSD sed (macOS)
 cp -R "$T/kstate" "$T/kstate.orig"
 printf 'CPU_MODEL="host"\nCPUS=12\n' > "$T/ocw/config"
 oc --boot-args "-v keepsyms=1" > "$T/out.txt" || fail "_oc with CPU_MODEL=host failed"
