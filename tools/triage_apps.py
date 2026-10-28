@@ -139,7 +139,7 @@ def app_row(name, lines, rung, glyph, logs):
     dc = draw_counters(plog)
     if dc:
         text += "; plugin census: %d draws, %d presents (%d process(es))" % (dc[0], dc[1], len(dc[2]))
-    elif name != "mission-control" and not result.startswith(("did not open", "was already")):
+    elif name not in ("mission-control", "launchpad") and not result.startswith(("did not open", "was already")):
         nl = len([l for l in plog.splitlines() if l.strip()])
         notes.append("no `census: SUMMARY` from the plugin in the app's processes (%d NVMTL line(s)): it drew nothing through the plugin, or ended before the 10 s tick" % nl)
         level = "WARN" if level == "INFO" else level

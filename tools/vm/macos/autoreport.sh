@@ -1511,7 +1511,7 @@ apps_proc() {   # apps_proc RUNG: the process name pgrep -x finds (empty: a Dock
         chess) echo Chess ;; terminal) echo Terminal ;; textedit) echo TextEdit ;; calculator) echo Calculator ;; notes) echo Notes ;;
         safari) echo Safari ;; preview) echo Preview ;; maps) echo Maps ;; settings) echo "System Settings" ;; appstore) echo "App Store" ;;
         photos) echo Photos ;; imagecapture) echo "Image Capture" ;; quicktime) echo "QuickTime Player" ;;
-        launchpad) apps_launchpad_name ;; mission-control) ;;
+        launchpad|mission-control) ;;   # no process of their own: the Dock draws Apps / Launchpad (card run 2026-10-26: `open -a Apps` exit 0, the window on screen, no "Apps" process)
         *) return 1 ;;
     esac
 }

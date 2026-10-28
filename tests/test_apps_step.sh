@@ -49,7 +49,7 @@ case "$1" in -a) app=$2 ;; x-apple.systempreferences:*) app="System Settings" ;;
 [ -n "$app" ] || exit 0
 f="$STUBDIR/pids-$(echo "$app" | tr ' ' '_')"
 [ "${FAIL_APP:-}" = "$app" ] && exit 1
-[ "$app" = "Mission Control" ] && exit 0   # it toggles and ends at once: no process to find
+case "$app" in "Mission Control"|Launchpad|Apps) exit 0 ;; esac   # the Dock shows them: no process to find (macOS 26: no "Apps" process)
 if [ -n "$newi" ] || [ ! -s "$f" ]; then
     n=$(cat "$STUBDIR/next" 2>/dev/null || echo 1000); echo $((n + 1)) > "$STUBDIR/next"
     echo $n >> "$f"
@@ -241,7 +241,9 @@ for SH in sh bash dash; do
     grep -q '^plugin: App(' "$L" || fail "$SH: plugin line: $(grep '^plugin' "$L" | head -2)"
     # the quit: SIGINT first, only the pids the survey started; the owner's Terminal (500) stays
     ! grep -q '^kill .*\b500\b' "$T/stub.log" || fail "$SH: the owner's Terminal was killed"
-    [ "$(grep -c "^quit: pid [0-9]* ended by SIGINT after " "$L")" = 16 ] || fail "$SH: the quit lines: $(grep -c '^quit: pid' "$L")"
+    # 15: Apps / Launchpad has no process of its own (the Dock draws it), like Mission Control
+    [ "$(grep -c "^quit: pid [0-9]* ended by SIGINT after " "$L")" = 15 ] || fail "$SH: the quit lines: $(grep -c '^quit: pid' "$L")"
+    grep -A8 '^== rung launchpad' "$L" | grep -q '^pids: none=' || fail "$SH: Apps / Launchpad is not a process of its own: $(grep -A8 '^== rung launchpad' "$L" | grep pids)"
     ! grep -q '^kill -TERM\|^kill -KILL' "$T/stub.log" || fail "$SH: an instance that quit on SIGINT was TERMed too"
     [ "$(cat "$T/sys/pids-Terminal")" = 500 ] || fail "$SH: instances left running: $(cat "$T/sys"/pids-* 2>/dev/null | tr '\n' ' ')"
     for f in "$T/sys"/pids-*; do case $f in *pids-Terminal|*pids-WindowServer|*pids-WebKit) ;; *) [ ! -s "$f" ] || fail "$SH: $f still lists $(cat "$f")" ;; esac; done
