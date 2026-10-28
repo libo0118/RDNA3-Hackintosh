@@ -88,6 +88,17 @@ def analyse(layer, runs):
     return res
 
 
+def fps_text(a, runs, end):
+    """N61: the frames a second the panel showed against those the page drew (seen + skipped), over the burst
+    (the E line's microseconds, else the last sample's)"""
+    us = end[1] if end and end[1] else (max(r[0] for r in runs) if runs else 0)
+    sec = us / 1e6
+    if sec < 1.0 or not a["frames"]:   # a rate over less than a second says nothing
+        return ""
+    shown, page = a["frames"] / sec, (a["frames"] + a["skipped"]) / sec
+    return "; displayed %.1f fps of the page's %.1f fps (%.0f %%)" % (shown, page, 100.0 * shown / page if page else 0.0)
+
+
 def kernel_delta(p):
     """the kernel's N59 counters during the burst, 'name +n' for those that moved"""
     names = ("iop_stale_checked", "iop_stale", "iop_stale_moved", "iop_stale_timeout", "iop_stale_nowait", "iop_stale_capped", "iop_stale_torn", "iop_ok")
@@ -114,10 +125,11 @@ def rows(name, text):
     for (layer, pipe), runs in sorted(p["samples"].items(), key=lambda kv: (LAYERS.index(kv[0][0]), kv[0][1])):
         a = analyse(layer, runs)
         n = len(a["back"])
+        fps = fps_text(a, runs, p["end"])
         ex = ", ".join("%.3f s: %d -> %d (%d back)" % (us / 1e6, f, t, by) for us, f, t, by in a["back"][:4])
         out.append(("FAIL" if n else "PASS", "frame order",
-                    "%s%s: %d regressions in %d samples (layer: %s, pipe %d): %d frames seen, %d skipped, %d torn sample(s)%s%s" % (
-                        name, wait, n, a["samples"], layer, pipe, a["frames"], a["skipped"], a["torn"],
+                    "%s%s: %d regressions in %d samples (layer: %s, pipe %d): %d frames seen, %d skipped, %d torn sample(s)%s%s%s" % (
+                        name, wait, n, a["samples"], layer, pipe, a["frames"], a["skipped"], a["torn"], fps,
                         "; first: " + ex if ex else "", kd)))
     if missing:
         out.append(("INFO", "frame order", "%s: layer(s) %s not found (WebGL: Safari may have no WebGL without the plugin in its GPU process)" % (

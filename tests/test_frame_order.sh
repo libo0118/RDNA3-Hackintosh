@@ -32,6 +32,16 @@ A debug.rdna3accel_iop_stale_moved: 7
 END
 python3 -I -B tools/frame_order.py --check "$T/frameorder-clean.log" > "$T/dec2" || no "--check failed a clean burst: $(cat "$T/dec2")"
 grep -q '^PASS frame order: frameorder-clean (kernel stale wait 12 ms): 0 regressions in 11 samples (layer: css, pipe 0): 3 frames seen, 0 skipped, 1 torn sample(s); kernel during it: iop_stale +3, iop_stale_moved +3' "$T/dec2" || no "clean row wrong: $(cat "$T/dec2")"
+# N61: a 2 s burst in which the panel showed 3 of the page's 30 frames (27 skipped): the displayed against the page's rate
+cat > "$T/frameorder-slow.log" <<'END'
+# frameorder slow 12:00:00 iop_stale_wait_ms=12
+L css 0 106 300
+S 0 css 0 000000000000111111111111 10
+S 700000 css 0 010100000000101011111111 10
+S 1400000 css 0 101110000000010001111111 10
+E 30 2000000 0
+END
+python3 -I -B tools/frame_order.py "$T/frameorder-slow.log" | grep -q '3 frames seen, 27 skipped, 0 torn sample(s); displayed 1.5 fps of the page.s 15.0 fps (10 %)' || no "the displayed / page fps is wrong: $(python3 -I -B tools/frame_order.py "$T/frameorder-slow.log")"
 printf '# frameorder none\nE 0 10 0\n' > "$T/frameorder-none.log"
 python3 -I -B tools/frame_order.py "$T/frameorder-none.log" | grep -q '^WARN frame order: frameorder-none: NO strip found' || no "a burst with no strip is not a WARN"
 # the kernel's row (29-surface-vram.txt) and the triage entry point

@@ -27,6 +27,7 @@
 #include "../common/rdna3_tcall.h"   // thread calls stopped with public KPIs only (macOS 26: card run 2026-10-25b)
 #include "../common/rdna3_fbgate.h"  // N58: the framebuffers' controller gates before the display machine
 #include "../common/rdna3_iop_stale.h"   // N59: an IOP copy of a buffer nothing wrote since it was last shown
+#include "../common/rdna3_iop_copy.h"    // N61: the IOP copy into the scanout and its cost
 #include <IOKit/IOWorkLoop.h>
 #include <mach/mach_time.h>
 #include <sys/kauth.h>
@@ -2091,6 +2092,9 @@ bool RD3DisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
 
 static bool rd3AccelSurfCopyReady(IOSurface *s, unsigned head);
 static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, unsigned *useed);
+static void rd3AccelIopGateNote(unsigned head, uint64_t t0);   /* N61 */
+static void rd3AccelIopCopyNote(unsigned head, uint64_t t0, uint64_t bytes, int accessBytes, unsigned w, unsigned h,
+                                unsigned spitch, unsigned dpitch, bool fromRes);
 static void rd3AccelIopStaleNote(IOSurface *s, unsigned head, unsigned lseed, unsigned useed);
 static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static void rd3AccelIopHome(IOService *fb, unsigned head);
@@ -2292,8 +2296,11 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
          * of the copied frames). Such a frame keeps the previous picture. */
         /* N59: a buffer of WindowServer's present ring nothing wrote since this head last copied it holds an
          * older frame (the plugin's copy-out of the new one is still on its way): wait for it, bounded */
+        const uint64_t gate0 = mach_absolute_time();
         rd3AccelIopStaleGate(s, head, &staleL, &staleU);
-        if (!rd3AccelSurfCopyReady(s, head)) return kIOReturnSuccess;
+        const bool copyReady = rd3AccelSurfCopyReady(s, head);
+        rd3AccelIopGateNote(head, gate0);   /* N61: what the gates cost this transaction */
+        if (!copyReady) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
         if (fmt != 0x42475241u) RD3IOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
         const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
@@ -2317,14 +2324,12 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (w != q.width || h != q.height) RD3IOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
 
     rd3AccelIopHome(fb, head);
-    const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
-    const unsigned spr = pitch / 4, dpr = q.pitch / 4;
-    volatile unsigned int *d = (volatile unsigned int *)q.kva;
-    for (unsigned y = 0; y < h; y++) {
-        const volatile unsigned int *sp = src + (unsigned long)y * spr;
-        volatile unsigned int *dp = d + (unsigned long)y * dpr;
-        for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
-    }
+    const unsigned rowBytes = ((pitch < q.pitch) ? pitch : q.pitch) & ~3u;
+    const unsigned spr = pitch / 4;
+    /* N61 (common/rdna3_iop_copy.h): the same bytes as the old 32-bit loop, 8 at a time when everything is 8-aligned; timed */
+    const uint64_t copy0 = mach_absolute_time();
+    const int accessBytes = rd3_iop_copy_rows(q.kva, q.pitch, src, pitch, h, rowBytes);
+    rd3AccelIopCopyNote(head, copy0, (uint64_t)rowBytes * h, accessBytes, w, h, pitch, q.pitch, fromRes);
     if (!fromRes && s) rd3AccelIopStaleNote(s, head, staleL, staleU);
     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
@@ -2447,6 +2452,27 @@ RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames source
 RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
 static SInt64 gCntIopCopySkip;
 RD3ACCEL_CNT(rdna3accel_iop_copy_skip,    gCntIopCopySkip,    "frames kept on the panel because the surface's newest pixels were not yet in system memory");
+/* N61 (common/rdna3_iop_copy.h): the display pipe's CPU copy into the scanout, and the gates before it */
+static SInt64 gCntIopCopyN, gCntIopCopyBytes, gCntIopCopyUs, gCntIopCopyMaxUs, gCntIopCopy64, gCntIopGateUs;
+static SInt64 gCntIopCopyNHead[kRd3MaxFB], gCntIopCopyUsHead[kRd3MaxFB], gCntIopGateUsHead[kRd3MaxFB];
+RD3ACCEL_CNT(rdna3accel_iop_copy_n,       gCntIopCopyN,       "N61: IOP copies into a scanout (all heads)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_bytes,   gCntIopCopyBytes,   "N61: bytes the IOP copies moved");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us,      gCntIopCopyUs,      "N61: microseconds the IOP copies took (all heads)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_max_us,  gCntIopCopyMaxUs,   "N61: the longest IOP copy, microseconds");
+RD3ACCEL_CNT(rdna3accel_iop_copy_64,      gCntIopCopy64,      "N61: IOP copies done 8 bytes per access (everything 8-aligned)");
+RD3ACCEL_CNT(rdna3accel_iop_gate_us,      gCntIopGateUs,      "N61: microseconds transactions spent in the stale / page-off gates before their copy");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h0,    gCntIopCopyNHead[0], "N61: IOP copies into head 0");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h1,    gCntIopCopyNHead[1], "N61: IOP copies into head 1");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h2,    gCntIopCopyNHead[2], "N61: IOP copies into head 2");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h3,    gCntIopCopyNHead[3], "N61: IOP copies into head 3");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h0,   gCntIopCopyUsHead[0], "N61: microseconds of IOP copies into head 0");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h1,   gCntIopCopyUsHead[1], "N61: microseconds of IOP copies into head 1");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h2,   gCntIopCopyUsHead[2], "N61: microseconds of IOP copies into head 2");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h3,   gCntIopCopyUsHead[3], "N61: microseconds of IOP copies into head 3");
+RD3ACCEL_CNT(rdna3accel_iop_gate_us_h0,   gCntIopGateUsHead[0], "N61: gate microseconds of head 0's transactions");
+RD3ACCEL_CNT(rdna3accel_iop_gate_us_h1,   gCntIopGateUsHead[1], "N61: gate microseconds of head 1's transactions");
+RD3ACCEL_CNT(rdna3accel_iop_gate_us_h2,   gCntIopGateUsHead[2], "N61: gate microseconds of head 2's transactions");
+RD3ACCEL_CNT(rdna3accel_iop_gate_us_h3,   gCntIopGateUsHead[3], "N61: gate microseconds of head 3's transactions");
 /* N59 (common/rdna3_iop_stale.h): IOP copies of a buffer whose IOSurface seeds did not move since the head last copied it */
 static int gIopStaleWaitMaxUs;
 static SInt64 gCntIopStaleChecked, gCntIopStale, gCntIopStaleMoved, gCntIopStaleTimeout, gCntIopStaleNotWaited, gCntIopStaleWaitUs,
@@ -2606,6 +2632,25 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty_base); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty_base_err);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_src_res);    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_src_surf);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_blank);   sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_skip);
+    /* N61 */
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_n);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_bytes);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_max_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_64);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_n_h0);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_n_h1);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_n_h2);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_n_h3);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_us_h0);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_us_h1);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_us_h2);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_us_h3);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h0);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h1);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h2);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_wait_ms); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_wait_maxus);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_checked); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_fresh);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale);   sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_moved);
@@ -4203,6 +4248,34 @@ static bool rd3AccelSurfCopyReady(IOSurface *s, unsigned head)
     if (++gIopCopyHeld[head] > 4) { gIopCopyHeld[head] = 0; return true; }
     OSAddAtomic64(1, &gCntIopCopySkip);
     return false;
+}
+
+/* ---- N61: what an IOP transaction costs (common/rdna3_iop_copy.h): the gates before the copy, the copy itself ---- */
+static void rd3AccelIopGateNote(unsigned head, uint64_t t0)
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    OSAddAtomic64((SInt64)(ns / 1000), &gCntIopGateUs);
+    if (head < kRd3MaxFB) OSAddAtomic64((SInt64)(ns / 1000), &gCntIopGateUsHead[head]);
+}
+static void rd3AccelIopCopyNote(unsigned head, uint64_t t0, uint64_t bytes, int accessBytes, unsigned w, unsigned h,
+                                unsigned spitch, unsigned dpitch, bool fromRes)
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    const SInt64 us = (SInt64)(ns / 1000);
+    const SInt64 k = OSAddAtomic64(1, &gCntIopCopyN);
+    OSAddAtomic64((SInt64)bytes, &gCntIopCopyBytes);
+    OSAddAtomic64(us, &gCntIopCopyUs);
+    if (accessBytes == 8) OSAddAtomic64(1, &gCntIopCopy64);
+    if (head < kRd3MaxFB) { OSAddAtomic64(1, &gCntIopCopyNHead[head]); OSAddAtomic64(us, &gCntIopCopyUsHead[head]); }
+    SInt64 m = gCntIopCopyMaxUs;
+    while (us > m && !OSCompareAndSwap64((UInt64)m, (UInt64)us, (volatile UInt64 *)&gCntIopCopyMaxUs)) m = gCntIopCopyMaxUs;
+    if (rd3_iop_copy_log_due((uint64_t)k))
+        ALOG("iop: copy #%lld (head %u): %ux%u from %s, pitch %u -> %u, %llu bytes in %lld us (%llu MB/s, %d-byte accesses); gates "
+             "before the copies %lld us in all (N61)", (long long)k + 1, head, w, h, fromRes ? "our VRAM resource" : "the IOSurface's memory",
+             spitch, dpitch, (unsigned long long)bytes, (long long)us, (unsigned long long)rd3_iop_mbps(bytes, (uint64_t)us), accessBytes,
+             (long long)gCntIopGateUs);
 }
 
 /* ---- N59: an IOP copy of a buffer nothing wrote since this head last copied it (common/rdna3_iop_stale.h) ----
