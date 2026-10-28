@@ -47,7 +47,7 @@ assert f.kernel_rows(sv.replace("stale: 20", "stale: 18"), True)[0][0] == "INFO"
 rows = f.report_rows({"frameorder-a": "# frameorder a\nE 0 1 0\n", "notes": "x"}, sv, True)
 assert [x[1] for x in rows] == ["iop stale", "frame order"] and rows[1][0] == "WARN", rows
 pl = ("2026-10-26 16:22:46.1 Df WindowServer[195:2ca] (RDNA3MTLDriver) NVMTL: vk: handoff: SUMMARY cbs=5 early=0 by_handler=0 by_wait=0 gap_us_avg=0 gap_us_max=0 held=0 held_us_avg=0 hold=0\n"
-      "2026-10-26 16:22:56.1 Df WindowServer[195:2ca] (RDNA3MTLDriver) NVMTL: vk: handoff: SUMMARY cbs=9 early=3 by_handler=1 by_wait=2 gap_us_avg=2100 gap_us_max=4000 held=0 held_us_avg=0 hold=0\n"
+      "2026-10-26 16:22:56.1 Df WindowServer[195:2ca] (RDNA3MTLDriver) NVMTL: vk: handoff: SUMMARY cbs=9 early=3 by_handler=1 by_wait=2 by_status=0 gap_us_avg=2100 gap_us_max=4000 held=0 held_us_avg=0 hold=0\n"
       "2026-10-26 16:22:57.1 Df Notes[3545:4237] (RDNA3MTLDriver) NVMTL: vk: handoff: SUMMARY cbs=2 early=0 by_handler=0 by_wait=0 gap_us_avg=0 gap_us_max=0 held=2 held_us_avg=900 hold=1\n")
 h = f.handoff_rows(pl)
 assert [x[0] for x in h] == ["INFO", "WARN"] and h[1][2].startswith("WindowServer[195]: 3 of 9 ") and "ON, held 2" in h[0][2], h

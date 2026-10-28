@@ -20,9 +20,12 @@
  * is still on its way; amdgpu's equivalent is the implicit sync of a scanout BO: amdgpu_dm_commit_planes
  * waits for the BO's reservation fences, dma_resv_wait_timeout, before it flips to it).
  *
- * A legitimate re-present of an unchanged buffer would wait in vain every time: RD3_IS_BUDGET timeouts in a
- * row with no wait that saw the seeds move stop the waits (counted as skipped); every RD3_IS_PROBE-th
- * stale present after that waits again, and one that sees the seeds move re-arms the waits.
+ * What the waits may cost in vain is capped per head: at most RD3_IS_CAP_MS of TIMED-OUT waiting in a one-second window
+ * (ECC review of 5a8765b: a count of timeouts in a row is reset by one late write, so timeout, timeout,
+ * timeout, moved repeating never tripped it, and a writer always later than the bound stopped the waits for
+ * good). A legitimate re-present of an unchanged buffer then costs at most the cap per second; a wait that sees
+ * the write is not charged; a writer always later than the bound is waited for again in every new window. A wait
+ * is never longer than what is left of the cap.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -33,17 +36,19 @@
 #include <string.h>
 
 #define RD3_IS_SLOTS   8u    /* surfaces remembered per head (WindowServer's ring is 2-3 buffers) */
-#define RD3_IS_BUDGET  4u    /* timeouts in a row before the waits stop */
-#define RD3_IS_PROBE   64u   /* a stale present that waits again while the waits are stopped */
+#define RD3_IS_CAP_MS  48u   /* the most a head waits in one second (about three 60 Hz frames) */
+#define RD3_IS_WINDOW_NS 1000000000ull
 #define RD3_IS_WAIT_MS 12u   /* the default bound of one wait: less than a 60 Hz frame */
 #define RD3_IS_WAIT_MAX_MS 100u
 
 typedef struct { uint32_t id, lseed, useed; uint64_t t; } rd3_is_ent;
 typedef struct {
     rd3_is_ent e[RD3_IS_SLOTS];
-    uint32_t next;       /* the slot the next new surface takes (round robin) */
-    uint32_t misses;     /* timeouts in a row */
-    uint32_t stopped;    /* stale presents not waited for since the waits stopped */
+    uint32_t next;       /* the slot the next new surface takes (round robin; nothing forgets a freed id: a reused id whose new
+                          * seeds equal the old ones by chance gives one false STALE, a wait its first write ends) */
+    uint64_t win_start;  /* the current one-second window (ns) */
+    uint64_t win_us;     /* waited in it, us */
+    uint32_t capped;     /* stale presents in it not waited for (the cap): the kext logs when a window begins capping */
 } rd3_is_head;
 
 enum rd3_is_verdict {
@@ -79,34 +84,33 @@ static inline void rd3_is_note(rd3_is_head *h, uint32_t id, uint32_t lseed, uint
     e->id = id; e->lseed = lseed; e->useed = useed; e->t = now;
 }
 
-/* a surface that is gone (or whose memory changed): forgotten, its next present is NEW */
-static inline void rd3_is_forget(rd3_is_head *h, uint32_t id)
-{
-    for (uint32_t i = 0; i < RD3_IS_SLOTS; i++) if (h->e[i].id == id) memset(&h->e[i], 0, sizeof h->e[i]);
-}
-
-/* a STALE present: wait for its seeds (1) or not (0). wait_ms 0 = count only. While the budget is spent,
- * only every RD3_IS_PROBE-th stale present waits (a probe) */
-static inline int rd3_is_should_wait(rd3_is_head *h, uint32_t wait_ms)
+/* a STALE present at `now_ns`: how long it may wait, in us (0: not at all - wait_ms 0 = count only, or the head's
+ * cap for this one-second window is spent; then h->capped counts it and is 1 for the window's first one) */
+static inline uint64_t rd3_is_wait_us(rd3_is_head *h, uint32_t wait_ms, uint64_t now_ns)
 {
     if (!wait_ms) return 0;
-    if (h->misses < RD3_IS_BUDGET) return 1;
-    h->stopped++;
-    return (h->stopped % RD3_IS_PROBE) == 0;
+    if (!h->win_start || now_ns - h->win_start >= RD3_IS_WINDOW_NS || now_ns < h->win_start) {
+        h->win_start = now_ns; h->win_us = 0; h->capped = 0;
+    }
+    const uint64_t cap = (uint64_t)RD3_IS_CAP_MS * 1000u, want = (uint64_t)wait_ms * 1000u;
+    if (h->win_us >= cap) { h->capped++; return 0; }
+    return cap - h->win_us < want ? cap - h->win_us : want;
 }
 
-/* after a wait: the seeds moved (the write came: the waits are armed again) or the bound passed */
-static inline void rd3_is_waited(rd3_is_head *h, int moved)
+/* after a wait: one that ended without the write (a timeout: waiting in vain) is charged to the window; one that
+ * saw the write cost what the late frame needed and is the fix, never charged */
+static inline void rd3_is_waited(rd3_is_head *h, int moved, uint64_t waited_us)
 {
-    if (moved) { h->misses = 0; h->stopped = 0; }
-    else if (h->misses < 0xffffffffu) h->misses++;
+    if (!moved) h->win_us += waited_us;
 }
 
-/* the wait bound a switch value asks for (ms), clamped */
+/* the wait bound a switch value asks for (ms), clamped: the sysctl's int, and the boot-arg's unsigned value
+ * (a value of 2^31 or more must not turn negative and silently mean 0: it is the maximum) */
 static inline uint32_t rd3_is_wait_ms(int v)
 {
     if (v <= 0) return 0;
     return (uint32_t)v > RD3_IS_WAIT_MAX_MS ? RD3_IS_WAIT_MAX_MS : (uint32_t)v;
 }
+static inline uint32_t rd3_is_wait_ms_u(uint32_t v) { return v > RD3_IS_WAIT_MAX_MS ? RD3_IS_WAIT_MAX_MS : v; }
 
 #endif

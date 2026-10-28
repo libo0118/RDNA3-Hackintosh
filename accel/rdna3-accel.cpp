@@ -1214,7 +1214,13 @@ public:
         gPerfStats = rd3_arg("rdna3perfstats", 1) ? 1 : 0;
         gVmSticky = rd3_arg("rdna3vmsticky", 1) ? 1 : 0;
         gSurfWait = rd3_arg("rdna3surfwait", 1) ? 1 : 0;
-        gIopStaleWaitMs = (int)rd3_is_wait_ms((int)rd3_arg("rdna3iopstalewait", RD3_IS_WAIT_MS));
+        {
+            const uint32_t want = rd3_arg("rdna3iopstalewait", RD3_IS_WAIT_MS);
+            gIopStaleWaitMs = (int)rd3_is_wait_ms_u(want);
+            if (want != (uint32_t)gIopStaleWaitMs)
+                ALOG("iop stale: boot-arg rdna3iopstalewait=%u clamped to %d ms (the most a stale IOP copy waits)", want,
+                     gIopStaleWaitMs);
+        }
         ALOG("iop stale: an IOP copy of a buffer nothing wrote since the head last showed it %s (N59; boot-arg "
              "rdna3iopstalewait, sysctl debug.rdna3accel_iop_stale_wait_ms; counters debug.rdna3accel_iop_stale*)",
              gIopStaleWaitMs ? "waits, bounded, for the write (the plugin's copy-out of the new frame)" : "is only counted (0)");
@@ -2444,7 +2450,7 @@ RD3ACCEL_CNT(rdna3accel_iop_copy_skip,    gCntIopCopySkip,    "frames kept on th
 /* N59 (common/rdna3_iop_stale.h): IOP copies of a buffer whose IOSurface seeds did not move since the head last copied it */
 static int gIopStaleWaitMaxUs;
 static SInt64 gCntIopStaleChecked, gCntIopStale, gCntIopStaleMoved, gCntIopStaleTimeout, gCntIopStaleNotWaited, gCntIopStaleWaitUs,
-              gCntIopStaleTorn, gCntIopStaleFresh;
+              gCntIopStaleTorn, gCntIopStaleFresh, gCntIopStaleCapped;
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_iop_stale_wait_ms, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopStaleWaitMs, 0,
            "N59: an IOP copy of a buffer nothing wrote since the head last showed it waits up to this many ms for the write (0 = count only; boot-arg rdna3iopstalewait)");
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_iop_stale_wait_maxus, CTLFLAG_RD | CTLFLAG_LOCKED, &gIopStaleWaitMaxUs, 0, "N59: the longest stale wait, us");
@@ -2453,7 +2459,8 @@ RD3ACCEL_CNT(rdna3accel_iop_stale_fresh,   gCntIopStaleFresh,   "N59: of them wi
 RD3ACCEL_CNT(rdna3accel_iop_stale,         gCntIopStale,        "N59: of them STALE: seeds unchanged since the head last copied it (an old frame, unless the wait saw the write)");
 RD3ACCEL_CNT(rdna3accel_iop_stale_moved,   gCntIopStaleMoved,   "N59: stale copies whose wait saw the seeds move (the write came late: the step back avoided)");
 RD3ACCEL_CNT(rdna3accel_iop_stale_timeout, gCntIopStaleTimeout, "N59: stale copies whose wait ended with no write (a re-present of an unchanged buffer, or a slower write)");
-RD3ACCEL_CNT(rdna3accel_iop_stale_nowait,  gCntIopStaleNotWaited, "N59: stale copies not waited for (wait_ms 0, or the timeout budget spent)");
+RD3ACCEL_CNT(rdna3accel_iop_stale_nowait,  gCntIopStaleNotWaited, "N59: stale copies not waited for (wait_ms 0, or the head's cap of timed-out waits for this second spent)");
+RD3ACCEL_CNT(rdna3accel_iop_stale_capped,  gCntIopStaleCapped,  "N59: one-second windows in which a head's cap of timed-out waits stopped the waits");
 RD3ACCEL_CNT(rdna3accel_iop_stale_waitus,  gCntIopStaleWaitUs,  "N59: time the stale waits took, us");
 RD3ACCEL_CNT(rdna3accel_iop_stale_torn,    gCntIopStaleTorn,    "N59: copies during which the buffer's seeds moved (a write raced the copy: a torn frame)");
 static SInt64 gCntIopFlip, gCntIopFlipHome, gCntIopFlipNo[8];
@@ -2603,6 +2610,7 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_checked); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_fresh);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale);   sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_moved);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_timeout); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_nowait);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_capped);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_waitus); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_torn);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip);       sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flips);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_lock);
@@ -4213,11 +4221,13 @@ static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, u
     if (!l || head >= kRd3MaxFB) return;
     const unsigned id = s->getSurfaceID();
     if (rd3SVPend(id, 2)) return;
-    uint64_t lastT = 0;
+    uint64_t lastT = 0, nowNs = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
+    const uint32_t waitMs = rd3_is_wait_ms(gIopStaleWaitMs);
     IOSimpleLockLock(l);
     const int v = rd3_is_check(&gIopStale[head], id, *lseed, *useed, &lastT);
-    const uint32_t waitMs = rd3_is_wait_ms(gIopStaleWaitMs);
-    const int wait = v == RD3_IS_STALE ? rd3_is_should_wait(&gIopStale[head], waitMs) : 0;
+    const uint64_t allowUs = v == RD3_IS_STALE ? rd3_is_wait_us(&gIopStale[head], waitMs, nowNs) : 0;
+    const bool capFirst = v == RD3_IS_STALE && waitMs && !allowUs && gIopStale[head].capped == 1;
     IOSimpleLockUnlock(l);
     if (v == RD3_IS_NEW) return;
     const SInt64 nc = OSAddAtomic64(1, &gCntIopStaleChecked);
@@ -4225,34 +4235,44 @@ static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, u
     const SInt64 n = OSAddAtomic64(1, &gCntIopStale);
     uint64_t agoNs = 0;
     if (lastT) absolutetime_to_nanoseconds(mach_absolute_time() - lastT, &agoNs);
-    if (!wait) {
+    if (!allowUs) {
         const SInt64 k = OSAddAtomic64(1, &gCntIopStaleNotWaited);
+        if (capFirst) {
+            const SInt64 c = OSAddAtomic64(1, &gCntIopStaleCapped);
+            if (rd3_log_due((uint64_t)c, 8, 1023))
+                ALOG("iop stale: head %u has waited %u ms in vain within this second (timed-out waits, the cap): its stale "
+                     "copies are NOT waited for until the next second (surface 0x%x; iop_stale_capped %lld windows)",
+                     head, RD3_IS_CAP_MS, id, (long long)c + 1);
+        }
         if (rd3_log_due((uint64_t)k, 8, 1023))
             ALOG("iop stale: head %u copies surface 0x%x with the seeds it had when this head last copied it %llu us ago "
                  "(lock %u unlock %u): nothing wrote it since -- an OLD frame goes to the panel, NOT waited (%s; "
                  "iop_stale %lld of %lld checked)", head, id, agoNs / 1000, *lseed, *useed,
-                 waitMs ? "the timeout budget is spent" : "debug.rdna3accel_iop_stale_wait_ms 0", (long long)n + 1,
+                 waitMs ? "this second's cap of timed-out waits is spent" : "debug.rdna3accel_iop_stale_wait_ms 0", (long long)n + 1,
                  (long long)nc + 1);
         return;
     }
+    /* done only when the unlock seed moved (the copy-out gave its write lock back: a lock seed that moved alone is
+     * a writer still copying, ECC review of 5a8765b); bounded by elapsed time, not by a count of IOSleep(1) calls,
+     * which a VM stretches to 1.5-2 ms each */
     const uint64_t t0 = mach_absolute_time();
+    uint64_t deadline = 0, ns = 0;
+    nanoseconds_to_absolutetime(allowUs * 1000ull, &deadline);
+    deadline += t0;
     int moved = 0;
-    /* done when the unlock seed moved (the copy-out gave its write lock back); a lock seed that moved alone (the
-     * write lock still held, or a kernel whose unlock seed does not move) is taken one poll later */
     bool lockMoved = false;
-    for (uint32_t ms = 0; ms < waitMs && !moved; ms++) {
+    while (!moved && mach_absolute_time() < deadline) {
         IOSleep(1);
         const unsigned l2 = s->getLockSeed(), u2 = s->getUnlockSeed();
-        if (u2 != *useed || lockMoved) moved = 1;
+        if (u2 != *useed) moved = 1;
         else if (l2 != *lseed) lockMoved = true;
     }
-    uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     const unsigned us = (unsigned)(ns / 1000);
     OSAddAtomic64((SInt64)us, &gCntIopStaleWaitUs);
     if ((int)us > gIopStaleWaitMaxUs) gIopStaleWaitMaxUs = (int)us;
     IOSimpleLockLock(l);
-    rd3_is_waited(&gIopStale[head], moved);
+    rd3_is_waited(&gIopStale[head], moved, us);   /* only a timed-out wait is charged to the head's cap */
     IOSimpleLockUnlock(l);
     const unsigned l1 = *lseed, u1 = *useed;
     *lseed = s->getLockSeed(); *useed = s->getUnlockSeed();
@@ -4266,10 +4286,11 @@ static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, u
     } else {
         const SInt64 k = OSAddAtomic64(1, &gCntIopStaleTimeout);
         if (rd3_log_due((uint64_t)k, 8, 1023))
-            ALOG("iop stale: head %u surface 0x%x: no write within %u ms (seeds lock %u unlock %u, as at its copy %llu "
-                 "us ago) -- copied as it is: a re-present of an unchanged buffer, or an OLD frame (iop_stale_timeout "
-                 "%lld of %lld stale; %u in a row stop the waits)", head, id, waitMs, *lseed, *useed, agoNs / 1000,
-                 (long long)k + 1, (long long)n + 1, RD3_IS_BUDGET);
+            ALOG("iop stale: head %u surface 0x%x: no finished write within %u us (seeds lock %u unlock %u, as at its "
+                 "copy %llu us ago%s) -- copied as it is: a re-present of an unchanged buffer, or an OLD frame "
+                 "(iop_stale_timeout %lld of %lld stale; at most %u ms of such waits per head per second)", head, id, us,
+                 *lseed, *useed, agoNs / 1000, lockMoved ? "; the write lock WAS taken: a writer still copying - torn "
+                 "unless it ends first" : "", (long long)k + 1, (long long)n + 1, RD3_IS_CAP_MS);
     }
 }
 /* after the copy: the seeds the panel's frame came with; seeds that moved during the copy = a torn frame */

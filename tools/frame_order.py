@@ -90,7 +90,7 @@ def analyse(layer, runs):
 
 def kernel_delta(p):
     """the kernel's N59 counters during the burst, 'name +n' for those that moved"""
-    names = ("iop_stale_checked", "iop_stale", "iop_stale_moved", "iop_stale_timeout", "iop_stale_nowait", "iop_stale_torn", "iop_ok")
+    names = ("iop_stale_checked", "iop_stale", "iop_stale_moved", "iop_stale_timeout", "iop_stale_nowait", "iop_stale_capped", "iop_stale_torn", "iop_ok")
     parts = []
     for n in names:
         k = "debug.rdna3accel_" + n
@@ -145,10 +145,10 @@ def kernel_rows(surfvram, iop_on):
     old = g("iop_stale", 0) - g("iop_stale_moved", 0)
     text = ("%d IOP copies, %d of a buffer this head showed before: %d with a new frame, %d STALE (seeds unchanged: nothing wrote it "
             "since); of those %d waited and got the late write (the step back avoided), %d timed out, %d not waited (wait %s ms); "
-            "%d torn (written during the copy); waits %.1f ms in all, longest %.1f ms" % (
+            "%d torn (written during the copy); waits %.1f ms in all, longest %.1f ms; %d second(s) in which a head's cap of timed-out waits acted" % (
                 g("iop_ok", 0), g("iop_stale_checked", 0), g("iop_stale_fresh", 0), g("iop_stale", 0), g("iop_stale_moved", 0),
                 g("iop_stale_timeout", 0), g("iop_stale_nowait", 0), g("iop_stale_wait_ms", "?"), g("iop_stale_torn", 0),
-                g("iop_stale_waitus", 0) / 1000.0, g("iop_stale_wait_maxus", 0) / 1000.0))
+                g("iop_stale_waitus", 0) / 1000.0, g("iop_stale_wait_maxus", 0) / 1000.0, g("iop_stale_capped", 0)))
     if g("iop_stale_moved", 0):
         text += ": PROVEN - WindowServer presented buffers before the plugin's copy-out of their frame (DRIVER-PLAN N59)"
     return [("WARN" if old > 0 else "INFO", "iop stale", text)]
@@ -164,8 +164,8 @@ def handoff_rows(plugin_text):
     for proc, d in sorted(last.items()):
         early, cbs = int(d.get("early", "0") or 0), int(d.get("cbs", "0") or 0)
         text = ("%s: %d of %d command buffer(s) writing an IOSurface were seen scheduled BEFORE the write was in the surface "
-                "(handler %s, waitUntilScheduled %s; gap avg %s us, max %s us); NVMTL_SCHED_AFTER_PUBLISH %s, held %s (avg %s us)" % (
-                    proc, early, cbs, d.get("by_handler", "?"), d.get("by_wait", "?"), d.get("gap_us_avg", "?"), d.get("gap_us_max", "?"),
+                "(handler %s, waitUntilScheduled %s, status %s; gap avg %s us, max %s us); NVMTL_SCHED_AFTER_PUBLISH %s, held %s (avg %s us)" % (
+                    proc, early, cbs, d.get("by_handler", "?"), d.get("by_wait", "?"), d.get("by_status", "?"), d.get("gap_us_avg", "?"), d.get("gap_us_max", "?"),
                     "ON" if d.get("hold") == "1" else "off", d.get("held", "?"), d.get("held_us_avg", "?")))
         out.append(("WARN" if early else "INFO", "handoff", text))
     return out

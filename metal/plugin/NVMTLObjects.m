@@ -5694,11 +5694,14 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (void)waitUntilScheduled {
     _nWait++; [_completionCondition lock];
     while (!_wasScheduled && !_executionDone) [_completionCondition wait];
-    if (!_executionDone && !_hoSeenBy) { _hoSeenBy = NVMTL_HO_WAIT; _hoSeenNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   /* N59 */
+    if (!_executionDone && !_hoSeenBy) _hoSeenBy = NVMTL_HO_WAIT;   /* N59: the observer; the time is when it was marked */
     [_completionCondition unlock];
     dispatch_group_wait(_scheduledGroup, DISPATCH_TIME_FOREVER);
 }
-- (MTLCommandBufferStatus)status { [_completionCondition lock]; MTLCommandBufferStatus s = _cbstatus; [_completionCondition unlock]; return s; }
+- (MTLCommandBufferStatus)status {
+    [_completionCondition lock]; MTLCommandBufferStatus s = _cbstatus;
+    if (s == MTLCommandBufferStatusScheduled && !_hoSeenBy) _hoSeenBy = NVMTL_HO_STATUS;   /* N59: a status poller saw it */
+    [_completionCondition unlock]; return s; }
 - (NSError *)error { return _cbError; }
 - (id<MTLCommandQueue>)commandQueue { return _queue; }
 - (id<MTLDevice>)device { return _queue ? [_queue device] : nil; }

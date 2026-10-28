@@ -137,7 +137,7 @@ extern id gNVMTLMainDevice;
   BOOL _wasScheduled, _executionDone, _completionReady;
   /* DRIVER-PLAN N59 (nvmtl_handoff.h): the last part writing an IOSurface (-1 none), when and how the scheduled point was
      seen (NVMTL_HO_*, under _completionCondition), NVMTL_SCHED_AFTER_PUBLISH's hold and since when */
-  NSInteger _hoLastSurfPart; uint64_t _hoSeenNs, _hoHeldNs; int _hoSeenBy; BOOL _hoHold;
+  NSInteger _hoLastSurfPart; uint64_t _hoSchedNs, _hoHeldNs; int _hoSeenBy; BOOL _hoHold;   // _hoSchedNs: when marked scheduled
   NSMutableArray *_signals;
   NSMutableArray *_waits;
 }

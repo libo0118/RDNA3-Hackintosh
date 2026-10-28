@@ -11,10 +11,10 @@
 static nvmtl_ho_stats g_ho;
 static uint64_t g_ho_last_cbs;
 static int nvmtl_ho_hold(void) {
-    static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_SCHED_AFTER_PUBLISH"); on = nvmtl_ho_hold_on(e);
+    static int on; static dispatch_once_t once;   // read by the commit and the summary timer's threads (ECC review of 5a8765b)
+    dispatch_once(&once, ^{ const char *e = getenv("NVMTL_SCHED_AFTER_PUBLISH"); on = nvmtl_ho_hold_on(e);
         nvlog("handoff (N59): a command buffer that writes an IOSurface is scheduled %s (NVMTL_SCHED_AFTER_PUBLISH=%s)",
-              on ? "only once its last IOSurface write is published (copied out / marked newest)" : "at its first submit, as before (its writes reach the surface later: counted)", e ? e : "unset"); }
+              on ? "only once its last IOSurface write is published (copied out / marked newest)" : "at its first submit, as before (its writes reach the surface later: counted)", e ? e : "unset"); });
     return on;
 }
 static void nvmtl_ho_summary(void) {
@@ -321,8 +321,9 @@ static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
     [_completionCondition lock];
     if (!_wasScheduled) {
         _wasScheduled = YES; _cbstatus = MTLCommandBufferStatusScheduled;
+        _hoSchedNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   // N59: the gap is measured from here, whoever observes it
         NSArray *handlers = [_scheduledHandlers copy]; [_scheduledHandlers removeAllObjects];
-        if (handlers.count && !_hoSeenBy) { _hoSeenBy = NVMTL_HO_HANDLER; _hoSeenNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+        if (handlers.count && !_hoSeenBy) _hoSeenBy = NVMTL_HO_HANDLER;
         [self nvmtlDispatchHandlers:handlers scheduled:YES];
         [_completionCondition broadcast];
     }
@@ -583,7 +584,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
     NVMTLSubmissionPart *part = partObj;
     const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     [_completionCondition lock];
-    const int by = _hoSeenBy; const uint64_t seen = _hoSeenNs;
+    const int by = _hoSeenBy; const uint64_t seen = _hoSchedNs;
     [_completionCondition unlock];
     const uint64_t gap = by && now > seen ? now - seen : 0, held = _hoHeldNs && now > _hoHeldNs ? now - _hoHeldNs : 0;
     nvmtl_ho_publish(&g_ho, by, gap, _hoHeldNs != 0, held);
@@ -593,8 +594,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
     if (k < 8 || (k & 1023) == 0) {
         uint32_t sid = 0;
         for (NVMTLTexture *t in part->surfaces) if (t->_surf) { sid = (uint32_t)IOSurfaceGetID(t->_surf); break; }
-        nvlog("handoff (N59): command buffer %u wrote IOSurface %u; its scheduled point was seen (%s) %.2f ms BEFORE the write was in the surface: a consumer that took it then read the frame before (#%llu; NVMTL_SCHED_AFTER_PUBLISH=1 holds it)",
-              nvmtl_tr_cb_id(self), sid, by == NVMTL_HO_WAIT ? "waitUntilScheduled returned" : "a scheduled handler ran", gap / 1e6, k + 1);
+        nvlog("handoff (N59): command buffer %u wrote IOSurface %u; it was scheduled %.2f ms BEFORE the write was in the surface and that was observed (%s): a consumer that took it then read the frame before (#%llu; NVMTL_SCHED_AFTER_PUBLISH=1 holds it)",
+              nvmtl_tr_cb_id(self), sid, gap / 1e6, by == NVMTL_HO_WAIT ? "waitUntilScheduled returned" : by == NVMTL_HO_STATUS ? "-status read Scheduled" : "a scheduled handler ran", k + 1);
     }
 }
 - (void)nvmtlSubmitWithEvents {

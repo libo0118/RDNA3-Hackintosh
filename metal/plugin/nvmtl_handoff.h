@@ -15,8 +15,9 @@
  *
  * Counted per process for every command buffer that writes an IOSurface, at the publish of its last such part:
  *   cbs        command buffers that wrote IOSurfaces
- *   early      of them, the scheduled point was OBSERVED before the publish (by=handler: a scheduled handler ran;
- *              by=wait: waitUntilScheduled returned); gap = publish - that moment
+ *   early      of them, the scheduled point was OBSERVED before the publish (by_handler: a scheduled handler was
+ *              dispatched; by_wait: waitUntilScheduled returned; by_status: -status read Scheduled); gap = publish -
+ *              the moment the command buffer was marked scheduled (ECC review of 5a8765b: not the observer's wake-up)
  *   held       NVMTL_SCHED_AFTER_PUBLISH=1: the scheduled point held until the publish (held_us: how long)
  * `vk: handoff: SUMMARY ...` (nvlog_uncapped, the shared 10 s timer) when a counter moved.
  */
@@ -26,10 +27,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-enum { NVMTL_HO_NONE = 0, NVMTL_HO_HANDLER = 1, NVMTL_HO_WAIT = 2 };
+enum { NVMTL_HO_NONE = 0, NVMTL_HO_HANDLER = 1, NVMTL_HO_WAIT = 2, NVMTL_HO_STATUS = 3 };
 
 typedef struct {
-    uint64_t cbs, early, by_handler, by_wait, gap_ns, gap_max_ns, held, held_ns;
+    uint64_t cbs, early, by_handler, by_wait, by_status, gap_ns, gap_max_ns, held, held_ns;
 } nvmtl_ho_stats;
 
 /* the publish of a command buffer's last IOSurface-writing part: `observed` how its scheduled point was seen before
@@ -40,7 +41,7 @@ static inline void nvmtl_ho_publish(nvmtl_ho_stats *s, int observed, uint64_t ga
     if (held) { __atomic_fetch_add(&s->held, 1, __ATOMIC_RELAXED); __atomic_fetch_add(&s->held_ns, held_ns, __ATOMIC_RELAXED); }
     if (observed == NVMTL_HO_NONE) return;
     __atomic_fetch_add(&s->early, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(observed == NVMTL_HO_HANDLER ? &s->by_handler : &s->by_wait, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(observed == NVMTL_HO_HANDLER ? &s->by_handler : observed == NVMTL_HO_WAIT ? &s->by_wait : &s->by_status, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&s->gap_ns, gap_ns, __ATOMIC_RELAXED);
     uint64_t m = __atomic_load_n(&s->gap_max_ns, __ATOMIC_RELAXED);
     while (gap_ns > m && !__atomic_compare_exchange_n(&s->gap_max_ns, &m, gap_ns, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
@@ -52,9 +53,9 @@ static inline int nvmtl_ho_format(const nvmtl_ho_stats *s, int hold_on, char *ou
     const uint64_t cbs = __atomic_load_n(&s->cbs, __ATOMIC_RELAXED), early = __atomic_load_n(&s->early, __ATOMIC_RELAXED);
     const uint64_t held = __atomic_load_n(&s->held, __ATOMIC_RELAXED);
     if (!cbs || !cap) return 0;
-    snprintf(out, cap, "cbs=%llu early=%llu by_handler=%llu by_wait=%llu gap_us_avg=%llu gap_us_max=%llu held=%llu held_us_avg=%llu hold=%d",
+    snprintf(out, cap, "cbs=%llu early=%llu by_handler=%llu by_wait=%llu by_status=%llu gap_us_avg=%llu gap_us_max=%llu held=%llu held_us_avg=%llu hold=%d",
              (unsigned long long)cbs, (unsigned long long)early, (unsigned long long)__atomic_load_n(&s->by_handler, __ATOMIC_RELAXED),
-             (unsigned long long)__atomic_load_n(&s->by_wait, __ATOMIC_RELAXED),
+             (unsigned long long)__atomic_load_n(&s->by_wait, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&s->by_status, __ATOMIC_RELAXED),
              (unsigned long long)(early ? __atomic_load_n(&s->gap_ns, __ATOMIC_RELAXED) / early / 1000u : 0),
              (unsigned long long)(__atomic_load_n(&s->gap_max_ns, __ATOMIC_RELAXED) / 1000u), (unsigned long long)held,
              (unsigned long long)(held ? __atomic_load_n(&s->held_ns, __ATOMIC_RELAXED) / held / 1000u : 0), hold_on);
