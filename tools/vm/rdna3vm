@@ -382,6 +382,12 @@ cmd_prepare() {
     local ram cpus
     ram=$(awk '/MemTotal/ {m=int($2/1048576/2); if (m>16) m=16; if (m<4) m=4; print m}' /proc/meminfo)
     cpus=$(nproc); cpus=$((cpus / 2)); [ $cpus -gt 8 ] && cpus=8; [ $cpus -lt 2 ] && cpus=2
+    # the owner's own settings survive a prepare (every update runs one): the active
+    # KEY=value lines of the old config the template below does not set are added
+    # back after it (2026-10-28: an update dropped RESIZE_BAR_LOG2=9, the next run
+    # had 256 MiB again)
+    local keep_conf=""
+    [ -f "$CONF" ] && keep_conf=$(grep -E '^[A-Z_][A-Z0-9_]*=' "$CONF" 2>/dev/null)
     cat > "$CONF" <<EOF
 # rdna3vm config (edit freely)
 OSXKVM="$osx"
@@ -458,6 +464,14 @@ EOF
            { grep -v -E '^-?rdna3|^debug=|^serial=|^msgbuf=|^keepsyms=|^-v$|^$' || true; } |
            tr '\n' ' ' | sed 's/ *$//')
     grep -q '^BASE_ARGS=' "$CONF" || echo "BASE_ARGS=\"$base\"" >> "$CONF"
+    local kl kk kept=""
+    while IFS= read -r kl; do
+        [ -n "$kl" ] || continue
+        kk=${kl%%=*}
+        grep -q "^$kk=" "$CONF" && continue
+        echo "$kl" >> "$CONF"; kept="$kept $kk"
+    done <<< "$keep_conf"
+    [ -z "$kept" ] || echo "  kept from the old config:$kept"
     . "$CONF"
     base=$BASE_ARGS
     ok "OpenCore ready (OSX-KVM boot-args: $base)"
