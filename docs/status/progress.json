@@ -2750,6 +2750,7 @@
   "hotplug",
   "ladder",
   "modeset",
-  "modeset2"
+  "modeset2",
+  "vramwin"
  ]
 }
