@@ -62,7 +62,11 @@ static inline int nvmtl_ho_format(const nvmtl_ho_stats *s, int hold_on, char *ou
     return 1;
 }
 
-/* NVMTL_SCHED_AFTER_PUBLISH: on when the value starts with '1' */
-static inline int nvmtl_ho_hold_on(const char *v) { return v && v[0] == '1'; }
+/* NVMTL_SCHED_AFTER_PUBLISH: ON by default, off only when the value starts with '0'. Card run 2026-10-28
+ * (app survey): WindowServer saw 12953 of 19533 IOSurface-writing command buffers scheduled before their copy-out
+ * was in the surface (gap avg 20 ms, max 411 ms) and the frame-order strips stepped back up to 19 frames, with the
+ * kernel's stale wait on or off: a consumer that presents at "scheduled" must not get there before the surface
+ * holds the frame. */
+static inline int nvmtl_ho_hold_on(const char *v) { return !(v && v[0] == '0'); }
 
 #endif

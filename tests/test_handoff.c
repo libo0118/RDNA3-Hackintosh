@@ -24,7 +24,7 @@ int main(void)
     nvmtl_ho_publish(&s, NVMTL_HO_STATUS, 2000000, 0, 0);
     CHECK(nvmtl_ho_format(&s, 1, line, sizeof line) == 1);
     CHECK(!strcmp(line, "cbs=5 early=3 by_handler=1 by_wait=1 by_status=1 gap_us_avg=2000 gap_us_max=3000 held=1 held_us_avg=2000 hold=1"));
-    CHECK(nvmtl_ho_hold_on("1") && !nvmtl_ho_hold_on("0") && !nvmtl_ho_hold_on(NULL) && !nvmtl_ho_hold_on(""));
+    CHECK(nvmtl_ho_hold_on("1") && !nvmtl_ho_hold_on("0") && nvmtl_ho_hold_on(NULL) && nvmtl_ho_hold_on(""));   /* on by default */
     printf("test_handoff: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;
 }
