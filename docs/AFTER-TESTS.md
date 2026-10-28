@@ -1497,6 +1497,12 @@ a report of the app or of WindowServer / Dock is summarised in `41-ladder-<app>-
 processes) and `41-ladder-<app>-sys.log` (the app's own Metal / GPU / error lines, WindowServer's and the kernel's `RDNA3` lines of the same minutes). Then the app is quit
 (SIGINT, TERM, KILL; an instance that was running before the rung is the owner's and is left alone).
 
+**`preview-image` and CoreImage's CIKL kernels (DRIVER-PLAN N60).** Preview's JPEG view builds a `CIColorKernel` from source (`_clampImageAlphaTo01`); card run 2026-10-26k crashed
+in `CIKernelReflection::consolidate` there. In `41-ladder-preview-image.log` look for the plugin's reading of that kernel's function: `CI PLAIN REFL <fn>: functionType 5, returns ..., N argument(s)`
+(or `CI REFL` / `CI STITCH REFL`) = arguments found, the image should show; `CI REFL FAILED <fn>: no argument list could be read ...` followed by `CI REFL FAILED diag <fn>: <AIR line>` lines =
+nothing parsed: CoreImage refuses the reflection and builds the kernel from its FOSL reflection alone (no crash is the point); the diag lines are the AIR shape to port next. A crash in
+`CIKernelReflection::consolidate` again means a new path answered an empty argument list: the `.ips` frames and the log line of the function name tell which.
+
 **How to read the result.**
 
 1. `rdna3vm result`, then the `app <name>` rows of the triage (`00-triage.txt`). The first word after the app's title is the run's verdict: `ran` (alive at the end, no crash
