@@ -1468,6 +1468,8 @@ certain candidate for the witness's "fence early".
 
 #### The app survey: `rdna3vm step apps`
 
+(N59: Safari's fourth stage `frames` opens the frame-order page and reads its strips from the scanout in two bursts, see "Animations step back to an earlier frame" below.)
+
 After card run 2026-10-26 the driver draws Terminal and Chess on the card, and those were almost the only apps tried. The `apps` step opens fifteen real apps one
 after another with the **default** driver and plugin settings (no `NVMTL_*` switch, no sysctl, no conf edit, no WindowServer restart) and leaves evidence of each, so
 that one run gives the list of what is still visibly broken. It is `ladder` variant 5 (`rdna3ladder=5`, `autoreport.sh --apps`; the APPS block of
@@ -3616,3 +3618,18 @@ first IOAccelSubmitter2. `ioreg -l -r -c RDNA3Accelerator | grep -E
 | kernel `perfstats: the core's ring busy time: <answer> (0x..., before 0x...)` (every change; `perf_lastret`) | answered = 0; 0xe00002d8 no GPU / no busy accounting yet; 0xe00002c7 an older core; 0xe00002c2 the ABI versions differ (a stale kext) | a lasting non-zero answer: the core's start log, reinstall both kexts |
 | triage `WARN N IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid`, kernel `perfstats: a <class> with ... IOUserClientCreator` (`perf_uccbad`) | a context whose creator string is not `pid N, name`: its process's time counts as 'no IOAccelSubmitter2' wrongly | the ioreg of that context |
 | triage `INFO 13-ioreg-accel.txt: every accumulatedGPUTime is 0 although N s were credited` / `WARN ... Device Utilization % = 100 while the rings' last value is X %` | the credited processes exited before the ioreg ran (the usual case), the family replaced the numbers we add to, or it overwrote our utilisation (the ioreg and the counters are read at different times: a single report can mislead) | repeat on the next run before acting |
+
+### Animations step back to an earlier frame (DRIVER-PLAN N59)
+
+Symptom: a continuous animation stutters and shows an older frame for a moment (1,2,3,1,4,...). Read, in this order:
+
+| Row / line | Means | Action |
+|---|---|---|
+| triage `frame order: N regressions in M samples (layer: css/canvas/webgl, pipe P)` per burst (`frameorder-frames` = the kernel wait as booted, `frameorder-frames-nowait` = count only); `tools/frame_order.py 41-ladder-frameorder-*.log` lists each step back (time, from -> to) | the app survey's Safari page read from the scanout ~thousands of times a second: N > 0 is the owner's symptom, measured. `PASS ... 0 regressions` with thousands of samples and `frames seen` near 60 per second: no step back | compare the two bursts: regressions only in `-nowait` = the kernel wait fixes it (keep it); regressions in both = look at the next rows |
+| triage `WARN frame order: NO strip found` | the page did not show (Safari covered by another window, a crash, a scaled page) or the look failed | the hi-res look `apps-safari-framesh` shows what was on the panel |
+| triage `iop stale` (`debug.rdna3accel_iop_stale*`): `K STALE ... M waited and got the late write ... PROVEN` | WindowServer presented buffers before the plugin's copy-out of their frame landed; the kernel waited (`iop_stale_moved`) | the race is proven on the kernel side; the bounded wait is the fix (`rdna3iopstalewait`, default 12 ms) |
+| `iop stale`: STALE with mostly `timed out`, kernel `iop stale: ... no write within N ms` | buffers re-presented with nothing written (legitimate repeats) or a copy-out slower than the bound | if `frame order` still regresses, raise `debug.rdna3accel_iop_stale_wait_ms` (max 100) for a run; timed-out waits cost at most 48 ms per head per second (`iop_stale_capped` = seconds where that cap stopped the waits, kernel `iop stale: head H has waited 48 ms in vain`) |
+| `iop stale` with 0 STALE but `frame order` regressions | the step back is not WindowServer's present ring: an app's IOSurface handed to WindowServer before its write (the next row) | the `handoff` rows |
+| triage `handoff: <proc>[pid]: E of C command buffer(s) ... seen scheduled BEFORE the write was in the surface` (plugin `vk: handoff: SUMMARY`, `handoff (N59): command buffer ...`) | a consumer could take that process's IOSurface before the plugin published the GPU write (Metal's scheduled point came first) | a run with `NVMTL_SCHED_AFTER_PUBLISH=1` in rdna3mtl.conf (WindowServer restarted): `held=` counts, `early=0`, and `frame order` must show 0 regressions |
+| triage `WARN iop stale ... no debug.rdna3accel_iop_stale* counters` | a kernel before N59, or a collector that does not grep them (29-surface-vram) | `rdna3vm update` |
+

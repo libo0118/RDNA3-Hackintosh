@@ -69,6 +69,12 @@ $(BUILD)/test_attr_ring: tests/test_attr_ring.c common/rdna3_attr_ring.h | $(BUI
 $(BUILD)/test_swap_front: tests/test_swap_front.c common/rdna3_swap_front.h common/rdna3_a3_display.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_swap_front.c
 
+$(BUILD)/test_handoff: tests/test_handoff.c metal/plugin/nvmtl_handoff.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_handoff.c
+$(BUILD)/test_strip: tests/test_strip.c common/rdna3_strip.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_strip.c
+$(BUILD)/test_iop_stale: tests/test_iop_stale.c common/rdna3_iop_stale.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_iop_stale.c
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
 # DRIVER-PLAN N42: IOGraphics' VBL from the vblank interrupt, the poll as fallback
@@ -198,12 +204,12 @@ $(BUILD)/test_libdrm_amdgpu: tests/test_libdrm_amdgpu.c $(LIBDRM_HOST_OBJS) $(KO
 	  $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # rdna3_drminfo on the loopback: --scanout writes the loopback's test picture
-$(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) | $(BUILD)
+$(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c common/rdna3_strip.h $(LIBDRM_HOST_OBJS) $(KOBJS) | $(BUILD)
 	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $(SAN) $(LIBDRM_INC) $(INC) -D_GNU_SOURCE -o $@ \
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_attr_ring $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_fbgate $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_coh $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_gpu_time_queue $(BUILD)/test_ab_switch $(BUILD)/test_surf_census $(BUILD)/test_surfin_cache $(BUILD)/test_ci_refl $(BUILD)/test_copy_pack $(BUILD)/test_capture $(BUILD)/test_msupload $(BUILD)/test_msdl $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_attr_ring $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_iop_stale $(BUILD)/test_strip $(BUILD)/test_handoff $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_fbgate $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_coh $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_gpu_time_queue $(BUILD)/test_ab_switch $(BUILD)/test_surf_census $(BUILD)/test_surfin_cache $(BUILD)/test_copy_pack $(BUILD)/test_capture $(BUILD)/test_msupload $(BUILD)/test_msdl $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host $(BUILD)/test_ci_refl
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -234,6 +240,8 @@ test: $(BUILD)/test_attr_ring $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUI
 	$(BUILD)/test_swap_front
 	$(BUILD)/test_attr_ring
 	$(BUILD)/test_flip_latch
+	$(BUILD)/test_iop_stale
+	$(BUILD)/test_handoff
 	$(BUILD)/test_vbl_irq
 	$(BUILD)/test_tcall
 	$(BUILD)/test_fbgate
@@ -256,6 +264,8 @@ test: $(BUILD)/test_attr_ring $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUI
 	test "$$(sed -n 2p $(BUILD)/scanout-pipe0.ppm)" = '1920 1080'
 	python3 -c "import sys; d=open(sys.argv[1],'rb').read(); d=d[d.index(b'255\n')+4:]; px=lambda x,y: tuple(d[(y*1920+x)*3:(y*1920+x)*3+3]); box=lambda x,y: 140<=x*320//1920<180 and 70<=y*180//1080<110; sys.exit(0 if len(d)==1920*1080*3 and all(px(x,y)==((255,255,255) if box(x,y) else (0,y*255//1080,x*255//1920)) for x in (0,1,1279,1280,1281,1919,900,1000) for y in (0,1,539,540,1079)) else 1)" $(BUILD)/scanout-pipe0.ppm
 	$(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q 'picture 1920x1080: .* (native)$$'
+	sh tests/test_frame_order.sh $(BUILD)
+	$(BUILD)/test_strip
 	python3 tools/triage_reports.py --picture $(BUILD)/scanout-pipe0.ppm | grep -q 'png'
 	python3 -c "import struct,sys; d=open(sys.argv[1],'rb').read(); sys.exit(0 if struct.unpack('>II', d[16:24]) == (1920, 1080) else 1)" $(BUILD)/scanout-pipe0.png
 	# a kext from before the native look (RDNA3_LB_SCANOUT_V1): its 1280-wide sample, and the output says so

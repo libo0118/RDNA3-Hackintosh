@@ -135,6 +135,9 @@ extern id gNVMTLMainDevice;
   NSCondition *_completionCondition;
   dispatch_group_t _callbackGroup, _scheduledGroup;
   BOOL _wasScheduled, _executionDone, _completionReady;
+  /* DRIVER-PLAN N59 (nvmtl_handoff.h): the last part writing an IOSurface (-1 none), when and how the scheduled point was
+     seen (NVMTL_HO_*, under _completionCondition), NVMTL_SCHED_AFTER_PUBLISH's hold and since when */
+  NSInteger _hoLastSurfPart; uint64_t _hoSchedNs, _hoHeldNs; int _hoSeenBy; BOOL _hoHold;   // _hoSchedNs: when marked scheduled
   NSMutableArray *_signals;
   NSMutableArray *_waits;
 }
@@ -148,6 +151,7 @@ extern id gNVMTLMainDevice;
 - (void)nvmtlReleaseCapacity;
 - (void)nvmtlRecordEncodingError:(NSError *)error;
 - (void)nvmtlFinishCallbacks;
+- (void)nvmtlHandoffPublished:(id)part;   // N59 (NVMTLEventSync.m)
 @end
 @interface NVMTLDepthStencilState : NSObject <MTLDepthStencilState> { @public int _write; int _compare;
   int _stencil; uint32_t _sf[6], _sb[6]; } @end
