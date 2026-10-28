@@ -27,7 +27,8 @@ static inline int rd3_iop_copy64_ok(uintptr_t src, uintptr_t dst, uint32_t spitc
 }
 
 /* copy `h` rows of `row_bytes` (a multiple of 4) from src (pitch spitch) to dst (pitch dpitch); returns 8 when the
- * 64-bit loop ran, 4 for the 32-bit one */
+ * 64-bit loop ran, 4 for the 32-bit one. Rows are stepped by bytes: the caller passes pitches of whole 32-bit words
+ * (performTransaction refuses others), which is where the old word-stepped loop put them. */
 static inline int rd3_iop_copy_rows(volatile void *dst, uint32_t dpitch, const volatile void *src, uint32_t spitch,
                                     uint32_t h, uint32_t row_bytes)
 {

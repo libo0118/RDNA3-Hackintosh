@@ -2323,6 +2323,10 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) RD3IOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
     if (w != q.width || h != q.height) RD3IOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
 
+    /* rdna3_iop_copy.h steps rows by bytes; the old loop stepped by pitch / 4 words: the same rows only for pitches of whole words
+     * (the surface's is checked above, the VRAM resource's and the scanout's only >= 4: cpp-reviewer of 42c31bb) */
+    if ((pitch & 3u) || (q.pitch & 3u))
+        RD3IOP_FAIL(kIOReturnBadArgument, "source pitch %u or scanout pitch %u is not a whole number of 32-bit words", pitch, q.pitch);
     rd3AccelIopHome(fb, head);
     const unsigned rowBytes = ((pitch < q.pitch) ? pitch : q.pitch) & ~3u;
     const unsigned spr = pitch / 4;

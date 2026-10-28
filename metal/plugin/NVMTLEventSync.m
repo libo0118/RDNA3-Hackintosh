@@ -31,6 +31,7 @@ static void nvmtl_ho_summary(void) {
     nvk_cmdbuf commands;
     NSSet *resources, *surfaces;
     NSSet *dma;   /* N61: the root textures whose copy into their IOSurface is recorded at the end of `commands` */
+    NSDictionary *dmaWhy;   /* N61: root texture (NSValue, not retained) -> why its copy was not recorded (NVMTL_SO_WHY_*) */
     NSArray *scratch;
     id waitEvent, signalEvent;
     uint64_t value;
@@ -43,7 +44,7 @@ static void nvmtl_ho_summary(void) {
 }
 @end
 static _Atomic unsigned gsub_inflight;
-static _Atomic unsigned long long gsub_ahead, gsub_peak;
+static _Atomic unsigned long long gsub_ahead, gsub_peak, gsub_held_dma;
 static NSMutableArray *nvmtl_quarantined_parts;
 static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
     nvmtl_inflight *const f = part->inflight;
@@ -248,7 +249,8 @@ static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
     part->resources = [_resources copy]; part->surfaces = [_surfDirty copy];
-    part->dma = nvmtl_surface_dma_record(part->surfaces, &part->commands);   /* N61: before the part can be submitted (ahead or at its turn) */
+    { NSDictionary *why = nil;   /* N61: before the part is submitted (a part with a GPU copy-out is never submitted ahead, nvmtlSubmitAhead) */
+      part->dma = nvmtl_surface_dma_record(part->surfaces, &part->commands, &why); part->dmaWhy = why; }
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
     if (_g79Sig.count) { part->signals = [_g79Sig copy]; [_g79Sig removeAllObjects]; }
@@ -439,6 +441,15 @@ static void nvmtl_gsub_census(void) {
             continue;
         }
         if (!part->commands.cb) return NO;
+        if (part->dma) {
+            /* N61 (cpp-reviewer of 077044e): its GPU copy writes the IOSurface without a lock or a seed move; run ahead, it could land
+             * while the previous command buffer's frame is still being read out of that surface (the kernel's IOP copy). In order, at
+             * its turn (nvmtlAdvancePart), every earlier command buffer is published. */
+            const unsigned long long k = atomic_fetch_add(&gsub_held_dma, 1);
+            if (!k || ((k + 1) & 0xFFFF) == 0)
+                nvlog("commit: G-SUB %llu part(s) with a GPU copy into an IOSurface (N61) NOT submitted ahead - each runs at its turn", k + 1);
+            return NO;
+        }
         if (!part->encoders && !part->resources.count && !part->surfaces.count && !part->scratch.count && nvmtl_skip_empty_on()) {
             if (!nvmtl_evfold_on() || _nextSubmit + 1 >= _parts.count) return NO;
             [self nvmtlMarkScheduled];
@@ -545,8 +556,10 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLTexture *texture in part->surfaces) {
                 const BOOL committed = nvmtl_ws_committed(self, texture);
                 if (committed) nvmtl_vk_surface_dirty_committed_scope(1);
-                const BOOL byGpu = part->dma && [part->dma containsObject:(texture->_parent ? texture->_parent : texture)];   /* N61 */
-                if (!(byGpu ? [texture nvmtlSurfaceOutDMA] : [texture nvmtlSurfaceOut])) published = NO;
+                NVMTLTexture *root = texture->_parent ? texture->_parent : texture;   /* N61 */
+                const BOOL byGpu = part->dma && [part->dma containsObject:root];
+                const int why = [part->dmaWhy[[NSValue valueWithNonretainedObject:root]] intValue];
+                if (!(byGpu ? [texture nvmtlSurfaceOutDMA] : [texture nvmtlSurfaceOutWhy:why])) published = NO;
                 if (committed) nvmtl_vk_surface_dirty_committed_scope(0);
             }
             nvt_set_cb(0);

@@ -1824,7 +1824,10 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
                   trHashed ? trBands : NULL, NVT_F_RO_LOCK);
     }
 }
-- (BOOL)nvmtlSurfaceOut {
+static int nvmtl_so_import(NVMTLTexture *r, int may_import);   /* N61, below */
+- (BOOL)nvmtlSurfaceOut { return [self nvmtlSurfaceOutWhy:NVMTL_SO_OK]; }
+/* why: for a part's publish, why its GPU copy-out was not recorded (NVMTL_SO_WHY_*, carried by the part); 0 for other callers */
+- (BOOL)nvmtlSurfaceOutWhy:(int)why {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
@@ -1870,8 +1873,11 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     { /* N61: the CPU path's cost and, for a part's publish, why the GPU path was not taken */
       const uint64_t total = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0, bytes = (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4);
       nvmtl_pc_out(&g_pc, NVMTL_SO_CPU, bytes, total, pcLocked - t0, pcGpu, pcCpu);
-      const int why = r->_soLastWhy; r->_soLastWhy = 0; nvmtl_pc_why(&g_pc, why);
+      nvmtl_pc_why(&g_pc, why);
       r->_soOuts++;
+      /* the first copy-out of a texture: its surface is imported here, on the execution thread, so the next seal (the commit
+       * thread, under the command buffers' lock) finds the buffer made (cpp-reviewer of 077044e) */
+      if (why == NVMTL_SO_WHY_FIRST && !r->_vramOn && !r->_bufCopy && nvmtl_so_dma_on()) (void)nvmtl_so_import(r, 1);
       static _Atomic unsigned long long k; static _Atomic unsigned slowSaid;
       const unsigned long long kk = atomic_fetch_add(&k, 1);
       const int slow = total >= NVMTL_PC_SLOW_NS && atomic_fetch_add(&slowSaid, 1) < 16;
@@ -1912,7 +1918,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         if (ul != kIOReturnSuccess) { nvlog("present cost (N61): GPU copy-out publish: IOSurfaceUnlock FAILED (0x%x), surface %u", (unsigned)ul, (unsigned)IOSurfaceGetID(r->_surf));
             nvmtl_tr_surf(r, NVT_K_SURF_OUT, NVT_OUT_READBACK_FAILED, (int)ul, trSeed0, seed, trT0, 0, NULL, lockopt ? NVT_F_RO_LOCK : 0); return NO; }
         r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = nvmtl_vram_gen(r->_surf, r->_plane);
-        r->_soOuts++; r->_soLastWhy = 0;
+        r->_soOuts++;
         const uint64_t total = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0, bytes = (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4);
         nvmtl_pc_out(&g_pc, NVMTL_SO_DMA, bytes, total, 0, 0, 0);
         static _Atomic unsigned long long k;
@@ -1923,17 +1929,19 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         nvmtl_tr_surf(r, NVT_K_SURF_OUT, NVT_OUT_COPY_DMA, 0, trSeed0, seed, trT0, bytes, trHashed ? trBands : NULL, lockopt ? NVT_F_RO_LOCK : 0);
         return YES;
     }
-    r->_soDead = YES; r->_soWhy = NVMTL_SO_WHY_MOVED; r->_soLastWhy = NVMTL_SO_WHY_MOVED;
+    r->_soDead = YES; r->_soWhy = NVMTL_SO_WHY_MOVED;
     nvlog("present cost (N61): surface %u's base moved since its import (%p, imported %p): this frame gets the CPU copy-out, the surface is not copied by the GPU again",
           (unsigned)IOSurfaceGetID(r->_surf), IOSurfaceGetBaseAddress(r->_surf), (void *)r->_soBase);
     }
-    return [self nvmtlSurfaceOut];
+    return [self nvmtlSurfaceOutWhy:NVMTL_SO_WHY_MOVED];
 }
-/* N61: import the surface's pages as a GPU buffer (under the surface's monitor); NVMTL_SO_OK or why not */
-static int nvmtl_so_import(NVMTLTexture *r) {
+/* N61: import the surface's pages as a GPU buffer (under the surface's monitor); NVMTL_SO_OK or why not. may_import 0 (the
+ * seal): only an import made before counts, a texture without one is FIRST; the import itself is made at its first CPU
+ * copy-out's publish (may_import 1). */
+static int nvmtl_so_import(NVMTLTexture *r, int may_import) {
     if (r->_soBuf.buf) return NVMTL_SO_OK;
     if (r->_soDead) return r->_soWhy ? r->_soWhy : NVMTL_SO_WHY_IMPORT;
-    if (r->_soOuts < NVMTL_SO_IMPORT_AFTER) return NVMTL_SO_WHY_FIRST;
+    if (!may_import || r->_soOuts < NVMTL_SO_IMPORT_AFTER) return NVMTL_SO_WHY_FIRST;
     const char *bad = NULL; int why = NVMTL_SO_OK;
     nvmtl_so_plan_t p; memset(&p, 0, sizeof p);
     if (!r->_surfOwned) { why = NVMTL_SO_WHY_SHAPE; bad = "the texture does not hold its IOSurface"; }
@@ -1975,13 +1983,15 @@ static int nvmtl_so_import(NVMTLTexture *r) {
  * surface's own pages, recorded at the end of the part's command buffer. Returns the root textures whose copy was
  * recorded (their publish is -nvmtlSurfaceOutDMA), nil when none; the others keep the CPU copy-out at the publish, the
  * reason noted on the texture (counted there). */
-static NSSet *nvmtl_surface_dma_record(NSSet *surfaces, nvk_cmdbuf *c) {
+static NSSet *nvmtl_surface_dma_record(NSSet *surfaces, nvk_cmdbuf *c, NSDictionary **whyOut) {
+    *whyOut = nil;
     if (!surfaces.count) return nil;
+    NSMutableDictionary *whys = nil;   /* root texture (not retained: the part's surfaces hold it) -> why its copy was not recorded */
     const int on = nvmtl_so_dma_on();
     NSMutableSet *done = nil, *seen = nil;
     for (NVMTLTexture *t in surfaces) {
         NVMTLTexture *r = t->_parent ? t->_parent : t;
-        if (!r->_surf || r->_vramOn || r->_bufCopy || [seen containsObject:r]) continue;
+        if (!r->_surf || r->_vramOn || r->_bufCopy || [seen containsObject:r]) continue;   /* not a private copy-out: no reason to carry */
         if (!seen) seen = [NSMutableSet new];
         [seen addObject:r];
         int why;
@@ -1989,18 +1999,22 @@ static NSSet *nvmtl_surface_dma_record(NSSet *surfaces, nvk_cmdbuf *c) {
             if (!on) why = NVMTL_SO_WHY_OFF;
             else if (!c || !c->cb || c->in_rp) why = NVMTL_SO_WHY_RECORD;
             else if (![r nvmtlSurfaceCopyable]) why = NVMTL_SO_WHY_SHAPE;
-            else why = nvmtl_so_import(r);
+            else why = nvmtl_so_import(r, 0);
             if (!why && nvmtl_vk_cmd_surface_dma(c, &r->_i, &r->_soBuf, r->_soOff, r->_soRow)) {
                 why = NVMTL_SO_WHY_RECORD;
                 static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) nvlog("present cost (N61): recording the GPU copy-out of surface %u FAILED - the CPU copy-out does it",
                                                                                   (unsigned)IOSurfaceGetID(r->_surf));
             }
-            r->_soLastWhy = why;
         }
-        if (why) continue;
+        if (why) {
+            if (!whys) whys = [NSMutableDictionary new];
+            whys[[NSValue valueWithNonretainedObject:r]] = @(why);
+            continue;
+        }
         if (!done) done = [NSMutableSet new];
         [done addObject:r];
     }
+    *whyOut = whys;
     return done;
 }
 - (NSUInteger)width  { return MAX(1u, [self nvi]->w >> _baseLevel); }
