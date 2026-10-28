@@ -137,7 +137,7 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h", "common/rdna3_flip_queue.h",
                     "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h",
-                    "common/rdna3_gpu_util.h", "common/rdna3_fbgate.h", "common/rdna3_iop_stale.h")
+                    "common/rdna3_gpu_util.h", "common/rdna3_fbgate.h", "common/rdna3_iop_stale.h", "common/rdna3_iop_copy.h")
 
 
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
@@ -4858,6 +4858,17 @@ def report(path, show_all):
     except Exception as e_:  # noqa: BLE001
         fo_rows_ = [("WARN", "frame order", "tools/frame_order.py FAILED (%s: %s): the frame-order rows are missing; the rest ran" % (type(e_).__name__, e_))]
     for lvl_, name_, text_ in fo_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+        failed = failed or lvl_ == "FAIL"
+    # DRIVER-PLAN N61: what a frame costs on its way to the panel (tools/triage_present_cost.py): the plugin's copy-outs, the kernel's IOP copies
+    try:
+        from triage_present_cost import present_rows as pc_rows
+        pc_rows_ = pc_rows((cdlog or "") + "\n" + (pluginlog or ""), surfvram, "rdna3acceliop=1" in args)
+    except ImportError:
+        pc_rows_ = [("WARN", "present cost", "tools/triage_present_cost.py is missing next to triage_reports.py: the copy-out / IOP copy costs were NOT read")]
+    except Exception as e_:  # noqa: BLE001
+        pc_rows_ = [("WARN", "present cost", "tools/triage_present_cost.py FAILED (%s: %s): the present cost rows are missing; the rest ran" % (type(e_).__name__, e_))]
+    for lvl_, name_, text_ in pc_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
         failed = failed or lvl_ == "FAIL"
     if ladder_txt:

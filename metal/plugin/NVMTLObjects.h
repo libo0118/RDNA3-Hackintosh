@@ -58,6 +58,8 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
 - (void)nvmtlSurfaceIn;
 - (void)nvmtlBufCopyIn;
 - (BOOL)nvmtlSurfaceOut;
+- (BOOL)nvmtlSurfaceOutWhy:(int)why;   /* N61: the CPU copy-out of a part's publish, with why the GPU path was not taken */
+- (BOOL)nvmtlSurfaceOutDMA;   /* N61: the publish of a GPU copy-out recorded in the command buffer (nvmtl_surface_dma_record) */
 @end
 @interface NVMTLFunction : NSObject <MTLFunction> { @public NSData *_spirv; NSString *_fname; NSString *_stage; NSString *_air; NSDictionary *_fc; NSArray *_embedded; unsigned char _bcHash[32]; BOOL _bcHashed;
   NSDictionary *_refl; NSDictionary *_airNames; NSArray *_arguments;
@@ -293,6 +295,10 @@ typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_p
 @interface NVMTLHeap () { @public nvmtl_park_t *_pk; uint32_t _npk; } @end
 @interface NVMTLBuffer () { @public nvmtl_park_t *_bpk; uint32_t _nbpk; os_unfair_lock _bpl; } @end
 @interface NVMTLTexture () { @public BOOL _bparkable; } @end
+#include "nvmtl_present_cost.h"
+/* N61: the IOSurface's own pages imported as a GPU buffer (the root texture only), where the plane's rows land in it, how
+ * many copy-outs the texture had, and why it is never copied by the GPU (_soDead, _soWhy: NVMTL_SO_WHY_*) */
+@interface NVMTLTexture () { @public nvk_buffer _soBuf; uintptr_t _soBase; size_t _soOff; uint32_t _soRow, _soOuts; int _soWhy; BOOL _soDead; } @end
 static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, NSUInteger off, NSUInteger len);
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared);
 @interface NVMTLIndirectCommandBuffer () { @public uint32_t _purge; } @end

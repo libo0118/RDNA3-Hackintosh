@@ -93,7 +93,8 @@ enum { NVT_IN_UPLOAD = 1, NVT_IN_SKIP_VRAM = 2, NVT_IN_LOCK_FAILED = 3, NVT_IN_U
 /* SURF_OUT paths. rc: for OUT_COPY_AFTER_REFUSE the dirty request's errno (negative: -2 dirty path switched off,
  * -3 no Vulkan device), for the failures the IOReturn / -1 */
 enum { NVT_OUT_DIRTY = 1, NVT_OUT_COPY_PRIVATE = 2, NVT_OUT_COPY_AFTER_REFUSE = 3, NVT_OUT_LOCK_FAILED = 4,
-       NVT_OUT_READBACK_FAILED = 5, NVT_OUT_NOT_COPYABLE = 6 };
+       NVT_OUT_READBACK_FAILED = 5, NVT_OUT_NOT_COPYABLE = 6,
+       NVT_OUT_COPY_DMA = 7 /* N61: the GPU copied the image into the surface's pages in the command buffer; the publish moved the seeds */ };
 /* PASS_END paths */
 enum { NVT_PASS_DRAWN = 1, NVT_PASS_CLEAR_ONLY = 2, NVT_PASS_EMPTY = 3, NVT_PASS_EMPTY_FAILED = 4,
        NVT_PASS_LOAD_UNTOUCHED = 5, NVT_PASS_REFUSED = 6, NVT_PASS_CLEAR_FAILED = 7 };
@@ -579,7 +580,7 @@ static inline void nvt_count_record(const nvt_rec *r)
         break;
     case NVT_K_SURF_OUT:
         if (r->path == NVT_OUT_DIRTY) nvt_count_at(t, NVT_C_OUT_DIRTY, 1);
-        else if (r->path == NVT_OUT_COPY_PRIVATE || r->path == NVT_OUT_COPY_AFTER_REFUSE) {
+        else if (r->path == NVT_OUT_COPY_PRIVATE || r->path == NVT_OUT_COPY_AFTER_REFUSE || r->path == NVT_OUT_COPY_DMA) {
             nvt_count_at(t, NVT_C_OUT_COPY, 1); nvt_count_at(t, NVT_C_KB_OUT, nvt_kib(r->bytes));
             if (r->path == NVT_OUT_COPY_AFTER_REFUSE) nvt_count_at(t, NVT_C_OUT_REFUSED, 1);
         } else nvt_count_at(t, NVT_C_OUT_FAIL, 1);

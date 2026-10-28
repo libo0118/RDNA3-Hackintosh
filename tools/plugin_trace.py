@@ -67,7 +67,8 @@ KIND_NAMES = {1: "START", 2: "SURF_IN", 3: "SURF_OUT", 4: "PASS_BEGIN", 5: "PASS
               14: "KREQ_DIRTY", 15: "KREQ_IMPORT", 16: "SURF_MAP", 17: "ENC_SPLIT"}
 IN_NAMES = {1: "UPLOAD", 2: "SKIP(shared VRAM current)", 3: "LOCK-FAILED", 4: "UPLOAD-FAILED", 5: "NOT-COPYABLE"}
 OUT_NAMES = {1: "DIRTY(no copy)", 2: "COPY-OUT(private image)", 3: "COPY-OUT after dirty refused", 4: "LOCK-FAILED",
-             5: "READBACK-FAILED", 6: "NOT-COPYABLE"}
+             5: "READBACK-FAILED", 6: "NOT-COPYABLE", 7: "COPY-OUT(GPU into the surface, N61)"}
+OUT_COPIES = (2, 3, 7)   # the surface-out paths that put the private image's pixels into the surface
 PASS_NAMES = {1: "DRAWN", 2: "CLEAR-ONLY", 3: "empty pass (clears/resolves)", 4: "empty pass FAILED",
               5: "load pass with no draws (target untouched)", 6: "REFUSED", 7: "clear FAILED"}
 SUB_NAMES = {1: "ok", 2: "vkQueueSubmit FAILED", 3: "failed before the submit", 4: "no backend (disabled)"}
@@ -493,7 +494,7 @@ class Analysis:
                     self.frame(r.id).outs.append(r)
                 if r.path == 1:
                     s.out_dirty += 1; s.published += 1
-                elif r.path in (2, 3):
+                elif r.path in OUT_COPIES:
                     s.out_copy += 1; s.published += 1
                     if r.path == 3:
                         s.out_refused += 1
@@ -528,14 +529,14 @@ class Analysis:
         for f in self.frames.values():
             if not f.commit or not f.dirty:
                 continue
-            pubs = {o.surf for o in f.outs if o.path in (1, 2, 3)}
+            pubs = {o.surf for o in f.outs if o.path in (1,) + OUT_COPIES}
             for d in f.dirty:
                 if d.surf in pubs:
                     continue
                 (unfinished if f.done is None else never)[d.surf].append(f)
         for sid, fl in sorted(never.items()):
             s = self.surf(sid)
-            bad = [o for f in fl for o in f.outs if o.surf == sid and o.path > 3]
+            bad = [o for f in fl for o in f.outs if o.surf == sid and o.path in (4, 5, 6)]
             det = ["cb %d at +%.3fs: %s" % (f.cb, f.commit.t, "; ".join(
                 "%s rc=%d" % (OUT_NAMES.get(o.path, o.path), o.rc) for o in f.outs if o.surf == sid) or "no surface-out ran") for f in fl[:3]]
             self.add("FAIL", "never-published",
@@ -561,7 +562,7 @@ class Analysis:
                 continue
             drawn_empty, cleared_empty = [], 0
             for r in s.events:
-                if r.kind != K_SURF_OUT or not r.empty() or r.path not in (2, 3):
+                if r.kind != K_SURF_OUT or not r.empty() or r.path not in OUT_COPIES:
                     continue
                 f = self.frames.get(r.id)
                 ends = [p["end"] for p in f.passes.values() if p["end"] and p["end"].surf == sid] if f else []
@@ -643,14 +644,14 @@ class Analysis:
             for r in s.events:
                 if r.kind == K_SURF_OUT:
                     last_pub = r
-                    known = known or r.path in (1, 2, 3)
+                    known = known or r.path in (1,) + OUT_COPIES
                 elif r.kind == K_SURF_IN:
                     if r.path == 1:
                         known = True
                         last_pub = None
                     elif r.path == 2:
                         why = None
-                        if last_pub is not None and last_pub.path > 3:
+                        if last_pub is not None and last_pub.path in (4, 5, 6):
                             why = "the last surface-out failed (%s)" % OUT_NAMES.get(last_pub.path)
                         elif last_pub is not None and last_pub.empty():
                             why = "the last surface-out published an EMPTY picture"
@@ -858,7 +859,7 @@ def print_frames(tr, an, n, off, out):
             out.write("    wrote surf %d\n" % d.surf)
         for r in f.ins + f.outs:
             out.write("    " + describe(tr, r, off, False) + "\n")
-        pubs = {o.surf for o in f.outs if o.path in (1, 2, 3)}
+        pubs = {o.surf for o in f.outs if o.path in (1,) + OUT_COPIES}
         for d in f.dirty:
             if d.surf not in pubs and f.done is not None:
                 out.write("    !! surf %d was written but never published\n" % d.surf)
