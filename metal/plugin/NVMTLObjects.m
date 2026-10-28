@@ -12,6 +12,7 @@ void nvlog(const char *fmt, ...);
 
 #import "NVMTLObjects.h"
 #include "nvmtl_ab_switch.h"
+#include "nvmtl_ci_refl.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 static int nvmtl_trace_on(void);
@@ -2122,6 +2123,12 @@ static NSArray *nvmtl_ci_refs(NSString *body) {
     }
     return out;
 }
+/* The rest of a function's metadata node after "ptr @NAME," (NAME bare or quoted: nvmtl_cirefl_head_skip), nil when the node is another function's. */
+static NSString *nvmtl_ci_after_head(NSString *entry, NSString *fname) {
+    if (!entry.length || !fname.length) return nil;
+    long k = nvmtl_cirefl_head_skip(entry.UTF8String, fname.UTF8String);
+    return k < 0 || (NSUInteger)k > entry.length ? nil : [entry substringFromIndex:(NSUInteger)k];
+}
 static NSDictionary *nvmtl_ci_entry(NVMTLFunction *fn)
 {
     if (!fn || ![fn->_stage isEqualToString:@"visible"]) return nil;
@@ -2139,10 +2146,9 @@ static NSDictionary *nvmtl_ci_entry(NVMTLFunction *fn)
                 NSString *key = [line substringToIndex:eq.location];
                 if ([key isEqualToString:@"!air.ci"]) list = body; else nodes[key] = body;
             }
-            NSString *head = [NSString stringWithFormat:@"ptr @%@,", fname];
             for (NSString *ref in nvmtl_ci_refs(list ?: @"")) {
-                NSString *entry = nodes[ref]; if (![entry hasPrefix:head]) continue;
-                NSArray *parts = nvmtl_ci_refs([entry substringFromIndex:head.length]);
+                NSString *entry = nodes[ref]; NSString *rest = nvmtl_ci_after_head(entry, fname); if (!rest) continue;
+                NSArray *parts = nvmtl_ci_refs(rest);
                 if (parts.count < 2) break;
                 NSString *retBody = nvmtl_ci_body(nodes, parts[0]);
                 if (retBody && !nvmtl_ci_quoted(retBody, @"air.arg_type_name")) retBody = nvmtl_ci_body(nodes, nvmtl_ci_refs(retBody).firstObject);
@@ -2200,10 +2206,9 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
                 NSString *key = [line substringToIndex:eq.location];
                 if ([key isEqualToString:@"!air.visible"]) list = body; else nodes[key] = body;
             }
-            NSString *head = [NSString stringWithFormat:@"ptr @%@,", fname];
             for (NSString *ref in nvmtl_ci_refs(list ?: @"")) {
-                NSString *entry = nodes[ref]; if (![entry hasPrefix:head]) continue;
-                NSArray *parts = nvmtl_ci_refs([entry substringFromIndex:head.length]);
+                NSString *entry = nodes[ref]; NSString *rest = nvmtl_ci_after_head(entry, fname); if (!rest) continue;
+                NSArray *parts = nvmtl_ci_refs(rest);
                 if (parts.count < 3) break;
                 NSString *outs = nvmtl_ci_body(nodes, parts[0]), *ins = nvmtl_ci_body(nodes, parts[1]), *si = nvmtl_ci_body(nodes, parts[2]);
                 if (![si hasPrefix:@"!\"air.stitching_info\""]) break;
@@ -2255,6 +2260,97 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
         }
         objc_setAssociatedObject(fn, &nvmtl_ci_stitch_key, found ?: [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return found;
+    }
+}
+/* DRIVER-PLAN N60. A [[stitchable]] function from newLibraryWithSource (CoreImage's CIKL kernels, CIKernelLibrary initWithSource:)
+ * whose `!air.visible` node is not the stitching shape nvmtl_ci_stitch_entry reads: the node is `ptr @f, !{outputs}, !{inputs}`, each
+ * input `!{... !"air.arg_type_name", !"<type>", !"air.arg_name", !"<name>"}`. Struct inputs of CoreImage's own types
+ * (nvmtl_cirefl_is_ci_struct) are one argument each, as CIKernelReflection::reflect takes them. A list with nothing usable is nil. */
+static NSDictionary *nvmtl_ci_plain_entry(NVMTLFunction *fn)
+{
+    NSString *ll = fn->_air, *fname = fn->_fname;
+    if (!ll.length || !fname.length || [ll rangeOfString:@"\n!air.visible = "].location == NSNotFound) return nil;
+    NSMutableDictionary *nodes = [NSMutableDictionary new]; NSString *list = nil;
+    for (NSString *line in [ll componentsSeparatedByString:@"\n"]) {
+        if (![line hasPrefix:@"!"]) continue;
+        NSRange eq = [line rangeOfString:@" = !{"]; if (eq.location == NSNotFound || ![line hasSuffix:@"}"]) continue;
+        NSString *body = [line substringWithRange:NSMakeRange(NSMaxRange(eq), line.length - NSMaxRange(eq) - 1)];
+        NSString *key = [line substringToIndex:eq.location];
+        if ([key isEqualToString:@"!air.visible"]) list = body; else nodes[key] = body;
+    }
+    for (NSString *ref in nvmtl_ci_refs(list ?: @"")) {
+        NSString *rest = nvmtl_ci_after_head(nodes[ref], fname); if (!rest) continue;
+        NSArray *parts = nvmtl_ci_refs(rest);
+        if (parts.count < 2) return nil;
+        NSString *outs = nvmtl_ci_body(nodes, parts[0]);
+        NSString *ob = outs ? nvmtl_ci_body(nodes, nvmtl_ci_refs(outs).firstObject) : nil;
+        NVMTLType *ret = [NVMTLType new];
+        NSString *rtn = ob ? nvmtl_ci_quoted(ob, @"air.arg_type_name") : nil;
+        ret->_dataType = rtn ? nvmtl_datatype_for_air_name(rtn) : MTLDataTypeFloat4;
+        NSMutableArray *args = [NSMutableArray new]; NSMutableString *say = [NSMutableString new];
+        for (NSString *aref in nvmtl_ci_refs(nvmtl_ci_body(nodes, parts[1]) ?: @"")) {
+            NSString *ab = nodes[aref]; if (!ab) continue;
+            NSString *tn = nvmtl_ci_quoted(ab, @"air.arg_type_name");
+            if (!tn.length) continue;   /* not an argument descriptor */
+            NVMTLCIStitchBinding *b = [NVMTLCIStitchBinding new];
+            b->_name = nvmtl_ci_quoted(ab, @"air.arg_name") ?: [NSString stringWithFormat:@"arg%lu", (unsigned long)args.count];
+            if (nvmtl_cirefl_is_ci_struct(tn.UTF8String)) {
+                NVMTLCIStructType *T = [NVMTLCIStructType new]; T->_dataType = MTLDataTypeStruct; T->_typeName = tn; T->_members = @[];
+                b->_bt = 29; b->_t = T;
+            } else {
+                b->_t = [NVMTLType new]; b->_bt = 18; b->_t->_dataType = nvmtl_datatype_for_air_name(tn);
+            }
+            [args addObject:b]; [say appendFormat:@" %@:%@=%lu/%lu", b->_name, tn, (unsigned long)b->_bt, (unsigned long)b->_t->_dataType];
+        }
+        if (!args.count) return nil;
+        nvlog("CI PLAIN REFL %s: functionType 5, returns %lu, %lu argument(s)%s", fname.UTF8String, (unsigned long)ret->_dataType, (unsigned long)args.count, say.UTF8String);
+        return @{ @"args": args, @"ret": ret };
+    }
+    return nil;
+}
+/* What went into the choice, in the log: the function's `define` line, the visible/ci lists and the nodes that name it (cut), so the
+ * next card run shows the AIR shape that no parser here understood. A per-process budget keeps a library of hundreds from flooding. */
+static void nvmtl_ci_diag(NVMTLFunction *fn)
+{
+    static int budget = 36;
+    NSString *ll = fn->_air, *fname = fn->_fname;
+    if (!ll.length || !fname.length) { nvlog_uncapped("CI REFL FAILED diag %s: no AIR is retained for this function", fname.UTF8String ?: "?"); return; }
+    __block int shown = 0;
+    [ll enumerateLinesUsingBlock:^(NSString *l, BOOL *stop) {
+        BOOL def = [l hasPrefix:@"define"] && [l rangeOfString:fname].location != NSNotFound;
+        BOOL list = [l hasPrefix:@"!air.visible = "] || [l hasPrefix:@"!air.ci = "] || [l hasPrefix:@"!air.stitchable"];
+        BOOL node = [l hasPrefix:@"!"] && ([l rangeOfString:[NSString stringWithFormat:@"@%@", fname]].location != NSNotFound ||
+                                           [l rangeOfString:[NSString stringWithFormat:@"@\"%@\"", fname]].location != NSNotFound);
+        if (!def && !list && !node) return;
+        if (__atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED) <= 0) { *stop = YES; return; }
+        nvlog_uncapped("CI REFL FAILED diag %s: %s", fname.UTF8String, (l.length > 600 ? [l substringToIndex:600] : l).UTF8String);
+        if (++shown >= 8) *stop = YES;
+    }];
+}
+/* The answer of -[NVMTLFunction arguments] / returnType for a visible function; computed once per function. */
+static char nvmtl_ci_resolved_key;
+static NSDictionary *nvmtl_ci_resolved(NVMTLFunction *fn)
+{
+    if (!fn || ![fn->_stage isEqualToString:@"visible"]) return nil;
+    @synchronized (fn) {
+        NSDictionary *have = objc_getAssociatedObject(fn, &nvmtl_ci_resolved_key);
+        if (have) return have;
+        NSDictionary *ci = nvmtl_ci_entry(fn), *st = nvmtl_ci_stitch_entry(fn), *pl = nil;
+        if (!((NSArray *)ci[@"args"]).count && !((NSArray *)st[@"args"]).count) pl = nvmtl_ci_plain_entry(fn);
+        const int src = nvmtl_cirefl_pick((long)((NSArray *)ci[@"args"]).count, (long)((NSArray *)st[@"args"]).count, (long)((NSArray *)pl[@"args"]).count);
+        NSDictionary *out = src == NVMTL_CIREFL_CI ? ci : src == NVMTL_CIREFL_STITCH ? st : src == NVMTL_CIREFL_PLAIN ? pl : nil;
+        if (!out) {
+            /* Poison (nvmtl_ci_refl.h): one argument CoreImage's reflect() refuses, so the kernel is built without the Metal
+             * reflection instead of consolidate() writing through an empty vector. */
+            NVMTLCIBinding *b = [NVMTLCIBinding new]; b->_t = [NVMTLType new]; b->_t->_dataType = MTLDataTypeNone; b->_name = @"nvmtl_unreflected";
+            NVMTLType *ret = [NVMTLType new]; ret->_dataType = MTLDataTypeFloat4;
+            out = @{ @"args": @[b], @"ret": ret };
+            nvlog_uncapped("CI REFL FAILED %s: no argument list could be read from its AIR (air.ci entry %s, stitching entry %s, plain entry %s) - answering one unsupported argument so CoreImage refuses the Metal reflection (the kernel then builds from its FOSL reflection) instead of crashing in CIKernelReflection::consolidate",
+                           fn->_fname.UTF8String ?: "?", ci ? "found, no arguments" : "none", st ? "found, no arguments" : "none", "none");
+            nvmtl_ci_diag(fn);
+        }
+        objc_setAssociatedObject(fn, &nvmtl_ci_resolved_key, out, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return out;
     }
 }
 @implementation NVMTLFunction
@@ -2350,8 +2446,8 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
     if ([_stage isEqualToString:@"object"]) return MTLFunctionTypeObject;
     return MTLFunctionTypeVertex;
 }
-- (NSArray *)arguments { return (nvmtl_ci_entry(self) ?: nvmtl_ci_stitch_entry(self))[@"args"]; }
-- (id)returnType { return (nvmtl_ci_entry(self) ?: nvmtl_ci_stitch_entry(self))[@"ret"]; }
+- (NSArray *)arguments { return nvmtl_ci_resolved(self)[@"args"]; }
+- (id)returnType { return nvmtl_ci_resolved(self)[@"ret"]; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 @end

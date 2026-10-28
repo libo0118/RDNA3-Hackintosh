@@ -181,7 +181,7 @@ integration tests `translator/tests/*.rs`. `wrapper/src/*.rs`: the C-callable dy
 Single translation unit: `NVMTLDevice.m` `#import`s `NVMTLObjects.h/.m`, `NVMTLTrace.m`,
 `NVMTLDevice_contract.m`, `NVMTLForward.m`, `NVMTLLibraryLoad.m`, `NVMTLGL.m`, `NVMTLEmbedded.m`,
 `NVMTLVendorCompiler.m` and `#include`s `nvmtl_vk.c`; `NVMTLObjects.m` pulls in `NVMTLEventSync.m`,
-`nvmtl_ab_switch.h`, `nvmtl_capture.h`, `nvconv_lib.h` (`NVMTLObjects.h` includes `nvmtl_surfin_cache.h`; `NVMTLTrace.m` includes `nvmtl_surf_census.h`). Built by `make -C metal plugin` into
+`nvmtl_ab_switch.h`, `nvmtl_capture.h`, `nvmtl_ci_refl.h` (CoreImage's reading of a visible function: `nvmtl_ci_resolved` in `NVMTLObjects.m`, N60), `nvconv_lib.h` (`NVMTLObjects.h` includes `nvmtl_surfin_cache.h`; `NVMTLTrace.m` includes `nvmtl_surf_census.h`). Built by `make -C metal plugin` into
 `RDNA3MTLDriver.bundle`. Everything is named `NVMTL*` / `nvmtl_*` (NullMoth heritage), including `nvlog`.
 
 | File | Holds |
@@ -256,7 +256,7 @@ firmware checks). It runs, by area:
 | Hardware model | `sim_navi32` (Navi 32 register model: PSP/SMU/GMC/IH/SDMA/GFX/DCN; `tests/sim_*.inc`), `test_discovery`, `test_fw`, `test_range_alloc` |
 | UAPI / libdrm | `test_uapi`, `test_bo_map`, `test_bo_map_race`, `test_libdrm_amdgpu` (real libdrm over `backend_loopback`), `rdna3_drminfo_host` (`--scanout`, DMA/GFX tests) |
 | Accelerator / display logic | `test_a3_display`, `test_swap_front`, `test_attr_ring`, `test_swap_copy`, `test_write_gen`, `test_flip_latch`, `test_flip_queue`, `test_vbl_irq`, `test_tcall`, `test_fbgate`, `test_gpu_busy`, `test_vram_park`, `test_vram_place`, `test_surf_pending`, `test_trace`, `test_coh`, `test_fb_policy`, `test_bootargs`, `test_gamma_judge`, `test_agdc_k5`, `test_agdc_n48` |
-| Metal plugin helpers | `test_mtl_allow`, `test_linear_pitch`, `test_gpu_time_queue`, `test_ab_switch`, `test_surf_census`, `test_surfin_cache`, `test_copy_pack`, `test_capture` (+ `tools/capture_decode.py --check`), `test_msupload`, `test_msdl`, `test_spirv_fbfetch`, `test_fbfetch_plan` |
+| Metal plugin helpers | `test_mtl_allow`, `test_linear_pitch`, `test_gpu_time_queue`, `test_ab_switch`, `test_surf_census`, `test_surfin_cache`, `test_ci_refl`, `test_copy_pack`, `test_capture` (+ `tools/capture_decode.py --check`), `test_msupload`, `test_msdl`, `test_spirv_fbfetch`, `test_fbfetch_plan` |
 | Python / source checks | `test_accel_hash_parity.py`, `test_fb_agdc_hash_parity.py`, `test_trace_parity.py`, `test_accel_slots.py` (`tools/check_accel_slots.py`), `test_accel_locks.py`, `test_kext_kpi_versions.py`, `test_kmutil_kpi_guard.py` |
 | Triage / tools | `test_triage_*.py` / `.sh` (fixtures in `reports/<date>` and `tests/trace_fixture.py`), `test_bootwatch.sh`, `test_glyph_verdict.py`, `test_lookimg.py`, `test_plugin_trace.sh`, `test_result_checklist.sh`, `test_bisect_step.sh`, `test_ladder_step.sh`, `test_apps_step.sh`, `test_triage_apps.py`, `test_play_step.sh`, `test_approve_gate.sh`, `test_vm_*.sh`, `test_forgejo_update.sh` |
 | Packaging | `test_oc_install.sh`, `test_make_pkg.sh`, `test_coredisplay_prefs.sh`, `test_prune_traces.sh`, `test_membw_load.sh` |
