@@ -137,7 +137,7 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h", "common/rdna3_flip_queue.h",
                     "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h",
-                    "common/rdna3_gpu_util.h", "common/rdna3_fbgate.h")
+                    "common/rdna3_gpu_util.h", "common/rdna3_fbgate.h", "common/rdna3_iop_stale.h")
 
 
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
@@ -4834,6 +4834,17 @@ def report(path, show_all):
     except Exception as e_:  # noqa: BLE001
         ar_rows_ = [("WARN", "attribute ring", "tools/triage_attr_ring.py FAILED (%s: %s): the attribute ring rows are missing; the rest ran" % (type(e_).__name__, e_))]
     for lvl_, name_, text_ in ar_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+        failed = failed or lvl_ == "FAIL"
+    # DRIVER-PLAN N59: IOP copies of a buffer nothing wrote since it was last shown, and the app survey's frame-order bursts (tools/frame_order.py)
+    try:
+        from frame_order import report_rows as fo_rows
+        fo_rows_ = fo_rows(locals().get("ladder_logs") or {}, surfvram, "rdna3acceliop=1" in args, (cdlog or "") + "\n" + (pluginlog or ""))
+    except ImportError:
+        fo_rows_ = [("WARN", "frame order", "tools/frame_order.py is missing next to triage_reports.py: the frame-order bursts and the iop_stale counters were NOT read")]
+    except Exception as e_:  # noqa: BLE001
+        fo_rows_ = [("WARN", "frame order", "tools/frame_order.py FAILED (%s: %s): the frame-order rows are missing; the rest ran" % (type(e_).__name__, e_))]
+    for lvl_, name_, text_ in fo_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
         failed = failed or lvl_ == "FAIL"
     if ladder_txt:

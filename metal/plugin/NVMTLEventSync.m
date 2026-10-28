@@ -4,6 +4,26 @@
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
 
+#include "nvmtl_handoff.h"
+// DRIVER-PLAN N59: a consumer may take a command buffer's IOSurfaces once it is scheduled (Metal's contract; Apple's kernel
+// orders later accesses after the write). The plugin's writes reach the surface only at the part's publish after the GPU:
+// counted (vk: handoff: SUMMARY), and NVMTL_SCHED_AFTER_PUBLISH=1 holds the scheduled point until that publish.
+static nvmtl_ho_stats g_ho;
+static uint64_t g_ho_last_cbs;
+static int nvmtl_ho_hold(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SCHED_AFTER_PUBLISH"); on = nvmtl_ho_hold_on(e);
+        nvlog("handoff (N59): a command buffer that writes an IOSurface is scheduled %s (NVMTL_SCHED_AFTER_PUBLISH=%s)",
+              on ? "only once its last IOSurface write is published (copied out / marked newest)" : "at its first submit, as before (its writes reach the surface later: counted)", e ? e : "unset"); }
+    return on;
+}
+static void nvmtl_ho_summary(void) {
+    char body[320];
+    const uint64_t cbs = __atomic_load_n(&g_ho.cbs, __ATOMIC_RELAXED);
+    if (cbs == g_ho_last_cbs || !nvmtl_ho_format(&g_ho, nvmtl_ho_hold(), body, sizeof body)) return;
+    g_ho_last_cbs = cbs;
+    nvlog_uncapped("vk: handoff: SUMMARY %s", body);
+}
 @interface NVMTLQueueReservation : NSObject { @public __weak NVMTLCommandBuffer *buffer; } @end
 @implementation NVMTLQueueReservation @end
 @interface NVMTLSubmissionPart : NSObject {
@@ -293,10 +313,16 @@ static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
     });
 }
 - (void)nvmtlMarkScheduled {
+    // N59: NVMTL_SCHED_AFTER_PUBLISH holds it while a part writing an IOSurface is not yet published
+    if (_hoHold && !_executionDone && _hoLastSurfPart >= (NSInteger)_nextPart) {
+        if (!_hoHeldNs) _hoHeldNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        return;
+    }
     [_completionCondition lock];
     if (!_wasScheduled) {
         _wasScheduled = YES; _cbstatus = MTLCommandBufferStatusScheduled;
         NSArray *handlers = [_scheduledHandlers copy]; [_scheduledHandlers removeAllObjects];
+        if (handlers.count && !_hoSeenBy) { _hoSeenBy = NVMTL_HO_HANDLER; _hoSeenNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
         [self nvmtlDispatchHandlers:handlers scheduled:YES];
         [_completionCondition broadcast];
     }
@@ -311,6 +337,7 @@ static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
     }
 }
 - (void)nvmtlFinishExecution:(NSError *)error {
+    if (_hoHold) { _hoHold = NO; [self nvmtlMarkScheduled]; }   // N59: scheduled always comes before completed
     for (NSUInteger i = _nextPart; i < _parts.count; i++) {
         NVMTLSubmissionPart *p = _parts[i];
         if (![p isKindOfClass:[NVMTLSubmissionPart class]] || !p->inflight) continue;
@@ -519,6 +546,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
                 if (committed) nvmtl_vk_surface_dirty_committed_scope(0);
             }
             nvt_set_cb(0);
+            if ((NSInteger)_nextPart == _hoLastSurfPart) [self nvmtlHandoffPublished:part];
             for (id resource in part->resources)
                 if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_out(resource);
         }
@@ -546,8 +574,28 @@ static void nvmtl_gsub_ahead_pass1(void) {
         ((void(*)(id,SEL,uint64_t))objc_msgSend)(event, @selector(setSignaledValue:), [s[1] unsignedLongLongValue]);
     }
     _parts[_nextPart++] = [NSNull null];
+    if (_hoHold && _hoLastSurfPart < (NSInteger)_nextPart) { _hoHold = NO; [self nvmtlMarkScheduled]; }   // N59: published
     if (_nextPart == _parts.count) [self nvmtlFinishExecution:nil];
     return YES;
+}
+// N59: the last IOSurface-writing part is published: was the scheduled point seen before (a consumer could take the stale surface)?
+- (void)nvmtlHandoffPublished:(id)partObj {
+    NVMTLSubmissionPart *part = partObj;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    [_completionCondition lock];
+    const int by = _hoSeenBy; const uint64_t seen = _hoSeenNs;
+    [_completionCondition unlock];
+    const uint64_t gap = by && now > seen ? now - seen : 0, held = _hoHeldNs && now > _hoHeldNs ? now - _hoHeldNs : 0;
+    nvmtl_ho_publish(&g_ho, by, gap, _hoHeldNs != 0, held);
+    if (!by) return;
+    static _Atomic unsigned long long n;
+    const unsigned long long k = atomic_fetch_add(&n, 1);
+    if (k < 8 || (k & 1023) == 0) {
+        uint32_t sid = 0;
+        for (NVMTLTexture *t in part->surfaces) if (t->_surf) { sid = (uint32_t)IOSurfaceGetID(t->_surf); break; }
+        nvlog("handoff (N59): command buffer %u wrote IOSurface %u; its scheduled point was seen (%s) %.2f ms BEFORE the write was in the surface: a consumer that took it then read the frame before (#%llu; NVMTL_SCHED_AFTER_PUBLISH=1 holds it)",
+              nvmtl_tr_cb_id(self), sid, by == NVMTL_HO_WAIT ? "waitUntilScheduled returned" : "a scheduled handler ran", gap / 1e6, k + 1);
+    }
 }
 - (void)nvmtlSubmitWithEvents {
     @synchronized ([NVMTLCommandBuffer class]) {
@@ -557,6 +605,13 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (!__atomic_load_n(&_rep, __ATOMIC_ACQUIRE)) __atomic_store_n(&_rep, nvmtl_ep_enter(), __ATOMIC_RELEASE);
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
+        _hoLastSurfPart = -1;   // N59: the last part that writes an IOSurface
+        for (NSUInteger i = 0; i < _parts.count; i++) {
+            NVMTLSubmissionPart *p = _parts[i];
+            if (![p isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+            for (NVMTLTexture *t in p->surfaces) if (t->_surf) { _hoLastSurfPart = (NSInteger)i; break; }
+        }
+        _hoHold = _hoLastSurfPart >= 0 && nvmtl_ho_hold();
         nvmtl_surface_register_writes(self);
         nvmtl_ws_mark_pending(self);   // N41: before any part reaches the GPU (submit-ahead needs _committed and the pump)
         nvmtl_tr_cb_commit(self);

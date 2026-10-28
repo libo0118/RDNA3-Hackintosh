@@ -809,6 +809,7 @@ static void nvmtl_mg_summary(int force) {
 /* ONE 10 s timer for the plugin's SUMMARY lines, armed when the device is made: `managed:`, `census:`, `vk: ab:` and `vk: fbfetch:` (the surface-in cache has its own). A call-driven
  * cadence loses the last window of a process that is ended by a signal (atexit does not run) and of one that does a little work and then idles; each summary prints only when a
  * counter moved since its last line, so an idle process prints nothing. A failed timer is said once and the summaries stay call-driven / at exit. */
+static void nvmtl_ho_summary(void);   /* N59, NVMTLEventSync.m */
 static void nvmtl_summary_timer_arm(void)
 {
     static dispatch_once_t once; static dispatch_source_t timer;
@@ -818,7 +819,7 @@ static void nvmtl_summary_timer_arm(void)
         if (!timer) { nvlog("summaries: the shared 10 s timer could not be made - the managed / census / ab / fbfetch totals go out at their events and at exit only"); return; }
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10ll * NSEC_PER_SEC), 10ull * NSEC_PER_SEC, 1ull * NSEC_PER_SEC);
         dispatch_source_set_event_handler(timer, ^{ @autoreleasepool {
-            nvmtl_cen_summary(1); nvmtl_mg_summary(1); nvmtl_vk_summaries();   /* force: skip each one's own 10 s clock, a line is still printed only when a counter moved */
+            nvmtl_cen_summary(1); nvmtl_mg_summary(1); nvmtl_vk_summaries(); nvmtl_ho_summary();   /* force: skip each one's own 10 s clock, a line is still printed only when a counter moved */
         } });
         dispatch_resume(timer);
     });
@@ -5693,6 +5694,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (void)waitUntilScheduled {
     _nWait++; [_completionCondition lock];
     while (!_wasScheduled && !_executionDone) [_completionCondition wait];
+    if (!_executionDone && !_hoSeenBy) { _hoSeenBy = NVMTL_HO_WAIT; _hoSeenNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   /* N59 */
     [_completionCondition unlock];
     dispatch_group_wait(_scheduledGroup, DISPATCH_TIME_FOREVER);
 }

@@ -141,7 +141,7 @@ rdna3_allow_mode() {
 # card run 58: WindowServer's display framebuffers and A3 (refused /
 # imported, the legacy swaps per head and those that scanned out an A3 BO)
 a3_sysctls() {
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|perf|present_|flipbuf|hook_|vm_|surface_)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|iop_stale|iop_ok:|iop_copy_skip|perf|present_|flipbuf|hook_|vm_|surface_)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
     # card run 2026-10-17c: who holds the CPU-visible VRAM now (tools/triage_reports.py "VISIBLE VRAM")
@@ -1517,7 +1517,7 @@ apps_proc() {   # apps_proc RUNG: the process name pgrep -x finds (empty: a Dock
 }
 apps_stages() {   # apps_stages RUNG: the pieces of content, in order (`main` = the app alone)
     case $1 in
-        safari) echo "text canvas webgl" ;; preview) echo "pdf image" ;; settings) echo "appearance wallpaper displays" ;;
+        safari) echo "text canvas webgl frames" ;; preview) echo "pdf image" ;; settings) echo "appearance wallpaper displays" ;;
         quicktime) echo "play later" ;; mission-control) echo "windows mc closed" ;; launchpad) echo "apps closed" ;;
         *) echo main ;;
     esac
@@ -1623,6 +1623,32 @@ if(!gl){i.textContent='NO WEBGL: getContext returned null';}else{
   gl.viewport(0,0,640,400);gl.clearColor(.1,.1,.2,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.uniformMatrix4fv(lm,false,mul(P,mul(T,mul(Y,X))));
   gl.drawElements(gl.TRIANGLES,36,gl.UNSIGNED_SHORT,0);document.title='RDNA3 survey: Safari WebGL, frame '+n;requestAnimationFrame(fr);};
  fr();}
+</script>
+APPSEND
+    # Safari 4 (DRIVER-PLAN N59: animations step back to an earlier frame): three frame counters drawn as strips of black / white
+    # blocks (common/rdna3_strip.h: a marker, 12 bits LSB first, the 12 bits inverted, a magenta end), read from the scanout many
+    # times a second by apps_frameorder (rdna3_drminfo --scanout-strip) and decoded by tools/frame_order.py: `css` a column of
+    # codes slid by a CSS steps() animation (Core Animation composites it), `canvas` a 2D canvas per requestAnimationFrame,
+    # `webgl` scissor clears per frame. KEEP THE LAYOUT IN STEP WITH common/rdna3_strip.h AND tools/frame_order.py.
+    cat > "$_ad/frameorder.html" <<'APPSEND'
+<!doctype html><meta charset="utf-8"><title>RDNA3 survey: frame order</title>
+<style>body{margin:0;background:#808080;font:12px monospace;color:#000}.s{display:block;margin:12px 0 0 12px}
+.w{position:relative;width:432px;height:16px;overflow:hidden;margin:12px 0 0 12px}#cs{position:absolute;left:0;top:0;will-change:transform;animation:fo 4s steps(240,end) infinite}
+@keyframes fo{from{transform:translateY(0)}to{transform:translateY(-3840px)}}</style>
+<div class="w"><canvas id="cs" width="432" height="3840"></canvas></div>
+<canvas class="s" id="c2" width="432" height="16"></canvas><canvas class="s" id="gl" width="432" height="16"></canvas><div class="s" id="i">starting</div>
+<script>
+var MW=24,BW=16,NB=12;
+function strip(x,y,v,mk){x.fillStyle=mk;x.fillRect(0,y,MW,16);for(var b=0;b<2*NB;b++){var t=b<NB?(v>>b)&1:1-((v>>(b-NB))&1);x.fillStyle=t?'#ffffff':'#000000';x.fillRect(MW+b*BW,y,BW,16);}x.fillStyle='#ff00ff';x.fillRect(MW+2*NB*BW,y,MW,16);}
+var cs=document.getElementById('cs').getContext('2d');for(var k=0;k<240;k++)strip(cs,k*16,k,'#00ff00');
+var c2=document.getElementById('c2').getContext('2d'),n=0,info=document.getElementById('i'),t0=Date.now();
+var gc=document.getElementById('gl'),gl=gc.getContext('webgl',{antialias:false})||gc.getContext('experimental-webgl');
+function box(x,w,r,g,b){gl.scissor(x,0,w,16);gl.clearColor(r,g,b,1);gl.clear(gl.COLOR_BUFFER_BIT);}
+function f(){n=(n+1)%4096;strip(c2,0,n,'#00ffff');
+ if(gl){gl.enable(gl.SCISSOR_TEST);box(0,MW,1,1,0);for(var b=0;b<2*NB;b++){var t=b<NB?(n>>b)&1:1-((n>>(b-NB))&1);box(MW+b*BW,BW,t,t,t);}box(MW+2*NB*BW,MW,1,0,1);}
+ if(n%60==0)info.textContent='frame order: canvas frame '+n+', '+Math.round(n*1000/(Date.now()-t0))+' fps, webgl '+(gl?'on':'NONE');
+ requestAnimationFrame(f);}
+f();
 </script>
 APPSEND
     # TextEdit: rich text (fonts, sizes, colours, bold / italic / underline), written by hand: no textutil
@@ -1826,6 +1852,7 @@ apps_do() {   # apps_do RUNG STAGE: what the stage opens, as the console user. 0
         safari:text) as_user open -a Safari "$_APPS_DIR/text.html" ;;
         safari:canvas) as_user open -a Safari "$_APPS_DIR/canvas.html" ;;
         safari:webgl) as_user open -a Safari "$_APPS_DIR/webgl.html" ;;
+        safari:frames) as_user open -a Safari "$_APPS_DIR/frameorder.html" ;;   # N59: then apps_frameorder reads its strips
         preview:pdf) as_user open -a Preview "$_APPS_DIR/survey.pdf" ;;
         preview:image) as_user open -a Preview "$_APPS_DIR/survey.jpg" ;;
         maps:main) as_user open -a Maps ;;
@@ -1903,6 +1930,28 @@ apps_wait_login() {   # apps_wait_login: after a WindowServer restart, until som
     ladder_w "login: NOBODY logged in ${_awl}s after the WindowServer restart: the rungs after this one did not run"
     return 1
 }
+apps_strip() {   # apps_strip NAME: one burst of the frame-order strips into $LD/frameorder-NAME.log (collect.sh: 41-ladder-frameorder-NAME.log), the kernel's N59 counters before (B) and after (A)
+    _sf="$LD/frameorder-$1.log"
+    { echo "# frameorder $1 $(date +%T) iop_stale_wait_ms=$(sysctl -n debug.rdna3accel_iop_stale_wait_ms 2>/dev/null || echo none)"
+      sysctl debug 2>/dev/null | grep -E '^debug\.rdna3accel_iop_(stale|ok:)' | sed 's/^/B /'; } > "$_sf"
+    if [ ! -x "$D/bin/rdna3_drminfo" ]; then ladder_w "frameorder: $1 NOT TAKEN: no $D/bin/rdna3_drminfo"; return 1; fi
+    with_limit 90 "$D/bin/rdna3_drminfo" --scanout-strip "$_sf.strip" "${APPS_STRIPSECS:-10}" > "$LD/strip.out" 2>&1
+    _sr=$?
+    cat "$_sf.strip" >> "$_sf" 2>/dev/null; rm -f "$_sf.strip"
+    { sysctl debug 2>/dev/null | grep -E '^debug\.rdna3accel_iop_(stale|ok:)' | sed 's/^/A /'; echo "# exit $_sr"; } >> "$_sf"
+    ladder_w "frameorder: $1: $(grep -c '^L ' "$_sf" | tr -d ' ') strip(s), $(grep -c '^S ' "$_sf" | tr -d ' ') change(s), exit $_sr ($(grep 'scanout strip:' "$LD/strip.out" | tail -1 | cut -c1-120))"
+}
+apps_frameorder() {   # the frames stage (N59): a burst with the kernel's stale wait as booted, then one with it off (count only): the A/B in one run
+    apps_strip frames
+    _fow=$(sysctl -n debug.rdna3accel_iop_stale_wait_ms 2>/dev/null)
+    if [ -n "$_fow" ] && [ "$_fow" != 0 ]; then
+        ladder_sysctl_set "sysctl:debug.rdna3accel_iop_stale_wait_ms=0"
+        apps_strip frames-nowait
+        ladder_sysctl_undo
+    else
+        ladder_w "frameorder: no second burst (debug.rdna3accel_iop_stale_wait_ms is ${_fow:-missing: a kernel before N59})"
+    fi
+}
 apps_stage() {   # apps_stage STAGE: open its content, wait for it to draw, look at both pipes (the rung's variables: _rn _an _apre _aextra ...)
     _ast=$1
     apps_do "$_rn" "$_ast"; _aorc=$?
@@ -1934,6 +1983,7 @@ apps_stage() {   # apps_stage STAGE: open its content, wait for it to draw, look
     bisect_look "${_alb}a" 12
     ladder_look_hires "${_alb}h"
     _alooks="$_alooks ${_alb}a ${_alb}h"
+    [ "$_rn:$_ast" != safari:frames ] || apps_frameorder
     if [ "$_rn" = terminal ]; then   # the glyph verdict's second look: only the window that changed between the two is the live text (tools/glyph_verdict.py)
         sleep "${LADDER_LOOK2GAP:-3}"
         ladder_look_hires "${_alb}h2"

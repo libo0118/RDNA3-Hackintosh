@@ -8,6 +8,7 @@
 #include "drm_xnu_backend.h"
 #include "rdna3_drm.h"
 #include "rdna3_bo_map.h"
+#include "rdna3_strip.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -97,6 +98,30 @@ static void lb_scanout_px(uint32_t x, uint32_t y, uint32_t out_w, uint32_t out_h
     o[2] = box ? 255 : (uint8_t)(x * 255 / out_w);
 }
 
+/* RDNA3_LB_STRIP=1 (tests/test_frame_order.sh, DRIVER-PLAN N59): the picture also holds the app survey's
+ * frame-order strips (common/rdna3_strip.h), a css one at row 100 and a canvas one at row 200, both at x 300;
+ * their counter advances every 5th scanout call and every 40th frame shows the frame three back */
+static void lb_strip_overlay(struct rd_xnu_scanout *s)
+{
+    static unsigned calls;
+    static uint8_t strip[RD3_STRIP_W * 3];
+    if (!getenv("RDNA3_LB_STRIP"))
+        return;
+    const unsigned frame = calls++ / 5, shown = frame % 40 == 39 ? frame - 3 : frame;
+    for (uint32_t r = 0; r < s->nrows; r++) {
+        const uint32_t y = s->row0 + r;
+        int layer = y >= 100 && y < 100 + RD3_STRIP_H ? RD3_SL_CSS : y >= 200 && y < 200 + RD3_STRIP_H ? RD3_SL_CANVAS : -1;
+        if (layer < 0)
+            continue;
+        rd3_strip_paint(strip, layer, layer == RD3_SL_CSS ? shown % RD3_STRIP_CSS_MOD : shown % RD3_STRIP_MOD);
+        for (uint32_t x = 0; x < s->ncols; x++) {
+            const uint32_t sx = s->col0 + x;
+            if (sx >= 300 && sx < 300 + RD3_STRIP_W)
+                memcpy(s->rgb + (r * s->ncols + x) * 3, strip + (sx - 300) * 3, 3);
+        }
+    }
+}
+
 static int lb_scanout(void *c, struct rd_xnu_scanout *s)
 {
     uint32_t r, x, per_call, out_w = RD_XNU_SCANOUT_W;
@@ -126,6 +151,7 @@ static int lb_scanout(void *c, struct rd_xnu_scanout *s)
         for (r = 0; r < s->nrows; r++)
             for (x = 0; x < s->ncols; x++)
                 lb_scanout_px(s->col0 + x, s->row0 + r, s->out_w, s->out_h, s->rgb + (r * s->ncols + x) * 3);
+        lb_strip_overlay(s);
         return 0;
     }
     /* RD_XNU_SCANOUT_HIRES samples RD_XNU_SCANOUT_HIRES_W wide (at most

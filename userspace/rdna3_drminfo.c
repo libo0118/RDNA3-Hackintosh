@@ -28,6 +28,13 @@
  *                              now: HUBP state and a 320-wide picture of it,
  *                              DIR/scanout-pipe<N>.ppm - the report's proof of
  *                              what reaches each panel. Nothing else runs.
+ *   rdna3_drminfo --scanout-strip FILE SECONDS  (root; DRIVER-PLAN N59) finds
+ *                              the frame-order strips of the app survey's page
+ *                              (common/rdna3_strip.h) on the lit pipes, then
+ *                              reads their rows from the scanout as fast as it
+ *                              can for SECONDS and writes every change of a
+ *                              strip's bits to FILE (tools/frame_order.py
+ *                              decodes it: a frame counter that steps back)
  *   rdna3_drminfo --scanout-hires DIR  the same at the surface's native
  *                              size, every pixel (1920x1080 on a 1080p panel:
  *                              an app's stale regions and text, card run 54);
@@ -53,6 +60,7 @@
 #include <sys/mman.h>
 #include "drm_xnu.h"
 #include "rdna3_drm.h"
+#include "rdna3_strip.h"
 
 #define IOCTL(fd, nr, arg) drm_xnu_ioctl_nr((fd), (nr), &(arg), sizeof(arg))
 
@@ -881,6 +889,110 @@ static int vcn_test(int fd)
     return bad != 0;
 }
 
+/* ---- N59: the frame-order strips (common/rdna3_strip.h) ----
+ * One native scanout call returns one row of up to RD_XNU_SCANOUT_RGB_PX pixels from any column, so a strip
+ * costs one ioctl per sample. The strips are found by scanning every 4th row of each lit pipe; a strip found on
+ * several rows is read on its middle one. FILE lines (tools/frame_order.py):
+ *   L <layer> <pipe> <row> <x>          a strip locked on to
+ *   S <us> <layer> <pipe> <bits> <n>    from <us> (since the burst began) the strip showed <bits>, <n> samples in a row
+ *   E <samples> <us> <errors>           the end: samples read, the burst's length, failed reads */
+static int strip_row(int fd, uint32_t pipe, uint32_t row, uint32_t col0, uint8_t *out, uint32_t *got, uint32_t *width)
+{
+    static struct rd_xnu_scanout s;
+    memset(&s, 0, sizeof(s));
+    s.pipe = pipe; s.row0 = row; s.col0 = col0;
+    s.flags = RD_XNU_SCANOUT_HIRES | RD_XNU_SCANOUT_NATIVE;
+    if (IOCTL(fd, RD_NR_XNU_SCANOUT, s) || s.abi != RD_XNU_SCANOUT_ABI || !s.lit || s.asleep || !s.nrows || !s.ncols
+        || s.ncols > RD_XNU_SCANOUT_RGB_PX)
+        return -1;
+    memcpy(out, s.rgb, (size_t)s.ncols * 3);
+    *got = s.ncols;
+    if (width) *width = s.out_w;
+    return 0;
+}
+
+struct strip_lock { int layer; uint32_t pipe, row0, row1, x; char last[2 * RD3_STRIP_BITS + 1]; uint64_t since, n; };
+
+static uint64_t strip_now_us(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u;
+}
+
+static int scanout_strip(int fd, const char *path, int seconds)
+{
+    static uint8_t row[8192 * 3], seg[RD_XNU_SCANOUT_RGB_PX * 3];
+    struct strip_lock lk[RD3_STRIP_MAX];
+    unsigned nl = 0;
+    FILE *f = path ? fopen(path, "w") : NULL;
+    if (!f) { perror(path ? path : "--scanout-strip needs FILE SECONDS"); return 1; }
+    if (seconds < 1) seconds = 1;
+    if (seconds > 120) seconds = 120;
+    memset(lk, 0, sizeof(lk));
+    for (uint32_t p = 0; p < 4; p++) {
+        uint32_t w = 0, got = 0;
+        if (strip_row(fd, p, 0, 0, seg, &got, &w) || !w || w > 8192)
+            continue;
+        uint32_t h = 0;
+        { struct rd_xnu_scanout s; memset(&s, 0, sizeof(s)); s.pipe = p; s.flags = RD_XNU_SCANOUT_HIRES | RD_XNU_SCANOUT_NATIVE;
+          if (!IOCTL(fd, RD_NR_XNU_SCANOUT, s)) h = s.out_h; }
+        for (uint32_t y = 0; y < h; y += 4) {
+            uint32_t x = 0, ok = 1;
+            while (x < w && ok) {
+                if (strip_row(fd, p, y, x, row + (size_t)x * 3, &got, NULL)) ok = 0;
+                else x += got;
+            }
+            if (!ok) continue;
+            rd3_strip_hit hit[RD3_STRIP_MAX];
+            const unsigned k = rd3_strip_find(row, w, hit, RD3_STRIP_MAX);
+            for (unsigned i = 0; i < k; i++) {
+                unsigned j;
+                for (j = 0; j < nl; j++)   /* the same strip on the next rows */
+                    if (lk[j].pipe == p && lk[j].layer == hit[i].layer && lk[j].row1 + 4 >= y
+                        && (lk[j].x > hit[i].x ? lk[j].x - hit[i].x : hit[i].x - lk[j].x) <= 2) { lk[j].row1 = y; break; }
+                if (j == nl && nl < RD3_STRIP_MAX) {
+                    lk[nl].layer = hit[i].layer; lk[nl].pipe = p; lk[nl].row0 = lk[nl].row1 = y; lk[nl].x = hit[i].x;
+                    nl++;
+                }
+            }
+        }
+    }
+    fprintf(f, "# frame-order strips (common/rdna3_strip.h): %u found, %d s burst\n", nl, seconds);
+    for (unsigned j = 0; j < nl; j++)
+        fprintf(f, "L %s %u %u %u\n", rd3_strip_layer_name[lk[j].layer], lk[j].pipe, (lk[j].row0 + lk[j].row1) / 2, lk[j].x);
+    printf("scanout strip: %u strip(s) found\n", nl);
+    uint64_t samples = 0, errors = 0;
+    const uint64_t t0 = strip_now_us(), end = t0 + (uint64_t)seconds * 1000000u;
+    while (nl && strip_now_us() < end) {
+        for (unsigned j = 0; j < nl; j++) {
+            uint32_t got = 0;
+            char bits[2 * RD3_STRIP_BITS + 1];
+            if (strip_row(fd, lk[j].pipe, (lk[j].row0 + lk[j].row1) / 2, lk[j].x, seg, &got, NULL)) { errors++; continue; }
+            samples++;
+            rd3_strip_bits(seg, got, bits);
+            if (got && rd3_strip_layer_of(rd3_strip_class(seg)) != lk[j].layer) bits[0] = 'm';   /* the strip moved away */
+            const uint64_t now = strip_now_us() - t0;
+            if (lk[j].n && !strcmp(bits, lk[j].last)) { lk[j].n++; continue; }
+            if (lk[j].n)
+                fprintf(f, "S %llu %s %u %s %llu\n", (unsigned long long)lk[j].since, rd3_strip_layer_name[lk[j].layer],
+                        lk[j].pipe, lk[j].last, (unsigned long long)lk[j].n);
+            memcpy(lk[j].last, bits, sizeof(bits));
+            lk[j].since = now; lk[j].n = 1;
+        }
+    }
+    for (unsigned j = 0; j < nl; j++)
+        if (lk[j].n)
+            fprintf(f, "S %llu %s %u %s %llu\n", (unsigned long long)lk[j].since, rd3_strip_layer_name[lk[j].layer],
+                    lk[j].pipe, lk[j].last, (unsigned long long)lk[j].n);
+    fprintf(f, "E %llu %llu %llu\n", (unsigned long long)samples, (unsigned long long)(strip_now_us() - t0),
+            (unsigned long long)errors);
+    fclose(f);
+    printf("scanout strip: %llu sample(s), %llu failed read(s) -> %s\n", (unsigned long long)samples,
+           (unsigned long long)errors, path);
+    return nl ? 0 : 2;
+}
+
 int main(int argc, char **argv)
 {
     struct drm_version v;
@@ -913,6 +1025,11 @@ int main(int argc, char **argv)
         return fails;
     }
 #endif
+    if (argc > 1 && !strcmp(argv[1], "--scanout-strip")) {
+        fails = scanout_strip(fd, argc > 2 ? argv[2] : NULL, argc > 3 ? atoi(argv[3]) : 10);
+        drm_xnu_close(fd);
+        return fails;
+    }
     if (argc > 1 && (!strcmp(argv[1], "--scanout") || !strcmp(argv[1], "--scanout-hires"))) {
         fails = scanout_dump(fd, argc > 2 ? argv[2] : NULL,
                              strcmp(argv[1], "--scanout") ? RD_XNU_SCANOUT_HIRES | RD_XNU_SCANOUT_NATIVE : 0);

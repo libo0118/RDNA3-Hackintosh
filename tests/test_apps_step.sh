@@ -119,9 +119,25 @@ exit 0
 EOF
 for c in caffeinate say afplay sleep pkill; do printf '#!/bin/sh\necho "%s $*" >> "$STUBLOG"\nexit 0\n' "$c" > "$T/bin/$c"; done
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/curl"
+# sysctl: only the N59 stale wait exists (the frames stage's A/B); every write is logged
+cat > "$T/bin/sysctl" <<'EOF'
+#!/bin/sh
+f=$STUBDIR/iop_stale_wait_ms; [ -f "$f" ] || echo 12 > "$f"
+case "$*" in
+    "-n debug.rdna3accel_iop_stale_wait_ms") cat "$f" ;;
+    "-w debug.rdna3accel_iop_stale_wait_ms="*) echo "sysctl $*" >> "$STUBLOG"; echo "${2#*=}" > "$f" ;;
+    debug) echo "debug.rdna3accel_iop_stale: 0" ;;
+    *) exit 1 ;;
+esac
+exit 0
+EOF
 cat > "$T/D/bin/rdna3_drminfo" <<'EOF'
 #!/bin/sh
 echo "drminfo $*" >> "$STUBLOG"
+if [ "$1" = --scanout-strip ]; then   # N59: one strip, two frames
+    printf 'L canvas 0 206 300\nS 0 canvas 0 100000000000011111111111 3\nS 50 canvas 0 010000000000101111111111 2\nE 5 100 0\n' > "$2"
+    echo "scanout strip: 1 strip(s) found"; exit 0
+fi
 case "$1" in --scanout|--scanout-hires) ;; *) exit 2 ;; esac
 dir=$2; mkdir -p "$dir"
 echo "pipe 0: LIT otg 0 1920x1080 pitch 1920 fmt 0 sw 0 dcc 0 address 0x1000 in use 0x1000"
@@ -180,7 +196,7 @@ printf 'NVMTL_TRACE_RING=262144\n' > "$T/conf.orig"
 printf 'mtlprobe\n%%apps\n' > "$T/allow.orig"
 fresh() { cp "$T/conf.orig" "$T/conf"; cp "$T/allow.orig" "$T/allow"; rm -f "$T/conf.bak" "$T/allow.bak"; }
 # stages per app, the looks per stage: the names the owner reads
-STAGES="chess:main terminal:main textedit:main calculator:main notes:main safari:text safari:canvas safari:webgl preview:pdf preview:image maps:main settings:appearance settings:wallpaper settings:displays appstore:main photos:main imagecapture:main quicktime:play quicktime:later mission-control:windows mission-control:mc mission-control:closed launchpad:apps launchpad:closed"
+STAGES="chess:main terminal:main textedit:main calculator:main notes:main safari:text safari:canvas safari:webgl safari:frames preview:pdf preview:image maps:main settings:appearance settings:wallpaper settings:displays appstore:main photos:main imagecapture:main quicktime:play quicktime:later mission-control:windows mission-control:mc mission-control:closed launchpad:apps launchpad:closed"
 
 for SH in sh bash dash; do
     command -v "$SH" >/dev/null 2>&1 || continue
@@ -195,7 +211,14 @@ for SH in sh bash dash; do
     [ "$(grep -c '^== end rung ' "$L")" = 15 ] && [ "$(grep -c '^result: ran$' "$L")" = 15 ] || fail "$SH: not 15 apps that ran: $(grep '^result: ' "$L" | sort | uniq -c)"
     grep -q '^== end$' "$L" || fail "$SH: no end line"
     # the default driver: nothing switched on, nothing restarted
-    ! grep -q -e '--env' -e 'sysctl' "$T/stub.log" || fail "$SH: a switch was set: $(grep -e '--env' -e sysctl "$T/stub.log" | head -3)"
+    ! grep -v -e '^sysctl -w debug.rdna3accel_iop_stale_wait_ms=' "$T/stub.log" | grep -q -e '--env' -e 'sysctl' || fail "$SH: a switch was set: $(grep -e '--env' -e sysctl "$T/stub.log" | head -3)"
+    # N59: the frames stage's two bursts, the kernel's stale wait off for the second and put back
+    [ "$(grep -c '^drminfo --scanout-strip ' "$T/stub.log")" = 2 ] && grep -qx 'sysctl -w debug.rdna3accel_iop_stale_wait_ms=0' "$T/stub.log" \
+        && grep -qx 'sysctl -w debug.rdna3accel_iop_stale_wait_ms=12' "$T/stub.log" && [ "$(cat "$T/sys/iop_stale_wait_ms")" = 12 ] || fail "$SH: the frame-order bursts: $(grep -e strip -e sysctl "$T/stub.log")"
+    grep -q '^# frameorder frames .* iop_stale_wait_ms=12$' "$T/ok/frameorder-frames.log" && grep -q '^# frameorder frames-nowait .* iop_stale_wait_ms=0$' "$T/ok/frameorder-frames-nowait.log" \
+        && grep -q '^L canvas 0 206 300$' "$T/ok/frameorder-frames.log" && grep -q '^frameorder: frames: 1 strip(s), 2 change(s), exit 0' "$L" || fail "$SH: the burst files: $(head -3 "$T/ok/frameorder-frames.log")"
+    python3 -I -B tools/frame_order.py "$T/ok/frameorder-frames.log" | grep -q '^PASS frame order: frameorder-frames (kernel stale wait 12 ms): 0 regressions in 5 samples (layer: canvas, pipe 0)' || fail "$SH: the burst does not decode"
+    grep -qF "open -a Safari $T/appsdir/frameorder.html" "$T/stub.log" && grep -q "steps(240,end)" "$T/appsdir/frameorder.html" || fail "$SH: the frame-order page"
     ! grep -q '^killall' "$T/stub.log" || fail "$SH: WindowServer was restarted"
     cmp -s "$T/conf" "$T/conf.orig" && [ ! -e "$T/conf.bak" ] || fail "$SH: the survey touched rdna3mtl.conf"
     ! grep -q 'osascript\|System Events' "$T/stub.log" || fail "$SH: the survey scripts an app's UI (System Events needs the owner's consent)"
@@ -219,7 +242,7 @@ for SH in sh bash dash; do
     [ -s "$A/survey.jpg" ] || fail "$SH: no JPEG for Preview"
     [ -x "$T/text.command" ] && grep -q 'rdna3 ladder tick' "$T/text.command" || fail "$SH: the Terminal's tick script"
     # looks: a short and a hi-res one per stage, the Terminal's second hi-res look, names the owner can read
-    [ "$(grep -c '^drminfo --scanout ' "$T/stub.log")" = 24 ] && [ "$(grep -c '^drminfo --scanout-hires ' "$T/stub.log")" = 25 ] || fail "$SH: looks: $(grep -c '^drminfo --scanout ' "$T/stub.log") short, $(grep -c '^drminfo --scanout-hires ' "$T/stub.log") hi-res"
+    [ "$(grep -c '^drminfo --scanout ' "$T/stub.log")" = 25 ] && [ "$(grep -c '^drminfo --scanout-hires ' "$T/stub.log")" = 26 ] || fail "$SH: looks: $(grep -c '^drminfo --scanout ' "$T/stub.log") short, $(grep -c '^drminfo --scanout-hires ' "$T/stub.log") hi-res"
     for st in $STAGES; do
         app=${st%%:*}; stage=${st#*:}
         if [ "$app" = chess ] || [ "$stage" = main ]; then n=apps-$app; else n=apps-$app-$stage; fi
@@ -268,7 +291,7 @@ assert names == ["app " + n for n in a.APPS_RUNGS] + ["apps survey"], names
 bad = [r for r in rows if r[0] != "INFO"]
 assert not bad, bad
 d = {r[1]: r[2] for r in rows}
-assert d["app safari"].startswith("Safari: ran; stages text canvas webgl; pids Safari=") and "plugin census: " in d["app safari"], d["app safari"]
+assert d["app safari"].startswith("Safari: ran; stages text canvas webgl frames; pids Safari=") and "plugin census: " in d["app safari"], d["app safari"]
 assert "glyphs (automatic" in d["app terminal"] and "CLEAN" in d["app terminal"], d["app terminal"]
 assert "15 ran, 0 crashed" in d["apps survey"], d["apps survey"]
 PYEOF
