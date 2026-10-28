@@ -72,7 +72,7 @@ echo "log $*" >> "$STUBLOG"
 pred=
 while [ $# -gt 0 ]; do [ "$1" = --predicate ] && pred=$2; shift; done
 [ -n "${BIGLOG:-}" ] && awk 'BEGIN { for (i = 0; i < 9000; i++) print "2026-10-25 12:00:01.000 Df  Chess[1000:1f] (RDNA3MTLDriver) NVMTL: filler line number " i " xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }'
-PKEYS="NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears NVMTL_ASYNC_COMMIT=0 NVMTL_GSUB_INFLIGHT=1 NVMTL_PRESUBMIT_PROLOGUE=0 NVMTL_NO_POOL_REUSE=1 NVMTL_NO_BUFREUSE=1 NVMTL_NO_BUFTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_PLACE=1 NVMTL_NO_DIRTYONLY=1 NVMTL_ENC78_OFF=all NVMTL_G79_OFF=all NVMTL_NO_RES2=1 NVMTL_NO_PURGE_RECLAIM=1 NVMTL_NO_SURFIN_CACHE=1"
+PKEYS="NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears NVMTL_ASYNC_COMMIT=0 NVMTL_GSUB_INFLIGHT=1 NVMTL_PRESUBMIT_PROLOGUE=0 NVMTL_NO_POOL_REUSE=1 NVMTL_NO_BUFREUSE=1 NVMTL_NO_BUFTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_RECYCLE=1 NVMTL_NO_HEAPTEX_PLACE=1 NVMTL_NO_DIRTYONLY=1 NVMTL_ENC78_OFF=all NVMTL_G79_OFF=all NVMTL_NO_RES2=1 NVMTL_NO_PURGE_RECLAIM=1 NVMTL_NO_SURFIN_CACHE=1 NVMTL_SURFOUT_DMA=0"
 for p in $(echo "$pred" | sed -n 's/processID == \([0-9]*\)/\1/gp' | tr -cs '0-9' ' '); do
     ev=$(tr '\n' ' ' < "$STUBDIR/env-$p" 2>/dev/null)
     sw=; set_by=; kept=; nset=0; radv=unset

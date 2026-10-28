@@ -146,7 +146,8 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
           static const char *const kv[][2] = { { "NVMTL_RADV_DEBUG", "nodcc,nohiz,nofmask,nofastclears" }, { "NVMTL_ASYNC_COMMIT", "0" }, { "NVMTL_GSUB_INFLIGHT", "1" },
               { "NVMTL_PRESUBMIT_PROLOGUE", "0" }, { "NVMTL_NO_POOL_REUSE", "1" }, { "NVMTL_NO_BUFREUSE", "1" }, { "NVMTL_NO_BUFTEX_RECYCLE", "1" },
               { "NVMTL_NO_HEAPTEX_RECYCLE", "1" }, { "NVMTL_NO_HEAPTEX_PLACE", "1" }, { "NVMTL_NO_DIRTYONLY", "1" }, { "NVMTL_ENC78_OFF", "all" },
-              { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" }, { "NVMTL_NO_SURFIN_CACHE", "1" } };
+              { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" }, { "NVMTL_NO_SURFIN_CACHE", "1" },
+              { "NVMTL_SURFOUT_DMA", "0" } };   /* N61: the CPU copy-out */
           /* MANAGED_CHECK / MANAGED_SNAPSHOT are not in the profile: they live in the pre-submit prologue, which PRESUBMIT_PROLOGUE=0 removes, so
            * they would log ON and do nothing. They are rungs of their own. */
           char setl[480]; size_t setn = 0; setl[0] = 0;
