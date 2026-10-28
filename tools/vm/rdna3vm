@@ -419,13 +419,14 @@ OC_RESOLUTION=${OC_RESOLUTION:-Max}
 # macOS's screen size in 'rdna3vm window' (no card there: QEMU's display)
 WINDOW_RESOLUTION=${WINDOW_RESOLUTION:-1440x900}
 # the card's BAR0 for the VM, 2^N MiB: 8 = 256 MiB (the safe default; macOS's
-# CPU-visible VRAM heap is then 144 MiB), 11 = 2 GiB (needs the 64-bit PCI
-# window, below; not proven in this VM: a 16 GiB BAR showed no picture, and the
-# 64-bit window once left the card unconfigured), 0 = leave it as amdgpu made it
+# CPU-visible VRAM heap is then 144 MiB), 9 = 512 MiB (about 400 MiB visible),
+# 10 = 1 GiB (if OVMF fits it below 4 GiB). macOS in a VM uses a BAR only below
+# 4 GiB and none above 1 GiB (docs/TESTING-VM.md "A bigger BAR0"); 0 = leave it
+# as amdgpu made it
 # RESIZE_BAR_LOG2=8
-# OVMF's 64-bit PCI window in MiB: 0 = none while BAR0 is 256 MiB (all BARs
-# below 4 GiB), sized automatically for a bigger BAR0; a number sets it,
-# default = OVMF's own
+# OVMF's 64-bit PCI window in MiB: 0 = none (all BARs below 4 GiB, what macOS in
+# a VM needs) for a BAR0 up to 1 GiB, sized automatically above that (useless
+# to macOS); a number sets it, default = OVMF's own
 # PCI_MMIO64_MB=0
 # The Mac model OpenCore tells macOS (SMBIOS SystemProductName): MacBookPro16,1
 # (what the OpenCore image has: a muxed laptop, CoreDisplay logs isMobile=YES),
@@ -1425,11 +1426,10 @@ DEVS=()
 # it again when it gets the card back.
 # A bigger window (card run 2026-10-17c: macOS's CPU-visible VRAM heap is
 # BAR0 minus the kernel's windows, 144 MiB at 256 MiB) is opt-in in the
-# config: RESIZE_BAR_LOG2=11 (2 GiB; 10 = 1 GiB, 12 = 4 GiB). It needs the
-# 64-bit PCI window (below), and the history is a warning: with the 64-bit
-# window the VM once left the card unconfigured (commit 0ae3df7: BARs
-# assigned at 8 s, unmapped at 40 s), and a 16 GiB BAR0 showed no picture at
-# all (5c1f617). Not tried with 1-4 GiB: the default stays 256 MiB.
+# config: RESIZE_BAR_LOG2=9 (512 MiB) or 10 (1 GiB). It must stay below
+# 4 GiB: macOS in a VM leaves a BAR above 4 GiB unassigned (N62: card run
+# 2026-10-28c, 1 GiB at 0x900000000, no IODeviceMemory; commit 0ae3df7 saw
+# the same with the 64-bit window), and takes no BAR above 1 GiB at all.
 resize_bar0() {
     local gpu f start end _ mb
     gpu=$(gpu_bdf) || return 0
@@ -1444,7 +1444,11 @@ resize_bar0() {
     else
         echo "  BAR0 ${mb} MiB (could not shrink it: no $f or refused)"
     fi
-    [ "${RESIZE_BAR_LOG2:-8}" -gt 8 ] && echo "  (RESIZE_BAR_LOG2=${RESIZE_BAR_LOG2}: a BAR0 above 256 MiB needs the VM's 64-bit PCI window; no picture or an unconfigured card = set it back to 8 in the config)"
+    if [ "${RESIZE_BAR_LOG2:-8}" -gt 10 ]; then
+        echo "  (RESIZE_BAR_LOG2=${RESIZE_BAR_LOG2}: macOS takes no BAR above 1 GiB (IOPCIFamily's MAX_BAR_SIZE): the kext gets no VRAM aperture; use 10 or less)"
+    elif [ "${RESIZE_BAR_LOG2:-8}" -gt 8 ]; then
+        echo "  (RESIZE_BAR_LOG2=${RESIZE_BAR_LOG2}: BAR0 stays below 4 GiB, no 64-bit PCI window (macOS in a VM ignores BARs above 4 GiB); no picture or an unconfigured card = OVMF could not fit it: set it back to 8 in the config)"
+    fi
 }
 
 # After an unbind amdgpu frees the card only when the last open /dev/dri or
@@ -1602,14 +1606,16 @@ restore() {
 }
 
 # OVMF's 64-bit PCI window in MiB for a card with a BAR0 of $2 MiB; $1 = PCI_MMIO64_MB:
-# a number, "default" (OVMF's own) or 0 = none while all BARs fit below 4 GiB. A BAR0
-# above 256 MiB (a bigger RESIZE_BAR_LOG2, or a resize that failed) is not planned for
-# the 32-bit window below 4 GiB, which q35's layout keeps well under 1 GiB: the 64-bit
-# window is kept, 4 x the BAR rounded up to a power of two (8 GiB for 2 GiB, 64 GiB for
-# the 16 GiB amdgpu leaves)
+# a number, "default" (OVMF's own) or 0 = none, so every BAR goes below 4 GiB. 0 stays
+# none for a BAR0 up to 1 GiB (N62, card run 2026-10-28c): macOS in a VM keeps no PCI BAR
+# above 4 GiB (IOPCIConfigurator drops PFM64 when CPUID says VMM), so a 1 GiB BAR0 OVMF
+# put at 0x900000000 got no IODeviceMemory and the kext could not map it; below 4 GiB it
+# is kept. Above 1 GiB macOS takes no BAR at all (IOPCIFamily's MAX_BAR_SIZE), so the
+# 64-bit window is only for the UEFI side (OVMF's GOP): 4 x the BAR rounded up to a power
+# of two (8 GiB for 2 GiB, 64 GiB for the 16 GiB amdgpu leaves), at least 4 GiB
 mmio64_mb() {
     local mm=$1 b0=$2 p2=256
-    if [ "$mm" = 0 ] && [ "$b0" -gt 256 ]; then
+    if [ "$mm" = 0 ] && [ "$b0" -gt 1024 ]; then
         while [ "$p2" -lt "$b0" ]; do p2=$((p2 * 2)); done
         mm=$((p2 * 4)); [ "$mm" -lt 4096 ] && mm=4096
     fi

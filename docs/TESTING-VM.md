@@ -568,7 +568,7 @@ runs found the card unconfigured behind an unsized port (commits 0a80e3c,
 c21eed6), so the port now carries the windows the card needs: `mem-reserve`
 for the 32-bit BARs (2 MiB or more), `pref32-reserve` (512 MiB for the default
 256 MiB BAR0, all BARs stay below 4 GiB as on the root bus) or, with a 64-bit
-window (`RESIZE_BAR_LOG2` above 8, `PCI_MMIO64_MB`), `pref64-reserve` (a power
+window (`RESIZE_BAR_LOG2` above 10, `PCI_MMIO64_MB`), `pref64-reserve` (a power
 of two above BAR0 + BAR2: 32 GiB for a 16 GiB BAR0) together with
 `-global q35-pcihost.pci-hole64-size` as large as OVMF's window. The sizes
 are read from the card's BARs after BAR0 was resized and printed in the host
@@ -1137,7 +1137,7 @@ shut the VM down and run the steps again. Reports from before the stamps
 (and a RADV from a CI artifact) have none; for the plugin the triage then
 looks for the `vk: VK_EXT_extended_dynamic_state` line in its log.
 
-### A bigger BAR0 for the VM (optional, untried)
+### A bigger BAR0 for the VM (optional)
 
 `rdna3vm` gives the VM the card with BAR0 cut to 256 MiB. That window is
 all the CPU can reach of the card's memory, and macOS's CPU-visible VRAM
@@ -1146,24 +1146,39 @@ cursor and the swap copies share it with the buffers RADV maps. Card run
 2026-10-17c ran it dry (the main display froze); the driver now keeps a
 reserve of it for the display (`rdna3visreserve`, docs/INSTALL-OPENCORE.md)
 and keeps buffers that need no CPU access out of it, so 256 MiB stays the
-default. To try a larger window, put this in `~/rdna3-vm/config`:
+default.
+
+What macOS takes (DRIVER-PLAN N62, from Apple's IOPCIFamily source and card
+run 2026-10-28c): in a VM it keeps a PCI BAR only **below 4 GiB** (its PCI
+configurator drops 64-bit placements when CPUID says "hypervisor"), and on
+any machine it takes **no BAR bigger than 1 GiB**. Run 2026-10-28c had a
+1 GiB BAR0 that OVMF put at 0x900000000 (its 64-bit window): macOS gave the
+card no BAR0 at all, the kext could not map it, the bring-up stopped and
+WindowServer never reached the GPU. So `rdna3vm` now gives the VM no 64-bit
+PCI window for a BAR0 up to 1 GiB, and OVMF has to fit it below 4 GiB. To
+try a larger window, put this in `~/rdna3-vm/config`:
 
 ```sh
-RESIZE_BAR_LOG2=11     # 2^11 MiB = 2 GiB (10 = 1 GiB, 12 = 4 GiB); 8 = 256 MiB, the default
+RESIZE_BAR_LOG2=9      # 2^9 MiB = 512 MiB (about 400 MiB visible heap); 8 = 256 MiB, the default
 ```
 
-`rdna3vm step` then shrinks the card to that size instead and starts QEMU
-with a 64-bit PCI window of four times the BAR rounded up to a power of two
-(8 GiB for 2 GiB; `PCI_MMIO64_MB=<MiB>` in the config sets it by hand, the
-host log prints `OVMF 64-bit PCI window: ... (BAR0 ... MiB)`). Two things in
-this repository's history say it can fail: the VM once left the card
-unconfigured when its BARs sat in the 64-bit window (commit 0ae3df7: at 8 s
-OVMF had assigned them, at 40 s macOS had them unmapped), and a 16 GiB BAR0
-showed no picture at all, not even the OpenCore picker (5c1f617). Neither was
-tried with 1-4 GiB. If the VM shows no picture or the report says the card
-is not there, set `RESIZE_BAR_LOG2=8` again (or delete the line) and send
-`host-*.log`; the report's `VISIBLE VRAM` line and `RDNA3,VRAMApertureMB`
-tell what window the run really had.
+and leave `PCI_MMIO64_MB` unset (or 0). The host log then says `OVMF 64-bit
+PCI window: 0 MiB (BAR0 512 MiB)` and, in the guest's PCI bus at 8 and 40 s,
+`BAR0: 64 bit prefetchable memory at 0x80000000 [0x9fffffff]` (below 4 GiB).
+When that run is good, `RESIZE_BAR_LOG2=10` (1 GiB) is the next try: it fits
+only if OVMF's 32-bit window has a free 1 GiB-aligned GiB, which q35 may not
+have. Values above 10 are useless to macOS (and the host log says so).
+
+What the report must show (triage row `VRAM aperture`, the kernel's line
+`VRAM aperture: BAR0 512 MiB at phys 0x80000000, mapped 512 MiB (kernel
+window, ...), visible heap N MiB`): the same BAR0 size as the host's
+`BAR0 ... -> 512 MiB`, `mapped` equal to it, and `VISIBLE VRAM` with fewer or
+no refusals. `VRAM aperture: NOT MAPPED: ...` names why (for example `the
+firmware put it above 4 GiB`); a picture-less VM or an unconfigured card means
+OVMF could not fit the BAR below 4 GiB: set `RESIZE_BAR_LOG2=8` again (or
+delete the line) and send `host-*.log`. The kext maps at most 1 GiB of BAR0
+into the kernel (`rdna3vramwin=<MiB>` lowers it); a map that fails is retried
+with half the window down to 256 MiB, and the row then says WARN.
 
 ## How it works (for the curious)
 
