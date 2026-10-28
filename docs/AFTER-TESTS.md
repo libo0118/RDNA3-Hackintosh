@@ -2986,6 +2986,20 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
   every counter dump of the tests file, collect.sh writes
   `38-vram-heap.txt`).
 
+The size of that heap comes first (DRIVER-PLAN N62): the triage row
+`VRAM aperture` reads the core's `VRAM aperture:` line (BAR0's size, the
+kernel window mapped of it, the visible heap) and the bring-up's map.
+
+| Seen (triage `VRAM aperture`) | Cause | Action |
+|---|---|---|
+| `INFO BAR0 X MiB, mapped X MiB, visible heap Z MiB` | all of BAR0 mapped | compare X with the host log's `BAR0 ... -> X MiB` (RESIZE_BAR_LOG2) |
+| `WARN ... the kernel window is smaller than BAR0 because bigger windows failed to map` | the kernel map of the whole BAR failed, a half (down to 256 MiB) worked | the kernel log has no IOReturn for it (the KPI gives none); try `rdna3vramwin=<MiB>` at the size that worked and report it |
+| `FAIL ... NOT MAPPED: BAR0 has no IODeviceMemory ...: the firmware put it above 4 GiB ...` | in a VM macOS keeps no BAR above 4 GiB (IOPCIConfigurator drops PFM64 under a hypervisor) | `RESIZE_BAR_LOG2` 9 or 8 and no `PCI_MMIO64_MB` in `~/rdna3-vm/config` (docs/TESTING-VM.md "A bigger BAR0") |
+| `FAIL ... NOT MAPPED: ...: BAR0 is bigger than 1 GiB ...` | IOPCIFamily takes no BAR above 1 GiB (bare metal with Resizable BAR on) | OpenCore `Booter → Quirks → ResizeAppleGpuBars = 10` (or 8), or Resizable BAR off (docs/INSTALL-OPENCORE.md section 5) |
+| `FAIL ... NOT MAPPED: ... IOPCIFamily did not assign it` | neither of the two known reasons | boot once with `pci_log=...` (IOPCIFamily's allocator log) and send the serial log |
+| `FAIL the bring-up could not map BAR0 ...` | Stage 2 stopped: no GPU for WindowServer (card run 2026-10-28c) | the reason in the same row; as above |
+| `FAIL BAR0 not mapped (0 MiB visible) by a kext before N62` | the kext of card run 2026-10-28c, which logs no reason | `rdna3vm update`, then as above |
+
 | Seen (triage `VISIBLE VRAM`) | Cause | Action |
 |---|---|---|
 | `FAIL VISIBLE VRAM exhausted: N refusals (K of the accelerator's own ...)` | the display's allocations did not fit the reserve plus the general heap | read `owners`: who holds the visible heap at the end (`accel` = WindowServer's framebuffers + legacy surfaces, `swap-D`, `fb-*`); more reserve (`rdna3visreserve=<MiB>`) or a bigger BAR0 (`RESIZE_BAR_LOG2=11` in `~/rdna3-vm/config`, docs/TESTING-VM.md, risky) |

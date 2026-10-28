@@ -17,6 +17,7 @@
 #include "RDNA3Trace.h"
 #include "rdna3_bo_map.h"
 #include "rdna3_attr_ring.h"
+#include "RDNA3BarMap.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -875,12 +876,18 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
         return false;
     }
 
-    fVramDev = fPci->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
-    if (fVramDev)
-        fVramDev->retain();
-    fVramMap = fPci->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0,
-                                                 kIOMapWriteCombineCache);
-    uint64_t visible = fVramMap ? fVramMap->getLength() : 0;
+    /* BAR0: the descriptor (user mappings, the framebuffer's physical
+     * aperture: the whole BAR) and a kernel window of it (BO clears, kernel
+     * maps, the accelerator's allocations: the CPU-visible heap). N62: a
+     * window of at most rdna3vramwin MiB (default 1024), like Apple's
+     * ATIController::mapPCISubRange; RDNA3BarMap.h */
+    uint32_t winMib = 0;
+    PE_parse_boot_argn("rdna3vramwin", &winMib, sizeof(winMib));
+    Rd3BarWindow bw;
+    rd3MapBar0Window(fPci, winMib, &bw);
+    fVramDev = bw.dev;     /* the reference the helper took */
+    fVramMap = bw.map;
+    uint64_t visible = bw.mapped;
 
     /* user heaps between the kernel's two windows (layout in RDNA3Accel.hpp) */
     uint64_t heapStart = (fDispReserveEnd > kVramKernelLowStart ? fDispReserveEnd
@@ -989,6 +996,23 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
         (unsigned long long)(range_alloc_free_bytes(fVramHeapHi) >> 20),
         (unsigned long long)(fVramReserve >> 20),
         fVisReserveArg < 0 ? "default; rdna3visreserve=<MiB> sets it" : "rdna3visreserve");
+    /* one line for the triage's VRAM aperture row (tools/triage_bar.py) */
+    {
+        const uint64_t visHeap = visEnd > heapStart ? visEnd - heapStart : 0;
+        if (fVramMap)
+            LOG("VRAM aperture: BAR0 %llu MiB at phys 0x%llx, mapped %llu MiB (kernel window, rdna3vramwin "
+                "cap %llu MiB%s), visible heap %llu MiB (%llu MiB beyond it)",
+                (unsigned long long)(bw.barLen >> 20), (unsigned long long)bw.barPhys,
+                (unsigned long long)(bw.mapped >> 20), (unsigned long long)(bw.cap >> 20),
+                bw.tries > 1 ? "; bigger windows failed to map" : "", (unsigned long long)(visHeap >> 20),
+                (unsigned long long)((heapEnd - visEnd) >> 20));
+        else
+            LOG("VRAM aperture: NOT MAPPED: BAR0 %llu MiB, mapped 0 MiB, visible heap 0 MiB: %s",
+                (unsigned long long)(bw.barLen >> 20), bw.why);
+        setProperty("RDNA3,VRAMBar0MB", bw.barLen >> 20, 32);
+        setProperty("RDNA3,VRAMWindowMB", bw.mapped >> 20, 32);
+        setProperty("RDNA3,VRAMVisibleHeapMB", visHeap >> 20, 32);
+    }
     vramSysctlRegister();
     setProperty("IOUserClientClass", "RDNA3UserClient");
     return true;

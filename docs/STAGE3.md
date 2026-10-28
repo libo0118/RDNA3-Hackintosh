@@ -43,8 +43,9 @@ that is, only once the accelerator starts displaying its own surfaces.
 macOS without a driver for the 7800 XT boots on the GOP buffer (IONDRVFramebuffer):
 no acceleration, one resolution, one monitor. That is enough.
 
-1. BIOS: CSM disabled (pure UEFI GOP). If there are problems with Resizable BAR:
-   disable it or set `ResizeAppleGpuBars = -1` in OpenCore. **Do not** block
+1. BIOS: CSM disabled (pure UEFI GOP). With Resizable BAR on, set
+   `ResizeAppleGpuBars = 10` (1 GiB) or `8` in OpenCore, or turn it off: macOS
+   takes no BAR above 1 GiB (DRIVER-PLAN N62). **Do not** block
    `IONDRVSupport` in this stage.
 2. In macOS enable Remote Login (SSH) and connect from another device.
 3. Install the kexts (`package/install.sh`), but **do the first tests by

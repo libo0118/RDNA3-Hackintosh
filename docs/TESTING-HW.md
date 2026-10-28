@@ -16,8 +16,11 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 2. **Remote access.** System Settings → General → Sharing → Remote
    Login (SSH). When the screen goes dark, you collect the report over SSH from another
    computer.
-3. **BIOS.** CSM disabled, Above 4G Decoding enabled. If you have trouble with
-   Resizable BAR: disable it or set `ResizeAppleGpuBars = -1` in OpenCore.
+3. **BIOS.** CSM disabled, Above 4G Decoding enabled. With Resizable BAR on,
+   set `Booter → Quirks → ResizeAppleGpuBars = 10` (1 GiB) or `8` (256 MiB) in
+   OpenCore, or turn Resizable BAR off: macOS takes no BAR above 1 GiB, a
+   16 GiB BAR0 leaves the kext with no VRAM aperture (DRIVER-PLAN N62,
+   docs/INSTALL-OPENCORE.md section 5).
 4. **Build and install.** On the Mac, in the repository directory:
 
    ```sh

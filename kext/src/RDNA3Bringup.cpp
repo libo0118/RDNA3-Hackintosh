@@ -5,6 +5,7 @@
  */
 #include "RDNA3Bringup.hpp"
 #include "RDNA3Accel.hpp"
+#include "RDNA3BarMap.h"
 
 #include <IOKit/IOLib.h>
 #include <libkern/OSKextLib.h>
@@ -496,17 +497,28 @@ bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out, bool optio
 bool RDNA3Bringup::mapVram()
 {
     fPci->setMemoryEnable(true);
-    fVram = fPci->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapWriteCombineCache);
-    if (!fVram) {
-        BLOG("cannot map BAR0 (VRAM aperture)");
+    /* a window of BAR0, not necessarily all of it (N62, RDNA3BarMap.h);
+     * the same window the accelerator's drmInit mapped */
+    uint32_t winMib = 0;
+    PE_parse_boot_argn("rdna3vramwin", &winMib, sizeof(winMib));
+    Rd3BarWindow w;
+    bool ok = rd3MapBar0Window(fPci, winMib, &w);
+    OSSafeReleaseNULL(w.dev);   /* only the map is kept here */
+    if (!ok) {
+        BLOG("cannot map BAR0 (VRAM aperture): %s", w.why);
+        publish("RDNA3,VRAMApertureMB", w.barLen >> 20);
+        publish("RDNA3,VRAMMappedMB", 0);
         return false;
     }
+    fVram = w.map;
     fDev->vram_cpu = (volatile uint8_t *)fVram->getVirtualAddress();
-    fDev->vram_cpu_len = fVram->getLength();
-    BLOG("BAR0 VRAM aperture %llu MiB at phys 0x%llx",
-         (unsigned long long)(fDev->vram_cpu_len >> 20),
-         (unsigned long long)fVram->getPhysicalAddress());
-    publish("RDNA3,VRAMApertureMB", fDev->vram_cpu_len >> 20);
+    fDev->vram_cpu_len = w.mapped;
+    BLOG("BAR0 VRAM aperture %llu MiB at phys 0x%llx, kernel window %llu MiB (rdna3vramwin cap %llu MiB%s)",
+         (unsigned long long)(w.barLen >> 20), (unsigned long long)w.barPhys,
+         (unsigned long long)(w.mapped >> 20), (unsigned long long)(w.cap >> 20),
+         w.tries > 1 ? ", smaller windows after failed maps" : "");
+    publish("RDNA3,VRAMApertureMB", w.barLen >> 20);
+    publish("RDNA3,VRAMMappedMB", w.mapped >> 20);
     return true;
 }
 

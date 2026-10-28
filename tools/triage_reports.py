@@ -4836,6 +4836,19 @@ def report(path, show_all):
     for lvl_, name_, text_ in ar_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
         failed = failed or lvl_ == "FAIL"
+    # DRIVER-PLAN N62: BAR0's size, the kernel window of it and the CPU-visible heap (tools/triage_bar.py); the lines may be
+    # only in the serial log next to the report (an early failure)
+    try:
+        from triage_bar import bar_rows
+        from triage_attr_ring import report_serial as bar_serial_
+        bar_rows_ = bar_rows(log or "", bar_serial_(path)[1])
+    except ImportError:
+        bar_rows_ = [("WARN", "VRAM aperture", "tools/triage_bar.py is missing next to triage_reports.py: BAR0's window was NOT read")]
+    except Exception as e_:  # noqa: BLE001
+        bar_rows_ = [("WARN", "VRAM aperture", "tools/triage_bar.py FAILED (%s: %s): the VRAM aperture row is missing; the rest ran" % (type(e_).__name__, e_))]
+    for lvl_, name_, text_ in bar_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+        failed = failed or lvl_ == "FAIL"
     # DRIVER-PLAN N59: IOP copies of a buffer nothing wrote since it was last shown, and the app survey's frame-order bursts (tools/frame_order.py)
     try:
         from frame_order import report_rows as fo_rows
@@ -5236,6 +5249,13 @@ def summary(path, serial=None):
             a3c.get("a3ws_refused", "?"),
             ", ".join("h%s %d (A3 %d)" % (k[-1], v, a3c.get("swaps_a3_h" + k[-1], 0))
                       for k, v in sorted(a3c.items()) if re.match(r"swaps_h\d$", k) and v))))
+    # DRIVER-PLAN N62: BAR0, the kernel window of it, the visible heap (tools/triage_bar.py); INFO too: the window is the fact
+    try:
+        from triage_bar import bar_rows
+        for lv, name, t in bar_rows(log):
+            out.append((name, "%s %s" % (lv, t[:360])))
+    except ImportError:
+        out.append(("VRAM aperture", "WARN tools/triage_bar.py is missing next to triage_reports.py: BAR0's window was NOT read"))
     for lv, t in vram_heap_lines(path, txt, log):
         if lv != "INFO":
             out.append(("VISIBLE VRAM", "%s %s" % (lv, t[:360])))
@@ -5730,6 +5750,17 @@ def main():
         # end (review of e2bf78e)
         if s != serials[-1]:
             continue
+        # DRIVER-PLAN N62: a run without a report (card run 2026-10-28c) has BAR0's window only here
+        if not reports:
+            try:
+                from triage_bar import bar_rows
+                for lv, name, t in bar_rows(open(s, errors="replace").read()):
+                    print("   %s %s: %s" % (lv, name, t))
+                    failed = failed or lv == "FAIL"
+            except ImportError:
+                print("   WARN VRAM aperture: tools/triage_bar.py is missing next to triage_reports.py: BAR0's window was NOT read")
+            except OSError:
+                pass
         try:
             sv = serial_swap_verdict(open(s, errors="replace").read())
         except OSError:

@@ -162,18 +162,25 @@ code-signing checks further.
 * **DeviceProperties:** none needed. Remove any `device-id` spoof for the
   card: the kexts match `IOPCIPrimaryMatch 0x747e1002` against the ids in
   the IORegistry, so a spoofed id hides the card from them.
-* **BIOS:** CSM off, Above 4G Decoding on, Resizable BAR on. The GPU always
-  uses all of its VRAM; the BAR0 window decides only how much of it the CPU
-  can reach directly (the CPU-visible heap: buffers macOS maps, uploads,
-  the framebuffer). The kext takes the window the firmware assigned, with
-  no setting of its own: 16 GiB with Resizable BAR, 256 MiB without it (and
-  in the VM, where `rdna3vm` shrinks BAR0 because the VM firmware fails with
-  a 16 GiB BAR). The window it got is in the IORegistry as
-  `RDNA3,VRAMApertureMB` and in the boot log (`BAR0 VRAM aperture`).
-  Leave `Booter → Quirks → ResizeAppleGpuBars = -1` (BARs kept as the
-  firmware sized them). If macOS fails to start with the full window, set
-  it to `10` (1 GiB) or disable Resizable BAR; everything above the window
-  then stays GPU-only VRAM.
+* **BIOS:** CSM off, Above 4G Decoding on, Resizable BAR on or off (see
+  below). The GPU always uses all of its VRAM; the BAR0 window decides only
+  how much of it the CPU can reach directly (the CPU-visible heap: buffers
+  macOS maps, uploads, the framebuffer). **macOS takes no PCI BAR bigger than
+  1 GiB** (Apple's IOPCIFamily: `MAX_BAR_SIZE`; a 16 GiB BAR0 is cut to
+  nothing and the card has no VRAM aperture at all, DRIVER-PLAN N62). With
+  Resizable BAR on (BAR0 = 16 GiB on the RX 7800 XT) set
+  `Booter → Quirks → ResizeAppleGpuBars = 10` (1 GiB, the most macOS takes;
+  OpenCore resizes BAR0 for macOS only, Windows/Linux keep 16 GiB) or `8`
+  (256 MiB, what the VM proved; OpenCore's own docs call only 0 fully
+  supported and warn that values above 8 may be unstable across sleep).
+  With Resizable BAR off BAR0 is 256 MiB and the quirk can stay `-1`. Do not
+  use `UEFI → Quirks → ResizeGpuBars` for this (OpenCore: it is not for the
+  macOS limit). The kext maps up to 1 GiB of BAR0 into the kernel
+  (`rdna3vramwin=<MiB>`); what it got is in the IORegistry
+  (`RDNA3,VRAMBar0MB`, `RDNA3,VRAMWindowMB`, `RDNA3,VRAMVisibleHeapMB`,
+  `RDNA3,VRAMApertureMB`) and in the boot log (`VRAM aperture: BAR0 ... MiB,
+  mapped ... MiB, visible heap ... MiB`, or `VRAM aperture: NOT MAPPED: ...`
+  with the reason: `BAR0 is bigger than 1 GiB` means the quirk is missing).
 * **`UEFI → Output → Resolution`:** `Max` (what the VM uses). The
   framebuffer starts on the mode the GOP left on head 0, so this is the
   boot resolution of the desktop.
@@ -245,6 +252,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3mtlapps=0` | read by the Metal plugin: ends apps mode (`%apps` in `rdna3mtl-allow.txt`), only the names in the list keep the GPU |
 | `rdna3enum=1` | report the GPU as working for enumeration only; submissions fail (debug) |
 | `rdna3visreserve=<MiB>` | how much of the CPU-visible VRAM heap (BAR0 minus the kernel's windows) is kept for the accelerator's allocations (WindowServer's framebuffers, cursor, swap copies); GEM BOs never take it. Default: two thirds of the heap, at most 128 MiB; `0` = no reserve (card run 2026-10-17c) |
+| `rdna3vramwin=<MiB>` | the most of BAR0 the core kext maps into the kernel (the CPU-visible VRAM heap is this window minus the kernel's own low window); default 1024 (the largest BAR macOS assigns, so all of it), at least 64; a failed map is retried with half the window down to 256 MiB (DRIVER-PLAN N62) |
 | `rdna3vmfrag=0` | user VRAM mappings with 4 KiB PTEs without a fragment, as before card run 2026-10-26h. Default (1): amdgpu_vm_pte_fragment PTE fragments (up to 1 MiB, capped at the physical alignment), which the GFX11 attribute ring's BIG_PAGE needs (DRIVER-PLAN N57); `0` only to tell new VM faults apart |
 | `rdna3vramlostcs=0` | after a VRAM loss (a reset or a sleep whose VRAM did not all come back), contexts made before it keep submitting instead of failing with -ECANCELED (amdgpu's behaviour, the default); the counter and VRAMLOST are reported either way. With the default, RADV turns the refused submission into `VK_ERROR_DEVICE_LOST` ("The CS has been cancelled because the context is lost"), the Metal plugin then disables its Vulkan backend for that process and every later command buffer ends with `MTLCommandBufferErrorInternal`: the process (WindowServer too, while it has the RDNA3 Metal device) stops drawing with the GPU until it is restarted, rather than drawing from lost memory. `=0` keeps it drawing, possibly garbage (debug) |
 | `rdna3soak=<min>`, `rdna3hangtest=1`/`2` | read by the report script only: soak loop, hang/recovery test |
