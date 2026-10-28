@@ -30,6 +30,7 @@ static void nvmtl_ho_summary(void) {
 @public
     nvk_cmdbuf commands;
     NSSet *resources, *surfaces;
+    NSSet *dma;   /* N61: the root textures whose copy into their IOSurface is recorded at the end of `commands` */
     NSArray *scratch;
     id waitEvent, signalEvent;
     uint64_t value;
@@ -247,6 +248,7 @@ static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
     part->resources = [_resources copy]; part->surfaces = [_surfDirty copy];
+    part->dma = nvmtl_surface_dma_record(part->surfaces, &part->commands);   /* N61: before the part can be submitted (ahead or at its turn) */
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
     if (_g79Sig.count) { part->signals = [_g79Sig copy]; [_g79Sig removeAllObjects]; }
@@ -543,7 +545,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLTexture *texture in part->surfaces) {
                 const BOOL committed = nvmtl_ws_committed(self, texture);
                 if (committed) nvmtl_vk_surface_dirty_committed_scope(1);
-                if (![texture nvmtlSurfaceOut]) published = NO;
+                const BOOL byGpu = part->dma && [part->dma containsObject:(texture->_parent ? texture->_parent : texture)];   /* N61 */
+                if (!(byGpu ? [texture nvmtlSurfaceOutDMA] : [texture nvmtlSurfaceOut])) published = NO;
                 if (committed) nvmtl_vk_surface_dirty_committed_scope(0);
             }
             nvt_set_cb(0);

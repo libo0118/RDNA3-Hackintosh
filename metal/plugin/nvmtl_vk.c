@@ -6529,7 +6529,12 @@ int nvmtl_vk_copy_buffer_nohook(nvk_queue *q, nvk_buffer *src, size_t srcOff, nv
 }
 
 int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes)
+{ return nvmtl_vk_image_read_split(q, img, dst, row_bytes, NULL, NULL); }
+/* N61: the same read, timed: *gpu_ns the staging copy's submit + fence wait, *cpu_ns the CPU copy into dst */
+int nvmtl_vk_image_read_split(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes, uint64_t *gpu_ns, uint64_t *cpu_ns)
 {
+    if (gpu_ns) *gpu_ns = 0;
+    if (cpu_ns) *cpu_ns = 0;
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(img->w, img->bw), rows = nvmtl_blocks(img->h, img->bh);
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_read: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
@@ -6549,9 +6554,26 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
     img->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
     pvkCmdCopyImageToBuffer(c.cb, img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage.buf, 1, &bic);
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (nvmtl_vk_submit_wait(&c)) return -1;
+    const uint64_t t1 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     const uint8_t *src = (const uint8_t *)stage.map;
     for (uint32_t y = 0; y < rows; y++) memcpy((uint8_t *)dst + y * row_bytes, src + (size_t)y * cols * bpp, (size_t)cols * bpp);
+    if (gpu_ns) *gpu_ns = t1 - t0;
+    if (cpu_ns) *cpu_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t1;
+    return 0;
+}
+
+/* N61: record the copy of a private image (level 0, layer 0, whole) into the IOSurface pages imported as `dst`, rows at
+ * `row_bytes` from `off`, at the end of a command buffer that is still recording: the frame is in the surface when the
+ * GPU completes it, with no submit or CPU copy of its own. The pages are system memory the GPU maps snooped
+ * (gpuvm_pte_flags), the barrier makes the transfer write available to the host. */
+int nvmtl_vk_cmd_surface_dma(nvk_cmdbuf *c, nvk_image *img, nvk_buffer *dst, size_t off, uint32_t row_bytes)
+{
+    if (!c || !c->cb || c->in_rp || !img || !img->img || !dst || !dst->buf) return -1;
+    if (nvmtl_vk_cmd_copy_image_to_buffer_level_layer(c, img, 0, 0, img->w, img->h, dst, off, row_bytes, 0, 0)) return -1;
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     return 0;
 }
 
