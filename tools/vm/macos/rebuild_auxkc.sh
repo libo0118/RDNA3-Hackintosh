@@ -32,7 +32,10 @@ for k in $list; do args="$args -p $k"; done
 [ -f "$AUX" ] && cp -p "$AUX" "$AUX.rdna3-old" && echo "rebuild_auxkc: the old collection kept as $AUX.rdna3-old"
 echo "rebuild_auxkc: building the auxiliary collection from:$list"
 # shellcheck disable=SC2086
-kmutil create -n aux -x \
+# --allow-missing-kdk: only the auxiliary collection is built, from the boot and
+# system collections already on the disk; without it kmutil create stops asking
+# for a KDK (exit 34) like install --update-all
+kmutil create -n aux -x --allow-missing-kdk -V release \
     -B /System/Library/KernelCollections/BootKernelExtensions.kc \
     -S /System/Library/KernelCollections/SystemKernelExtensions.kc \
     -A "$AUX" $args
