@@ -213,6 +213,9 @@ static inline int rd3_iop_scanout_ok(uint64_t base, uint64_t phys, uint64_t cook
 
 /* failures in a row that switch the SDMA path off (the A2 swap copy's rule) */
 #define RD3_ISF_OFF_AFTER 3u
+/* frames a slot waits after the core refused its bind for want of room (NOSPACE) or a GART / ring that is not up
+ * (NODEV) before it lists its pages and asks again (each ask walks the whole page list) */
+#define RD3_ISF_BACKOFF_FRAMES 64u
 
 /* the scanout is read back and compared with the source for the k-th (0-based) SDMA copy: the first 256, then every
  * 16th (16 samples through the BAR, a few microseconds) */

@@ -821,6 +821,7 @@ static int rd3IopSdmaStatus(int r)
     case RDNA3_ENOENT: return RD3K_IOPSDMA_STALE;
     case RDNA3_ENOMEM: return RD3K_IOPSDMA_NOSPACE;
     case RDNA3_EINVAL: return RD3K_IOPSDMA_INVALID;
+    case RDNA3_ETIME:  return RD3K_IOPSDMA_TIMEOUT;
     default:           return RD3K_IOPSDMA_FAILED;
     }
 }
@@ -867,13 +868,14 @@ IOReturn RDNA3Accel::platformIopSdma(RD3KIopSdma *q)
     q->err = r;
     q->liveRanges = live;
     /* the accelerator counts and logs every failure with its frame; the core logs the hardware ones too */
-    if ((q->status == RD3K_IOPSDMA_FAILED || q->status == RD3K_IOPSDMA_INVALID) &&
-        (fIopSdmaFails < 8 || (fIopSdmaFails & 1023) == 0))
+    const bool bad = q->status == RD3K_IOPSDMA_FAILED || q->status == RD3K_IOPSDMA_INVALID ||
+                     q->status == RD3K_IOPSDMA_TIMEOUT;
+    if (bad && (fIopSdmaFails < 8 || (fIopSdmaFails & 1023) == 0))
         LOG("iop sdma (N63): op %u failed (%d, status %d) handle 0x%llx: %llu pages | rect %ux%u bytes from +%llu "
             "(pitch %u) -> VRAM 0x%llx (pitch %u), %u ranges bound (failure #%u)", q->op, r, q->status, q->handle,
             q->pageCount, q->rowBytes, q->rows, q->srcOffset, q->srcPitch, q->dstCookie, q->dstPitch, live,
             fIopSdmaFails + 1);
-    if (q->status == RD3K_IOPSDMA_FAILED || q->status == RD3K_IOPSDMA_INVALID)
+    if (bad)
         fIopSdmaFails++;
     return kIOReturnSuccess;
 }

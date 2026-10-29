@@ -241,6 +241,7 @@ public:
         unsigned id; IOMemoryDescriptor *md; IOMemoryMap *map;
         unsigned long long sdma, sdmaBytes, sdmaGart; unsigned sdmaLead, sdmaNo;
         IODMACommand *sdmaDma;
+        unsigned sdmaBackoff, sdmaBackoffWhy;   /* frames left before the next bind after a NOSPACE / NODEV answer */
     } fIopSrc[kIopSrcSlots];
     unsigned fIopNext;
     const void *iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need, RD3IopSrc **slot);

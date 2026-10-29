@@ -491,6 +491,9 @@ private:
      * slots; reset with every new GART table (hwInit), off while the GART is down */
     rd3_ig        fIopGart = {};
     bool          fIopGartReady = false;
+    /* an IOP copy's fence timed out: the copy may still read its range, so no copy is taken and an unbind
+     * unmaps only once the ring drained, until the next GART table (iopGartReset) */
+    bool          fIopGartHung = false;
     void          iopGartReset();
     struct UfSlot { uint64_t pa; uint64_t seq; uint32_t ip, ring; bool used; };
     UfSlot        fUfSlot[kUfSlots] = {};

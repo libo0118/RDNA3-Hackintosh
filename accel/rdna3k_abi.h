@@ -394,7 +394,11 @@ struct RD3KCopyRequest {
 #define RD3K_IOPSDMA_STALE     2   /* the handle names no bound range (unbound, or bound before a reset / wake) */
 #define RD3K_IOPSDMA_NOSPACE   3   /* BIND: no free slot or GART range that large */
 #define RD3K_IOPSDMA_INVALID   4   /* bad pages (not page aligned, too many), a rectangle outside the range or VRAM */
-#define RD3K_IOPSDMA_FAILED    5   /* the GART map or the SDMA copy failed, or its fence did not come in time ('err') */
+#define RD3K_IOPSDMA_FAILED    5   /* the GART map or the SDMA copy failed ('err') */
+/* COPY: the fence did not come in time. The copy may still run: the core takes no IOP copy any more and keeps
+ * the bound ranges' PTEs (an unbind only unmaps once the ring drained) until the next GART table; the accelerator
+ * switches its SDMA path off */
+#define RD3K_IOPSDMA_TIMEOUT   6
 struct RD3KIopSdma {
     unsigned int       version;     /* RD3K_IOPSDMA_VERSION */
     unsigned int       op;          /* RD3K_IOPSDMA_OP_* */

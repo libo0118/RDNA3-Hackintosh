@@ -2077,6 +2077,7 @@ void RD3DisplayPipe::iopDropSlot(RD3IopSrc *e, const char *why)
     if (e->md)  { e->md->complete(); e->md->release(); e->md = nullptr; }
     e->id = 0;
     e->sdmaNo = 0;
+    e->sdmaBackoff = 0;
 }
 
 void RD3DisplayPipe::iopDropSources()
@@ -4451,6 +4452,39 @@ static void rd3AccelIopSdmaFallback(unsigned why, unsigned head, bool strike, co
     }
 }
 
+/* GART ranges whose unbind the core did not answer (no core reachable at that moment): asked again before the next
+ * SDMA copy, so the core's slots do not run out (32 of them). Lock-free: each entry is taken / given by a CAS. */
+enum { kIopSdmaOrphans = 16 };
+static volatile UInt64 gIopSdmaOrphan[kIopSdmaOrphans];
+static void rd3AccelIopSdmaOrphanKeep(UInt64 h, unsigned surf)
+{
+    for (unsigned i = 0; i < kIopSdmaOrphans; i++)
+        if (OSCompareAndSwap64(0, h, &gIopSdmaOrphan[i])) {
+            ALOG("iop: sdma: the core did not answer the unbind of surface 0x%x's range 0x%llx: kept for a retry", surf,
+                 (unsigned long long)h);
+            return;
+        }
+    ALOG("iop: sdma: the core did not answer the unbind of surface 0x%x's range 0x%llx and the retry list is full: the "
+         "core's slot stays taken until its next GART table", surf, (unsigned long long)h);
+}
+static void rd3AccelIopSdmaOrphansRetry()
+{
+    for (unsigned i = 0; i < kIopSdmaOrphans; i++) {
+        const UInt64 h = gIopSdmaOrphan[i];
+        if (!h || !OSCompareAndSwap64(h, 0, &gIopSdmaOrphan[i])) continue;
+        struct RD3KIopSdma c;
+        bzero(&c, sizeof c);
+        c.op = RD3K_IOPSDMA_OP_UNBIND;
+        c.handle = h;
+        if (!rd3AccelIopSdmaCall(&c)) {   /* still no core: back on the list */
+            OSCompareAndSwap64(0, h, &gIopSdmaOrphan[i]);
+            return;
+        }
+        ALOG("iop: sdma: retried unbind of range 0x%llx -> status %d (%llu ranges left)", (unsigned long long)h, c.status,
+             (unsigned long long)c.liveRanges);
+    }
+}
+
 /* the slot's GART range dropped (before its descriptor is completed); quiet when there is none */
 static void rd3AccelIopSdmaDmaDrop(RD3DisplayPipe::RD3IopSrc *e)
 {
@@ -4469,6 +4503,7 @@ static void rd3AccelIopSdmaUnbind(RD3DisplayPipe::RD3IopSrc *e, const char *why)
     c.op = RD3K_IOPSDMA_OP_UNBIND;
     c.handle = e->sdma;
     const bool asked = rd3AccelIopSdmaCall(&c);
+    if (!asked) rd3AccelIopSdmaOrphanKeep(e->sdma, e->id);
     const SInt64 n = OSAddAtomic64(1, &gCntIopSdmaUnbinds);
     if (n < 8 || (n & 1023) == 0 || (asked && c.status != RD3K_IOPSDMA_OK && c.status != RD3K_IOPSDMA_STALE))
         ALOG("iop: sdma unbind #%lld: surface 0x%x's GART range 0x%llx (+0x%llx, %llu bytes) because %s -> %s %d (%llu ranges left)",
@@ -4544,12 +4579,14 @@ static unsigned rd3AccelIopSdmaBind(RD3DisplayPipe::RD3IopSrc *e, unsigned head,
         dma->release();
     }
     if (!asked || c.status == RD3K_IOPSDMA_NODEV) {
-        rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "bind of surface 0x%x: %s", e->id,
-                                asked ? "the core's GART area or SDMA ring is not up" : "no core answer");
+        e->sdmaBackoff = RD3_ISF_BACKOFF_FRAMES; e->sdmaBackoffWhy = RD3_ISF_CORE;
+        rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "bind of surface 0x%x: %s (asked again in %u frames)", e->id,
+                                asked ? "the core's GART area or SDMA ring is not up" : "no core answer", RD3_ISF_BACKOFF_FRAMES);
         return RD3_ISF_CORE;
     }
     if (c.status != RD3K_IOPSDMA_OK || !c.handle) {
         if (c.status == RD3K_IOPSDMA_INVALID) e->sdmaNo = 1;
+        if (c.status == RD3K_IOPSDMA_NOSPACE) { e->sdmaBackoff = RD3_ISF_BACKOFF_FRAMES; e->sdmaBackoffWhy = RD3_ISF_BIND; }
         rd3AccelIopSdmaFallback(RD3_ISF_BIND, head, c.status == RD3K_IOPSDMA_FAILED,
                                 "bind of surface 0x%x (%llu pages, lead %u): status %d err %d, %llu ranges bound", e->id, npages,
                                 lead, c.status, c.err, (unsigned long long)c.liveRanges);
@@ -4574,6 +4611,13 @@ static bool rd3AccelIopBySdma(RD3DisplayPipe::RD3IopSrc *e, unsigned head, const
     if (gIopSdmaNoCore) { rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "the core does not answer rdna3IopSdma"); return false; }
     if (gIopSdmaOff) { rd3AccelIopSdmaFallback(RD3_ISF_OFF, head, false, "switched off after failures"); return false; }
     if (e->sdmaNo) { rd3AccelIopSdmaFallback(RD3_ISF_PAGES, head, false, "surface 0x%x: its pages are no GART range", e->id); return false; }
+    if (e->sdmaBackoff) {
+        e->sdmaBackoff--;
+        rd3AccelIopSdmaFallback(e->sdmaBackoffWhy, head, false, "surface 0x%x: its bind was refused; %u frame(s) before it asks again",
+                                e->id, e->sdmaBackoff);
+        return false;
+    }
+    rd3AccelIopSdmaOrphansRetry();
     if (gIopVramBaseBad || !rd3_iop_scanout_ok(gIopVramBase, q->phys, q->allocationCookie, (unsigned long long)h * q->pitch, 0)) {
         rd3AccelIopSdmaFallback(RD3_ISF_SCANOUT, head, false, "the scanout's VRAM offset 0x%llx is not the memory at its BAR address "
                                 "0x%llx (BAR0 base %s0x%llx): SDMA would write elsewhere", q->allocationCookie, q->phys,
@@ -4607,6 +4651,13 @@ static bool rd3AccelIopBySdma(RD3DisplayPipe::RD3IopSrc *e, unsigned head, const
     if (c.status == RD3K_IOPSDMA_NODEV) {
         rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "copy: the core's GART area or SDMA ring is not up");
         return false;
+    }
+    if (c.status == RD3K_IOPSDMA_TIMEOUT && OSCompareAndSwap(0, 1, &gIopSdmaOff)) {
+        /* the copy may still run (the core takes no IOP copy until its next GART table): off, not three strikes */
+        rd3AccelIopSdmaState();
+        ALOG("iop sdma (N63): switched OFF: the SDMA copy of surface 0x%x (head %u) timed out after %llu us; the CPU copies "
+             "every frame (the core takes no IOP copy until its next GART table; `sysctl -w debug.rdna3accel_iop_sdma=1` "
+             "re-arms the accelerator)", e->id, head, c.usec);
     }
     if (c.status != RD3K_IOPSDMA_OK) {
         rd3AccelIopSdmaFallback(RD3_ISF_COPY, head, true, "copy of surface 0x%x %ux%u pitch %u -> 0x%llx pitch %u: status %d err %d "

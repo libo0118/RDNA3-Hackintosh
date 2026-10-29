@@ -305,6 +305,7 @@ void RDNA3Bringup::stopAndFree()
     /* gmc_v11_0_hw_fini with rdna3amdgpu=1: VM fault interrupts off, MMHUB
      * GART off */
     fIopGartReady = false;   /* N63: no IOP copy through the GART from here on */
+    fIopGartHung = false;
     if (fAmdgpuExact && fGmc && fDev)
         gmc11_hw_fini(fDev);
     /* ... and soc21_common_hw_fini last (IP block 0): doorbell apertures off */
@@ -894,6 +895,7 @@ bool RDNA3Bringup::hwInit()
     int ret;
 
     fIopGartReady = false;   /* N63: no IOP range until level 6 has a GART table again (iopGartReset) */
+    fIopGartHung = false;
 
     /* rdna3amdgpu=1: soc21_common_hw_init - ASPM (soc21_program_aspm when
      * amdgpu_device_should_use_aspm: amdgpu.aspm=-1, PCIe DPM on, the link's
@@ -2852,6 +2854,7 @@ void RDNA3Bringup::ipSuspend(bool all)
         if (fIh && fIh->enabled && fDev)
             ih60_disable(fDev, fIh);
         fIopGartReady = false;   /* N63: the GART goes down; hwInit binds nothing again until asked */
+        fIopGartHung = false;
         if (fGmc && fDev)
             gmc11_hw_fini(fDev);
         /* soc21_common_suspend (= soc21_common_hw_fini), the first IP block */
@@ -3428,6 +3431,7 @@ static const uint64_t kIopGartTop  = 32ull << 20;   /* the top's 16 MiB transfer
 void RDNA3Bringup::iopGartReset()
 {
     fIopGartReady = false;
+    fIopGartHung = false;
     if (!fGmc || fGmc->gart_size < kIopGartBase + kIopGartTop + (64ull << 20)) {
         rd3_ig_reset(&fIopGart, 0, 0);
         BLOG("iop sdma (N63): no GART area for the IOP copy (GART %llu MiB): the accelerator copies with the CPU",
@@ -3476,8 +3480,18 @@ int RDNA3Bringup::iopGartCopy(uint64_t handle, uint64_t srcOff, uint32_t srcPitc
         return RDNA3_EINVAL;
     busyUncounted(RD3_BUSY_UNC_KCOPY, AMDGPU_HW_IP_DMA);
     cohSync(true);
-    return rdna3_copy_gart_rect_to_vram(fDev, fGmc, fSdma, s->off, s->pages * 4096, srcOff, srcPitch, dstOff, dstPitch,
-                                        rowBytes, rows);
+    const int r = rdna3_copy_gart_rect_to_vram(fDev, fGmc, fSdma, s->off, s->pages * 4096, srcOff, srcPitch, dstOff,
+                                               dstPitch, rowBytes, rows);
+    if (r == RDNA3_ETIME) {
+        /* the copy may still run: a later unbind must not pull its PTEs (an SDMA VM fault), and no new copy may
+         * queue behind it (a late completion would put an older frame over the CPU's) */
+        fIopGartHung = true;
+        fIopGartReady = false;
+        BLOG("iop sdma (N63): the copy's fence timed out (range +0x%llx, %u rows x %u bytes): no IOP copy by SDMA "
+             "until the next GART table; %u range(s) keep their PTEs until the ring has drained",
+             (unsigned long long)s->off, rows, rowBytes, fIopGart.live);
+    }
+    return r;
 }
 
 int RDNA3Bringup::iopGartUnbind(uint64_t handle)
@@ -3485,6 +3499,17 @@ int RDNA3Bringup::iopGartUnbind(uint64_t handle)
     uint64_t off = 0, n = 0;
     if (!rd3_ig_release(&fIopGart, handle, &off, &n))
         return RDNA3_ENOENT;   /* unbound already, or from before a new GART table (nothing mapped there now) */
+    if (fIopGartHung) {
+        /* after a fence timeout: unmap only once every fence on the ring passed (nothing reads the range) */
+        if (!fSdma || !fSdma->ready || !sdma60_fence_passed(fDev, fSdma, fSdma->fence_seq)) {
+            BLOG("iop sdma (N63): range +0x%llx (%llu pages) released but NOT unmapped: the SDMA ring has not drained "
+                 "since the copy timed out (the next GART table drops it)", (unsigned long long)off, (unsigned long long)n);
+            return RDNA3_EBUSY;
+        }
+        if (fGmc && fGmc->mmhub_enabled)
+            rdna3_gart_unbind_pages(fDev, fGmc, off, n);
+        return RDNA3_OK;
+    }
     if (fIopGartReady && fGmc && fGmc->mmhub_enabled)
         rdna3_gart_unbind_pages(fDev, fGmc, off, n);
     return RDNA3_OK;
