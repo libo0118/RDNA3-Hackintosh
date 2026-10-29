@@ -2752,6 +2752,7 @@
   "ladder",
   "modeset",
   "modeset2",
-  "vramwin"
+  "vramwin",
+  "wsfps"
  ]
 }
