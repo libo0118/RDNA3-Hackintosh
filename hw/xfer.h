@@ -35,6 +35,21 @@ int rdna3_copy_pages_to_vram(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uin
                              const uint64_t *pages, uint64_t npages, uint64_t len,
                              uint64_t win_off, uint32_t win_pages);
 
+/* DRIVER-PLAN N63, the IOP copy by SDMA: a buffer of system pages bound to the GART for as long as its owner keeps
+ * them wired (amdgpu_ttm_alloc_gart -> amdgpu_gart_bind of a GTT BO: amdgpu_gart_map with the TT PTE flags, then
+ * amdgpu_gart_invalidate_tlb), unbound before the pages go (amdgpu_ttm_backend_unbind -> amdgpu_gart_unbind, TLB
+ * flushed). Contiguous runs are written in one gmc11_gart_map. 'pages' are 4 KiB bus addresses; nothing is mapped
+ * when one is not page aligned or the range leaves the GART. */
+int  rdna3_gart_bind_pages(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, const uint64_t *pages, uint64_t npages);
+void rdna3_gart_unbind_pages(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint64_t npages);
+/* amdgpu_copy_buffer from such a bound buffer into VRAM, a pitched rectangle (sdma60_copy_rect_sync: one span when
+ * the pitches match, one COPY_LINEAR per row otherwise), waited for: rows of row_bytes from byte src_off of the
+ * buffer at GART offset gart_off (bound_bytes long), src_pitch apart, to VRAM offset vram_off, dst_pitch apart.
+ * RDNA3_EINVAL when the rectangle leaves the buffer or VRAM. */
+int  rdna3_copy_gart_rect_to_vram(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t gart_off,
+                                  uint64_t bound_bytes, uint64_t src_off, uint32_t src_pitch, uint64_t vram_off,
+                                  uint32_t dst_pitch, uint32_t row_bytes, uint32_t rows);
+
 #ifdef __cplusplus
 }
 #endif

@@ -37,6 +37,7 @@
 #include <mach/kmod.h>
 #include <libkern/version.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IODMACommand.h>   /* N63: the bus addresses of a presented surface's pages */
 #include <IOKit/IORangeAllocator.h>
 #include "IOAccelerator.h"
 #include "IOGraphicsAccelerator2.h"
@@ -155,6 +156,16 @@ static volatile SInt64 gCntApDescMoved;
  * wait for WindowServer's pending GPU write, rd3AccelSurfGpuWait) */
 static int gVmSticky = 1, gSurfWait = 1, gSurfWaitMs = (int)RD3_SP_WAIT_MS;
 static int gIopStaleWaitMs = (int)RD3_IS_WAIT_MS;   /* N59: debug.rdna3accel_iop_stale_wait_ms */
+/* N63 (common/rdna3_iop_copy.h): the IOP copy by SDMA - boot-arg rdna3iopsdma, sysctl debug.rdna3accel_iop_sdma
+ * (1 = on, the default; 0 = the CPU copy of N61 for every frame). gIopSdmaOff: three failures in a row switched it
+ * off (writing the sysctl turns it on again); gIopSdmaNoCore: the core does not answer rdna3IopSdma */
+static int gIopSdma = 1;
+static volatile UInt32 gIopSdmaOff, gIopSdmaNoCore, gIopSdmaFailRun;
+/* N63: BAR0's CPU-physical base as the core's own VRAM allocations give it (phys = BAR0 + offset), for the check
+ * that a scanout's VRAM offset is the memory its BAR address is; gIopVramBaseBad: two allocations disagreed */
+static volatile UInt64 gIopVramBase;
+static volatile UInt32 gIopVramBaseBad;
+static void rd3AccelIopSdmaState();   /* debug.rdna3accel_iop_copy_sdma_state from the switches */
 static void rdna3accelInstallSysctl(void);
 static void rd3AccelInstallSysctl2(void);
 /* the raw offsets into Apple's objects (re/, iofam/, +0x88 / +0x98 /
@@ -1215,6 +1226,11 @@ public:
         gPerfStats = rd3_arg("rdna3perfstats", 1) ? 1 : 0;
         gVmSticky = rd3_arg("rdna3vmsticky", 1) ? 1 : 0;
         gSurfWait = rd3_arg("rdna3surfwait", 1) ? 1 : 0;
+        gIopSdma = rd3_arg("rdna3iopsdma", 1) ? 1 : 0;
+        rd3AccelIopSdmaState();
+        ALOG("iop sdma (N63): the display pipe's copy of a presented surface into the scanout is done by %s (boot-arg "
+             "rdna3iopsdma, sysctl debug.rdna3accel_iop_sdma; counters debug.rdna3accel_iop_copy_sdma*)",
+             gIopSdma ? "SDMA0 from the surface's pages bound to the GART (the CPU for a frame SDMA cannot take)" : "the CPU (0)");
         {
             const uint32_t want = rd3_arg("rdna3iopstalewait", RD3_IS_WAIT_MS);
             gIopStaleWaitMs = (int)rd3_is_wait_ms_u(want);
@@ -1912,6 +1928,13 @@ bool RD3VidMemory::allocPhysical()
         return false;
     }
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
+    if (r.phys >= r.allocationCookie) {   /* N63: BAR0's base, from the core's allocation (phys = BAR0 + offset) */
+        const UInt64 b = r.phys - r.allocationCookie;
+        if (!OSCompareAndSwap64(0, b, &gIopVramBase) && gIopVramBase != b && OSCompareAndSwap(0, 1, &gIopVramBaseBad))
+            ALOG("iop sdma (N63): VRAM allocation phys 0x%llx offset 0x%llx gives BAR0 base 0x%llx, an earlier one 0x%llx: "
+                 "the IOP copy stays on the CPU", r.phys, r.allocationCookie, (unsigned long long)b,
+                 (unsigned long long)gIopVramBase);
+    }
     fAllocGen = (unsigned long long)OSAddAtomic64(1, &gVmAllocGen) + 1;   /* the IOP flip's marker (N38) */
     fBacked = true;   /* free() traces the object's end (N41) */
     OSAddAtomic64(1, &gCntVmAlloc); OSAddAtomic64((SInt64)fBytes, &gCntVmAllocBytes);
@@ -2044,14 +2067,23 @@ static unsigned gIopLogs = 0;
 #define RD3IOPLOG(fmt, ...) do { if (gIopLogs < RD3IOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
 #define RD3IOP_FAIL(rc, fmt, ...) do { OSAddAtomic64(1, &gCntIopFail); RD3IOPLOG(fmt, ##__VA_ARGS__); return (rc); } while (0)
 
+static void rd3AccelIopSdmaUnbind(RD3DisplayPipe::RD3IopSrc *e, const char *why);   /* N63 */
+/* a source slot let go: its GART range first (N63: the GPU must not reach the pages once they are unwired), then
+ * the map and the descriptor's prepare */
+void RD3DisplayPipe::iopDropSlot(RD3IopSrc *e, const char *why)
+{
+    rd3AccelIopSdmaUnbind(e, why);
+    if (e->map) { e->map->release(); e->map = nullptr; }
+    if (e->md)  { e->md->complete(); e->md->release(); e->md = nullptr; }
+    e->id = 0;
+    e->sdmaNo = 0;
+    e->sdmaBackoff = 0;
+}
+
 void RD3DisplayPipe::iopDropSources()
 {
-    for (unsigned i = 0; i < kIopSrcSlots; i++) {
-        RD3IopSrc *e = &fIopSrc[i];
-        if (e->map) { e->map->release(); e->map = nullptr; }
-        if (e->md)  { e->md->complete(); e->md->release(); e->md = nullptr; }
-        e->id = 0;
-    }
+    for (unsigned i = 0; i < kIopSrcSlots; i++)
+        iopDropSlot(&fIopSrc[i], "the display pipe is freed");
 }
 
 void RD3DisplayPipe::free()
@@ -2060,21 +2092,24 @@ void RD3DisplayPipe::free()
     IOAccelLegacyDisplayPipe::free();
 }
 
-const void *RD3DisplayPipe::iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need)
+const void *RD3DisplayPipe::iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need, RD3IopSrc **slot)
 {
+    *slot = nullptr;
     for (unsigned i = 0; i < kIopSrcSlots; i++)
-        if (fIopSrc[i].md == md && fIopSrc[i].id == id && fIopSrc[i].map)
-            return (fIopSrc[i].map->getLength() >= need) ? (const void *)fIopSrc[i].map->getVirtualAddress() : nullptr;
+        if (fIopSrc[i].md == md && fIopSrc[i].id == id && fIopSrc[i].map) {
+            if (fIopSrc[i].map->getLength() < need) return nullptr;
+            *slot = &fIopSrc[i];
+            return (const void *)fIopSrc[i].map->getVirtualAddress();
+        }
     if (md->getLength() < need) return nullptr;
     RD3IopSrc *e = &fIopSrc[fIopNext % kIopSrcSlots]; fIopNext++;
-    if (e->map) { e->map->release(); e->map = nullptr; }
-    if (e->md)  { e->md->complete(); e->md->release(); e->md = nullptr; }
-    e->id = 0;
+    iopDropSlot(e, "its source slot is reused for another surface");
     if (md->prepare() != kIOReturnSuccess) return nullptr;
     IOMemoryMap *m = md->map(kIOMapReadOnly);
     if (!m) { md->complete(); return nullptr; }
     md->retain(); e->md = md; e->map = m; e->id = id;
     RD3IOPLOG("mapped source surface 0x%x (%llu bytes) into slot %u", id, (unsigned long long)m->getLength(), (fIopNext - 1) % kIopSrcSlots);
+    *slot = e;
     return (const void *)m->getVirtualAddress();
 }
 
@@ -2096,6 +2131,8 @@ static void rd3AccelIopGateNote(unsigned head, uint64_t t0);   /* N61 */
 static void rd3AccelIopCopyNote(unsigned head, uint64_t t0, uint64_t bytes, int accessBytes, unsigned w, unsigned h,
                                 unsigned spitch, unsigned dpitch, bool fromRes);
 static void rd3AccelIopStaleNote(IOSurface *s, unsigned head, unsigned lseed, unsigned useed);
+static bool rd3AccelIopBySdma(RD3DisplayPipe::RD3IopSrc *e, unsigned head, const struct RD3KVramRequest *q, const volatile void *src,
+                              unsigned w, unsigned h, unsigned pitch, unsigned rowBytes);   /* N63 */
 static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static void rd3AccelIopHome(IOService *fb, unsigned head);
 
@@ -2263,6 +2300,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 
     const volatile unsigned int *src = nullptr; unsigned w = 0, h = 0, pitch = 0; bool fromRes = false;
     unsigned staleL = 0, staleU = 0;
+    RD3IopSrc *srcSlot = nullptr;   /* N63: the source slot (its GART range for the SDMA copy) */
     RD3Resource *res = OSDynamicCast(RD3Resource, ro);
     RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
     static SInt32 gIopK6Logs;
@@ -2308,7 +2346,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         if (P < 4 * W || (P & 3)) RD3IOP_FAIL(kIOReturnBadArgument, "surface %llux%llu: row pitch %llu is under 4*W or not word-aligned", W, H, P);
         IOMemoryDescriptor *md = s->getMemoryDescriptor();
         if (!md) RD3IOP_FAIL(kIOReturnNoMemory, "surface 0x%x has no memory descriptor", s->getSurfaceID());
-        src = (const volatile unsigned int *)iopMapSurface(s->getSurfaceID(), md, H * P);
+        src = (const volatile unsigned int *)iopMapSurface(s->getSurfaceID(), md, H * P, &srcSlot);
         if (!src) RD3IOP_FAIL(kIOReturnVMError, "surface 0x%x would not prepare/map %llu bytes", s->getSurfaceID(), H * P);
         w = (unsigned)W; h = (unsigned)H; pitch = (unsigned)P;
     } else {
@@ -2330,10 +2368,15 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     rd3AccelIopHome(fb, head);
     const unsigned rowBytes = ((pitch < q.pitch) ? pitch : q.pitch) & ~3u;
     const unsigned spr = pitch / 4;
-    /* N61 (common/rdna3_iop_copy.h): the same bytes as the old 32-bit loop, 8 at a time when everything is 8-aligned; timed */
-    const uint64_t copy0 = mach_absolute_time();
-    const int accessBytes = rd3_iop_copy_rows(q.kva, q.pitch, src, pitch, h, rowBytes);
-    rd3AccelIopCopyNote(head, copy0, (uint64_t)rowBytes * h, accessBytes, w, h, pitch, q.pitch, fromRes);
+    /* N63: SDMA0 copies it from the surface's pages bound to the GART, the fence waited for; any failure leaves
+     * the frame to the CPU copy below (counted by reason) */
+    const bool bySdma = !fromRes && srcSlot && rd3AccelIopBySdma(srcSlot, head, &q, src, w, h, pitch, rowBytes);
+    if (!bySdma) {
+        /* N61 (common/rdna3_iop_copy.h): the same bytes as the old 32-bit loop, 8 at a time when everything is 8-aligned; timed */
+        const uint64_t copy0 = mach_absolute_time();
+        const int accessBytes = rd3_iop_copy_rows(q.kva, q.pitch, src, pitch, h, rowBytes);
+        rd3AccelIopCopyNote(head, copy0, (uint64_t)rowBytes * h, accessBytes, w, h, pitch, q.pitch, fromRes);
+    }
     if (!fromRes && s) rd3AccelIopStaleNote(s, head, staleL, staleU);
     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
@@ -2459,24 +2502,54 @@ RD3ACCEL_CNT(rdna3accel_iop_copy_skip,    gCntIopCopySkip,    "frames kept on th
 /* N61 (common/rdna3_iop_copy.h): the display pipe's CPU copy into the scanout, and the gates before it */
 static SInt64 gCntIopCopyN, gCntIopCopyBytes, gCntIopCopyUs, gCntIopCopyMaxUs, gCntIopCopy64, gCntIopGateUs;
 static SInt64 gCntIopCopyNHead[kRd3MaxFB], gCntIopCopyUsHead[kRd3MaxFB], gCntIopGateUsHead[kRd3MaxFB];
-RD3ACCEL_CNT(rdna3accel_iop_copy_n,       gCntIopCopyN,       "N61: IOP copies into a scanout (all heads)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n,       gCntIopCopyN,       "N61: IOP copies into a scanout by the CPU (all heads; N63: SDMA ones are iop_copy_sdma_n)");
 RD3ACCEL_CNT(rdna3accel_iop_copy_bytes,   gCntIopCopyBytes,   "N61: bytes the IOP copies moved");
 RD3ACCEL_CNT(rdna3accel_iop_copy_us,      gCntIopCopyUs,      "N61: microseconds the IOP copies took (all heads)");
 RD3ACCEL_CNT(rdna3accel_iop_copy_max_us,  gCntIopCopyMaxUs,   "N61: the longest IOP copy, microseconds");
 RD3ACCEL_CNT(rdna3accel_iop_copy_64,      gCntIopCopy64,      "N61: IOP copies done 8 bytes per access (everything 8-aligned)");
 RD3ACCEL_CNT(rdna3accel_iop_gate_us,      gCntIopGateUs,      "N61: microseconds transactions spent in the stale / page-off gates before their copy");
-RD3ACCEL_CNT(rdna3accel_iop_copy_n_h0,    gCntIopCopyNHead[0], "N61: IOP copies into head 0");
-RD3ACCEL_CNT(rdna3accel_iop_copy_n_h1,    gCntIopCopyNHead[1], "N61: IOP copies into head 1");
-RD3ACCEL_CNT(rdna3accel_iop_copy_n_h2,    gCntIopCopyNHead[2], "N61: IOP copies into head 2");
-RD3ACCEL_CNT(rdna3accel_iop_copy_n_h3,    gCntIopCopyNHead[3], "N61: IOP copies into head 3");
-RD3ACCEL_CNT(rdna3accel_iop_copy_us_h0,   gCntIopCopyUsHead[0], "N61: microseconds of IOP copies into head 0");
-RD3ACCEL_CNT(rdna3accel_iop_copy_us_h1,   gCntIopCopyUsHead[1], "N61: microseconds of IOP copies into head 1");
-RD3ACCEL_CNT(rdna3accel_iop_copy_us_h2,   gCntIopCopyUsHead[2], "N61: microseconds of IOP copies into head 2");
-RD3ACCEL_CNT(rdna3accel_iop_copy_us_h3,   gCntIopCopyUsHead[3], "N61: microseconds of IOP copies into head 3");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h0,    gCntIopCopyNHead[0], "N61: IOP copies into head 0 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h1,    gCntIopCopyNHead[1], "N61: IOP copies into head 1 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h2,    gCntIopCopyNHead[2], "N61: IOP copies into head 2 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_n_h3,    gCntIopCopyNHead[3], "N61: IOP copies into head 3 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h0,   gCntIopCopyUsHead[0], "N61: microseconds of IOP copies into head 0 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h1,   gCntIopCopyUsHead[1], "N61: microseconds of IOP copies into head 1 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h2,   gCntIopCopyUsHead[2], "N61: microseconds of IOP copies into head 2 (N63: CPU or SDMA)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_us_h3,   gCntIopCopyUsHead[3], "N61: microseconds of IOP copies into head 3 (N63: CPU or SDMA)");
 RD3ACCEL_CNT(rdna3accel_iop_gate_us_h0,   gCntIopGateUsHead[0], "N61: gate microseconds of head 0's transactions");
 RD3ACCEL_CNT(rdna3accel_iop_gate_us_h1,   gCntIopGateUsHead[1], "N61: gate microseconds of head 1's transactions");
 RD3ACCEL_CNT(rdna3accel_iop_gate_us_h2,   gCntIopGateUsHead[2], "N61: gate microseconds of head 2's transactions");
 RD3ACCEL_CNT(rdna3accel_iop_gate_us_h3,   gCntIopGateUsHead[3], "N61: gate microseconds of head 3's transactions");
+/* N63 (common/rdna3_iop_copy.h): the IOP copy by SDMA; iop_copy_n / _us / _max_us / _bytes / _64 above count the CPU
+ * copies, iop_copy_n_h<i> / _us_h<i> both paths */
+static SInt64 gCntIopSdmaN, gCntIopSdmaUs, gCntIopSdmaMaxUs, gCntIopSdmaBytes, gCntIopSdmaCoreUs, gCntIopSdmaBinds,
+              gCntIopSdmaBindUs, gCntIopSdmaUnbinds, gCntIopSdmaRanges, gCntIopSdmaVerified, gCntIopSdmaFb,
+              gCntIopSdmaFbWhy[RD3_ISF_N], gCntIopSdmaState;
+static int rdna3accel_iop_sdma_sysctl SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_iop_sdma, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+            rdna3accel_iop_sdma_sysctl, "I",
+            "N63: 1 (default, boot-arg rdna3iopsdma) = the IOP copy into the scanout by SDMA0 from the surface's pages "
+            "bound to the GART, 0 = by the CPU; writing it also ends a switch-off after failures");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_state, gCntIopSdmaState, "N63: 1 = IOP copies go to SDMA, 0 = switched off (sysctl / boot-arg), 2 = off after 3 failures in a row, 3 = the core does not answer rdna3IopSdma");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_n,       gCntIopSdmaN,       "N63: IOP copies done by SDMA (all heads)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_us,      gCntIopSdmaUs,      "N63: microseconds the SDMA IOP copies cost the transaction (call, fence wait, check)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_core_us, gCntIopSdmaCoreUs,  "N63: of them, microseconds inside the core (its DRM lock, the copy, the fence)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_max_us,  gCntIopSdmaMaxUs,   "N63: the longest SDMA IOP copy, microseconds");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_bytes,   gCntIopSdmaBytes,   "N63: bytes the SDMA IOP copies moved");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_binds,   gCntIopSdmaBinds,   "N63: surfaces whose pages were bound to a GART range");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_bind_us, gCntIopSdmaBindUs,  "N63: microseconds those binds took (page list + GART map)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_unbinds, gCntIopSdmaUnbinds, "N63: GART ranges unbound (slot reused, pipe freed)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_ranges,  gCntIopSdmaRanges,  "N63: GART ranges the core has bound (as of its last answer)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_verified, gCntIopSdmaVerified, "N63: SDMA copies whose scanout was read back (16 samples) and matched the source");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb,      gCntIopSdmaFb,      "N63: frames the CPU copied although the SDMA path was on (the _fb_<reason> counters)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_core,   gCntIopSdmaFbWhy[RD3_ISF_CORE],   "N63: CPU instead: no core, a core without rdna3IopSdma, or its GART / SDMA not up");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_pages,  gCntIopSdmaFbWhy[RD3_ISF_PAGES],  "N63: CPU instead: the surface's pages could not be listed as a GART range");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_bind,   gCntIopSdmaFbWhy[RD3_ISF_BIND],   "N63: CPU instead: the core could not bind the pages (no GART room / slot, or refused)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_copy,   gCntIopSdmaFbWhy[RD3_ISF_COPY],   "N63: CPU instead: the SDMA copy failed or its fence did not come in time");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_verify, gCntIopSdmaFbWhy[RD3_ISF_VERIFY], "N63: CPU again: the scanout's samples after the SDMA copy differed from the source");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_off,    gCntIopSdmaFbWhy[RD3_ISF_OFF],    "N63: CPU instead: the SDMA path was switched off after 3 failures in a row");
+RD3ACCEL_CNT(rdna3accel_iop_copy_sdma_fb_scanout, gCntIopSdmaFbWhy[RD3_ISF_SCANOUT], "N63: CPU instead: the scanout's VRAM offset is not the memory at its BAR address (or BAR0's base is not known)");
+static_assert(RD3_ISF_N == 7, "N63: a new fallback reason needs its debug.rdna3accel_iop_copy_sdma_fb_<name> counter");
 /* N59 (common/rdna3_iop_stale.h): IOP copies of a buffer whose IOSurface seeds did not move since the head last copied it */
 static int gIopStaleWaitMaxUs;
 static SInt64 gCntIopStaleChecked, gCntIopStale, gCntIopStaleMoved, gCntIopStaleTimeout, gCntIopStaleNotWaited, gCntIopStaleWaitUs,
@@ -2655,6 +2728,27 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h1);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h2);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_gate_us_h3);
+    /* N63 */
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_sdma);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_state);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_n);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_core_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_max_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_bytes);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_binds);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_bind_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_unbinds);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_ranges);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_verified);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_core);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_pages);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_bind);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_copy);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_verify);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_off);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_scanout);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_wait_ms); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_wait_maxus);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_checked); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_fresh);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale);   sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_moved);
@@ -4280,6 +4374,336 @@ static void rd3AccelIopCopyNote(unsigned head, uint64_t t0, uint64_t bytes, int 
              "before the copies %lld us in all (N61)", (long long)k + 1, head, w, h, fromRes ? "our VRAM resource" : "the IOSurface's memory",
              spitch, dpitch, (unsigned long long)bytes, (long long)us, (unsigned long long)rd3_iop_mbps(bytes, (uint64_t)us), accessBytes,
              (long long)gCntIopGateUs);
+}
+
+/* ---- N63: the IOP copy by SDMA (common/rdna3_iop_copy.h; the core's rdna3IopSdma, rdna3k_abi.h) ----
+ * performTransaction's CPU copy moved ~8 MB per 1920x1080 frame through the write-combined BAR on WindowServer's
+ * thread (card run 2026-10-28d: avg 20 ms per head). Here the surface's wired pages (the source slot keeps the
+ * descriptor prepared) are bound once to a GART range of the core (amdgpu_ttm_alloc_gart), and every frame SDMA0
+ * copies the pitched rectangle into the scanout (amdgpu_copy_buffer) and the core waits for its fence before it
+ * answers: the transaction still ends with the frame in the scanout, and no later than the copy. The first 256 SDMA
+ * copies, then every 16th, are checked by reading 16 pixels of the scanout back. Any failure: the CPU copies that
+ * frame (debug.rdna3accel_iop_copy_sdma_fb_<reason>, log `iop: sdma -> CPU`); three in a row switch the path off
+ * until debug.rdna3accel_iop_sdma is written. */
+static int rdna3accel_iop_sdma_sysctl SYSCTL_HANDLER_ARGS
+{
+    int v = gIopSdma;
+    const int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr) return err;
+    gIopSdma = v ? 1 : 0;
+    const UInt32 wasOff = gIopSdmaOff;
+    gIopSdmaOff = 0; gIopSdmaFailRun = 0;
+    gCntIopSdmaState = gIopSdma ? (gIopSdmaNoCore ? 3 : 1) : 0;
+    ALOG("iop sdma (N63): sysctl debug.rdna3accel_iop_sdma=%d: IOP copies by %s%s", gIopSdma, gIopSdma ? "SDMA" : "the CPU",
+         wasOff ? " (the switch-off after failures is ended)" : "");
+    return 0;
+}
+
+static void rd3AccelIopSdmaState()
+{
+    gCntIopSdmaState = !gIopSdma ? 0 : gIopSdmaNoCore ? 3 : gIopSdmaOff ? 2 : 1;
+}
+
+/* the core's answer to one rdna3IopSdma op; false: no core, or a core without the function (logged once) */
+static bool rd3AccelIopSdmaCall(struct RD3KIopSdma *c)
+{
+    IOService *core = rd3AccelCore();
+    if (!core) return false;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_IOPSDMA_FN);
+    if (!sym) return false;
+    c->version = RD3K_IOPSDMA_VERSION;
+    c->status = RD3K_IOPSDMA_NODEV;
+    const IOReturn r = core->callPlatformFunction(sym, false, c, nullptr, nullptr, nullptr);
+    sym->release();
+    if (r == kIOReturnSuccess) {
+        gCntIopSdmaRanges = (SInt64)c->liveRanges;
+        return true;
+    }
+    if (OSCompareAndSwap(0, 1, &gIopSdmaNoCore)) {
+        rd3AccelIopSdmaState();
+        ALOG("iop sdma (N63): the core answers rdna3IopSdma with 0x%x (%s): every IOP copy stays on the CPU", (unsigned)r,
+             r == kIOReturnUnsupported ? "a core kext older than N63" : "refused");
+    }
+    return false;
+}
+
+/* a frame the CPU copies although the SDMA path is on: counted by reason, logged (first 8 of each reason, then
+ * every 1024th); `strike`: a failure that counts toward the switch-off */
+static void rd3AccelIopSdmaFallback(unsigned why, unsigned head, bool strike, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static void rd3AccelIopSdmaFallback(unsigned why, unsigned head, bool strike, const char *fmt, ...)
+{
+    if (why >= RD3_ISF_N) why = RD3_ISF_CORE;
+    OSAddAtomic64(1, &gCntIopSdmaFb);
+    const SInt64 k = OSAddAtomic64(1, &gCntIopSdmaFbWhy[why]);
+    if (k < 8 || (k & 1023) == 0) {
+        char msg[200];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(msg, sizeof msg, fmt, ap);
+        va_end(ap);
+        ALOG("iop: sdma -> CPU (head %u, %s #%lld): %s", head, rd3_iop_sdma_fb_name(why), (long long)k + 1, msg);
+    }
+    if (!strike) return;
+    const UInt32 run = (UInt32)OSIncrementAtomic((volatile SInt32 *)&gIopSdmaFailRun) + 1u;
+    if (run >= RD3_ISF_OFF_AFTER && OSCompareAndSwap(0, 1, &gIopSdmaOff)) {
+        rd3AccelIopSdmaState();
+        ALOG("iop sdma (N63): switched OFF after %u failures in a row (the last: %s): the CPU copies every frame until "
+             "`sysctl -w debug.rdna3accel_iop_sdma=1`", (unsigned)run, rd3_iop_sdma_fb_name(why));
+    }
+}
+
+/* GART ranges whose unbind the core did not answer (no core reachable at that moment): asked again before the next
+ * SDMA copy, so the core's slots do not run out (32 of them). Lock-free: each entry is taken / given by a CAS. */
+enum { kIopSdmaOrphans = 16 };
+static volatile UInt64 gIopSdmaOrphan[kIopSdmaOrphans];
+static void rd3AccelIopSdmaOrphanKeep(UInt64 h, unsigned surf)
+{
+    for (unsigned i = 0; i < kIopSdmaOrphans; i++)
+        if (OSCompareAndSwap64(0, h, &gIopSdmaOrphan[i])) {
+            ALOG("iop: sdma: the core did not answer the unbind of surface 0x%x's range 0x%llx: kept for a retry", surf,
+                 (unsigned long long)h);
+            return;
+        }
+    ALOG("iop: sdma: the core did not answer the unbind of surface 0x%x's range 0x%llx and the retry list is full: the "
+         "core's slot stays taken until its next GART table", surf, (unsigned long long)h);
+}
+static void rd3AccelIopSdmaOrphansRetry()
+{
+    for (unsigned i = 0; i < kIopSdmaOrphans; i++) {
+        const UInt64 h = gIopSdmaOrphan[i];
+        if (!h || !OSCompareAndSwap64(h, 0, &gIopSdmaOrphan[i])) continue;
+        struct RD3KIopSdma c;
+        bzero(&c, sizeof c);
+        c.op = RD3K_IOPSDMA_OP_UNBIND;
+        c.handle = h;
+        if (!rd3AccelIopSdmaCall(&c)) {   /* still no core: back on the list */
+            OSCompareAndSwap64(0, h, &gIopSdmaOrphan[i]);
+            return;
+        }
+        ALOG("iop: sdma: retried unbind of range 0x%llx -> status %d (%llu ranges left)", (unsigned long long)h, c.status,
+             (unsigned long long)c.liveRanges);
+    }
+}
+
+/* the slot's GART range dropped (before its descriptor is completed); quiet when there is none */
+static void rd3AccelIopSdmaDmaDrop(RD3DisplayPipe::RD3IopSrc *e)
+{
+    if (!e->sdmaDma) return;
+    e->sdmaDma->clearMemoryDescriptor(true);
+    e->sdmaDma->release();
+    e->sdmaDma = nullptr;
+}
+
+static void rd3AccelIopSdmaUnbind(RD3DisplayPipe::RD3IopSrc *e, const char *why)
+{
+    if (!e) return;
+    if (!e->sdma) { rd3AccelIopSdmaDmaDrop(e); return; }
+    struct RD3KIopSdma c;
+    bzero(&c, sizeof c);
+    c.op = RD3K_IOPSDMA_OP_UNBIND;
+    c.handle = e->sdma;
+    const bool asked = rd3AccelIopSdmaCall(&c);
+    if (!asked) rd3AccelIopSdmaOrphanKeep(e->sdma, e->id);
+    const SInt64 n = OSAddAtomic64(1, &gCntIopSdmaUnbinds);
+    if (n < 8 || (n & 1023) == 0 || (asked && c.status != RD3K_IOPSDMA_OK && c.status != RD3K_IOPSDMA_STALE))
+        ALOG("iop: sdma unbind #%lld: surface 0x%x's GART range 0x%llx (+0x%llx, %llu bytes) because %s -> %s %d (%llu ranges left)",
+             (long long)n + 1, e->id, e->sdma, e->sdmaGart, e->sdmaBytes, why, asked ? "status" : "no core, status",
+             asked ? c.status : -1, (unsigned long long)c.liveRanges);
+    e->sdma = 0; e->sdmaGart = 0; e->sdmaBytes = 0; e->sdmaLead = 0;
+    rd3AccelIopSdmaDmaDrop(e);   /* after the GART range: the GPU reaches the pages no more */
+}
+
+/* bind the slot's pages (the descriptor's physical segments, in order, as one GART range); a RD3_ISF_* reason on
+ * failure, RD3_ISF_N on success */
+static unsigned rd3AccelIopSdmaBind(RD3DisplayPipe::RD3IopSrc *e, unsigned head, unsigned long long bytes)
+{
+    const uint64_t t0 = mach_absolute_time();
+    rd3AccelIopSdmaDmaDrop(e);   /* none without a range; never two */
+    /* the bus addresses as the core's GTT BOs get them (RDNA3Accel::gttWire, amdgpu_ttm_tt_pin_userptr ->
+     * dma_map_sgtable): an IODMACommand, 44-bit, mapped, page-aligned segments; kept prepared while bound. A
+     * descriptor that does not start on a page would need a bounce buffer: not taken (the CPU copies it). */
+    IOByteCount sl = 0;
+    const addr64_t pa0 = e->md->getPhysicalSegment(0, &sl, kIOMemoryMapperNone);
+    if (!pa0 || !sl || (pa0 & 4095u)) {
+        e->sdmaNo = 1;
+        rd3AccelIopSdmaFallback(RD3_ISF_PAGES, head, false, "surface 0x%x: %s (%llu bytes)", e->id,
+                                (!pa0 || !sl) ? "no physical segment at 0" : "its memory does not start on a page", bytes);
+        return RD3_ISF_PAGES;
+    }
+    const uint32_t lead = 0;
+    const uint64_t npages = rd3_iop_range_pages(lead, bytes);
+    uint64_t *list = (uint64_t *)IOMalloc((vm_size_t)(npages * sizeof(uint64_t)));
+    IODMACommand *dma = list ? IODMACommand::withSpecification(IODMACommand::OutputHost64, 44, 0, IODMACommand::kMapped, 0, 4096)
+                             : nullptr;
+    if (!list || !dma || dma->setMemoryDescriptor(e->md, true) != kIOReturnSuccess) {
+        if (dma) dma->release();
+        if (list) IOFree(list, (vm_size_t)(npages * sizeof(uint64_t)));
+        rd3AccelIopSdmaFallback(RD3_ISF_PAGES, head, false, "surface 0x%x: no memory for a %llu-page list or its DMA command "
+                                "(list %p, command %p)", e->id, npages, list, dma);
+        return RD3_ISF_PAGES;
+    }
+    uint64_t n = 0, off = 0;
+    int pr = 0;
+    while (off < bytes && !pr) {
+        IODMACommand::Segment64 seg[8];
+        UInt32 nseg = 8;
+        UInt64 at = off;
+        if (dma->gen64IOVMSegments(&at, seg, &nseg) != kIOReturnSuccess || !nseg) { pr = -3; break; }
+        for (UInt32 i = 0; i < nseg && !pr && off < bytes; i++) {
+            uint64_t len = seg[i].fLength;
+            if (len > bytes - off) len = bytes - off;
+            pr = rd3_iop_pages_add(list, npages, &n, lead, off, seg[i].fIOVMAddr, len);
+            off += len;
+        }
+    }
+    if (pr || n != npages) {
+        dma->clearMemoryDescriptor(true);
+        dma->release();
+        IOFree(list, (vm_size_t)(npages * sizeof(uint64_t)));
+        e->sdmaNo = 1;
+        rd3AccelIopSdmaFallback(RD3_ISF_PAGES, head, false, "surface 0x%x: its pages are no GART range (%s at byte %llu of %llu, "
+                                "%llu of %llu pages)", e->id, pr == -1 ? "a segment starts mid-page" : pr == -2 ?
+                                "more pages than its length" : pr == -3 ? "no DMA segment" : "a short list", off, bytes,
+                                n, npages);
+        return RD3_ISF_PAGES;
+    }
+    struct RD3KIopSdma c;
+    bzero(&c, sizeof c);
+    c.op = RD3K_IOPSDMA_OP_BIND;
+    c.pages = (const unsigned long long *)list;
+    c.pageCount = npages;
+    const bool asked = rd3AccelIopSdmaCall(&c);
+    IOFree(list, (vm_size_t)(npages * sizeof(uint64_t)));
+    if (!asked || c.status != RD3K_IOPSDMA_OK || !c.handle) {   /* nothing bound: the DMA command goes */
+        dma->clearMemoryDescriptor(true);
+        dma->release();
+    }
+    if (!asked || c.status == RD3K_IOPSDMA_NODEV) {
+        e->sdmaBackoff = RD3_ISF_BACKOFF_FRAMES; e->sdmaBackoffWhy = RD3_ISF_CORE;
+        rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "bind of surface 0x%x: %s (asked again in %u frames)", e->id,
+                                asked ? "the core's GART area or SDMA ring is not up" : "no core answer", RD3_ISF_BACKOFF_FRAMES);
+        return RD3_ISF_CORE;
+    }
+    if (c.status != RD3K_IOPSDMA_OK || !c.handle) {
+        if (c.status == RD3K_IOPSDMA_INVALID) e->sdmaNo = 1;
+        if (c.status == RD3K_IOPSDMA_NOSPACE) { e->sdmaBackoff = RD3_ISF_BACKOFF_FRAMES; e->sdmaBackoffWhy = RD3_ISF_BIND; }
+        rd3AccelIopSdmaFallback(RD3_ISF_BIND, head, c.status == RD3K_IOPSDMA_FAILED,
+                                "bind of surface 0x%x (%llu pages, lead %u): status %d err %d, %llu ranges bound", e->id, npages,
+                                lead, c.status, c.err, (unsigned long long)c.liveRanges);
+        return RD3_ISF_BIND;
+    }
+    e->sdma = c.handle; e->sdmaGart = c.gartOffset; e->sdmaBytes = bytes; e->sdmaLead = lead; e->sdmaDma = dma;
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    OSAddAtomic64((SInt64)(ns / 1000), &gCntIopSdmaBindUs);
+    const SInt64 k = OSAddAtomic64(1, &gCntIopSdmaBinds);
+    if (k < 16 || (k & 1023) == 0)
+        ALOG("iop: sdma bind #%lld (head %u): surface 0x%x, %llu bytes = %llu pages (first at +%u) -> GART +0x%llx, handle 0x%llx, "
+             "in %llu us (core %llu us); %llu ranges bound", (long long)k + 1, head, e->id, bytes, npages, lead, c.gartOffset,
+             c.handle, ns / 1000, c.usec, (unsigned long long)c.liveRanges);
+    return RD3_ISF_N;
+}
+
+static bool rd3AccelIopBySdma(RD3DisplayPipe::RD3IopSrc *e, unsigned head, const struct RD3KVramRequest *q, const volatile void *src,
+                              unsigned w, unsigned h, unsigned pitch, unsigned rowBytes)
+{
+    if (!gIopSdma || !e || !e->md || !q || !q->kva) return false;
+    if (gIopSdmaNoCore) { rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "the core does not answer rdna3IopSdma"); return false; }
+    if (gIopSdmaOff) { rd3AccelIopSdmaFallback(RD3_ISF_OFF, head, false, "switched off after failures"); return false; }
+    if (e->sdmaNo) { rd3AccelIopSdmaFallback(RD3_ISF_PAGES, head, false, "surface 0x%x: its pages are no GART range", e->id); return false; }
+    if (e->sdmaBackoff) {
+        e->sdmaBackoff--;
+        rd3AccelIopSdmaFallback(e->sdmaBackoffWhy, head, false, "surface 0x%x: its bind was refused; %u frame(s) before it asks again",
+                                e->id, e->sdmaBackoff);
+        return false;
+    }
+    rd3AccelIopSdmaOrphansRetry();
+    if (gIopVramBaseBad || !rd3_iop_scanout_ok(gIopVramBase, q->phys, q->allocationCookie, (unsigned long long)h * q->pitch, 0)) {
+        rd3AccelIopSdmaFallback(RD3_ISF_SCANOUT, head, false, "the scanout's VRAM offset 0x%llx is not the memory at its BAR address "
+                                "0x%llx (BAR0 base %s0x%llx): SDMA would write elsewhere", q->allocationCookie, q->phys,
+                                gIopVramBaseBad ? "ambiguous, " : gIopVramBase ? "" : "not known yet, ",
+                                (unsigned long long)gIopVramBase);
+        return false;
+    }
+    const uint64_t t0 = mach_absolute_time();
+    const unsigned long long bytes = (unsigned long long)h * pitch;
+    if (e->sdma && e->sdmaBytes < bytes) rd3AccelIopSdmaUnbind(e, "the frame needs more bytes than it bound");
+    struct RD3KIopSdma c;
+    bzero(&c, sizeof c);
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!e->sdma && rd3AccelIopSdmaBind(e, head, bytes) != RD3_ISF_N) return false;
+        bzero(&c, sizeof c);
+        c.op = RD3K_IOPSDMA_OP_COPY;
+        c.handle = e->sdma;
+        c.srcOffset = e->sdmaLead;
+        c.srcPitch = pitch;
+        c.dstCookie = q->allocationCookie;
+        c.dstPitch = q->pitch;
+        c.rowBytes = rowBytes;
+        c.rows = h;
+        if (!rd3AccelIopSdmaCall(&c)) { rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "copy: no core answer"); return false; }
+        if (c.status != RD3K_IOPSDMA_STALE) break;
+        /* a GPU reset or a wake gave the GART a new table: the range is gone, bind again (once) */
+        ALOG("iop: sdma: surface 0x%x's GART range 0x%llx is gone (a new GART table): bound again", e->id, e->sdma);
+        e->sdma = 0; e->sdmaGart = 0; e->sdmaBytes = 0;
+        rd3AccelIopSdmaDmaDrop(e);   /* nothing maps the pages now; the bind makes a new DMA command */
+    }
+    if (c.status == RD3K_IOPSDMA_NODEV) {
+        rd3AccelIopSdmaFallback(RD3_ISF_CORE, head, false, "copy: the core's GART area or SDMA ring is not up");
+        return false;
+    }
+    if (c.status == RD3K_IOPSDMA_TIMEOUT && OSCompareAndSwap(0, 1, &gIopSdmaOff)) {
+        /* the copy may still run (the core takes no IOP copy until its next GART table): off, not three strikes */
+        rd3AccelIopSdmaState();
+        ALOG("iop sdma (N63): switched OFF: the SDMA copy of surface 0x%x (head %u) timed out after %llu us; the CPU copies "
+             "every frame (the core takes no IOP copy until its next GART table; `sysctl -w debug.rdna3accel_iop_sdma=1` "
+             "re-arms the accelerator)", e->id, head, c.usec);
+    }
+    if (c.status != RD3K_IOPSDMA_OK) {
+        rd3AccelIopSdmaFallback(RD3_ISF_COPY, head, true, "copy of surface 0x%x %ux%u pitch %u -> 0x%llx pitch %u: status %d err %d "
+                                "after %llu us", e->id, w, h, pitch, q->allocationCookie, q->pitch, c.status, c.err, c.usec);
+        return false;
+    }
+    /* the frame is in the scanout (the core waited for the fence); read 16 pixels back when due */
+    const SInt64 k = gCntIopSdmaN;
+    bool checked = false;
+    if (rd3_iop_sdma_verify_due((uint64_t)k)) {
+        unsigned bad = 0, bi = 0, bx = 0, by = 0, bs = 0, bd = 0;
+        for (unsigned i = 0; i < 16; i++) {
+            uint32_t x, y;
+            rd3_iop_sample_xy(i, w, h, (uint64_t)k, &x, &y);
+            if ((uint64_t)x * 4u + 4u > rowBytes) x = rowBytes / 4u - 1u;
+            const unsigned sv = *(const volatile uint32_t *)((const volatile uint8_t *)src + (uint64_t)y * pitch + (uint64_t)x * 4u);
+            const unsigned dv = *(const volatile uint32_t *)((const volatile uint8_t *)q->kva + (uint64_t)y * q->pitch + (uint64_t)x * 4u);
+            if (sv != dv && !bad++) { bi = i; bx = x; by = y; bs = sv; bd = dv; }
+        }
+        if (bad) {
+            rd3AccelIopSdmaFallback(RD3_ISF_VERIFY, head, true, "surface 0x%x %ux%u: %u of 16 scanout samples differ from the source "
+                                    "after the SDMA copy (first: #%u at %u,%u source 0x%08x scanout 0x%08x; GART +0x%llx, lead %u)",
+                                    e->id, w, h, bad, bi, bx, by, bs, bd, e->sdmaGart, e->sdmaLead);
+            return false;
+        }
+        checked = true;
+        OSAddAtomic64(1, &gCntIopSdmaVerified);
+    }
+    gIopSdmaFailRun = 0;
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    const SInt64 us = (SInt64)(ns / 1000);
+    const uint64_t moved = (uint64_t)rowBytes * h;
+    const SInt64 n = OSAddAtomic64(1, &gCntIopSdmaN);
+    OSAddAtomic64(us, &gCntIopSdmaUs);
+    OSAddAtomic64((SInt64)c.usec, &gCntIopSdmaCoreUs);
+    OSAddAtomic64((SInt64)moved, &gCntIopSdmaBytes);
+    if (head < kRd3MaxFB) { OSAddAtomic64(1, &gCntIopCopyNHead[head]); OSAddAtomic64(us, &gCntIopCopyUsHead[head]); }
+    SInt64 m = gCntIopSdmaMaxUs;
+    while (us > m && !OSCompareAndSwap64((UInt64)m, (UInt64)us, (volatile UInt64 *)&gCntIopSdmaMaxUs)) m = gCntIopSdmaMaxUs;
+    if (rd3_iop_copy_log_due((uint64_t)n))
+        ALOG("iop: sdma copy #%lld (head %u): %ux%u from surface 0x%x's GART range, pitch %u -> %u, %llu bytes in %lld us (core %llu us, "
+             "%llu MB/s)%s; CPU copies so far %lld, fallbacks %lld (N63)", (long long)n + 1, head, w, h, e->id, pitch, q->pitch,
+             (unsigned long long)moved, (long long)us, c.usec, (unsigned long long)rd3_iop_mbps(moved, (uint64_t)us),
+             checked ? ", 16 samples read back match" : "", (long long)gCntIopCopyN, (long long)gCntIopSdmaFb);
+    return true;
 }
 
 /* ---- N59: an IOP copy of a buffer nothing wrote since this head last copied it (common/rdna3_iop_stale.h) ----

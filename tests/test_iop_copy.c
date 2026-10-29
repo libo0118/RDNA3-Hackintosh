@@ -33,8 +33,109 @@ static int one(uint32_t w, uint32_t h, uint32_t spitch, uint32_t dpitch, uint32_
     return ok;
 }
 
+/* N63: the core's GART range table */
+static void test_gart_table(void)
+{
+    struct rd3_ig t;
+    uint64_t off = 0, off2 = 0, off3 = 0, o = 0, pg = 0;
+    memset(&t, 0, sizeof t);
+    rd3_ig_reset(&t, 4u << 20, 1000);
+    CHECK(t.base == (4u << 20) && t.pages == 1000 && t.live == 0);
+    CHECK(rd3_ig_alloc(&t, 0, &off) == 0 && rd3_ig_alloc(&t, 1001, &off) == 0);   /* nothing, too big */
+    const uint64_t h1 = rd3_ig_alloc(&t, 400, &off);
+    CHECK(h1 && off == (4u << 20) && rd3_ig_find(&t, h1) && t.live == 1);
+    const uint64_t h2 = rd3_ig_alloc(&t, 400, &off2);
+    CHECK(h2 && h2 != h1 && off2 == (4u << 20) + 400u * 4096u);
+    CHECK(rd3_ig_alloc(&t, 201, &off3) == 0);                                        /* 200 left */
+    CHECK(rd3_ig_release(&t, h1, &o, &pg) && o == off && pg == 400 && t.live == 1);
+    CHECK(!rd3_ig_find(&t, h1) && !rd3_ig_release(&t, h1, &o, &pg));                /* gone, once */
+    const uint64_t h3 = rd3_ig_alloc(&t, 300, &off3);                                /* first fit: the hole at 0 */
+    CHECK(h3 && off3 == (4u << 20) && h3 != h1);
+    CHECK(!rd3_ig_find(&t, h1));                                                     /* same slot, new generation */
+    const uint64_t h4 = rd3_ig_alloc(&t, 100, &o);                                   /* between 300 and 400 */
+    CHECK(h4 && o == (4u << 20) + 300u * 4096u);
+    const uint64_t h5 = rd3_ig_alloc(&t, 200, &o);                                   /* after h2 */
+    CHECK(h5 && o == (4u << 20) + 800u * 4096u);
+    CHECK(rd3_ig_alloc(&t, 1, &o) == 0);                                             /* full */
+    /* a reset (GPU reset, wake: a new GART table) forgets every range; old handles name nothing */
+    rd3_ig_reset(&t, 4u << 20, 1000);
+    CHECK(!rd3_ig_find(&t, h2) && !rd3_ig_find(&t, h3) && t.live == 0);
+    const uint64_t h6 = rd3_ig_alloc(&t, 10, &o);
+    CHECK(h6 && h6 != h2 && h6 != h3 && h6 != h4 && h6 != h5 && o == (4u << 20));
+    CHECK(!rd3_ig_find(&t, 0) && !rd3_ig_find(&t, 0x100000000ull) && !rd3_ig_find(&t, ((uint64_t)t.gen << 32) | 33u));
+    /* slots run out before the area */
+    rd3_ig_reset(&t, 0, 1u << 20);
+    unsigned got = 0;
+    for (unsigned i = 0; i < RD3_IG_SLOTS + 2; i++) got += rd3_ig_alloc(&t, 1, &o) != 0;
+    CHECK(got == RD3_IG_SLOTS && t.live == RD3_IG_SLOTS);
+    /* the source rectangle inside the range */
+    CHECK(rd3_ig_rect_ok(1080ull * 7680, 0, 7680, 7680, 1080));
+    CHECK(!rd3_ig_rect_ok(1080ull * 7680, 4, 7680, 7680, 1080));
+    CHECK(rd3_ig_rect_ok(1080ull * 7680 + 4, 4, 7680, 7680, 1080));
+    CHECK(rd3_ig_rect_ok(1079ull * 7744 + 7680, 0, 7744, 7680, 1080));               /* the last row needs no pad */
+    CHECK(!rd3_ig_rect_ok(1079ull * 7744 + 7679, 0, 7744, 7680, 1080));
+    CHECK(!rd3_ig_rect_ok(100, 0, 8, 16, 2) && !rd3_ig_rect_ok(100, 0, 8, 8, 0) && !rd3_ig_rect_ok(100, 100, 8, 8, 1));
+    CHECK(rd3_ig_rect_ok(~0ull, 0, 0xffffffffu, 0xffffffffu, 0xffffffffu));          /* the largest span fits 64 bits */
+}
+
+/* N63: the descriptor's physical segments as a page list in GART order */
+static void test_pages(void)
+{
+    uint64_t l[16], n = 0;
+    /* page-aligned, two segments: 3 pages + 2 pages */
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 0, 0x10000, 3 * 4096) == 0 && n == 3);
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 3 * 4096, 0x80000, 2 * 4096 - 100) == 0 && n == 5);
+    CHECK(l[0] == 0x10000 && l[2] == 0x12000 && l[3] == 0x80000 && l[4] == 0x81000);
+    CHECK(rd3_iop_range_pages(0, 5 * 4096 - 100) == 5);
+    /* a descriptor that starts 0x100 into its page, split in the middle of a page that continues */
+    n = 0;
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0x100, 0, 0x20100, 0x1f80) == 0 && n == 3);   /* ends at 0x22080 */
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0x100, 0x1f80, 0x22080, 0xf80 + 4096) == 0 && n == 4);
+    CHECK(l[0] == 0x20000 && l[1] == 0x21000 && l[2] == 0x22000 && l[3] == 0x23000);
+    CHECK(rd3_iop_range_pages(0x100, 0x1f80 + 0xf80 + 4096) == 4);
+    /* a segment that resumes inside ANOTHER page, or at a page start where the range is mid-page: refused */
+    n = 0;
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 0, 0x30000, 0x800) == 0 && n == 1);
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 0x800, 0x40800, 0x800) == -1);
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 0x800, 0x40000, 0x800) == -1);
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 0x800, 0x30800, 0x800) == 0 && n == 1);   /* the same page continued */
+    n = 0;
+    CHECK(rd3_iop_pages_add(l, 16, &n, 0, 0x10, 0x30010, 16) == -1);   /* mid-page start, nothing before it */
+    /* the list's capacity */
+    n = 0;
+    CHECK(rd3_iop_pages_add(l, 2, &n, 0, 0, 0x50000, 3 * 4096) == -2 && n == 2);
+    CHECK(rd3_iop_pages_add(l, 2, &n, 0, 0, 0x50000, 0) == 0);
+}
+
+static void test_sdma_policy(void)
+{
+    uint32_t x, y;
+    CHECK(rd3_iop_sdma_verify_due(0) && rd3_iop_sdma_verify_due(255) && !rd3_iop_sdma_verify_due(257) && rd3_iop_sdma_verify_due(272));
+    for (uint64_t seq = 0; seq < 50; seq++)
+        for (uint32_t i = 0; i < 16; i++) {
+            rd3_iop_sample_xy(i, 1920, 1080, seq, &x, &y);
+            CHECK(x < 1920 && y < 1080);
+        }
+    rd3_iop_sample_xy(0, 1920, 1080, 7, &x, &y);  CHECK(x == 0 && y == 0);
+    rd3_iop_sample_xy(15, 1920, 1080, 7, &x, &y); CHECK(x == 1919 && y == 1079);
+    rd3_iop_sample_xy(5, 1, 1, 3, &x, &y);        CHECK(x == 0 && y == 0);
+    rd3_iop_sample_xy(5, 0, 0, 3, &x, &y);        CHECK(x == 0 && y == 0);
+    CHECK(!strcmp(rd3_iop_sdma_fb_name(RD3_ISF_COPY), "copy") && !strcmp(rd3_iop_sdma_fb_name(RD3_ISF_N), "?"));
+    CHECK(!strcmp(rd3_iop_sdma_fb_name(RD3_ISF_SCANOUT), "scanout") && RD3_ISF_N == 7);
+    /* the scanout's VRAM offset against its BAR address */
+    CHECK(rd3_iop_scanout_ok(0x80000000ull, 0x80000000ull + 0x1000000, 0x1000000, 8294400, 0));
+    CHECK(rd3_iop_scanout_ok(0x80000000ull, 0x80000000ull, 0, 8294400, 16ull << 30));        /* offset 0 at the BAR's start */
+    CHECK(!rd3_iop_scanout_ok(0x80000000ull, 0x80800000ull, 0, 8294400, 0));                 /* console elsewhere, offset 0 */
+    CHECK(!rd3_iop_scanout_ok(0, 0x80000000ull, 0, 8294400, 0));                             /* no base learned */
+    CHECK(!rd3_iop_scanout_ok(0x80000000ull, 0x1000, 0x2000, 16, 0));                        /* phys under the offset */
+    CHECK(!rd3_iop_scanout_ok(0x80000000ull, 0x80000000ull + (16ull << 30) - 4096, (16ull << 30) - 4096, 8192, 16ull << 30));
+}
+
 int main(void)
 {
+    test_gart_table();
+    test_pages();
+    test_sdma_policy();
     CHECK(rd3_iop_copy64_ok(0x1000, 0x2000, 7680, 7680, 7680));
     CHECK(!rd3_iop_copy64_ok(0x1004, 0x2000, 7680, 7680, 7680));
     CHECK(!rd3_iop_copy64_ok(0x1000, 0x2000, 7684, 7680, 7680));

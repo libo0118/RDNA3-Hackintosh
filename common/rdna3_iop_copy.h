@@ -59,4 +59,177 @@ static inline uint64_t rd3_iop_mbps(uint64_t bytes, uint64_t us)
 /* a log line is due for the k-th (0-based) copy: the first 4, then every 1024th */
 static inline int rd3_iop_copy_log_due(uint64_t k) { return k < 4u || (k & 1023u) == 0; }
 
+/* ==== N63: the IOP copy by SDMA ====
+ * The CPU copy above moves ~8 MB per 1920x1080 frame through the BAR on WindowServer's thread (card run 2026-10-28d:
+ * avg 20 ms per head, 40 ms a frame with two heads). With the switch on (boot-arg rdna3iopsdma, sysctl
+ * debug.rdna3accel_iop_sdma) the accelerator binds the surface's wired system pages into a GART range of the core kext
+ * once per source slot (amdgpu_ttm_alloc_gart -> amdgpu_gart_bind of a GTT BO; kept while the slot keeps the memory
+ * descriptor prepared, unbound before it is completed) and has SDMA0 copy the pitched rectangle from that range into
+ * the scanout (amdgpu_copy_buffer, COPY_LINEAR: one span when the pitches match, else one per row), waiting for the
+ * fence before the transaction returns. Any failure copies that frame with the CPU (counted by reason). */
+
+/* the core's GART range table (kext/src/RDNA3Bringup.cpp iopGart*): first fit in an area of the GART nothing else
+ * uses; a handle names a slot and the generation it was bound in, so a handle from before a reset or a wake (the
+ * table is reset with the GART) or of an unbound range finds nothing */
+#define RD3_IG_SLOTS 32u
+struct rd3_ig_slot { uint64_t off, pages; uint32_t gen, used; };
+struct rd3_ig {
+    uint64_t base, pages;   /* the area: GART byte offset of its first page, its size in 4 KiB pages */
+    uint32_t gen, live;     /* the last generation handed out (kept across resets), slots in use */
+    struct rd3_ig_slot s[RD3_IG_SLOTS];
+};
+
+/* (re)start with nothing bound; the generation goes on so older handles stay invalid */
+static inline void rd3_ig_reset(struct rd3_ig *t, uint64_t base, uint64_t pages)
+{
+    const uint32_t gen = t->gen;
+    for (uint32_t i = 0; i < RD3_IG_SLOTS; i++) { t->s[i].off = 0; t->s[i].pages = 0; t->s[i].gen = 0; t->s[i].used = 0; }
+    t->base = base & ~4095ull; t->pages = pages; t->gen = gen; t->live = 0;
+}
+
+static inline uint64_t rd3_ig_handle(uint32_t idx, uint32_t gen) { return ((uint64_t)gen << 32) | (uint64_t)(idx + 1u); }
+
+/* the slot a handle names, or NULL (0, unknown, unbound, from an older generation) */
+static inline struct rd3_ig_slot *rd3_ig_find(struct rd3_ig *t, uint64_t handle)
+{
+    const uint32_t idx = (uint32_t)(handle & 0xffffffffu), gen = (uint32_t)(handle >> 32);
+    if (!idx || idx > RD3_IG_SLOTS || !gen) return 0;
+    struct rd3_ig_slot *s = &t->s[idx - 1u];
+    return (s->used && s->gen == gen) ? s : 0;
+}
+
+/* `npages` free pages starting at area page `at` */
+static inline int rd3_ig_free_at(const struct rd3_ig *t, uint64_t at, uint64_t npages)
+{
+    if (at > t->pages || npages > t->pages - at) return 0;
+    for (uint32_t i = 0; i < RD3_IG_SLOTS; i++) {
+        const struct rd3_ig_slot *s = &t->s[i];
+        if (!s->used) continue;
+        const uint64_t so = (s->off - t->base) / 4096u;
+        if (at < so + s->pages && so < at + npages) return 0;
+    }
+    return 1;
+}
+
+/* a range of `npages` (first fit, lowest offset): its handle and GART byte offset, or 0 (no slot, no room) */
+static inline uint64_t rd3_ig_alloc(struct rd3_ig *t, uint64_t npages, uint64_t *off)
+{
+    uint32_t free_slot = RD3_IG_SLOTS;
+    uint64_t best = ~0ull;
+    if (!npages || npages > t->pages) return 0;
+    for (uint32_t i = 0; i < RD3_IG_SLOTS && free_slot == RD3_IG_SLOTS; i++)
+        if (!t->s[i].used) free_slot = i;
+    if (free_slot == RD3_IG_SLOTS) return 0;
+    /* candidates: the area's start and the end of every bound range */
+    if (rd3_ig_free_at(t, 0, npages)) best = 0;
+    for (uint32_t i = 0; i < RD3_IG_SLOTS; i++) {
+        if (!t->s[i].used) continue;
+        const uint64_t at = (t->s[i].off - t->base) / 4096u + t->s[i].pages;
+        if (at < best && rd3_ig_free_at(t, at, npages)) best = at;
+    }
+    if (best == ~0ull) return 0;
+    if (++t->gen == 0) t->gen = 1;   /* 0 never names a range */
+    struct rd3_ig_slot *s = &t->s[free_slot];
+    s->off = t->base + best * 4096u; s->pages = npages; s->gen = t->gen; s->used = 1;
+    t->live++;
+    *off = s->off;
+    return rd3_ig_handle(free_slot, s->gen);
+}
+
+/* forget a range; 1 = it was bound (its GART offset and pages out, for the unmap), 0 = the handle names nothing */
+static inline int rd3_ig_release(struct rd3_ig *t, uint64_t handle, uint64_t *off, uint64_t *pages)
+{
+    struct rd3_ig_slot *s = rd3_ig_find(t, handle);
+    if (!s) return 0;
+    *off = s->off; *pages = s->pages;
+    s->used = 0; s->gen = 0; s->off = 0; s->pages = 0;
+    if (t->live) t->live--;
+    return 1;
+}
+
+/* the source rectangle (rows of row_bytes, pitch apart, from byte src_off of the range) lies inside its `bytes` */
+static inline int rd3_ig_rect_ok(uint64_t bytes, uint64_t src_off, uint32_t pitch, uint32_t row_bytes, uint32_t rows)
+{
+    if (!rows || !row_bytes || row_bytes > pitch || src_off >= bytes) return 0;
+    const uint64_t span = (uint64_t)(rows - 1u) * pitch + row_bytes;
+    return span <= bytes - src_off;
+}
+
+/* the 4 KiB pages under a memory descriptor, from its physical segments in order: `md_off` is the segment's offset
+ * in the descriptor, `lead` the in-page offset of the descriptor's first byte (the range maps descriptor byte X at
+ * range byte lead + X). A segment must start where that puts it in its page: at a page start (a new page), or inside
+ * the page the previous segment ended in (the same page continued). 0 = added, -1 = a page the range cannot express,
+ * -2 = the list is full */
+static inline int rd3_iop_pages_add(uint64_t *list, uint64_t cap, uint64_t *n, uint32_t lead, uint64_t md_off,
+                                    uint64_t pa, uint64_t len)
+{
+    if (!len) return 0;
+    const uint64_t in = (md_off + lead) & 4095u;
+    if ((pa & 4095u) != in) return -1;
+    uint64_t page = pa & ~4095ull;
+    const uint64_t end = pa + len;
+    if (in) {   /* inside a page: the previous segment's last page, or the descriptor's first byte */
+        if (*n) { if (list[*n - 1u] != page) return -1; }
+        else if (md_off) return -1;
+        else { if (*n >= cap) return -2; list[(*n)++] = page; }
+        page += 4096u;
+    }
+    for (; page < end; page += 4096u) {
+        if (*n >= cap) return -2;
+        list[(*n)++] = page;
+    }
+    return 0;
+}
+
+/* pages of a range holding `bytes` from in-page offset `lead` */
+static inline uint64_t rd3_iop_range_pages(uint32_t lead, uint64_t bytes) { return ((uint64_t)lead + bytes + 4095u) / 4096u; }
+
+/* why a frame went to the CPU copy instead (debug.rdna3accel_iop_copy_sdma_fb_<name>) */
+enum rd3_iop_sdma_fb {
+    RD3_ISF_CORE = 0,   /* the core does not answer rdna3IopSdma (older core) or its GART / SDMA are not up */
+    RD3_ISF_PAGES,      /* the surface's physical pages could not be listed in GART order (or no memory for the list) */
+    RD3_ISF_BIND,       /* the core could not bind the pages (no free GART range or slot, or refused) */
+    RD3_ISF_COPY,       /* the SDMA copy was refused or its fence did not come in time */
+    RD3_ISF_VERIFY,     /* the scanout's samples after the copy differ from the source: the CPU copied it again */
+    RD3_ISF_OFF,        /* three failures in a row switched the SDMA path off until the sysctl is written */
+    RD3_ISF_SCANOUT,    /* the scanout's VRAM offset does not name the memory its BAR address does (or no base known) */
+    RD3_ISF_N
+};
+static inline const char *rd3_iop_sdma_fb_name(unsigned r)
+{
+    static const char *const n[RD3_ISF_N] = { "core", "pages", "bind", "copy", "verify", "off", "scanout" };
+    return r < RD3_ISF_N ? n[r] : "?";
+}
+
+/* the scanout the CPU writes (BAR address `phys`) is the VRAM SDMA writes (offset `cookie`): the BAR's base
+ * (`base`, learned from the core's own allocations: phys = BAR0 + offset) must lie under phys by exactly cookie. A
+ * framebuffer on the boot console without the core's head info reports offset 0 for a console that may lie
+ * elsewhere: SDMA must never write there. */
+static inline int rd3_iop_scanout_ok(uint64_t base, uint64_t phys, uint64_t cookie, uint64_t bytes, uint64_t vram_size)
+{
+    if (!base || !phys || phys < cookie || phys - cookie != base) return 0;
+    return !vram_size || (cookie <= vram_size && bytes <= vram_size - cookie);
+}
+
+/* failures in a row that switch the SDMA path off (the A2 swap copy's rule) */
+#define RD3_ISF_OFF_AFTER 3u
+/* frames a slot waits after the core refused its bind for want of room (NOSPACE) or a GART / ring that is not up
+ * (NODEV) before it lists its pages and asks again (each ask walks the whole page list) */
+#define RD3_ISF_BACKOFF_FRAMES 64u
+
+/* the scanout is read back and compared with the source for the k-th (0-based) SDMA copy: the first 256, then every
+ * 16th (16 samples through the BAR, a few microseconds) */
+static inline int rd3_iop_sdma_verify_due(uint64_t k) { return k < 256u || (k & 15u) == 0; }
+
+/* sample i (0..15) of a w x h frame: a 4 x 4 grid moved by `seq` so successive checks look at other pixels, the
+ * first sample the frame's first pixel, the last its last */
+static inline void rd3_iop_sample_xy(uint32_t i, uint32_t w, uint32_t h, uint64_t seq, uint32_t *x, uint32_t *y)
+{
+    if (!w || !h) { *x = *y = 0; return; }
+    if (i == 0) { *x = 0; *y = 0; return; }
+    if (i == 15) { *x = w - 1u; *y = h - 1u; return; }
+    *x = (uint32_t)((((uint64_t)(2u * (i & 3u) + 1u) * w) / 8u + seq * 97u) % w);
+    *y = (uint32_t)((((uint64_t)(2u * (i >> 2) + 1u) * h) / 8u + seq * 61u) % h);
+}
+
 #endif

@@ -38,9 +38,9 @@ check(list(s) == ["WindowServer[207]"] and s["WindowServer[207]"]["outs"] == "30
 r = present_rows(text, SV, True)
 names = [n for _l, n, _t in r]
 check(names == ["IOP copy", "present cost"], "rows: %r" % names)
-check(r[0][0] == "INFO" and "1000 IOP copies, avg 4.00 ms (2073 MB/s, 1000 of them 8 bytes per access), longest 9.00 ms" in r[0][2]
-      and "head 0: 600, avg 4.00 ms, gates avg 0.50 ms" in r[0][2], "IOP copy row: %r" % (r[0],))
-check(r[1][0] == "INFO" and r[1][2].startswith("WindowServer[207]: copy-out avg 0.40 ms (path GPU 29 / CPU 1; NVMTL_SURFOUT_DMA on), IOP copy avg 4.00 ms, surface-in avg 3.00 ms")
+check(r[0][0] == "INFO" and "1000 IOP copies (path CPU), avg 4.00 ms; CPU path: 1000 copies, avg 4.00 ms (2073 MB/s, 1000 of them 8 bytes per access), longest 9.00 ms" in r[0][2]
+      and "head 0: 600, avg 4.00 ms, gates avg 0.50 ms" in r[0][2] and "SDMA path" not in r[0][2], "IOP copy row: %r" % (r[0],))
+check(r[1][0] == "INFO" and r[1][2].startswith("WindowServer[207]: copy-out avg 0.40 ms (path GPU 29 / CPU 1; NVMTL_SURFOUT_DMA on), IOP copy avg 4.00 ms (CPU), surface-in avg 3.00 ms")
       and "GPU path not taken: first 1" in r[1][2], "present cost row (GPU path): %r" % (r[1],))
 # the old path only, slow
 r = present_rows(P % (2, body(10, 10, 0, 12000, dma_mode=1)), SV, True)
@@ -58,6 +58,35 @@ check(present_rows("", "", False) == [], "nothing at all: no rows")
 r = present_rows("x WindowServer[207:2cd] (RDNA3MTLDriver) NVMTL: vk: handoff: SUMMARY cbs=1\n", SV, True)
 check(r[-1][1] == "present cost" and "before DRIVER-PLAN N61" in r[-1][2], "old plugin: %r" % r)
 check(kernel_counters(SV)["iop_copy_n_h1"] == 400, "kernel counters parsed")
+
+# N63: the SDMA path took most copies (the CPU only a few fallbacks): both paths and the reasons in the row, the
+# present cost row's IOP average over both
+SD = ("debug.rdna3accel_iop_ok: 5756\ndebug.rdna3accel_iop_copy_n: 10\ndebug.rdna3accel_iop_copy_bytes: 82944000\n"
+      "debug.rdna3accel_iop_copy_us: 200000\ndebug.rdna3accel_iop_copy_max_us: 25000\ndebug.rdna3accel_iop_copy_64: 10\n"
+      "debug.rdna3accel_iop_gate_us: 99000\ndebug.rdna3accel_iop_copy_n_h0: 1000\ndebug.rdna3accel_iop_copy_us_h0: 1290000\n"
+      "debug.rdna3accel_iop_gate_us_h0: 99000\ndebug.rdna3accel_iop_copy_sdma_state: 1\ndebug.rdna3accel_iop_copy_sdma_n: 990\n"
+      "debug.rdna3accel_iop_copy_sdma_us: 1089000\ndebug.rdna3accel_iop_copy_sdma_core_us: 990000\n"
+      "debug.rdna3accel_iop_copy_sdma_max_us: 3000\ndebug.rdna3accel_iop_copy_sdma_bytes: 8211456000\n"
+      "debug.rdna3accel_iop_copy_sdma_binds: 4\ndebug.rdna3accel_iop_copy_sdma_bind_us: 2000\n"
+      "debug.rdna3accel_iop_copy_sdma_unbinds: 1\ndebug.rdna3accel_iop_copy_sdma_ranges: 3\n"
+      "debug.rdna3accel_iop_copy_sdma_verified: 300\ndebug.rdna3accel_iop_copy_sdma_fb: 10\n"
+      "debug.rdna3accel_iop_copy_sdma_fb_core: 10\ndebug.rdna3accel_iop_copy_sdma_fb_pages: 0\n")
+r = present_rows(P % (5, body(30, 1, 29, 400)), SD, True)
+check(r[0][0] == "INFO" and r[0][2].startswith("1000 IOP copies (path SDMA 990 / CPU 10), avg 1.29 ms; CPU path: 10 copies, avg 20.00 ms")
+      and "SDMA path on: 990 copies, avg 1.10 ms (core 1.00 ms), longest 3.00 ms, 7540 MB/s; 4 bind(s) (avg 0.50 ms), 1 unbind(s), "
+          "3 range(s) bound; 300 checked by read-back; fallbacks to the CPU 10 (core 10)" in r[0][2], "SDMA row: %r" % (r[0],))
+check("IOP copy avg 1.29 ms (SDMA 990 / CPU 10)" in r[1][2], "present cost over both paths: %r" % (r[1],))
+# switched off after failures, read-back mismatches: WARN with the reason
+r = present_rows("", SD.replace("sdma_state: 1", "sdma_state: 2") + "debug.rdna3accel_iop_copy_sdma_fb_verify: 3\n", True)
+check(r[0][0] == "WARN" and "switched OFF after 3 failures" in r[0][2] and "verify 3" in r[0][2] and "switched itself OFF" in r[0][2],
+      "SDMA off: %r" % (r[0],))
+r = present_rows("", SD + "debug.rdna3accel_iop_copy_sdma_fb_copy: 2\n", True)
+check(r[0][0] == "WARN" and "failed or read back wrong" in r[0][2], "SDMA copy failures: %r" % (r[0],))
+# on, but every copy on the CPU (e.g. a core without rdna3IopSdma would say state 3)
+r = present_rows("", SV + "debug.rdna3accel_iop_copy_sdma_state: 1\ndebug.rdna3accel_iop_copy_sdma_n: 0\n", True)
+check(r[0][0] == "WARN" and "every copy went to the CPU" in r[0][2], "SDMA on, unused: %r" % (r[0],))
+r = present_rows("", SV + "debug.rdna3accel_iop_copy_sdma_state: 3\ndebug.rdna3accel_iop_copy_sdma_n: 0\n", True)
+check(r[0][0] == "INFO" and "core older than N63" in r[0][2], "old core: %r" % (r[0],))
 
 if FAILS:
     sys.exit("test_triage_present_cost: %d FAILED" % len(FAILS))

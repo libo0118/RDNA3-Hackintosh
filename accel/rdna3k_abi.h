@@ -375,6 +375,49 @@ struct RD3KCopyRequest {
     unsigned long long usec;                   /* out: the copy's time */
 };
 
+/* ---- the IOP copy by SDMA (answered by the core kext, asked by the accelerator directly; DRIVER-PLAN N63) ----
+ * The display pipe's copy of a presented IOSurface (system memory) into a head's scanout (VRAM). BIND puts the
+ * surface's wired 4 KiB pages into a GART range of the core (amdgpu_ttm_alloc_gart / amdgpu_gart_bind) and answers
+ * a handle; COPY has SDMA0 copy a pitched rectangle from that range into VRAM and waits for its fence
+ * (amdgpu_copy_buffer); UNBIND drops the range (amdgpu_gart_unbind) - the accelerator unbinds before it lets the
+ * pages go. A GPU reset or a wake gives the GART a new table: every handle from before answers STALE (bind again).
+ * All three run under the core's DRM lock (it serializes the DMA ring). A core without this function answers
+ * kIOReturnUnsupported (IOService's): the accelerator copies with the CPU. */
+#define RD3K_IOPSDMA_FN        "rdna3IopSdma"
+#define RD3K_IOPSDMA_VERSION   1u
+#define RD3K_IOPSDMA_OP_BIND   1u
+#define RD3K_IOPSDMA_OP_COPY   2u
+#define RD3K_IOPSDMA_OP_UNBIND 3u
+/* status (the call answers kIOReturnSuccess with a status for everything but a bad version / op) */
+#define RD3K_IOPSDMA_OK        0
+#define RD3K_IOPSDMA_NODEV     1   /* no GMC / GART area / SDMA ring (yet): rdna3lvl < 7, a reset under way, stopping */
+#define RD3K_IOPSDMA_STALE     2   /* the handle names no bound range (unbound, or bound before a reset / wake) */
+#define RD3K_IOPSDMA_NOSPACE   3   /* BIND: no free slot or GART range that large */
+#define RD3K_IOPSDMA_INVALID   4   /* bad pages (not page aligned, too many), a rectangle outside the range or VRAM */
+#define RD3K_IOPSDMA_FAILED    5   /* the GART map or the SDMA copy failed ('err') */
+/* COPY: the fence did not come in time. The copy may still run: the core takes no IOP copy any more and keeps
+ * the bound ranges' PTEs (an unbind only unmaps once the ring drained) until the next GART table; the accelerator
+ * switches its SDMA path off */
+#define RD3K_IOPSDMA_TIMEOUT   6
+struct RD3KIopSdma {
+    unsigned int       version;     /* RD3K_IOPSDMA_VERSION */
+    unsigned int       op;          /* RD3K_IOPSDMA_OP_* */
+    int                status;      /* out: RD3K_IOPSDMA_* */
+    int                err;         /* out: the RDNA3_E* code behind FAILED / INVALID */
+    unsigned long long handle;      /* BIND out, COPY / UNBIND in */
+    /* BIND */
+    const unsigned long long *pages;   /* bus addresses, 4 KiB each, in the range's order */
+    unsigned long long pageCount;
+    unsigned long long gartOffset;  /* out: the range's GART byte offset (for the log) */
+    unsigned long long liveRanges;  /* out (all ops): ranges bound now */
+    /* COPY: rows of rowBytes from byte srcOffset of the range, srcPitch apart, to VRAM offset dstCookie (the
+     * scanout's allocationCookie), dstPitch apart */
+    unsigned long long srcOffset;
+    unsigned long long dstCookie;
+    unsigned int       srcPitch, dstPitch, rowBytes, rows;
+    unsigned long long usec;        /* out: the op's time (the lock wait included) */
+};
+
 /* ---- GPU busy time (answered by the core kext; DRIVER-PLAN N49) ----
  * The accelerator's 250 ms perfstats tick takes the kernel rings' busy time
  * (common/rdna3_gpu_busy.h: amdgpu_ctx_fence_time's model) for Activity

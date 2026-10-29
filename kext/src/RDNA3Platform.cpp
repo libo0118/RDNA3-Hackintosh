@@ -810,6 +810,76 @@ IOReturn RDNA3Accel::platformCopyVram(RD3KCopyRequest *q)
     return r == RDNA3_OK ? kIOReturnSuccess : kIOReturnIOError;
 }
 
+/* DRIVER-PLAN N63: the IOP copy by SDMA (rdna3k_abi.h RD3K_IOPSDMA_FN): bind a presented surface's pages into
+ * a GART range, copy from it into the scanout, unbind. The accelerator calls it on WindowServer's thread from
+ * performTransaction (its family lock may be held: that lock is taken before ours everywhere). */
+static int rd3IopSdmaStatus(int r)
+{
+    switch (r) {
+    case RDNA3_OK:     return RD3K_IOPSDMA_OK;
+    case RDNA3_ENODEV: return RD3K_IOPSDMA_NODEV;
+    case RDNA3_ENOENT: return RD3K_IOPSDMA_STALE;
+    case RDNA3_ENOMEM: return RD3K_IOPSDMA_NOSPACE;
+    case RDNA3_EINVAL: return RD3K_IOPSDMA_INVALID;
+    case RDNA3_ETIME:  return RD3K_IOPSDMA_TIMEOUT;
+    default:           return RD3K_IOPSDMA_FAILED;
+    }
+}
+
+IOReturn RDNA3Accel::platformIopSdma(RD3KIopSdma *q)
+{
+    if (!q || q->version != RD3K_IOPSDMA_VERSION)
+        return kIOReturnBadArgument;
+    if (q->op != RD3K_IOPSDMA_OP_BIND && q->op != RD3K_IOPSDMA_OP_COPY && q->op != RD3K_IOPSDMA_OP_UNBIND)
+        return kIOReturnBadArgument;
+    q->status = RD3K_IOPSDMA_NODEV;
+    q->err = 0;
+    q->usec = 0;
+    if (!fDrmLock)
+        return kIOReturnSuccess;
+    uint64_t t0 = mach_absolute_time(), ns = 0;
+    int r = RDNA3_ENODEV;
+    uint32_t live = 0;
+    IOLockLock(fDrmLock);
+    /* re-checked under the lock: stop takes fBringup out under it */
+    if (fBringup) {
+        switch (q->op) {
+        case RD3K_IOPSDMA_OP_BIND: {
+            uint64_t h = 0, off = 0;
+            r = fBringup->iopGartBind((const uint64_t *)q->pages, q->pageCount, &h, &off);
+            q->handle = h;
+            q->gartOffset = off;
+            break;
+        }
+        case RD3K_IOPSDMA_OP_COPY:
+            r = fBringup->iopGartCopy(q->handle, q->srcOffset, q->srcPitch, q->dstCookie, q->dstPitch, q->rowBytes,
+                                      q->rows);
+            break;
+        default:
+            r = fBringup->iopGartUnbind(q->handle);
+            break;
+        }
+        live = fBringup->iopGartLive();
+    }
+    IOLockUnlock(fDrmLock);
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    q->usec = ns / 1000;
+    q->status = rd3IopSdmaStatus(r);
+    q->err = r;
+    q->liveRanges = live;
+    /* the accelerator counts and logs every failure with its frame; the core logs the hardware ones too */
+    const bool bad = q->status == RD3K_IOPSDMA_FAILED || q->status == RD3K_IOPSDMA_INVALID ||
+                     q->status == RD3K_IOPSDMA_TIMEOUT;
+    if (bad && (fIopSdmaFails < 8 || (fIopSdmaFails & 1023) == 0))
+        LOG("iop sdma (N63): op %u failed (%d, status %d) handle 0x%llx: %llu pages | rect %ux%u bytes from +%llu "
+            "(pitch %u) -> VRAM 0x%llx (pitch %u), %u ranges bound (failure #%u)", q->op, r, q->status, q->handle,
+            q->pageCount, q->rowBytes, q->rows, q->srcOffset, q->srcPitch, q->dstCookie, q->dstPitch, live,
+            fIopSdmaFails + 1);
+    if (bad)
+        fIopSdmaFails++;
+    return kIOReturnSuccess;
+}
+
 /* DRIVER-PLAN N49: the kernel rings' busy time and the GPU time per process
  * since the last take, for the accelerator's PerformanceStatistics and its
  * contexts' accumulatedGPUTime (Activity Monitor) */
@@ -942,6 +1012,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformPageoff((RD3KSurfPageoff *)p1);
         if (fn->isEqualTo(RD3K_COPY_FN))
             return platformCopyVram((RD3KCopyRequest *)p1);
+        if (fn->isEqualTo(RD3K_IOPSDMA_FN))
+            return platformIopSdma((RD3KIopSdma *)p1);
     }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
