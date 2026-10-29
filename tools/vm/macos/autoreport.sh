@@ -79,7 +79,8 @@ fix_tracedir() {
 }
 sync_metal() {
     fix_tracedir
-    plugin_trace_conf
+    # --sync-metal (build_metal.sh) runs before plugin_trace_conf is defined below; every boot writes it anyway
+    command -v plugin_trace_conf >/dev/null 2>&1 && plugin_trace_conf
     m=/Library/GPUBundles/rdna3mtl
     [ -d "$m" ] && [ -f "$1/libvulkan_radeon.dylib" ] || return 0
     for f in libvulkan_radeon.dylib libdrm.2.dylib libdrm_amdgpu.1.dylib; do
