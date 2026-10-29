@@ -125,6 +125,15 @@ int main(void)
       CHECK(nvmtl_fbf_reason_rank(NVMTL_FBF_NO_ATTACHMENT) < nvmtl_fbf_reason_rank(NVMTL_FBF_FORCED_ZERO)
             && nvmtl_fbf_reason_rank(NVMTL_FBF_FORCED_ZERO) < nvmtl_fbf_reason_rank(NVMTL_FBF_MULTISAMPLE)
             && nvmtl_fbf_reason_rank(NVMTL_FBF_MULTISAMPLE) < nvmtl_fbf_reason_rank(NVMTL_FBF_NO_LAYOUT)); }
+    /* N64: the barrier before a reading draw: an image barrier unless the switch asks for the old one or an image is missing */
+    CHECK(nvmtl_fbf_barrier_mode(0, 0x1, 0x1) == NVMTL_FBF_BAR_IMAGE);
+    CHECK(nvmtl_fbf_barrier_mode(0, 0x5, 0xff) == NVMTL_FBF_BAR_IMAGE);
+    CHECK(nvmtl_fbf_barrier_mode(1, 0x1, 0x1) == NVMTL_FBF_BAR_MEM_KNOB);
+    CHECK(nvmtl_fbf_barrier_mode(0, 0x3, 0x1) == NVMTL_FBF_BAR_MEM_NOIMAGE);
+    CHECK(nvmtl_fbf_barrier_mode(0, 0, 0xff) == NVMTL_FBF_BAR_MEM_NOIMAGE);
+    CHECK(nvmtl_fbf_barrier_mode(0, 0x100, 0x1ff) == NVMTL_FBF_BAR_MEM_NOIMAGE);   /* only slots 0..7 exist */
+    CHECK(!nvmtl_fbf_membar_knob(NULL) && !nvmtl_fbf_membar_knob("") && !nvmtl_fbf_membar_knob("0") && !nvmtl_fbf_membar_knob("0x"));
+    CHECK(nvmtl_fbf_membar_knob("1") && nvmtl_fbf_membar_knob("yes"));
     /* the release-build syslog filter keeps the new lines */
     CHECK(nvmtl_log_failure("vk: fbfetch: UNSUPPORTED (a multisample target): reads"));
     CHECK(nvmtl_log_failure("vk: fbfetch: a draw that reads [[color(n)]] 0x1 is SKIPPED: no set"));

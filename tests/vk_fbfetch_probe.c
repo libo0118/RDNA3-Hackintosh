@@ -9,6 +9,9 @@
  * Cases: one fetch draw over a gradient for several formats (incl. sRGB view over an sRGB image, UNORM view over an sRGB image);
  * 40 overlapping fetch draws that add 0.01 each (per-pixel read-after-write ordering, exact in RGBA32F; env NOBARRIER=1 drops
  * the barrier as a negative control and only reports); a restart (pass A without input attachments, pass B with, LOADing).
+ * N64: every case runs twice, with the barrier as a global VkMemoryBarrier (the plugin before N64, NVMTL_FBF_MEMBAR=1) and as a
+ * VkImageMemoryBarrier on the attachment (GENERAL -> GENERAL, the plugin's default since N64); case 5 times 400 overlapping
+ * WindowServer-sized fetch draws (BGRA8 1920x1080, DCC on) with each barrier kind and with none (the floor), by GPU timestamps.
  *   cc -I metal/plugin -o /tmp/fbf_probe tests/vk_fbfetch_probe.c -lvulkan -lm && /tmp/fbf_probe
  * Shaders (glslc --target-env=vulkan1.1 -O; the SPIR-V is in vk_fbfetch_probe_spv.h):
  *   fbf.vert  : fullscreen triangle from gl_VertexIndex
@@ -60,9 +63,16 @@ static VkRenderPass mkpass(VkFormat f, int input, int load)
                                   { 0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT } };
     VkRenderPassCreateInfo rc = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, 0, 0, 1, &ad, 1, &sd, input ? 3u : 2u, dp }; VkRenderPass rp; CK(vkCreateRenderPass(dev, &rc, 0, &rp)); return rp;
 }
-static void fbf_barrier(VkCommandBuffer cb)
+static int g_imgbar;   /* N64: 1 = the barrier is an image barrier on the attachment */
+static void fbf_barrier(VkCommandBuffer cb, VkImage img)
 {
     if (getenv("NOBARRIER")) return;
+    if (g_imgbar) {
+        VkImageMemoryBarrier ib = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, img, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &ib);
+        return;
+    }
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, 0, 0, 0);
 }
@@ -141,7 +151,7 @@ static int run_one(VkFormat imgfmt, VkFormat viewfmt, const char *name)
     VkClearValue cv = { { { 0, 0, 0, 0 } } }; VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0, rp, t.fb[0], { { 0, 0 }, { W, H } }, 1, &cv };
     vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     draw(cb, pg, 1.f, 0.f, 0, 0, W, H);
-    fbf_barrier(cb); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
+    fbf_barrier(cb, t.img); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
     draw(cb, pf, 0.5f, 0.125f, 0, 0, W, H);
     vkCmdEndRenderPass(cb); finish(cb, &t);
     int bad = 0; const int srgb = viewfmt == VK_FORMAT_B8G8R8A8_SRGB, f16 = viewfmt == VK_FORMAT_R16G16B16A16_SFLOAT, f32 = viewfmt == VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -165,7 +175,7 @@ static int run_order(void)
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
     enum { N = 40 }; int rx[N], ry[N], rw[N], rh[N]; srand(11);
     for (int i = 0; i < N; i++) { rw[i] = 300 + rand() % 900; rh[i] = 200 + rand() % 600; rx[i] = rand() % (W - rw[i]); ry[i] = rand() % (H - rh[i]);
-        fbf_barrier(cb); draw(cb, pf, 1.f, 0.01f, rx[i], ry[i], rw[i], rh[i]); }
+        fbf_barrier(cb, t.img); draw(cb, pf, 1.f, 0.01f, rx[i], ry[i], rw[i], rh[i]); }
     vkCmdEndRenderPass(cb); finish(cb, &t);
     int bad = 0, wrong_px = 0;
     for (uint32_t y = 0; y < H; y++) for (uint32_t x = 0; x < W; x++) {
@@ -187,7 +197,7 @@ static int run_restart(VkFormat f, const char *name)
     vkCmdBeginRenderPass(cb, &ra, VK_SUBPASS_CONTENTS_INLINE); draw(cb, pg, 1.f, 0.f, 0, 0, W, H); vkCmdEndRenderPass(cb);
     VkRenderPassBeginInfo rb = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0, rpB, t.fb[1], { { 0, 0 }, { W, H } }, 0, 0 };
     vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-    fbf_barrier(cb); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
+    fbf_barrier(cb, t.img); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
     draw(cb, pf, 0.5f, 0.125f, 0, 0, W, H); vkCmdEndRenderPass(cb); finish(cb, &t);
     int bad = 0; const float tol = f == VK_FORMAT_R32G32B32A32_SFLOAT ? 2e-5f : 1.6f / 255.f;
     for (uint32_t y = 0; y < H; y++) for (uint32_t x = 0; x < W; x++) {
@@ -211,7 +221,7 @@ static int run_mixed(void)
     for (int i = 0; i < N; i++) {
         kind[i] = i == 0 ? 0 : rand() % 2;   /* 0: ordinary draw (gradient * 0.5 replaces), 1: fetch draw (+0.01) */
         rw[i] = 300 + rand() % 900; rh[i] = 200 + rand() % 600; rx[i] = rand() % (W - rw[i]); ry[i] = rand() % (H - rh[i]);
-        if (kind[i]) { fbf_barrier(cb); draw(cb, pf, 1.f, 0.01f, rx[i], ry[i], rw[i], rh[i]); }
+        if (kind[i]) { fbf_barrier(cb, t.img); draw(cb, pf, 1.f, 0.01f, rx[i], ry[i], rw[i], rh[i]); }
         else draw(cb, pg, 0.5f, 0.f, rx[i], ry[i], rw[i], rh[i]);
     }
     vkCmdEndRenderPass(cb); finish(cb, &t);
@@ -228,6 +238,39 @@ static int run_mixed(void)
     }
     printf("%-34s %d interleaved fetch / ordinary draws (write after read): %d wrong pixels (%d channel errors)\n", "R32G32B32A32_SFLOAT", N, wrong_px, bad);
     return bad;
+}
+/* case 5 (N64, the cost): 400 overlapping fetch draws of window-tile size (64..512 x 32..256) into BGRA8 1920x1080 (DCC on, like
+ * WindowServer's composition target), one pass; mode 0 memory barrier, 1 image barrier, 2 no barrier (the floor; its pixels are not
+ * checked). GPU time of the pass by timestamps, best of 5 runs. */
+static double run_cost(int mode)
+{
+    VkFormat f = VK_FORMAT_B8G8R8A8_UNORM; VkRenderPass rp = mkpass(f, 1, 0); VkPipeline pg = mkpipe(rp, g_vm, g_gm), pf = mkpipe(rp, g_vm, g_fm);
+    target t = mktarget(f, f, rp, 0); VkDescriptorSet set = mkset(t.img, f);
+    VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, 0, 0, VK_QUERY_TYPE_TIMESTAMP, 2 }; VkQueryPool qp; CK(vkCreateQueryPool(dev, &qi, 0, &qp));
+    VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(pd, &props);
+    double best = 1e30; const int saved = g_imgbar;
+    for (int run = 0; run < 5; run++) {
+        VkCommandBuffer cb = begincb(); vkCmdResetQueryPool(cb, qp, 0, 2); bar(cb, t.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkClearValue cv = { { { 0, 0, 0, 0 } } }; VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0, rp, t.fb[0], { { 0, 0 }, { W, H } }, 1, &cv };
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qp, 0);
+        vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+        draw(cb, pg, 1.f, 0.f, 0, 0, W, H);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
+        srand(5);
+        for (int i = 0; i < 400; i++) {
+            const int w = 64 + rand() % 448, h = 32 + rand() % 224, x = rand() % (int)(W - (uint32_t)w), y = rand() % (int)(H - (uint32_t)h);
+            if (mode != 2) { g_imgbar = mode == 1; fbf_barrier(cb, t.img); }
+            draw(cb, pf, 0.98f, 0.004f, x, y, w, h);
+        }
+        vkCmdEndRenderPass(cb);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qp, 1);
+        finish(cb, &t);
+        uint64_t ts[2]; CK(vkGetQueryPoolResults(dev, qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+        const double ms = (double)(ts[1] - ts[0]) * props.limits.timestampPeriod / 1e6; if (ms < best) best = ms;
+    }
+    g_imgbar = saved;
+    printf("%-34s 400 overlapping fetch draws, %s: GPU %.3f ms (best of 5)\n", "B8G8R8A8_UNORM 1920x1080", mode == 0 ? "memory barrier each" : mode == 1 ? "image barrier each" : "NO barrier (floor)", best);
+    return best;
 }
 int main(void)
 {
@@ -252,6 +295,8 @@ int main(void)
     if (rc || scan.decl_mask != 1 || scan.read_mask != 1 || moved != 1) { printf("FAIL: the plugin's scan / set patch did not see the fetch variable\n"); return 1; }
     g_vm = mkmod(fbf_vert_spv, sizeof fbf_vert_spv); g_gm = mkmod(fbf_grad_spv, sizeof fbf_grad_spv); g_fm = mkmod(fw, nw * 4);
     int bad = 0;
+    for (g_imgbar = 0; g_imgbar < 2; g_imgbar++) {
+    printf("--- the barrier before each fetch draw: %s\n", g_imgbar ? "VkImageMemoryBarrier on the attachment (N64)" : "global VkMemoryBarrier (before N64)");
     bad += run_one(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM");
     bad += run_one(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, "R8G8B8A8_UNORM");
     bad += run_one(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB, "B8G8R8A8_SRGB (sRGB view)");
@@ -262,5 +307,10 @@ int main(void)
     bad += run_mixed();
     bad += run_restart(VK_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM");
     bad += run_restart(VK_FORMAT_R32G32B32A32_SFLOAT, "R32G32B32A32_SFLOAT");
+    }
+    g_imgbar = 0;
+    if (!getenv("NOBARRIER")) { const double m = run_cost(0), i = run_cost(1), z = run_cost(2);
+        printf("cost: memory barrier %.3f ms, image barrier %.3f ms, none %.3f ms: the barrier costs %.2f us/draw (memory) vs %.2f us/draw (image)\n",
+               m, i, z, (m - z) * 1000.0 / 400, (i - z) * 1000.0 / 400); }
     printf("TOTAL bad %d\n", bad); return bad != 0;
 }

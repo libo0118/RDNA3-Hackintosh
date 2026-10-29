@@ -2341,6 +2341,7 @@ static _Atomic unsigned g_fbf_modules, g_fbf_declared_only, g_fbf_read, g_fbf_ze
                         g_fbf_move_failed, g_fbf_refused[NVMTL_FBF_REASONS];
 enum { NVMTL_FBF_SK_NOPASS, NVMTL_FBF_SK_NOINPUT, NVMTL_FBF_SK_ATTACHMENT, NVMTL_FBF_SK_NOSET, NVMTL_FBF_SK_N };
 static _Atomic unsigned g_fbf_sets, g_fbf_draws, g_fbf_skip[NVMTL_FBF_SK_N], g_fbf_restarts, g_fbf_att_refused, g_fbf_alloc_failed;
+static _Atomic unsigned g_fbf_bar_img, g_fbf_bar_mem, g_fbf_bar_noimg;   /* N64: the barriers before reading draws, by kind (nvmtl_fbf_barrier_mode) */
 static _Atomic uint64_t g_fbf_sum_ns; static unsigned g_fbf_sum_last;
 static int nvmtl_fbf_pow2(unsigned k) { return k && !(k & (k - 1)); }
 /* One line with every total (key=value; tools/triage_n48.py reads the newest). Emitted at most every 10 s, and only when a total moved
@@ -2355,17 +2356,18 @@ static void nvmtl_fbf_summary(int force)
     const unsigned served = atomic_load(&g_fbf_served), modules = atomic_load(&g_fbf_modules), rd = atomic_load(&g_fbf_read), zm = atomic_load(&g_fbf_zeroed),
                    zf = atomic_load(&g_fbf_zero_failed), sf = atomic_load(&g_fbf_scan_failed), mf = atomic_load(&g_fbf_move_failed),
                    sets = atomic_load(&g_fbf_sets), draws = atomic_load(&g_fbf_draws), rs = atomic_load(&g_fbf_restarts),
-                   ar = atomic_load(&g_fbf_att_refused), af = atomic_load(&g_fbf_alloc_failed);
-    sum += served + modules + rd + zm + zf + sf + mf + sets + draws + rs + ar + af;
+                   ar = atomic_load(&g_fbf_att_refused), af = atomic_load(&g_fbf_alloc_failed),
+                   bi = atomic_load(&g_fbf_bar_img), bm = atomic_load(&g_fbf_bar_mem), bn = atomic_load(&g_fbf_bar_noimg);
+    sum += served + modules + rd + zm + zf + sf + mf + sets + draws + rs + ar + af + bi + bm + bn;
     if (!sum || sum == g_fbf_sum_last) return;
     if (!atomic_compare_exchange_strong(&g_fbf_sum_ns, (uint64_t *)&last, now) && !force) return;
     g_fbf_sum_last = sum;
     nvlog_uncapped("vk: fbfetch: SUMMARY served=%u modules=%u read=%u zmod=%u zero_failed=%u scan_failed=%u move_failed=%u "
                    "zr_noatt=%u zr_ms=%u zr_int=%u zr_tess=%u zr_nolayout=%u zr_forced=%u sets=%u draws=%u skipped=%u skip_nopass=%u skip_noinput=%u "
-                   "skip_att=%u skip_noset=%u restarts=%u att_refused=%u alloc_failed=%u",
+                   "skip_att=%u skip_noset=%u restarts=%u att_refused=%u alloc_failed=%u bar_img=%u bar_mem=%u bar_noimg=%u",
                    served, modules, rd, zm, zf, sf, mf, r[NVMTL_FBF_NO_ATTACHMENT], r[NVMTL_FBF_MULTISAMPLE], r[NVMTL_FBF_INTEGER_FORMAT], r[NVMTL_FBF_TESS],
                    r[NVMTL_FBF_NO_LAYOUT], r[NVMTL_FBF_FORCED_ZERO], sets, draws, sk[0] + sk[1] + sk[2] + sk[3], sk[NVMTL_FBF_SK_NOPASS], sk[NVMTL_FBF_SK_NOINPUT],
-                   sk[NVMTL_FBF_SK_ATTACHMENT], sk[NVMTL_FBF_SK_NOSET], rs, ar, af);
+                   sk[NVMTL_FBF_SK_ATTACHMENT], sk[NVMTL_FBF_SK_NOSET], rs, ar, af, bi, bm, bn);
 }
 static void nvmtl_fbf_atexit(void) { nvmtl_fbf_summary(1); }
 static void nvmtl_fbf_arm(void) { static int armed; if (!armed) { armed = 1; atexit(nvmtl_fbf_atexit); } }
@@ -3484,6 +3486,50 @@ static void nvmtl_fbf_prepare_pass(nvk_cmdbuf *c)
         nvlog("vk: fbfetch: pass %u with input attachments 0x%x (%u written, refused 0x%x): descriptor set made", k, c->fbin, nw, c->fbf_bad);
     nvmtl_fbf_summary(0);
 }
+/* NVMTL_FBF_MEMBAR=1: the barrier before every reading draw is the old global memory barrier (the A/B switch of N64); read once, logged */
+static int nvmtl_fbf_membar_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_FBF_MEMBAR"); on = nvmtl_fbf_membar_knob(e);
+        nvlog("vk: fbfetch: the barrier before a draw that reads [[color(n)]] is %s (NVMTL_FBF_MEMBAR=%s)",
+              on ? "the OLD global memory barrier (RADV: CB flush + whole-L2 invalidate per draw)" : "an image barrier on the attachment (N64)", e ? e : "unset");
+    }
+    return on;
+}
+/* DRIVER-PLAN N64: the self-dependency's barrier before a draw that reads `reads` (nvmtl_fbfetch_plan.h nvmtl_fbf_barrier_mode says why an
+ * image barrier, which RADV turns into a CB flush + PS wait + vector-cache invalidate without the whole-GL2 invalidate of a global one).
+ * The image barrier names the attachment's level / slice in its subpass layout (GENERAL -> GENERAL: no transition; Vulkan allows it
+ * inside the pass because the image is this subpass's input and colour attachment and the scopes equal the self-dependency's). */
+static void nvmtl_fbf_barrier(nvk_cmdbuf *c, uint32_t reads)
+{
+    uint32_t have = 0;
+    for (uint32_t n = 0; n < NVMTL_NCOL && n < NVMTL_FBF_NCOL; n++)
+        if (c->fbf_att[n].img && c->fbf_att[n].img->img) have |= 1u << n;
+    const unsigned mode = nvmtl_fbf_barrier_mode(nvmtl_fbf_membar_on(), reads, have);
+    if (mode == NVMTL_FBF_BAR_IMAGE) {
+        VkImageMemoryBarrier ib[NVMTL_NCOL]; uint32_t nb = 0;
+        for (uint32_t n = 0; n < NVMTL_NCOL && n < NVMTL_FBF_NCOL; n++) {
+            if (!(reads & (1u << n))) continue;
+            const nvk_fbf_att *a = &c->fbf_att[n];
+            ib[nb++] = (VkImageMemoryBarrier){ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)a->img->img,
+                { VK_IMAGE_ASPECT_COLOR_BIT, a->level, 1, a->layer, 1 } };
+        }
+        pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT,
+                              0, NULL, 0, NULL, nb, ib);
+        atomic_fetch_add(&g_fbf_bar_img, 1); c->wf.bar_img++;
+        return;
+    }
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+    c->wf.bar_mem++;
+    if (mode == NVMTL_FBF_BAR_MEM_KNOB) { atomic_fetch_add(&g_fbf_bar_mem, 1); return; }
+    const unsigned k = atomic_fetch_add(&g_fbf_bar_noimg, 1) + 1;
+    nvlog("vk: fbfetch: a draw that reads [[color(n)]] 0x%x got the OLD global barrier: attachment(s) 0x%x have no image to name (pass inputs 0x%x) - correct, but slow (#%u)",
+          reads, reads & ~have, c->fbin, k);
+    if (nvmtl_fbf_pow2(k)) nvmtl_fbf_summary(1);
+}
 /* before a draw whose pipeline reads: the descriptor set, then the by-region barrier of the self-dependency. 0 = recorded, -1 = skip the draw.
  * Every skip cause has its own literal; the first two are logic bugs (the encoder restarts a pass that lacks an input), the others are resource failures. */
 static int nvmtl_fbf_bind(nvk_cmdbuf *c, nvk_pipeline *p)
@@ -3508,11 +3554,11 @@ static int nvmtl_fbf_bind(nvk_cmdbuf *c, nvk_pipeline *p)
         if (nvmtl_fbf_pow2(k)) nvmtl_fbf_summary(1);
         return -1;
     }
-    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT };
-    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+    nvmtl_fbf_barrier(c, p->fbread);
     VkDescriptorSet set = (VkDescriptorSet)c->fbf_set;
     pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FBF_SET, 1, &set, 0, NULL);
     const unsigned k = atomic_fetch_add(&g_fbf_draws, 1) + 1;
+    c->wf.fbf_draws++;
     if (k <= 4) nvlog("vk: fbfetch: draw %u reads [[color(n)]] 0x%x: barrier + set %u bound (pass inputs 0x%x)", k, p->fbread, NVMTL_FBF_SET, c->fbin);
     if (nvmtl_fbf_pow2(k) || !(k & 255)) nvmtl_fbf_summary(nvmtl_fbf_pow2(k));
     return 0;
@@ -3535,6 +3581,7 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
                            NVMTL_SAMPLE_POSITION_BYTES, c->sample_pattern.position);
     pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
     if (p->fbread && nvmtl_fbf_bind(c, p)) { c->nobind = 1; c->skipped++; }   /* never draw a pipeline that reads [[color(n)]] without its input attachment */
+    if (!c->nobind) c->wf.draws++;   /* N64: a draw this command buffer records (bind_set runs once per draw) */
 }
 
 #define NVMTL_DEPTH_USAGE (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | \
@@ -4944,6 +4991,7 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
     if (nvmtl_vk_init()) return -1;
     const uint64_t b0 = nvmtl_perf_now();
     memset(out, 0, sizeof *out);
+    out->wf_t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);   /* N64: the frame's recording starts */
     VkCommandPool pool = nvmtl_keep_pool_pop();
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL,
         VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, g_qfam };
@@ -5106,8 +5154,31 @@ static void nvmtl_ab_summary(int force)
                    c[1][0], c[1][1], c[1][2], c[1][3], c[1][4], c[1][5], c[1][6], c[1][7], c[1][8], c[1][9], we, wo, wb, ww,
                    sic[0], sic[1], sic[2], sic[3], sic[4], sic[5], dcs, dcc);
 }
+/* DRIVER-PLAN N64: what a frame costs (nvmtl_ws_frame.h): every completed command buffer that began a render pass, the surface-in uploads.
+ * `vk: ws frame: SUMMARY` on the shared 10 s timer when a counter moved and at exit (tools/triage_present_cost.py, row `ws frame`). */
+static nvmtl_wf_stats g_wf; static _Atomic uint64_t g_wf_last;
+static void nvmtl_wf_summary(void)
+{
+    const uint64_t ev = nvmtl_wf_events(&g_wf);
+    if (ev == atomic_load(&g_wf_last)) return;
+    char body[512];
+    if (!nvmtl_wf_format(&g_wf, nvmtl_fbf_membar_on(), body, sizeof body)) return;
+    atomic_store(&g_wf_last, ev);
+    nvlog_uncapped("vk: ws frame: SUMMARY %s", body);
+}
+static void nvmtl_wf_atexit(void) { nvmtl_wf_summary(); }
+static void nvmtl_wf_note(const nvk_cmdbuf *c, uint64_t wait_ns)
+{
+    if (!nvmtl_wf_is_frame(&c->wf)) return;
+    static int armed; if (!armed) { armed = 1; atexit(nvmtl_wf_atexit); }
+    /* GPU time: the command buffer's own TOP_OF_PIPE / BOTTOM_OF_PIPE pair (timing.valid: both came back and were plausible) */
+    const int gpu_ok = c->timing.valid && c->timing.end_tick >= c->timing.start_tick;
+    const uint64_t gpu_ns = gpu_ok ? nvmtl_wf_ticks_ns(c->timing.start_tick, c->timing.end_tick, g_timestamp_bits, (double)g_lim.timestampPeriod) : 0;
+    nvmtl_wf_frame(&g_wf, &c->wf, c->wf_rec_ns, gpu_ok && gpu_ns, gpu_ns, wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC));
+}
+void nvmtl_vk_wf_upload(uint64_t bytes, uint64_t ns) { nvmtl_wf_upload(&g_wf, bytes, ns); }
 /* the shared 10 s timer (NVMTLObjects.m nvmtl_summary_timer_arm): force skips each summary's own clock, a line is printed only when a counter moved */
-void nvmtl_vk_summaries(void) { nvmtl_ab_summary(1); nvmtl_fbf_summary(1); }
+void nvmtl_vk_summaries(void) { nvmtl_ab_summary(1); nvmtl_fbf_summary(1); nvmtl_wf_summary(); }
 static void nvmtl_load_layout(nvk_cmdbuf *c, nvk_image *img, int depth, uint32_t level, uint32_t layer, uint32_t layers)
 {
     if (!img) return;
@@ -5333,7 +5404,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
               memset(c->pt_fs[c->pt_n], 0, sizeof c->pt_fs[c->pt_n]); }
       } }
     pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-    c->in_rp = 1;
+    c->in_rp = 1; c->wf.passes++;
     if (p->pipe) pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipe);
     VkViewport vp = { 0, (float)ps->h, (float)ps->w, -(float)ps->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, { ps->w, ps->h } };
     pvkCmdSetViewport(c->cb, 0, 1, &vp); pvkCmdSetScissor(c->cb, 0, 1, &sc);
@@ -6005,6 +6076,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvt_vk_submit(f->trseq, who, NVT_SUB_EARLY_FAIL, -1, 0, 0, 0); nvmtl_cmd_retire(c); return -1; }
     c->timing.clock = nvmtl_clock_snapshot();
     c->timing.host_before_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (c->wf_t0) c->wf_rec_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - c->wf_t0;   /* N64: begin -> submit */
     if (c->timing_pool && !c->in_rp)
         pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->timing_pool, 1);
     else c->timing.clock.valid = 0;
@@ -6115,6 +6187,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
             if (nvmtl_vk_interval_seconds(&c->timing, &a, &b)) c->timing.valid = 0;
         }
     }
+    nvmtl_wf_note(c, trWaitNs);   /* N64: `vk: ws frame: SUMMARY` */
     if (c->pt_pool && c->pt_n) {
         uint64_t r[256] = {0}; const unsigned n = c->pt_n;
         if (pvkGetQueryPoolResults(g_dev, (VkQueryPool)c->pt_pool, 0, 2 * n, sizeof(uint64_t) * 2 * n, r, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {

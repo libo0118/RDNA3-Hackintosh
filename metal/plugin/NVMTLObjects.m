@@ -1811,7 +1811,9 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     const uint64_t pcIn0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     int rc = (base && row) ? nvmtl_vk_image_write(r->_q, &r->_i, base, row) : -1;
-    if (!rc) nvmtl_pc_in(&g_pc, (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4), clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - pcIn0);   /* N61 */
+    if (!rc) { const uint64_t inBytes = (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4), inNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - pcIn0;
+               nvmtl_pc_in(&g_pc, inBytes, inNs);   /* N61 */
+               nvmtl_vk_wf_upload(inBytes, inNs); }  /* N64: `vk: ws frame: SUMMARY` */
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "in%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
     uint32_t trBands[8]; const BOOL trHashed = !rc && nvt_on() && nvmtl_tr_hash(r, base, row, trBands);   // the CPU memory just uploaded, still locked
     IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);

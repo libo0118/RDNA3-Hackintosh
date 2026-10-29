@@ -172,6 +172,13 @@ impl += L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0))
 r = rows_of(impl)
 check(list(r) == ["framebuffer fetch"] and r["framebuffer fetch"][0] == "INFO" and "IMPLEMENTED" in r["framebuffer fetch"][2]
       and "Terminal 5 pipeline(s) served, 9000 draw(s), 40 pass set(s), 3 restart(s)" in r["framebuffer fetch"][2], "implemented: INFO only, %r" % r)
+# N64: the barrier kinds of a newer plugin are in the row; a reading draw without an image to name is a WARN from the totals
+n64 = L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0) + " bar_img=8990 bar_mem=0 bar_noimg=0")
+r = rows_of(impl.replace(SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0), "x") + n64)
+check(r["framebuffer fetch"][0] == "INFO" and "3 restart(s), barriers: image 8990, old memory 0 (NVMTL_FBF_MEMBAR), 0 without an image" in r["framebuffer fetch"][2],
+      "N64 barrier kinds: %r" % r)
+rr = [x for x in t48.n48_plugin_rows(L("Terminal", 904, "1e1e", SUM % (5, 0, 0, 40, 9000, 0, 0, 3, 0) + " bar_img=1 bar_mem=0 bar_noimg=7")) if x[0] == "WARN"]
+check(len(rr) == 1 and "7 reading draw(s) that got the OLD global barrier" in rr[0][2], "N64 bar_noimg: WARN, %r" % rr)
 uns = L("Chess", 3000, "1", "vk: fbfetch: UNSUPPORTED (a multisample target (per-sample fetch is not carried)): reads of colour attachment(s) 0x1 are zeroed, 0x0 are served [1 such pipeline(s) for this reason so far]")
 rr = [x for x in t48.n48_plugin_rows(impl + uns) if x[0] == "WARN"]
 check(len(rr) == 1 and "multisample target" in rr[0][2] and "Chess" in rr[0][2], "unsupported reason: WARN, %r" % rr)

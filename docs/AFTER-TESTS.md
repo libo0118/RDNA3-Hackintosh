@@ -3666,3 +3666,20 @@ IOSurface (plugin), the display pipe's copy of the IOSurface into the scanout (k
 | `WARN IOP copy ... no debug.rdna3accel_iop_copy_* counters` / `present cost ... a plugin before DRIVER-PLAN N61` | an old kext / plugin, or a collector that does not grep them | `rdna3vm update`; the plugin with CI `full: true` and `build_metal.sh` |
 | frame trace (`tools/plugin_trace.py`): `surface-out surf S COPY-OUT(GPU into the surface, N61) ... T ms` | a publish of the GPU path; `COPY-OUT(private image)` is the CPU path; T is the copy-out's own time | GPU publishes of ~0.1 ms and `cb ... done ok in` close to the draw time = the copy-out is out of the way |
 
+### What a WindowServer frame costs (DRIVER-PLAN N64)
+
+Card run 2026-10-29a: the scanout showed 11.3 fps of the 60 fps page, but WindowServer's plugin trace (`tools/plugin_trace.py --rates`
+on `31-plugin-trace/WindowServer-*.trace`) shows 122 command buffers a second (two per frame: 61 fps) in the seconds before and after the
+frame-order bursts and 20-36 during them: the strip probe (`rdna3_drminfo --scanout-strip`, one ~2 ms ioctl after another, each under the
+kernel's display lock) slowed what it measured. From N64 the probe sleeps after each round as long as the round took (`# pacing:` line in
+the burst file). Compare the trace's per-second `cb_commit` column with the burst times (`# frameorder <burst> <time>` in
+`41-ladder-frameorder-*.log`; the trace's second 0 is its `opened` time, UTC) before blaming the driver for a low displayed rate.
+
+| Row / line | Means | Action |
+|---|---|---|
+| `frame order: ... displayed X fps ...; probe paced (50 % duty)` | the burst read the scanout at most half the time | the displayed rate is the driver's; if it is still far below the page's, the `ws frame` row says where the time goes |
+| `frame order: ...; probe UNPACED (...)` | an rdna3_drminfo before N64: back-to-back reads | the displayed rate is a floor; `rdna3vm update` |
+| triage `ws frame: WindowServer[pid]: ws frame: avg X ms (encode E, GPU G, fbfetch barriers B/frame, uploads U MB/frame) \| N frame(s) ... in S active second(s) = R/s, busiest second P; ...` (plugin `vk: ws frame: SUMMARY frames= active_s= fps_peak= passes= draws= fbf_draws= bar_img= bar_mem= rec_us_avg= rec_us_max= gpu_n= gpu_us_avg= gpu_us_max= wait_us_avg= ups= up_kb= up_us_avg= membar=`, metal/plugin/nvmtl_ws_frame.h) | per process, newest SUMMARY: a "frame" is a command buffer that began a render pass (WindowServer commits ~2 per displayed frame). `encode` = the command buffer's begin to its submit (WindowServer's encoding + the plugin's recording + surface-in uploads done meanwhile), `GPU` = its own TOP/BOTTOM timestamps, `busiest second` = most frames in one second (122 = 61 fps of two) | `encode` over 8 ms (WARN): the CPU side (the trace's `encode-time split`); `GPU` over 8 ms (WARN): the GPU side (the barriers below, the uploads); `GPU UNKNOWN`: no calibrated timestamps |
+| `ws frame` barriers `image N, OLD memory M (NVMTL_FBF_MEMBAR off)` | the barrier before each framebuffer-fetch draw (N64): an image barrier on the attachment by default; the old global memory barrier with `NVMTL_FBF_MEMBAR=1` (the A/B switch) | M > 0 without the switch: WARN, an attachment without an image (`got the OLD global barrier` line) |
+| `framebuffer fetch: IMPLEMENTED ...; <proc> ... restart(s), barriers: image N, old memory M (NVMTL_FBF_MEMBAR), K without an image` (`vk: fbfetch: SUMMARY ... bar_img= bar_mem= bar_noimg=`) | the same split from the fbfetch totals | `bar_noimg` > 0 is a WARN in the totals row |
+| glyphs / Chess not clean with N64 and clean with `NVMTL_FBF_MEMBAR=1` | the image barrier is not enough on the card's RADV (the host's RADV 26.2.5 passes `tests/vk_fbfetch_probe.c` with both) | set `NVMTL_FBF_MEMBAR=1` in rdna3mtl.conf, report it; DRIVER-PLAN N64 |
