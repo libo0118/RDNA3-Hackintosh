@@ -773,7 +773,7 @@ start_share() {
     mkdir -p "$WORK/share/tools"
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$ROOT/tools/macos/collect_plugin_trace.sh" "$ROOT/tools/macos/fix_tracedir.sh" \
        "$TOOLS/macos/autoreport.sh" "$TOOLS/macos/build_radv.sh" \
-       "$TOOLS/macos/build_metal.sh" "$WORK/share/tools/" 2>/dev/null || true
+       "$TOOLS/macos/build_metal.sh" "$TOOLS/macos/rebuild_auxkc.sh" "$WORK/share/tools/" 2>/dev/null || true
     # the Metal plugin's trace: its collector and the trace directory's fixer
     # (autoreport.sh fetches them when they exist)
     for f in collect_plugin_trace.sh fix_tracedir.sh; do
