@@ -1,0 +1,68 @@
+tools/baremetal - what is downloaded for the bare-metal macOS 26 USB, fetched and checked, never vendored.
+
+What:     the owner's PC (MSI B550-A PRO, Ryzen 7 5800X, RX 7800 XT, RTL8111 Ethernet, ALC897
+          audio, Crucial P3 / P310 NVMe) boots macOS 26 Tahoe through OpenCore from a USB stick.
+          fetch.sh downloads the pins below into ~/rdna3-baremetal/dl, build_efi.py builds the
+          EFI folder from them, make_usb.sh writes the stick. docs/BAREMETAL.md is the procedure.
+Format:   tools/baremetal/pins.txt (name, version, sha256, url) is what fetch.sh reads; this file is
+          the reason for each pin. tests/test_baremetal.sh checks that they agree.
+Pins:     all are official release builds, fetched and sha256 checked (BSD-3-Clause, except the
+          Realtek driver, GPL-2.0, and Dortania's SSDT binaries, which are compiled from its MIT
+          repository); a changed file is refused, not used.
+  OpenCorePkg 1.0.8 (2026-09-27), OpenCore-1.0.8-RELEASE.zip
+    https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.8/OpenCore-1.0.8-RELEASE.zip
+    sha256 2011e8b7216ecb2645d97ea710df965947edd406846e92050b9bc4190be6d27b
+    Why: the newest release; its changelog names macOS 26 kext injection and Tahoe XhciPortLimit
+    fixes since 1.0.5; carries macrecovery.py, ocvalidate and macserial of the same version.
+  Lilu 1.7.2 (2026-03-20), Lilu-1.7.2-RELEASE.zip
+    https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip
+    sha256 53967d7dcfaab01023a33df2e969a89522f13d6654a6a56ac4711b62dabf3ab8
+    Why: the same pin as the card VM (tools/vm/data/oc_kexts.SOURCE): runs on macOS 26 without
+    -lilubetaall, "Fixed AMDSupport lockups & panics in macOS 26".
+  VirtualSMC 1.3.8 (2026-09-27), VirtualSMC-1.3.8-RELEASE.zip
+    https://github.com/acidanthera/VirtualSMC/releases/download/1.3.8/VirtualSMC-1.3.8-RELEASE.zip
+    sha256 2e29a8aaf91b4eb0bcdf5913ed17e70f5cf76531122acd4132eff7813a54de8b
+    Why: SMC emulation macOS needs; its plugin range (kern_start.cpp) ends at KernelVersion::Tahoe.
+    Only VirtualSMC.kext is used. SMCProcessor / SMCSuperIO read Intel CPU and Nuvoton/ITE sensors
+    (Intel MSRs; a Ryzen needs SMCAMDProcessor / AMDRyzenCPUPowerManagement instead, which is
+    unmaintained and not pinned here: it only gives temperatures and frequency, not needed).
+  AppleALC 1.9.8 (2026-09-27), AppleALC-1.9.8-RELEASE.zip
+    https://github.com/acidanthera/AppleALC/releases/download/1.9.8/AppleALC-1.9.8-RELEASE.zip
+    sha256 d4d36cd2da7863cf7cbfcb0892d45c08457f4f4ddd065a073dd010e46bd63bcb
+    Why: onboard audio; kern_start.cpp range ends at Tahoe. The board's codec is a Realtek ALC897
+    (ID 10ec:0897, subsystem 1462:9c56, read from /proc/asound on the PC), not the ALC892 older
+    B550-A PRO sheets name. ALC897 layouts in this release: 11 12 13 21 22 23 31 66 69 77 97 98 99;
+    build_efi.py defaults to alcid=13 (MSI Z590-A PRO), 69 (MSI Z490-A PRO) and 31 (MSI X670E)
+    are the next to try. Not verified on this board.
+  RestrictEvents 1.1.6 (2025-07-07), RestrictEvents-1.1.6-RELEASE.zip
+    https://github.com/acidanthera/RestrictEvents/releases/download/1.1.6/RestrictEvents-1.1.6-RELEASE.zip
+    sha256 98170dfae195ddd28b5d95e3f040125a13ca783bcb9bd1e5b8c588e217b14ee6
+    Why: the VM's pin; About This Mac shows the real "AMD Ryzen 7 5800X" instead of an Intel name.
+  NVMeFix 1.1.3 (2025-07-07), NVMeFix-1.1.3-RELEASE.zip
+    https://github.com/acidanthera/NVMeFix/releases/download/1.1.3/NVMeFix-1.1.3-RELEASE.zip
+    sha256 e1d5657ab7ac31f69771708f7b80bf218ab9aa0b8e4c4fe6ff943983037e3dfb
+    Why: "Added constants for macOS 26 support"; power management for the DRAM-less Crucial SSDs.
+  RealtekRTL8111 3.0.0 (2025-12-24), RealtekRTL8111-V3.0.0.zip (Mieze)
+    https://github.com/Mieze/RTL8111_driver_for_OS_X/releases/download/v3.0.0/RealtekRTL8111-V3.0.0.zip
+    sha256 a0f2e64ac3c76e2d416ff88f35a197ce229e74ea78e968631a736a43b4d8231c
+    Why: its README says tested on 10.8.2 - 26.1 with several RTL8111 revisions; the board's
+    Ethernet is 10ec:8168 rev 15.
+  SSDT-EC-USBX-DESKTOP.aml, SSDT-CPUR.aml (dortania/Getting-Started-With-ACPI, commit 60029d4,
+    extra-files/compiled/)
+    sha256 1cf941a6767fc95d2aa5c265e82fc0c94f05885a67ba6f9a34fe643b2f12dd2e  (EC-USBX-DESKTOP)
+    sha256 edc447852d26c95e5888a8517c78cc8b9dfc5160de9297db971fcae2acb6ff8d  (CPUR)
+    Why: the Dortania AMD guide's two SSDTs for a desktop B550 + Zen 3. The board has no PNP0C09
+    EC device (/sys/bus/acpi/devices on the PC), so the fake EC is needed; its CPUs are
+    \_SB.PLTF.C000..C00F, the names SSDT-CPUR.aml renames to PR00...
+  macOS recovery: not pinned (Apple's servers, always the newest for the board): macrecovery.py
+    -b Mac-27AD2F918AE68F61 (MacPro7,1) -os latest; the script verifies every chunk against
+    BaseSystem.chunklist. Fetched 2026-10-29: macOS 26.6.2 (25G83), BaseSystem.dmg 960530321
+    bytes, sha256 edddd0d5869caaa12e29e6996a04f11590280580976a119dbd42c24fa62fe18e.
+Not used: WhateverGreen (no RDNA3 support, docs/INSTALL-OPENCORE.md section 6), USBToolBox /
+    UTBMap (not needed: the 5800X board's two USB controllers have 14 and 8 root ports, both
+    under macOS's limit of 15 per controller; docs/BAREMETAL.md), SMCProcessor, VoodooPS2.
+AMD_Vanilla: the kernel patches come from tools/vm/data/amd_vanilla-a174cca.plist
+    (tools/vm/data/amd_vanilla.SOURCE), the file the card VM runs.
+Update:   take a newer release's zip sha256 from its GitHub release, set pins.txt and this file,
+    run tests/test_baremetal.sh; check the plugin's kern_start.cpp still reaches the macOS in use
+    and the Lilu minimum is met.
