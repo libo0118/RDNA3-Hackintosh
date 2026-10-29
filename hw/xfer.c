@@ -78,3 +78,60 @@ int rdna3_copy_pages_to_vram(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uin
 {
     return xfer(d, g, r, vram_off, pages, npages, len, win_off, win_pages, 1);
 }
+
+/* the TT PTE flags xfer() maps with: system, snooped, read/write, MTYPE_UC */
+static const uint64_t kGttFlags = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                                  RD_PTE_WRITEABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+
+int rdna3_gart_bind_pages(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, const uint64_t *pages, uint64_t npages)
+{
+    uint64_t i = 0;
+    if (!g || !pages || !npages || (gart_off & 4095) || gart_off > g->gart_size ||
+        npages > (g->gart_size - gart_off) / 4096)
+        return RDNA3_EINVAL;
+    for (i = 0; i < npages; i++)
+        if (pages[i] & 4095)
+            return RDNA3_EINVAL;
+    for (i = 0; i < npages;) {
+        uint64_t run = 1;
+        int ret;
+        while (i + run < npages && run < 0xffffffffull && pages[i + run] == pages[i] + run * 4096)
+            run++;
+        ret = gmc11_gart_map(d, g, gart_off + i * 4096, pages[i], (uint32_t)run, kGttFlags);
+        if (ret != RDNA3_OK) {
+            gmc11_gart_unmap(d, g, gart_off, (uint32_t)i);
+            gmc11_gart_tlb_flush(d, g);
+            return ret;
+        }
+        i += run;
+    }
+    /* amdgpu_gart_invalidate_tlb: every hub (SDMA 6.0 walks VMID0 through the GFXHUB, DRIVER-PLAN N54) */
+    gmc11_gart_tlb_flush(d, g);
+    return RDNA3_OK;
+}
+
+void rdna3_gart_unbind_pages(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint64_t npages)
+{
+    if (!g || !npages || (gart_off & 4095) || gart_off > g->gart_size)
+        return;
+    if (npages > (g->gart_size - gart_off) / 4096)
+        npages = (g->gart_size - gart_off) / 4096;
+    gmc11_gart_unmap(d, g, gart_off, (uint32_t)npages);
+    gmc11_gart_tlb_flush(d, g);
+}
+
+int rdna3_copy_gart_rect_to_vram(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t gart_off,
+                                 uint64_t bound_bytes, uint64_t src_off, uint32_t src_pitch, uint64_t vram_off,
+                                 uint32_t dst_pitch, uint32_t row_bytes, uint32_t rows)
+{
+    uint64_t span_s, span_d;
+    if (!g || !r || !r->ready || !rows || !row_bytes || row_bytes > src_pitch || row_bytes > dst_pitch ||
+        gart_off > g->gart_size || bound_bytes > g->gart_size - gart_off || src_off >= bound_bytes)
+        return RDNA3_EINVAL;
+    span_s = (uint64_t)(rows - 1) * src_pitch + row_bytes;
+    span_d = (uint64_t)(rows - 1) * dst_pitch + row_bytes;
+    if (span_s > bound_bytes - src_off || vram_off > d->vram_size || span_d > d->vram_size - vram_off)
+        return RDNA3_EINVAL;
+    return sdma60_copy_rect_sync(d, r, g->gart_start + gart_off + src_off, src_pitch, rdna3_vram_mc(d, vram_off),
+                                 dst_pitch, row_bytes, rows);
+}

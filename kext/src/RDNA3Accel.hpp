@@ -333,9 +333,11 @@ private:
     bool          fAccelVmStopping = false;   /* stop: no new accelerator VM (fDrmLock) */
     IOReturn      platformPageoff(struct RD3KSurfPageoff *q);
     IOReturn      platformCopyVram(struct RD3KCopyRequest *q);
+    IOReturn      platformIopSdma(struct RD3KIopSdma *q);   /* DRIVER-PLAN N63 */
     IOReturn      platformGpuBusy(struct RD3KGpuBusy *q);   /* DRIVER-PLAN N49 */
     uint64_t      fAccelVramBytes = 0;
     uint32_t      fCopyVramFails = 0;      /* rdna3CopyVram refused (log limit) */
+    uint32_t      fIopSdmaFails = 0;       /* N63: rdna3IopSdma failures (log limit: first 8, every 1024th) */
     uint32_t      fCsFailLogs = 0;         /* AMDGPU_CS refused (log limit; traced every time) */
     uint32_t      fUserptrRo = 0;          /* GEM_USERPTR wired read-only after a read-write refusal */
     uint32_t      fUserptrFails = 0;       /* GEM_USERPTR refused (log limit) */

@@ -36,6 +36,7 @@
 #include "xfer.h"
 #include "rdna3_drm.h"
 #include "rdna3_flip_queue.h"
+#include "rdna3_iop_copy.h"
 #include "gen/gc_11_0_0_harvest.h"
 #include "gen/gc_11_0_0_gds.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
@@ -11141,6 +11142,110 @@ static void run(const char *fwdir)
                 }
                 memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
                 CHECK(wpte == 0 && S.sdma_bad == 0);
+            }
+            /* DRIVER-PLAN N63: the IOP copy by SDMA. A presented surface's wired pages (scattered, the descriptor
+             * starting 0x300 into its first page) are bound once to a GART range of the core's table, SDMA copies
+             * the pitched rectangle into the scanout from there frame after frame (amdgpu_copy_buffer from a GTT
+             * BO bound by amdgpu_ttm_alloc_gart), the range is unbound before the pages go; a range bound again
+             * at the same offset with OTHER pages is read from the new pages (the TLB flush of the bind) */
+            {
+                const uint32_t lead = 0x300, w = 100, h = 30, spitch = 448, dpitch = 512, rowb = w * 4;
+                const uint64_t segpa[3] = { SYS_PHYS + 0x40300, SYS_PHYS + 0x47000, SYS_PHYS + 0x60000 };
+                const uint64_t seglen[3] = { 2 * 4096 - 0x300, 4096, 0 };   /* the last: whatever is left */
+                const uint64_t bytes = (uint64_t)h * spitch;
+                uint64_t list[8], n = 0, md = 0, gart = 0, gart2 = 0, ipte = 0, rel_off = 0, rel_pages = 0;
+                struct rd3_ig ig;
+                uint8_t *row = malloc(dpitch);
+                uint32_t f0 = S.mm_tlb_flushes, ik;
+                int pass;
+                /* the area as the core places it: above the IH rings, below the top's windows and slots */
+                memset(&ig, 0, sizeof ig);
+                rd3_ig_reset(&ig, 4u << 20, (gmc.gart_size - (4u << 20) - (32u << 20)) / 4096);
+                CHECK(row != NULL);
+                /* the page list from the descriptor's segments (0x40300 + 0x41000 contiguous, then two singles) */
+                for (ik = 0; ik < 3; ik++) {
+                    const uint64_t len = seglen[ik] ? seglen[ik] : bytes - md;
+                    CHECK(rd3_iop_pages_add(list, 8, &n, lead, md, segpa[ik], len) == 0);
+                    md += len;
+                }
+                CHECK(n == 4 && n == rd3_iop_range_pages(lead, bytes) && list[0] == SYS_PHYS + 0x40000 &&
+                      list[1] == SYS_PHYS + 0x41000 && list[2] == SYS_PHYS + 0x47000 && list[3] == SYS_PHYS + 0x60000);
+                /* the surface's bytes where the descriptor puts them */
+                for (ik = 0; ik < bytes; ik++) {
+                    const uint64_t at = lead + ik;
+                    S.sysmem[list[at / 4096] - SYS_PHYS + (at & 4095)] = (uint8_t)(ik * 7u + 3u);
+                }
+                const uint64_t hd = rd3_ig_alloc(&ig, n, &gart);
+                CHECK(hd && gart == (4u << 20));
+                CHECK(rdna3_gart_bind_pages(&dev, &gmc, gart, list, n) == RDNA3_OK && S.mm_tlb_flushes > f0);
+                memcpy(&ipte, S.vram + gmc.gart_table + (gart / 4096 + 2) * 8, 8);
+                CHECK((ipte & 0x0000FFFFFFFFF000ull) == SYS_PHYS + 0x47000 && (ipte & 3) == 3);   /* valid, system */
+                uint64_t idst = rdna3_vram_alloc(&dev, (uint64_t)h * dpitch, 4096, "iop-scanout");
+                for (pass = 0; pass < 2; pass++) {   /* two frames from the same binding */
+                    rdna3_vram_fill(&dev, idst, 0xA5, (uint64_t)h * dpitch);
+                    if (pass)   /* the next frame's pixels */
+                        for (ik = 0; ik < bytes; ik++) {
+                            const uint64_t at = lead + ik;
+                            S.sysmem[list[at / 4096] - SYS_PHYS + (at & 4095)] = (uint8_t)(ik * 5u + 1u);
+                        }
+                    CHECK(rdna3_copy_gart_rect_to_vram(&dev, &gmc, &sd, gart, n * 4096, lead, spitch, idst, dpitch, rowb,
+                                                       h) == RDNA3_OK);
+                    int good = 1;
+                    for (uint32_t y = 0; y < h && good; y++) {
+                        rdna3_vram_read(&dev, idst + (uint64_t)y * dpitch, row, dpitch);
+                        for (uint32_t x = 0; x < dpitch && good; x++) {
+                            const uint64_t sk = (uint64_t)y * spitch + x;
+                            const uint8_t want = x < rowb ? (uint8_t)(pass ? sk * 5u + 1u : sk * 7u + 3u) : 0xA5;
+                            good = row[x] == want;
+                        }
+                    }
+                    CHECK(good);
+                }
+                CHECK(S.sdma_bad == 0 && S.gart_unmapped == 0);
+                /* refused: the rectangle past the bound bytes, a row wider than a pitch, VRAM past its end */
+                CHECK(rdna3_copy_gart_rect_to_vram(&dev, &gmc, &sd, gart, n * 4096, lead + 4096, spitch, idst, dpitch,
+                                                   rowb, h) == RDNA3_EINVAL);
+                CHECK(rdna3_copy_gart_rect_to_vram(&dev, &gmc, &sd, gart, n * 4096, lead, 64, idst, dpitch, rowb, h) ==
+                      RDNA3_EINVAL);
+                CHECK(rdna3_copy_gart_rect_to_vram(&dev, &gmc, &sd, gart, n * 4096, lead, spitch, dev.vram_size - 4096,
+                                                   dpitch, rowb, h) == RDNA3_EINVAL);
+                /* a second surface bound beside it; then the first unbound and a third bound at its offset */
+                {
+                    const uint64_t other[4] = { SYS_PHYS + 0x70000, SYS_PHYS + 0x71000, SYS_PHYS + 0x72000,
+                                                SYS_PHYS + 0x73000 };
+                    const uint64_t h2 = rd3_ig_alloc(&ig, 4, &gart2);
+                    CHECK(h2 && gart2 == gart + 4 * 4096 && rdna3_gart_bind_pages(&dev, &gmc, gart2, other, 4) == RDNA3_OK);
+                    CHECK(rd3_ig_release(&ig, hd, &rel_off, &rel_pages) && rel_off == gart && rel_pages == n);
+                    rdna3_gart_unbind_pages(&dev, &gmc, rel_off, rel_pages);
+                    memcpy(&ipte, S.vram + gmc.gart_table + (gart / 4096) * 8, 8);
+                    CHECK(ipte == 0);
+                    memset(S.sysmem + 0x70000, 0x3C, 4 * 4096);
+                    const uint64_t h3 = rd3_ig_alloc(&ig, 4, &rel_off);
+                    const uint64_t moved[4] = { SYS_PHYS + 0x80000, SYS_PHYS + 0x81000, SYS_PHYS + 0x90000,
+                                                SYS_PHYS + 0x91000 };
+                    CHECK(h3 && rel_off == gart && !rd3_ig_find(&ig, hd));   /* the old handle names nothing */
+                    memset(S.sysmem + 0x80000, 0x5A, 2 * 4096);
+                    memset(S.sysmem + 0x90000, 0x5A, 2 * 4096);
+                    CHECK(rdna3_gart_bind_pages(&dev, &gmc, rel_off, moved, 4) == RDNA3_OK);
+                    rdna3_vram_fill(&dev, idst, 0, (uint64_t)h * dpitch);
+                    CHECK(rdna3_copy_gart_rect_to_vram(&dev, &gmc, &sd, rel_off, 4 * 4096, 0, dpitch, idst, dpitch, rowb,
+                                                       h) == RDNA3_OK);   /* equal pitches: one span */
+                    rdna3_vram_read(&dev, idst + (uint64_t)(h - 1) * dpitch, row, dpitch);
+                    CHECK(row[0] == 0x5A && row[rowb - 1] == 0x5A && S.sdma_tlb_stale == 0 && S.sdma_bad == 0);
+                    rdna3_vram_read(&dev, idst, row, dpitch);
+                    CHECK(row[0] == 0x5A && row[rowb] == 0x5A);   /* one span: the pitch padding comes along */
+                    /* a page that is not page aligned: nothing bound */
+                    const uint64_t bad[2] = { SYS_PHYS + 0xa0000, SYS_PHYS + 0xa1010 };
+                    CHECK(rdna3_gart_bind_pages(&dev, &gmc, gart2 + 4 * 4096, bad, 2) == RDNA3_EINVAL);
+                    memcpy(&ipte, S.vram + gmc.gart_table + (gart2 / 4096 + 4) * 8, 8);
+                    CHECK(ipte == 0);
+                    CHECK(rdna3_gart_bind_pages(&dev, &gmc, gmc.gart_size - 4096, other, 2) == RDNA3_EINVAL);
+                    rdna3_gart_unbind_pages(&dev, &gmc, gart2, 4);
+                    rdna3_gart_unbind_pages(&dev, &gmc, rel_off, 4);
+                    CHECK(rd3_ig_release(&ig, h2, &rel_off, &rel_pages) && rd3_ig_release(&ig, h3, &rel_off, &rel_pages) &&
+                          ig.live == 0);
+                }
+                free(row);
             }
             /* a pitched rectangle VRAM -> VRAM (the accelerator's swap copy
              * onto a scanout of another pitch): 40 rows of 3000 bytes from

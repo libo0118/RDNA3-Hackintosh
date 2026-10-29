@@ -232,9 +232,19 @@ public:
     void     submitFlipBuffer(IOAccelEvent *a0, unsigned int a1, IOAccelResource2 *a2,
                               IOAccelResource2 *a3) APPLE_KEXT_OVERRIDE;
     enum { kIopSrcSlots = 4 };
-    struct RD3IopSrc { unsigned id; IOMemoryDescriptor *md; IOMemoryMap *map; } fIopSrc[kIopSrcSlots];
+    /* a presented surface's memory, prepared (wired) and mapped while the slot keeps it; N63: its GART range for
+     * the SDMA copy (the core's handle, 0 = none; unbound before the descriptor is completed), the DMA command
+     * that gave the pages' bus addresses (kept prepared while they are bound: amdgpu's dma_map_sgtable of a
+     * userptr BO), the in-page offset of its first byte, the bytes bound, and sdmaNo: its pages cannot be
+     * expressed as a GART range (CPU only) */
+    struct RD3IopSrc {
+        unsigned id; IOMemoryDescriptor *md; IOMemoryMap *map;
+        unsigned long long sdma, sdmaBytes, sdmaGart; unsigned sdmaLead, sdmaNo;
+        IODMACommand *sdmaDma;
+    } fIopSrc[kIopSrcSlots];
     unsigned fIopNext;
-    const void *iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need);
+    const void *iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need, RD3IopSrc **slot);
+    void        iopDropSlot(RD3IopSrc *e, const char *why);
     void        iopDropSources();
 };
 OSDefineMetaClassAndStructors(RD3DisplayPipe, IOAccelLegacyDisplayPipe)

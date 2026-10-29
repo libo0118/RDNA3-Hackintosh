@@ -8,7 +8,10 @@ Sources:
     the seeds), why the GPU path was not taken, surface-in uploads;
   * the kernel's `debug.rdna3accel_iop_copy_*` / `iop_gate_us*` (common/rdna3_iop_copy.h) in 29-surface-vram.txt: the
     display pipe's CPU copy of every presented surface into the scanout, and the time its gates (the N59 stale wait,
-    the VRAM page-off wait) held the transactions.
+    the VRAM page-off wait) held the transactions;
+  * N63: `debug.rdna3accel_iop_copy_sdma_*` (same file): the same copy by SDMA0 from the surface's pages bound to the
+    GART, its fallbacks to the CPU by reason, and `iop_copy_sdma_state` (1 on, 0 off by the switch, 2 off after
+    failures, 3 a core without rdna3IopSdma).
 
     present_rows(plugin_text, surfvram, iop_on) -> [(LEVEL, name, text)]
 """
@@ -41,13 +44,52 @@ def kernel_counters(surfvram):
     return out
 
 
+SDMA_FB = ("core", "pages", "bind", "copy", "verify", "off", "scanout")   # common/rdna3_iop_copy.h enum rd3_iop_sdma_fb
+SDMA_STATE = {0: "off (debug.rdna3accel_iop_sdma=0 / rdna3iopsdma=0)", 1: "on", 2: "switched OFF after 3 failures in a row",
+              3: "the core does not answer rdna3IopSdma (a core older than N63)"}
+
+
+def iop_counts(c):
+    """(copies, us) of both paths together: the CPU's iop_copy_n / _us and N63's iop_copy_sdma_n / _us"""
+    return c.get("iop_copy_n", 0) + c.get("iop_copy_sdma_n", 0), c.get("iop_copy_us", 0) + c.get("iop_copy_sdma_us", 0)
+
+
+def iop_path(c):
+    """which path the IOP copies took: SDMA, CPU, `SDMA n / CPU m`, or None (no copy)"""
+    cpu, sdma = c.get("iop_copy_n", 0), c.get("iop_copy_sdma_n", 0)
+    if not cpu and not sdma:
+        return None
+    return "SDMA" if sdma and not cpu else "CPU" if cpu and not sdma else "SDMA %d / CPU %d" % (sdma, cpu)
+
+
+def sdma_text(c):
+    """N63: the SDMA path as a phrase, or None for a kernel before it"""
+    if "iop_copy_sdma_n" not in c:
+        return None
+    n, us = c.get("iop_copy_sdma_n", 0), c.get("iop_copy_sdma_us", 0)
+    st = c.get("iop_copy_sdma_state")
+    fbs = ", ".join("%s %d" % (k, c.get("iop_copy_sdma_fb_" + k, 0)) for k in SDMA_FB if c.get("iop_copy_sdma_fb_" + k, 0))
+    binds = c.get("iop_copy_sdma_binds", 0)
+    return ("SDMA path %s: %d copies%s; %d bind(s)%s, %d unbind(s), %d range(s) bound; %d checked by read-back; "
+            "fallbacks to the CPU %d%s" % (
+                SDMA_STATE.get(st, "state %s" % st) if st is not None else "state unknown", n,
+                (", avg %.2f ms (core %.2f ms), longest %.2f ms, %d MB/s" % (
+                    us / 1000.0 / n, c.get("iop_copy_sdma_core_us", 0) / 1000.0 / n, c.get("iop_copy_sdma_max_us", 0) / 1000.0,
+                    c.get("iop_copy_sdma_bytes", 0) // us if us else 0)) if n else "",
+                binds, " (avg %.2f ms)" % (c.get("iop_copy_sdma_bind_us", 0) / 1000.0 / binds) if binds else "",
+                c.get("iop_copy_sdma_unbinds", 0), c.get("iop_copy_sdma_ranges", 0), c.get("iop_copy_sdma_verified", 0),
+                c.get("iop_copy_sdma_fb", 0), " (" + fbs + ")" if fbs else ""))
+
+
 def iop_text(c):
     """the kernel's copy cost as a phrase, or None without the N61 counters"""
     n = c.get("iop_copy_n")
     if n is None:
         return None
-    if not n:
-        return "no IOP copy"
+    sd = sdma_text(c)
+    tot, tot_us = iop_counts(c)
+    if not tot:
+        return "no IOP copy" + ("; " + sd if sd else "")
     us = c.get("iop_copy_us", 0)
     heads = []
     for h in range(4):
@@ -55,10 +97,11 @@ def iop_text(c):
         if hn:
             heads.append("head %d: %d, avg %.2f ms, gates avg %.2f ms" % (
                 h, hn, c.get("iop_copy_us_h%d" % h, 0) / 1000.0 / hn, c.get("iop_gate_us_h%d" % h, 0) / 1000.0 / hn))
-    return ("%d IOP copies, avg %.2f ms (%d MB/s, %d of them 8 bytes per access), longest %.2f ms, %d MB in all; gates before "
-            "the copies avg %.2f ms%s" % (
-                n, us / 1000.0 / n, c.get("iop_copy_bytes", 0) // us if us else 0, c.get("iop_copy_64", 0),
-                c.get("iop_copy_max_us", 0) / 1000.0, c.get("iop_copy_bytes", 0) >> 20, c.get("iop_gate_us", 0) / 1000.0 / n,
+    cpu = ("CPU path: %d copies, avg %.2f ms (%d MB/s, %d of them 8 bytes per access), longest %.2f ms, %d MB in all" % (
+        n, us / 1000.0 / n, c.get("iop_copy_bytes", 0) // us if us else 0, c.get("iop_copy_64", 0),
+        c.get("iop_copy_max_us", 0) / 1000.0, c.get("iop_copy_bytes", 0) >> 20)) if n else "CPU path: no copy"
+    return ("%d IOP copies (path %s), avg %.2f ms; %s%s; gates before the copies avg %.2f ms%s" % (
+                tot, iop_path(c), tot_us / 1000.0 / tot, cpu, "; " + sd if sd else "", c.get("iop_gate_us", 0) / 1000.0 / tot,
                 " (" + "; ".join(heads) + ")" if heads else ""))
 
 
@@ -71,10 +114,19 @@ def present_rows(plugin_text, surfvram, iop_on=True):
             out.append(("WARN", "IOP copy", "no debug.rdna3accel_iop_copy_* counters in 29-surface-vram.txt (a kernel before DRIVER-PLAN N61, "
                         "or a collector that does not grep them): what the display pipe's copy into the scanout costs is UNKNOWN"))
     else:
-        n = c.get("iop_copy_n", 0)
-        avg = c.get("iop_copy_us", 0) / 1000.0 / n if n else 0.0
-        out.append(("WARN" if avg > SLOW_MS else "INFO", "IOP copy", iop + (": the copy alone takes over %.0f ms a frame" % SLOW_MS if avg > SLOW_MS else "")))
-    iop_avg = "%.2f ms" % (c.get("iop_copy_us", 0) / 1000.0 / c["iop_copy_n"]) if c.get("iop_copy_n") else "unknown"
+        n, us = iop_counts(c)
+        avg = us / 1000.0 / n if n else 0.0
+        lvl, why = ("WARN", ": the copy alone takes over %.0f ms a frame" % SLOW_MS) if avg > SLOW_MS else ("INFO", "")
+        st = c.get("iop_copy_sdma_state")
+        if st == 2:
+            lvl, why = "WARN", why + ": the SDMA path switched itself OFF (the `iop sdma (N63): switched OFF` and `iop: sdma -> CPU` lines say why)"
+        elif c.get("iop_copy_sdma_fb_verify", 0) or c.get("iop_copy_sdma_fb_copy", 0):
+            lvl, why = "WARN", why + ": SDMA copies failed or read back wrong (the `iop: sdma -> CPU` lines)"
+        elif st == 1 and c.get("iop_copy_n", 0) and not c.get("iop_copy_sdma_n", 0):
+            lvl, why = "WARN", why + ": the SDMA path is on but every copy went to the CPU (the fallback reasons above)"
+        out.append((lvl, "IOP copy", iop + why))
+    n_all, us_all = iop_counts(c)
+    iop_avg = ("%.2f ms (%s)" % (us_all / 1000.0 / n_all, iop_path(c))) if n_all else "unknown"
     sums = plugin_summaries(plugin_text)
     if not sums:
         if re.search(r"NVMTL: vk: handoff: SUMMARY", plugin_text or ""):

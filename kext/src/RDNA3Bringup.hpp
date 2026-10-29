@@ -46,6 +46,7 @@ extern "C" {
 #include "smu13.h"
 #include "dmub32.h"
 #include "xfer.h"
+#include "rdna3_iop_copy.h"
 #include "rdna3_drm.h"
 #include "rdna3_gpu_busy.h"
 #include "amd_fw.h"
@@ -107,6 +108,15 @@ public:
                        uint32_t rows);
     int   copyPagesToVram(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
     int   clearVram(uint64_t vramOff, uint64_t len);   /* SDMA CONST_FILL, 0 */
+    /* DRIVER-PLAN N63, the IOP copy by SDMA (rdna3IopSdma, common/rdna3_iop_copy.h): GART ranges of system pages
+     * the accelerator keeps bound per presented surface (amdgpu_ttm_alloc_gart), the pitched copy from one into
+     * VRAM (amdgpu_copy_buffer), the unbind. Under the DRM lock. RDNA3_ENODEV no GART area / SDMA, RDNA3_ENOENT a
+     * handle that names no range (STALE), RDNA3_ENOMEM no slot / room, RDNA3_EINVAL bad arguments. */
+    int   iopGartBind(const uint64_t *pages, uint64_t npages, uint64_t *handle, uint64_t *gartOff);
+    int   iopGartCopy(uint64_t handle, uint64_t srcOff, uint32_t srcPitch, uint64_t dstOff, uint32_t dstPitch,
+                      uint32_t rowBytes, uint32_t rows);
+    int   iopGartUnbind(uint64_t handle);
+    uint32_t iopGartLive() const { return fIopGart.live; }
 
     /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
@@ -477,6 +487,11 @@ private:
      * 16 MiB transfer window (amdgpu_ttm_alloc_gart for uf_bo). A slot is
      * remapped only once its last job's fence passed. */
     static const uint32_t kUfSlots = 64;
+    /* N63: the IOP copy's GART ranges, between the IH rings (from offset 0) and the top's transfer window and
+     * slots; reset with every new GART table (hwInit), off while the GART is down */
+    rd3_ig        fIopGart = {};
+    bool          fIopGartReady = false;
+    void          iopGartReset();
     struct UfSlot { uint64_t pa; uint64_t seq; uint32_t ip, ring; bool used; };
     UfSlot        fUfSlot[kUfSlots] = {};
     int           ufAddr(const rdna3_cs_job *job, uint64_t *mc, int *slot);
