@@ -2748,6 +2748,7 @@
   "cpuhost",
   "hanggfx",
   "hotplug",
+  "iopsdma",
   "ladder",
   "modeset",
   "modeset2",
