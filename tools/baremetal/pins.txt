@@ -1,0 +1,10 @@
+# name  version  sha256  url      (read by fetch.sh and tests/test_baremetal.sh; prose in SOURCE)
+OpenCorePkg      1.0.8   2011e8b7216ecb2645d97ea710df965947edd406846e92050b9bc4190be6d27b https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.8/OpenCore-1.0.8-RELEASE.zip
+Lilu             1.7.2   53967d7dcfaab01023a33df2e969a89522f13d6654a6a56ac4711b62dabf3ab8 https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip
+VirtualSMC       1.3.8   2e29a8aaf91b4eb0bcdf5913ed17e70f5cf76531122acd4132eff7813a54de8b https://github.com/acidanthera/VirtualSMC/releases/download/1.3.8/VirtualSMC-1.3.8-RELEASE.zip
+AppleALC         1.9.8   d4d36cd2da7863cf7cbfcb0892d45c08457f4f4ddd065a073dd010e46bd63bcb https://github.com/acidanthera/AppleALC/releases/download/1.9.8/AppleALC-1.9.8-RELEASE.zip
+RestrictEvents   1.1.6   98170dfae195ddd28b5d95e3f040125a13ca783bcb9bd1e5b8c588e217b14ee6 https://github.com/acidanthera/RestrictEvents/releases/download/1.1.6/RestrictEvents-1.1.6-RELEASE.zip
+NVMeFix          1.1.3   e1d5657ab7ac31f69771708f7b80bf218ab9aa0b8e4c4fe6ff943983037e3dfb https://github.com/acidanthera/NVMeFix/releases/download/1.1.3/NVMeFix-1.1.3-RELEASE.zip
+RealtekRTL8111   3.0.0   a0f2e64ac3c76e2d416ff88f35a197ce229e74ea78e968631a736a43b4d8231c https://github.com/Mieze/RTL8111_driver_for_OS_X/releases/download/v3.0.0/RealtekRTL8111-V3.0.0.zip
+SSDT-CPUR.aml    60029d4 edc447852d26c95e5888a8517c78cc8b9dfc5160de9297db971fcae2acb6ff8d https://raw.githubusercontent.com/dortania/Getting-Started-With-ACPI/60029d4fff6d56e210e5f682f6dd6508c4bb3343/extra-files/compiled/SSDT-CPUR.aml
+SSDT-EC-USBX-DESKTOP.aml 60029d4 1cf941a6767fc95d2aa5c265e82fc0c94f05885a67ba6f9a34fe643b2f12dd2e https://raw.githubusercontent.com/dortania/Getting-Started-With-ACPI/60029d4fff6d56e210e5f682f6dd6508c4bb3343/extra-files/compiled/SSDT-EC-USBX-DESKTOP.aml

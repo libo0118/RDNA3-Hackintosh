@@ -10,6 +10,9 @@ section of [TESTING-HW](TESTING-HW.md#bare-metal-with-the-installer-no-vm-harnes
 > bare-metal machine has not run it yet. Prepare the way back (section 8)
 > **before** the first boot.
 
+The machine, BIOS and installer stick for the owner's own PC (macOS 26,
+dual boot with Linux): [BAREMETAL](BAREMETAL.md).
+
 Requirements: macOS **15 Sequoia** (x86_64), OpenCore, the RX 7800 XT,
 SSH or a second machine to read a report if the screen stays dark.
 
