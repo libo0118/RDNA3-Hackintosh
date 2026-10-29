@@ -203,7 +203,7 @@ def build_config(sample, stage, *, kexts, cores, smbios, identity, alcid, entrie
 
     # Misc: a visible picker for dual boot; Linux's GRUB as an entry; SIP/Secure Boot model as the VM
     boot = c["Misc"]["Boot"]
-    boot.update({"ShowPicker": True, "PickerMode": "Builtin", "HideAuxiliary": True,
+    boot.update({"ShowPicker": True, "PickerMode": "Builtin", "HideAuxiliary": False,   # the recovery (com.apple.recovery.boot dmg) is an auxiliary entry: hidden, the picker offered only the stick itself (2026-10-29)
                  "LauncherOption": "Disabled",
                  "Timeout": 0 if timeout is None else timeout})
     c["Misc"]["Security"].update({"ScanPolicy": 0, "SecureBootModel": "Disabled", "Vault": "Optional",
