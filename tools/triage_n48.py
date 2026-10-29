@@ -282,7 +282,11 @@ def n48_plugin_rows(pluginlog=""):
         rows.append(("INFO", "framebuffer fetch", "[[color(n)]] declared in %s but no read is left in the module (folded away)" %
                      ", ".join(sorted(fbf_gone)[:4])))
     if fbf_impl or fbf_sum:
-        tot = ["%s %d pipeline(s) served, %d draw(s), %d pass set(s), %d restart(s)" % (p, v.get("served", 0), v.get("draws", 0), v.get("sets", 0), v.get("restarts", 0))
+        tot = ["%s %d pipeline(s) served, %d draw(s), %d pass set(s), %d restart(s)%s" % (
+                   p, v.get("served", 0), v.get("draws", 0), v.get("sets", 0), v.get("restarts", 0),
+                   # N64: the barrier before each reading draw, by kind (absent in a plugin before N64)
+                   ", barriers: image %d, old memory %d (NVMTL_FBF_MEMBAR), %d without an image" % (v.get("bar_img", 0), v.get("bar_mem", 0), v.get("bar_noimg", 0))
+                   if "bar_img" in v else "")
                for (p, _), v in sorted(fbf_sum.items())[:4]]
         rows.append(("INFO", "framebuffer fetch",
                      "IMPLEMENTED (render-pass input attachments, DRIVER-PLAN N48): modules served in %s; %s" %
@@ -296,7 +300,8 @@ def n48_plugin_rows(pluginlog=""):
                           ("att_refused", "attachment(s) that cannot be input attachments"), ("alloc_failed", "descriptor-set allocation failure(s)"),
                           ("zr_ms", "pipeline(s) with a multisample read zeroed"), ("zr_int", "pipeline(s) with an integer-format read zeroed"),
                           ("zr_tess", "tessellation pipeline(s) with a read zeroed"), ("zr_nolayout", "pipeline(s) zeroed for lack of a descriptor layout"),
-                          ("zr_forced", "pipeline(s) zeroed by NVMTL_FBFETCH_ZERO=1")):
+                          ("zr_forced", "pipeline(s) zeroed by NVMTL_FBFETCH_ZERO=1"),
+                          ("bar_noimg", "reading draw(s) that got the OLD global barrier because an attachment had no image (N64: correct but slow)")):
             if v.get(key, 0) > 0:
                 probs.append("%s[%d]: %d %s" % (p, pid, v[key], what))
         if v.get("restarts", 0) > 100:

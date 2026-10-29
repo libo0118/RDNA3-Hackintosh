@@ -147,4 +147,24 @@ static inline uint32_t nvmtl_fbf_pass_fbin(uint32_t requested, uint32_t pipeline
 {
     return samples > 1 ? 0u : ((requested | pipeline_fbread) & slots_present & ((1u << NVMTL_FBF_NCOL) - 1u));
 }
+
+/* DRIVER-PLAN N64: the barrier recorded before a draw that reads. Until N64 it was a global VkMemoryBarrier, and RADV (Mesa d381c361,
+ * radv_cmd_buffer.c radv_src_access_flush / radv_dst_access_flush) cannot know which image a global barrier is about: image_is_coherent
+ * is false, has_CB_meta true, so every such draw costs a CB flush + CB metadata flush + PS partial flush + a whole-GL2 invalidate
+ * (AC_BARRIER_INV_L2) on both sides. A VkImageMemoryBarrier naming the attachment (layout GENERAL -> GENERAL, legal inside the pass:
+ * the image is the subpass's input AND colour attachment, the scopes equal the self-dependency) lets RADV ask
+ * radv_image_is_l2_coherent (GFX11: true unless pipe-misaligned) and radv_image_has_CB_metadata: the GL2 invalidate goes away, the
+ * CB flush and the PS wait stay (they are what makes the previous draw's pixels readable). IMAGE: one image barrier per attachment the
+ * draw reads; MEM_KNOB: NVMTL_FBF_MEMBAR=1, the old barrier (the A/B switch); MEM_NOIMAGE: an attachment the draw reads has no image
+ * to name (never expected: such a pass refuses the draw before this), the old barrier keeps it correct. */
+enum { NVMTL_FBF_BAR_IMAGE = 0, NVMTL_FBF_BAR_MEM_KNOB = 1, NVMTL_FBF_BAR_MEM_NOIMAGE = 2 };
+static inline unsigned nvmtl_fbf_barrier_mode(int membar_knob, uint32_t reads, uint32_t have_image)
+{
+    if (membar_knob) return NVMTL_FBF_BAR_MEM_KNOB;
+    reads &= (1u << NVMTL_FBF_NCOL) - 1u;
+    if (!reads || (reads & ~have_image)) return NVMTL_FBF_BAR_MEM_NOIMAGE;
+    return NVMTL_FBF_BAR_IMAGE;
+}
+/* NVMTL_FBF_MEMBAR: on when the value is set and does not start with '0' */
+static inline int nvmtl_fbf_membar_knob(const char *v) { return v && *v && *v != '0'; }
 #endif

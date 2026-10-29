@@ -6,7 +6,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
-from triage_present_cost import present_rows, plugin_summaries, kernel_counters  # noqa: E402
+from triage_present_cost import present_rows, plugin_summaries, kernel_counters, ws_frame_rows, ws_summaries  # noqa: E402
 
 FAILS = []
 
@@ -37,7 +37,8 @@ s = plugin_summaries(text)
 check(list(s) == ["WindowServer[207]"] and s["WindowServer[207]"]["outs"] == "30", "newest SUMMARY per process: %r" % s)
 r = present_rows(text, SV, True)
 names = [n for _l, n, _t in r]
-check(names == ["IOP copy", "present cost"], "rows: %r" % names)
+check(names == ["IOP copy", "present cost", "ws frame"], "rows: %r" % names)
+check(r[2][0] == "INFO" and "before DRIVER-PLAN N64" in r[2][2], "no ws frame line from an older plugin: %r" % (r[2],))
 check(r[0][0] == "INFO" and "1000 IOP copies (path CPU), avg 4.00 ms; CPU path: 1000 copies, avg 4.00 ms (2073 MB/s, 1000 of them 8 bytes per access), longest 9.00 ms" in r[0][2]
       and "head 0: 600, avg 4.00 ms, gates avg 0.50 ms" in r[0][2] and "SDMA path" not in r[0][2], "IOP copy row: %r" % (r[0],))
 check(r[1][0] == "INFO" and r[1][2].startswith("WindowServer[207]: copy-out avg 0.40 ms (path GPU 29 / CPU 1; NVMTL_SURFOUT_DMA on), IOP copy avg 4.00 ms (CPU), surface-in avg 3.00 ms")
@@ -87,6 +88,35 @@ r = present_rows("", SV + "debug.rdna3accel_iop_copy_sdma_state: 1\ndebug.rdna3a
 check(r[0][0] == "WARN" and "every copy went to the CPU" in r[0][2], "SDMA on, unused: %r" % (r[0],))
 r = present_rows("", SV + "debug.rdna3accel_iop_copy_sdma_state: 3\ndebug.rdna3accel_iop_copy_sdma_n: 0\n", True)
 check(r[0][0] == "INFO" and "core older than N63" in r[0][2], "old core: %r" % (r[0],))
+
+# N64: `vk: ws frame: SUMMARY` (metal/plugin/nvmtl_ws_frame.h nvmtl_wf_format, the body tests/test_ws_frame.c checks)
+W = "2026-10-29 10:00:%02d.1 Df %s (RDNA3MTLDriver) NVMTL: vk: ws frame: SUMMARY %s\n"
+
+
+def wbody(frames=800, gpu_n=800, rec=4000, gpu=3000, bi=300000, bm=0, membar=0, ups=400, up_kb=409600):
+    return ("frames=%d active_s=40 fps_peak=122 passes=46000 draws=340000 fbf_draws=%d bar_img=%d bar_mem=%d rec_us_avg=%d rec_us_max=24000 "
+            "gpu_n=%d gpu_us_avg=%d gpu_us_max=9000 wait_us_avg=1500 ups=%d up_kb=%d up_us_avg=2300 membar=%d" % (
+                frames, bi + bm, bi, bm, rec, gpu_n, gpu, ups, up_kb, membar))
+
+
+text = (W % (1, "WindowServer[207:2cd]", wbody(frames=10)) + W % (11, "WindowServer[207:2cd]", wbody())
+        + W % (12, "Terminal[968:1a]", wbody(frames=20, gpu_n=20, bi=100, ups=0, up_kb=0)))
+check(ws_summaries(text)["WindowServer[207]"]["frames"] == "800", "newest ws frame SUMMARY: %r" % ws_summaries(text))
+r = ws_frame_rows(text)
+check([x[2].split(":")[0] for x in r] == ["WindowServer[207]", "Terminal[968]"], "WindowServer first: %r" % r)
+check(r[0][0] == "INFO" and r[0][2].startswith("WindowServer[207]: ws frame: avg 7.00 ms (encode 4.00, GPU 3.00, fbfetch barriers 375.0/frame, uploads 0.50 MB/frame)")
+      and "800 frame(s) (command buffers that drew) in 40 active second(s) = 20.0/s, busiest second 122" in r[0][2]
+      and "barriers: image 300000, OLD memory 0 (NVMTL_FBF_MEMBAR off)" in r[0][2] and "400 surface-in upload(s) (0.5 a frame, avg 2.30 ms, 400 MB in all)" in r[0][2],
+      "ws frame row: %r" % (r[0],))
+# slow GPU, no timestamps, unexpected memory barriers: WARN for WindowServer with the reasons
+r = ws_frame_rows(W % (2, "WindowServer[207:2cd]", wbody(gpu=12000, bm=5)))
+check(r[0][0] == "WARN" and "the GPU alone takes over 8 ms" in r[0][2] and "5 draw(s) got the OLD memory barrier" in r[0][2], "slow GPU: %r" % (r[0],))
+r = ws_frame_rows(W % (3, "WindowServer[207:2cd]", wbody(gpu_n=0, rec=9000)))
+check(r[0][0] == "WARN" and "GPU UNKNOWN" in r[0][2] and "avg 9.00 + GPU ? ms" in r[0][2] and "encoding alone" in r[0][2], "no GPU time: %r" % (r[0],))
+# the A/B switch: the old barrier everywhere is said, not a WARN
+r = ws_frame_rows(W % (4, "WindowServer[207:2cd]", wbody(bi=0, bm=300000, membar=1)))
+check(r[0][0] == "INFO" and "NVMTL_FBF_MEMBAR ON (the old barrier)" in r[0][2] and "OLD memory 300000" in r[0][2], "A/B membar: %r" % (r[0],))
+check(ws_frame_rows("") == [], "no plugin log: no ws frame row")
 
 if FAILS:
     sys.exit("test_triage_present_cost: %d FAILED" % len(FAILS))

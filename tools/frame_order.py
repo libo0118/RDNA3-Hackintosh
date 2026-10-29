@@ -45,7 +45,7 @@ def value(bits):
 def parse(text):
     """{'strips': [(layer, pipe, row, x)], 'samples': {(layer, pipe): [(us, bits, n)]}, 'end': (samples, us, errors) or None,
     'wait_ms': str or None, 'before': {name: int}, 'after': {name: int}}"""
-    out = {"strips": [], "samples": {}, "end": None, "wait_ms": None, "before": {}, "after": {}}
+    out = {"strips": [], "samples": {}, "end": None, "wait_ms": None, "before": {}, "after": {}, "paced": None}
     for line in text.splitlines():
         f = line.split()
         if not f:
@@ -54,6 +54,9 @@ def parse(text):
             m = re.search(r"iop_stale_wait_ms=(\S+)", line)
             if m:
                 out["wait_ms"] = m.group(1)
+            m = re.match(r"#\s*pacing:.*?\((\d+)% duty", line)
+            if m:
+                out["paced"] = int(m.group(1))
         elif f[0] in ("B", "A") and len(f) == 3 and f[1].endswith(":") and f[2].lstrip("-").isdigit():
             out["before" if f[0] == "B" else "after"][f[1][:-1]] = int(f[2])
         elif f[0] == "L" and len(f) == 5 and f[1] in MOD:
@@ -110,6 +113,16 @@ def kernel_delta(p):
     return ", ".join(parts)
 
 
+def probe_text(p):
+    """N64: whether the probe paced its reads (rdna3_drminfo `# pacing:` line). Card run 2026-10-29a: back-to-back reads (each ~2 ms
+    under the kernel's display lock) cut WindowServer from 122 to 20-36 command buffers a second during the bursts, so an unpaced
+    burst's displayed rate is a floor, not the driver's rate"""
+    if p["paced"] is not None:
+        return "; probe paced (%d %% duty)" % p["paced"]
+    return ("; probe UNPACED (an rdna3_drminfo before N64: back-to-back scanout reads under the display lock slowed WindowServer "
+            "in card run 2026-10-29a, the displayed rate is a floor)")
+
+
 def rows(name, text):
     """triage rows (LEVEL, 'frame order', text) of one burst file"""
     p = parse(text)
@@ -126,6 +139,7 @@ def rows(name, text):
         a = analyse(layer, runs)
         n = len(a["back"])
         fps = fps_text(a, runs, p["end"])
+        fps += probe_text(p) if fps else ""
         ex = ", ".join("%.3f s: %d -> %d (%d back)" % (us / 1e6, f, t, by) for us, f, t, by in a["back"][:4])
         out.append(("FAIL" if n else "PASS", "frame order",
                     "%s%s: %d regressions in %d samples (layer: %s, pipe %d): %d frames seen, %d skipped, %d torn sample(s)%s%s%s" % (

@@ -911,6 +911,16 @@ static int strip_row(int fd, uint32_t pipe, uint32_t row, uint32_t col0, uint8_t
     return 0;
 }
 
+/* N64: the sleep after a round of strip reads that took `took_us`: as long again (STRIP_DUTY_PCT 50 = the display lock is free half
+ * the time), at most STRIP_SLEEP_MAX_US so a slow read never stops the sampling for long */
+#define STRIP_DUTY_PCT      50u
+#define STRIP_SLEEP_MAX_US  8000u
+static uint64_t strip_gap_us(uint64_t took_us)
+{
+    const uint64_t g = took_us * (100u - STRIP_DUTY_PCT) / STRIP_DUTY_PCT;
+    return g > STRIP_SLEEP_MAX_US ? STRIP_SLEEP_MAX_US : g;
+}
+
 struct strip_lock { int layer; uint32_t pipe, row0, row1, x; char last[2 * RD3_STRIP_BITS + 1]; uint64_t since, n; };
 
 static uint64_t strip_now_us(void)
@@ -961,10 +971,16 @@ static int scanout_strip(int fd, const char *path, int seconds)
     fprintf(f, "# frame-order strips (common/rdna3_strip.h): %u found, %d s burst\n", nl, seconds);
     for (unsigned j = 0; j < nl; j++)
         fprintf(f, "L %s %u %u %u\n", rd3_strip_layer_name[lk[j].layer], lk[j].pipe, (lk[j].row0 + lk[j].row1) / 2, lk[j].x);
+    /* N64: card run 2026-10-29a - while this loop read back to back (one ioctl ~2 ms, each holding the display lock fDispLock in
+     * RDNA3Accel::drmScanout), WindowServer committed 20-36 command buffers a second instead of 122 (60 frames) before and after the
+     * bursts (its plugin trace), so the scanout showed 11 fps: the probe slowed what it measured. Each round now sleeps as long as its
+     * reads took (the lock is free at least half the time); a round of two strips still samples every ~8 ms, twice per 60 Hz frame. */
+    fprintf(f, "# pacing: sleep after each round as long as its reads took (%u%% duty, at most %u us)\n", STRIP_DUTY_PCT, STRIP_SLEEP_MAX_US);
     printf("scanout strip: %u strip(s) found\n", nl);
-    uint64_t samples = 0, errors = 0;
+    uint64_t samples = 0, errors = 0, slept_us = 0;
     const uint64_t t0 = strip_now_us(), end = t0 + (uint64_t)seconds * 1000000u;
     while (nl && strip_now_us() < end) {
+        const uint64_t r0 = strip_now_us();
         for (unsigned j = 0; j < nl; j++) {
             uint32_t got = 0;
             char bits[2 * RD3_STRIP_BITS + 1];
@@ -980,6 +996,12 @@ static int scanout_strip(int fd, const char *path, int seconds)
             memcpy(lk[j].last, bits, sizeof(bits));
             lk[j].since = now; lk[j].n = 1;
         }
+        const uint64_t gap = strip_gap_us(strip_now_us() - r0);
+        if (gap) {
+            struct timespec ts = { (time_t)(gap / 1000000u), (long)(gap % 1000000u) * 1000L };
+            nanosleep(&ts, NULL);
+            slept_us += gap;
+        }
     }
     for (unsigned j = 0; j < nl; j++)
         if (lk[j].n)
@@ -988,8 +1010,8 @@ static int scanout_strip(int fd, const char *path, int seconds)
     fprintf(f, "E %llu %llu %llu\n", (unsigned long long)samples, (unsigned long long)(strip_now_us() - t0),
             (unsigned long long)errors);
     fclose(f);
-    printf("scanout strip: %llu sample(s), %llu failed read(s) -> %s\n", (unsigned long long)samples,
-           (unsigned long long)errors, path);
+    printf("scanout strip: %llu sample(s), %llu failed read(s), %llu ms paced -> %s\n", (unsigned long long)samples,
+           (unsigned long long)errors, (unsigned long long)(slept_us / 1000u), path);
     return nl ? 0 : 2;
 }
 

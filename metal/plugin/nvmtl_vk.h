@@ -10,6 +10,7 @@
 const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
 typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; } nvk_buffer;
 #include "nvmtl_sample_positions.h"
+#include "nvmtl_ws_frame.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vpair;  } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -76,6 +77,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *fbf_set; uint32_t fbf_ready;     /* the pass's descriptor set (set NVMTL_FBF_SET) and whether it was built (or failed) */
                  nvk_image *tmpimg; unsigned ntmpimg;     /* scratch images the recording made (a copy inside one image goes through one); destroyed with the command buffer */
                  nvk_fbf_att fbf_att[NVMTL_NCOL];
+                 uint64_t wf_t0, wf_rec_ns; nvmtl_wf_cb wf;   /* N64 (nvmtl_ws_frame.h): begin time, begin -> submit, what the command buffer recorded */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
@@ -198,6 +200,7 @@ int  nvmtl_vk_submit_finish(nvmtl_inflight *f);
 void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n);
 void nvmtl_vk_note_dontcare(int cleared);   /* a render pass attachment with a don't-care load action (cleared = NVMTL_DONTCARE_CLEARS turned it into a clear) */
 void nvmtl_vk_summaries(void);              /* print the `vk: ab:` and `vk: fbfetch:` SUMMARY lines when a counter moved (the shared timer) */
+void nvmtl_vk_wf_upload(uint64_t bytes, uint64_t ns);   /* N64: a surface-in upload (IOSurface -> private image), for `vk: ws frame: SUMMARY` */
 int nvmtl_vk_pre_open(void);
 int nvmtl_vk_pre_copy(nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
 int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word);

@@ -13,7 +13,12 @@ Sources:
     GART, its fallbacks to the CPU by reason, and `iop_copy_sdma_state` (1 on, 0 off by the switch, 2 off after
     failures, 3 a core without rdna3IopSdma).
 
-    present_rows(plugin_text, surfvram, iop_on) -> [(LEVEL, name, text)]
+  * N64: the plugin's `vk: ws frame: SUMMARY frames= ... rec_us_avg= gpu_us_avg= ...` (metal/plugin/nvmtl_ws_frame.h), the newest
+    line per process: what one frame (a command buffer that began a render pass) costs to record and on the GPU, its draws,
+    framebuffer-fetch draws and the barriers before them (image / old memory barrier), the surface-in uploads.
+
+    present_rows(plugin_text, surfvram, iop_on) -> [(LEVEL, name, text)]   (the `ws frame` rows included)
+    ws_frame_rows(plugin_text) -> [(LEVEL, 'ws frame', text)]
 """
 import re
 
@@ -105,7 +110,67 @@ def iop_text(c):
                 " (" + "; ".join(heads) + ")" if heads else ""))
 
 
+WS_HALF_FRAME_MS = 8.0   # one command buffer over this (record or GPU) takes half of a 60 Hz frame; WindowServer commits ~2 a frame
+
+
+def ws_summaries(plugin_text):
+    """{'Proc[pid]': {key: value}} from the newest `vk: ws frame: SUMMARY` per process"""
+    last = {}
+    for m in re.finditer(r"([A-Za-z][\w .-]*?)\[(\d+):[0-9a-f]+\].*?NVMTL: vk: ws frame: SUMMARY (.*)$", plugin_text or "", re.M):
+        name = re.sub(r"^(Df|Db|Dc|I|In|E|Er|Ef|F|Fa|A|De|Default|Info|Debug|Error|Fault)\s+", "", m.group(1).strip())
+        last["%s[%s]" % (name, m.group(2))] = dict(kv.split("=", 1) for kv in m.group(3).split() if "=" in kv)
+    return last
+
+
+def ws_frame_rows(plugin_text):
+    """N64: `ws frame: avg X ms (encode E, GPU G, fbfetch barriers B/frame, uploads U MB/frame)` per process, WindowServer first"""
+    sums = ws_summaries(plugin_text)
+    if not sums:
+        if re.search(r"NVMTL: vk: present cost: SUMMARY", plugin_text or ""):
+            return [("INFO", "ws frame", "no `vk: ws frame: SUMMARY` line although the plugin logs present-cost summaries: a plugin before "
+                     "DRIVER-PLAN N64 (what a WindowServer frame costs is UNKNOWN)")]
+        return []
+    out = []
+    for proc, d in sorted(sums.items(), key=lambda kv: (not kv[0].startswith("WindowServer"), kv[0])):
+        fr, gn, ups = _num(d, "frames"), _num(d, "gpu_n"), _num(d, "ups")
+        if not fr and not ups:
+            continue
+        rec, gpu = _num(d, "rec_us_avg") / 1000.0, _num(d, "gpu_us_avg") / 1000.0
+        bi, bm = _num(d, "bar_img"), _num(d, "bar_mem")
+        per = (lambda k: _num(d, k) / float(fr)) if fr else (lambda k: 0.0)
+        up_mb = _num(d, "up_kb") / 1024.0 / fr if fr else 0.0
+        act = _num(d, "active_s")
+        text = ("%s: ws frame: avg %s ms (encode %.2f, GPU %s, fbfetch barriers %.1f/frame, uploads %.2f MB/frame) | "
+                "%d frame(s) (command buffers that drew) in %d active second(s) = %.1f/s, busiest second %d; %.1f pass(es), %.1f draw(s), "
+                "%.1f framebuffer-fetch draw(s) a frame; barriers: image %d, OLD memory %d (NVMTL_FBF_MEMBAR %s); encode longest %.2f ms, "
+                "GPU longest %s, fence wait avg %.2f ms; %d surface-in upload(s) (%.1f a frame, avg %.2f ms, %d MB in all)" % (
+                    proc, ("%.2f" % (rec + gpu)) if gn else ("%.2f + GPU ?" % rec), rec, ("%.2f" % gpu) if gn else "UNKNOWN",
+                    (bi + bm) / float(fr) if fr else 0.0, up_mb,
+                    fr, act, fr / float(act) if act else 0.0, _num(d, "fps_peak"), per("passes"), per("draws"), per("fbf_draws"),
+                    bi, bm, "ON (the old barrier)" if d.get("membar") == "1" else "off", _num(d, "rec_us_max") / 1000.0,
+                    ("%.2f ms (%d of %d timed)" % (_num(d, "gpu_us_max") / 1000.0, gn, fr)) if gn else "-",
+                    _num(d, "wait_us_avg") / 1000.0, ups, ups / float(fr) if fr else 0.0, _num(d, "up_us_avg") / 1000.0, _num(d, "up_kb") >> 10))
+        lvl, why = "INFO", []
+        if fr and not gn:
+            why.append("no GPU timestamp came back (calibrated timestamps missing?): the GPU share is UNKNOWN")
+        if rec > WS_HALF_FRAME_MS:
+            why.append("encoding alone takes over %.0f ms a command buffer" % WS_HALF_FRAME_MS)
+        if gn and gpu > WS_HALF_FRAME_MS:
+            why.append("the GPU alone takes over %.0f ms a command buffer" % WS_HALF_FRAME_MS)
+        if bm and d.get("membar") != "1":
+            why.append("%d draw(s) got the OLD memory barrier without NVMTL_FBF_MEMBAR (an attachment without an image: the `got the OLD global barrier` line)" % bm)
+        if why:
+            lvl = "WARN" if proc.startswith("WindowServer") else "INFO"
+            text += ": " + "; ".join(why)
+        out.append((lvl, "ws frame", text))
+    return out
+
+
 def present_rows(plugin_text, surfvram, iop_on=True):
+    return _present_rows(plugin_text, surfvram, iop_on) + ws_frame_rows(plugin_text)
+
+
+def _present_rows(plugin_text, surfvram, iop_on=True):
     out = []
     c = kernel_counters(surfvram)
     iop = iop_text(c)
