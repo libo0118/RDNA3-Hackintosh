@@ -200,3 +200,38 @@ the stick: `rdna3/report-20261031-162542` (config-driver, after the hang) and
 - The tools need `libdrm.2.dylib` / `libdrm_amdgpu.1.dylib` next to them;
   the artifact ships them as `libdrm.dylib` / `libdrm_amdgpu.dylib` (symlinks
   made by hand).
+
+### Smoothness and Geekbench 7 (config-metal, 17:00-17:25)
+
+- The owner sees ~20-30 fps everywhere (window drags, animations, YouTube).
+  The driver side measures a steady 60 Hz: `iop_ok_h1` sampled every ~1.5 ms
+  for 3 s rose 180 times, every gap 16.7 ms; during a window drag 479 presents
+  in 8 s (378 gaps ~17 ms, one 50 ms gap). SDMA copy 0.32 ms per frame
+  (max 3 ms), vblank IRQs ~60/s per head (`virq_lat_avg_us` 6), the plugin's
+  `ws frame` ~120/s for both heads (rec 1.2 ms CPU, 0.5 ms GPU per frame).
+  So if the eye sees 30 fps, WindowServer presents repeated content: not
+  yet explained. Next checks: whether consecutive presented surfaces differ
+  (content duplicates), the cursor path, and N59 (frames stepping back).
+- testufo.com in Safari shows **SYNC FAILURE** (no frame-rate reading): Safari
+  is `-Safari` in the allow list (N1, WebKit.GPU sandbox), so WebKit renders
+  on the CPU (two WebKit processes at 54% + 39% CPU) - Safari and YouTube in
+  Safari say nothing about the plugin's speed.
+- **Geekbench 7.0.0 GPU (Metal) does not run**:
+  1. The benchmark worker is `Geekbench 7.app/Contents/Resources/geekbench_avx2`,
+     not in Contents/MacOS, so `%apps` refuses it ("not allow-listed: no
+     device") and the run ends at once. Added `geekbench_avx2` to
+     `/Library/GPUBundles/rdna3mtl-allow.txt` on the Mac by hand (backup
+     `/private/tmp/rdna3mtl-allow.txt.bak`); the repo's `metal/rdna3mtl-allow.txt`
+     should get it too (or `%apps` should cover executables under
+     Contents/Resources of an app).
+  2. Then it crashes in MPS: `MPSNDArrayConvolutionDeviceBehaviorAMD::
+     EncodeNDArrayConvolution` -> `MPSLibrary::MPSKey_Compile`; plugin log:
+     `link FAILED: "AMDConvolution::ndArrayConvolution2DAMD_NHWC" ... native
+     emitter: unsupported Metal visible function reference; dynamic linked
+     functions are not expressible in Logical SPIR-V`, then MPSLibrary.mm
+     line 639 error. The translator needs visible-function / linked-function
+     support (inline the 10 linked functions at pipeline creation) before
+     Geekbench's GPU run (MPS NDArray convolution) can work.
+     Crash `~/Library/Logs/DiagnosticReports/geekbench_avx2-2026-10-31-172324.ips`
+     and the log stream are on the Pi in `~/rdna3-bm/gb/`.
+- `rdna3_drminfo` crashed once (16:42, before the libdrm symlinks: dyld).
