@@ -34,6 +34,15 @@ IOService *RDNA3Accel::probe(IOService *provider, SInt32 *score)
         LOG("disabled by -rdna3off");
         return nullptr;
     }
+    /* Safe Mode (-x; OpenCore adds it for Shift+Enter in the picker with
+     * PollAppleHotKeys): macOS loads no Auxiliary KC kexts then, and the
+     * OpenCore-injected core stands down too, so a bare-metal Mac whose
+     * desktop does not come up with the driver boots without it from the
+     * picker alone (no edit of config.plist from Linux). */
+    if (PE_parse_boot_argn("-x", dummy, sizeof(dummy))) {
+        LOG("disabled in Safe Mode (-x)");
+        return nullptr;
+    }
     return super::probe(provider, score);
 }
 

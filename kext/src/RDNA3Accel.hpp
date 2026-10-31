@@ -24,7 +24,8 @@
  *  rdna3doorbell=0 keeps the rings on their wptr registers (no compute).
  *  rdna3msi=1 drains the interrupt ring from the device's MSI (level 6+)
  *             and wakes fence waiters from it instead of polling.
- *  -rdna3off  disables the driver entirely (probe fails).
+ *  -rdna3off  disables the driver entirely (probe fails); so does Safe
+ *             Mode (-x).
  *
  * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect
  * VRAM read window, which is what amdgpu does as its very first access).
