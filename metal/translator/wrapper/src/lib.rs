@@ -180,6 +180,7 @@ pub extern "C" fn nvmtl_link_visible(
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
     };
+    metal2vulkan::visible_stubs::reset();
     let mut linkage = metal2vulkan::linked_functions::LinkedFunctionLinkage::default();
     for i in 0..n {
         let (sp, mp) = unsafe { (*syms.add(i), *mods.add(i)) };
@@ -192,6 +193,19 @@ pub extern "C" fn nvmtl_link_visible(
         Ok(v) => v, Err(e) => { set_err(&format!("link: {e}")); return -1; }
     };
     let mut v = linked.into_bytes(); v.push(0);
+    let mut b = v.into_boxed_slice();
+    unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
+    std::mem::forget(b);
+    0
+}
+
+/// What the last nvmtl_link_visible / nvmtl_link_runtime on this thread did with each visible
+/// function (linked, unresolved, table slots, stubs found without the AIR list), as one
+/// NUL-terminated line for the plugin's log; free it with nvmtl_translate_free(out, out_len).
+#[no_mangle]
+pub extern "C" fn nvmtl_link_report(out: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { return -1; }
+    let mut v = metal2vulkan::visible_stubs::take().summary().into_bytes(); v.push(0);
     let mut b = v.into_boxed_slice();
     unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
     std::mem::forget(b);
@@ -352,6 +366,7 @@ pub extern "C" fn nvmtl_link_runtime(
         let m = unsafe { CStr::from_ptr(mp) }.to_str().map_err(|_| "module is not utf-8".to_string())?.to_string();
         Ok((s, m))
     };
+    metal2vulkan::visible_stubs::reset();
     let mut references = Vec::with_capacity(nref);
     for i in 0..nref {
         match pair(refs, ref_mods, i) {

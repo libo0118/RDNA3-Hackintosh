@@ -27,6 +27,7 @@ mod spirv_module;
 mod spirv_operand;
 mod spirv_variable_ptr;
 pub mod tools;
+pub mod visible_stubs;
 pub(crate) mod types;
 
 pub use fc_air_specialize::specialize_air_function_constants;
@@ -89,15 +90,36 @@ fn lower_air_text_if_enabled(san_ll: &str) -> Cow<'_, str> {
 }
 
 fn reject_unsupported_metal_linked_functions(san_ll: &str) -> Result<(), String> {
-    if san_ll.contains(".MTL_VISIBLE_FN_REF") || san_ll.contains("!air.visible_function_references")
+    // Any spelling of the stub suffix still refuses (as before), even one that is not a global
+    // the scanner recognises; the names are only for the log.
+    if !san_ll.contains(visible_stubs::VISIBLE_STUB_SUFFIX)
+        && !san_ll.contains("!air.visible_function_references")
     {
-        return Err(
-            "native emitter: unsupported Metal visible function reference; dynamic linked \
-             functions are not expressible in Logical SPIR-V"
-                .into(),
-        );
+        return Ok(());
     }
-    Ok(())
+    let mut symbols = Vec::<String>::new();
+    for stub in visible_stubs::suffix_stubs(san_ll) {
+        if !symbols.contains(&stub.symbol) {
+            symbols.push(stub.symbol);
+        }
+    }
+    // The plugin defers a function to pipeline creation (nvmtl_link_stage) when this message holds
+    // "visible function reference"; the names say which functions the link must supply.
+    let mut named = symbols
+        .iter()
+        .take(4)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if symbols.len() > 4 {
+        named.push_str(&format!(", +{} more", symbols.len() - 4));
+    }
+    Err(format!(
+        "native emitter: unsupported Metal visible function reference to {} function(s) [{named}] \
+         not linked into this module; dynamic linked functions are not expressible in Logical \
+         SPIR-V, so they must be linked at pipeline creation",
+        symbols.len()
+    ))
 }
 
 fn reject_function_constant_erased_effects(san_ll: &str, module: &Module) -> Result<(), String> {

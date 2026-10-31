@@ -114,6 +114,10 @@ int main(void)
     CHECK(nvmtl_log_failure("msdl: SUMMARY done=4 d_colour=0 d_depth=0 d_stencil=4 refused=0"));
     CHECK(nvmtl_log_failure("msupload: SUMMARY done=4 done_int=4 inter=4 flat=0 wide=0 up_inter_13=4"));
     CHECK(!nvmtl_log_failure("msdl: STENCIL 4-sample image 971x680 -> buffer (vk format 130)"));
+    /* a pipeline link's visible-function report reaches it too (DRIVER-PLAN N67), linked or failed */
+    CHECK(nvmtl_log_failure("link: \"AMDConvolution::ndArrayConvolution2DAMD_NHWC\" visible functions: linked 10 [a, b]; unresolved 0 []"));
+    CHECK(nvmtl_log_failure("link: \"k\" visible functions (link FAILED): linked 0 []; unresolved 1 [f]"));
+    CHECK(!nvmtl_log_failure("link: \"k\" references f; 1 linked function(s): [f air=10 fc=0]"));
 
     /* every step has a name for the log line */
     for (int s = NVMTL_GPUQ_OPENED; s <= NVMTL_GPUQ_ADD_FAILED; s++) CHECK(nvmtl_gpuq_step_name(s)[0] != '?');

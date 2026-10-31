@@ -510,10 +510,23 @@ pub fn specialize_visible_function_references(
         .into_iter()
         .map(llvm_global)
         .collect::<Result<HashSet<_>, _>>()?;
-    Ok(crate::native::inline_direct_function_pointer_consumers(
-        &output,
-        &direct_functions,
-    ))
+    let output =
+        crate::native::inline_direct_function_pointer_consumers(&output, &direct_functions);
+    let survivors = crate::visible_stubs::suffix_stubs(&output);
+    if !survivors.is_empty() {
+        let named = survivors
+            .iter()
+            .take(4)
+            .map(|stub| stub.global.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{} visible-function stub(s) survived linking ({named}): their reference could not be \
+             resolved to a linked function or marked unresolved",
+            survivors.len()
+        ));
+    }
+    Ok(output)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,9 +537,11 @@ struct AirVisibleFunctionReference {
 
 pub fn visible_function_reference_symbols(module: &str) -> Result<Vec<String>, String> {
     air_visible_function_references(module).map(|references| {
+        let mut seen = HashSet::new();
         references
             .into_iter()
             .map(|reference| reference.symbol)
+            .filter(|symbol| seen.insert(symbol.clone()))
             .collect()
     })
 }
@@ -538,19 +553,27 @@ fn rewrite_visible_reference_stubs<'a>(
     pending: &mut Vec<&'a LinkedFunctionReference>,
 ) -> Result<String, String> {
     let references = air_visible_function_references(module)?;
+    let listed = air_listed_stub_globals(module);
     let mut replacements = Vec::new();
     for reference in references {
+        if !listed.contains(reference.stub_global.as_str()) {
+            crate::visible_stubs::note_unlisted(&reference.symbol);
+        }
         let Some(dependency) = authored.get(reference.symbol.as_str()) else {
+            crate::visible_stubs::note_unresolved(&reference.symbol);
             replacements.push((
                 reference.stub_global,
                 llvm_global(&format!("{}{UNRESOLVED_VISIBLE_SUFFIX}", reference.symbol))?,
             ));
             continue;
         };
+        crate::visible_stubs::note_linked(&reference.symbol);
         used.insert(dependency.symbol.as_str());
         pending.push(dependency);
         replacements.push((reference.stub_global, llvm_global(&reference.symbol)?));
     }
+    // Longest stub first: `@f.MTL_VISIBLE_FN_REF` is a prefix of `@f.MTL_VISIBLE_FN_REF.1`.
+    replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
     let mut output = String::with_capacity(module.len());
     for line in module.lines() {
         if line
@@ -567,6 +590,20 @@ fn rewrite_visible_reference_stubs<'a>(
         output.push('\n');
     }
     Ok(output)
+}
+
+/// The stub globals `!air.visible_function_references` names (its `!"air.visible_function_reference"` nodes).
+fn air_listed_stub_globals(module: &str) -> HashSet<String> {
+    const MARKER: &str = "!\"air.visible_function_reference\", ptr ";
+    module
+        .lines()
+        .filter_map(|line| {
+            let body = &line[line.find(MARKER)? + MARKER.len()..];
+            let at = body.find('@')?;
+            let end = llvm_metadata_global_end(body, at)?;
+            Some(body[at..end].to_string())
+        })
+        .collect()
 }
 
 fn air_visible_function_references(
@@ -606,6 +643,18 @@ fn air_visible_function_references(
         references.push(AirVisibleFunctionReference {
             stub_global,
             symbol,
+        });
+    }
+    // A stub the list does not name is still a call to a visible function: resolve it by the name
+    // its suffix carries instead of leaving it for the emitter to refuse (crate::visible_stubs).
+    for stub in crate::visible_stubs::suffix_stubs(module) {
+        if stubs.contains_key(&stub.global) {
+            continue;
+        }
+        stubs.insert(stub.global.clone(), stub.symbol.clone());
+        references.push(AirVisibleFunctionReference {
+            stub_global: stub.global,
+            symbol: stub.symbol,
         });
     }
     Ok(references)
@@ -929,6 +978,7 @@ pub fn specialize_visible_function_tables(
             if linked_module_set.insert(function.module_ll.as_str()) {
                 linked_modules.push(&function.module_ll);
             }
+            crate::visible_stubs::note_table_direct(&function.symbol);
             (llvm_global(&function.symbol)?, false)
         } else {
             if !pointer.index.trim_start().starts_with("i32 ") {
@@ -971,6 +1021,7 @@ pub fn specialize_visible_function_tables(
                     argument_types: call.argument_types,
                 });
                 for function in entries {
+                    crate::visible_stubs::note_table_dispatched(&function.symbol);
                     if linked_module_set.insert(function.module_ll.as_str()) {
                         linked_modules.push(&function.module_ll);
                     }
@@ -2297,6 +2348,119 @@ declare void @missing.MTL_VISIBLE_FN_REF() section "air.externally_defined"
             specialized.contains("call void @missing.MTL_UNRESOLVED_VISIBLE_FN()"),
             "{specialized}"
         );
+    }
+
+    // MPS's AMDConvolution::ndArrayConvolution2DAMD_NHWC (bare-metal Mac, 2026-10-31): the kernel
+    // calls visible functions whose stubs !air.visible_function_references does not name. They
+    // are found by their suffix, reported to the plugin and linked like listed ones.
+    const UNLISTED_ENTRY: &str = r#"define void @"AMDConvolution::ndArrayConvolution2DAMD_NHWC"(ptr addrspace(1) %out) {
+entry:
+  %a = call float @"AMDConvolution::activation.MTL_VISIBLE_FN_REF"(float 1.0)
+  %b = call float @listed.MTL_VISIBLE_FN_REF(float %a)
+  %c = call float @plain.MTL_VISIBLE_FN_REF(float %b)
+  store float %c, ptr addrspace(1) %out
+  ret void
+}
+declare float @"AMDConvolution::activation.MTL_VISIBLE_FN_REF"(float) section "air.externally_defined"
+declare float @listed.MTL_VISIBLE_FN_REF(float) section "air.externally_defined"
+declare float @plain.MTL_VISIBLE_FN_REF(float) section "air.externally_defined"
+!air.visible_function_references = !{!0}
+!0 = !{!"air.visible_function_reference", ptr @listed.MTL_VISIBLE_FN_REF, !"listed"}
+"#;
+
+    fn unlisted_linkage() -> LinkedFunctionLinkage {
+        let define = |name: &str| format!("define float {name}(float %x) {{\nentry:\n  ret float %x\n}}\n");
+        LinkedFunctionLinkage {
+            visible_references: vec![
+                LinkedFunctionReference {
+                    symbol: "AMDConvolution::activation".into(),
+                    module_ll: define("@\"AMDConvolution::activation\""),
+                },
+                LinkedFunctionReference {
+                    symbol: "listed".into(),
+                    module_ll: define("@listed"),
+                },
+                LinkedFunctionReference {
+                    symbol: "plain".into(),
+                    module_ll: define("@plain"),
+                },
+            ],
+            visible_tables: vec![],
+            intersection_tables: vec![],
+        }
+    }
+
+    #[test]
+    fn unlisted_visible_stubs_are_reported_to_the_plugin() {
+        let symbols = visible_function_reference_symbols(UNLISTED_ENTRY).unwrap();
+        assert_eq!(symbols, vec!["listed", "AMDConvolution::activation", "plain"]);
+    }
+
+    #[test]
+    fn unlisted_visible_stubs_are_linked_as_direct_calls() {
+        crate::visible_stubs::reset();
+        let specialized =
+            specialize_visible_function_references(UNLISTED_ENTRY, &unlisted_linkage()).unwrap();
+        let report = crate::visible_stubs::take();
+        assert!(!specialized.contains(".MTL_VISIBLE_FN_REF"), "{specialized}");
+        assert!(!specialized.contains("!air.visible_function_references"), "{specialized}");
+        assert!(
+            specialized.contains("call float @\"AMDConvolution::activation\"(float 1.0)"),
+            "{specialized}"
+        );
+        assert!(specialized.contains("call float @listed(float %a)"), "{specialized}");
+        assert!(specialized.contains("call float @plain(float %b)"), "{specialized}");
+        assert!(specialized.contains("define float @\"AMDConvolution::activation\"("));
+        assert_eq!(report.linked.len(), 3, "{report:?}");
+        assert!(report.unresolved.is_empty(), "{report:?}");
+        assert_eq!(
+            report.unlisted.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["AMDConvolution::activation", "plain"]
+        );
+    }
+
+    #[test]
+    fn an_unsupplied_unlisted_stub_is_marked_unresolved_and_reported() {
+        let mut linkage = unlisted_linkage();
+        linkage.visible_references.retain(|r| r.symbol != "plain");
+        crate::visible_stubs::reset();
+        let specialized = specialize_visible_function_references(UNLISTED_ENTRY, &linkage).unwrap();
+        let report = crate::visible_stubs::take();
+        assert!(!specialized.contains(".MTL_VISIBLE_FN_REF"), "{specialized}");
+        assert!(specialized.contains("call float @plain.MTL_UNRESOLVED_VISIBLE_FN(float %b)"));
+        assert_eq!(
+            report.unresolved.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["plain"]
+        );
+        assert!(report.summary().contains("unresolved 1 [plain]"), "{}", report.summary());
+    }
+
+    #[test]
+    fn a_uniqued_stub_is_not_clobbered_by_its_shorter_prefix() {
+        let entry = r#"define void @main() {
+entry:
+  call void @f.MTL_VISIBLE_FN_REF()
+  call void @f.MTL_VISIBLE_FN_REF.1(i32 1)
+  ret void
+}
+declare void @f.MTL_VISIBLE_FN_REF() section "air.externally_defined"
+declare void @f.MTL_VISIBLE_FN_REF.1(i32) section "air.externally_defined"
+"#;
+        let specialized = specialize_visible_function_references(
+            entry,
+            &LinkedFunctionLinkage {
+                visible_references: vec![LinkedFunctionReference {
+                    symbol: "f".into(),
+                    module_ll: "define void @f() {\nentry:\n  ret void\n}\n".into(),
+                }],
+                visible_tables: vec![],
+                intersection_tables: vec![],
+            },
+        )
+        .unwrap();
+        assert!(!specialized.contains("MTL_VISIBLE_FN_REF"), "{specialized}");
+        assert!(!specialized.contains("@f.1"), "{specialized}");
+        assert!(specialized.contains("call void @f(i32 1)"), "{specialized}");
     }
 
     const ENTRY: &str = r#"
