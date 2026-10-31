@@ -182,4 +182,21 @@ the stick: `rdna3/report-20261031-162542` (config-driver, after the hang) and
   a correct rule unless reduceTransparency stays on.
 - the mouse not waking the displays (4).
 - `surfgem refused 2149` and the nearly full visible VRAM heap with the plugin.
-- Geekbench 6 is not installed on the Mac yet.
+- Geekbench 7.0.0 (the owner's Linux baseline is GB7) is in
+  /Applications; its free CLI has only `--cpu`, so the GPU (Metal) run is
+  the owner's, from the app.
+
+### GPU checks on config-metal (run 91's userspace tools, over SSH)
+
+- `rdna3_drminfo`: amdgpu 3.61.0, 0x747e rev 0xc8, 60 CUs, GTT and VRAM BO
+  write/read-back ok, "Stage 4 UAPI smoke test passed".
+- `mtlprobe`: one Metal device "AMD Radeon RX 7800 XT" (NVMTLDevice),
+  families Common1-3 Mac2 Metal3, recommendedMaxWorkingSetSize 11148 MiB,
+  compute kernel and rendered triangle correct ("METAL: ALL PASSED").
+- `rdna3_vktest /Library/GPUBundles/rdna3mtl/libvulkan_radeon.dylib`:
+  "ALL PASSED: 14 submit(s) tested" (all queue families, host-pointer import,
+  OPAQUE_FD, DRM-modifier images, SDMA tiled copies, timeline semaphore,
+  mutable descriptors).
+- The tools need `libdrm.2.dylib` / `libdrm_amdgpu.1.dylib` next to them;
+  the artifact ships them as `libdrm.dylib` / `libdrm_amdgpu.dylib` (symlinks
+  made by hand).
