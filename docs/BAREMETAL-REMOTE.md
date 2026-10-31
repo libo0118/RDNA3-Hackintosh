@@ -434,10 +434,10 @@ argument; move the old tarball to `rdna3/old/` first (the first attempt reinstal
     test_bootwatch "bash late: no snapshot" (run 111); both pass on the Pi.
     Still open from round 2: judder 1b/1c (iop_latch=1 now has VRAM room: retest), mouse wake (3);
     the game's remaining cap is nextDrawable waits (~50-60 %, drawables handed back by WindowServer).
-12. **The owner (2026-11-01 00:0x), after BAR0 1 GiB + N71: "okna chodza plynnie, wszystko jest teraz
-    plynne"** (windows move smoothly, everything is smooth) - the round-1 complaint (~20-30 fps feel,
-    uneven drag steps, N68) is gone without iop_latch (still 0). Likely cause: the 144 MiB visible heap
-    was full (1326 GEM refusals, ~1 GB) so buffers and surfaces lived in system RAM; with 912 MiB nothing
-    is refused. Not yet measured by a 240 fps video; the Linux session should treat N68 as "fixed by the
-    BAR, confirm with a video" and make ResizeAppleGpuBars 10 the default in the stick's config-*.plist
-    (config-metal.plist / config-driver.plist still -1; only config.plist has 10).
+12. **The owner (2026-11-01 00:0x): "okna chodza plynnie, wszystko jest teraz plynne"** (windows move smoothly,
+    everything is smooth), and corrected: it was smooth BEFORE the bigger BAR too, i.e. already on this
+    round's build (bf2c3fa, CI run 103) with iop_latch 0 - the round-1 complaint (~20-30 fps feel, N68) did
+    not come back in round 2. What fixed it is not pinned (round 1 ran 6f55f46); not yet measured by a
+    240 fps video. The BAR change is still worth keeping (no VRAM refusals, room for iop_latch); make
+    ResizeAppleGpuBars 10 the default in the stick's config-*.plist (config-metal.plist /
+    config-driver.plist still -1; only config.plist has 10).
