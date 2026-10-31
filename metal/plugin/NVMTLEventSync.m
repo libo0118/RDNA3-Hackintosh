@@ -31,6 +31,7 @@ static void nvmtl_ho_summary(void) {
 @public
     nvk_cmdbuf commands;
     NSSet *resources, *surfaces;
+    NSSet *deferred;   /* N69: drawable roots the seal left out of `surfaces` (their copy-out waits for the presenting buffer); nil when none */
     NSSet *dma;   /* N61: the root textures whose copy into their IOSurface is recorded at the end of `commands` */
     NSDictionary *dmaWhy;   /* N61: root texture (NSValue, not retained) -> why its copy was not recorded (NVMTL_SO_WHY_*) */
     NSArray *scratch;
@@ -87,7 +88,7 @@ static void nvmtl_surface_register_writes(NVMTLCommandBuffer *cb) {
     @synchronized ([NVMTLCommandBuffer class]) {
         if (!nvmtl_surface_writers) nvmtl_surface_writers = [NSMapTable weakToStrongObjectsMapTable];
         NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
-        for (NVMTLSubmissionPart *part in cb->_parts) for (NVMTLTexture *t in part->surfaces) {
+        for (NVMTLSubmissionPart *part in cb->_parts) for (NVMTLTexture *t in part->deferred ? [part->surfaces setByAddingObjectsFromSet:part->deferred] : part->surfaces) {   // N69: a deferred drawable is still a pending writer
             if (!t->_surf) continue;
             if (!writes) { writes = [NSMutableDictionary new]; [nvmtl_surface_writers setObject:writes forKey:cb->_queue]; }
             NVMTLPendingSurfaceWrite *write = [NVMTLPendingSurfaceWrite new];
@@ -240,22 +241,28 @@ static BOOL nvmtl_drawable_defer_on(void) {
               on ? "written once, by the command buffer that presents it" : "written after every command buffer that draws into it", e ? e : "unset"); }
     return on;
 }
-static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb) {
+static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb, NSSet **deferred) {
     NSMutableSet *dirty = cb->_surfDirty;
+    *deferred = nil;
     if (!dirty.count || !nvmtl_drawable_defer_on()) return [dirty copy];
-    NSMutableSet *keep = nil; unsigned dropped = 0;
-    for (NVMTLTexture *t in dirty)
-        if (nvmtl_drawable_defer(1, t->_soDrawable, [cb->_presentRoots containsObject:t])) {
-            if (!keep) keep = [dirty mutableCopy];
-            [keep removeObject:t]; dropped++;
-        }
-    if (!dropped) return [dirty copy];
-    static _Atomic unsigned long long n;
-    const unsigned long long k = atomic_fetch_add(&n, dropped) + dropped;
+    NSMutableSet *keep = nil, *drop = nil; unsigned presenting = 0;
+    for (NVMTLTexture *t in dirty) {
+        const BOOL here = [cb->_presentRoots containsObject:t];
+        if (nvmtl_drawable_defer(1, t->_soDrawable, here)) {
+            if (!keep) { keep = [dirty mutableCopy]; drop = [NSMutableSet new]; }
+            [keep removeObject:t]; [drop addObject:t];
+        } else if (here && t->_soDrawable) presenting++;
+    }
+    static _Atomic unsigned long long nOut, nDef;
+    if (presenting) atomic_fetch_add(&nOut, presenting);
+    if (!drop) return [dirty copy];
+    *deferred = drop;
+    const unsigned long long k = atomic_fetch_add(&nDef, drop.count) + drop.count;
     static _Atomic unsigned long long next = 1;   /* census at 1, 2, 4 ... 65536, then every 65536 */
     unsigned long long want = atomic_load(&next);
     if (k >= want && atomic_compare_exchange_strong(&next, &want, k < 65536 ? k * 2 : (k / 65536 + 1) * 65536))
-        nvlog("commit: N69 %llu copy-outs of drawable surfaces deferred to their present (NVMTL_DRAWABLE_DEFER)", k);
+        nvlog("commit: N69 %llu copy-outs of drawable surfaces deferred to their present (NVMTL_DRAWABLE_DEFER); %llu copy-outs sealed in presenting buffers so far",
+              k, (unsigned long long)atomic_load(&nOut));
     return [keep copy];
 }
 
@@ -277,7 +284,7 @@ static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb) {
     NVMTLSubmissionPart *part = [NVMTLSubmissionPart new];
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
-    part->resources = [_resources copy]; part->surfaces = nvmtl_seal_surfaces(self);
+    part->resources = [_resources copy]; part->surfaces = nvmtl_seal_surfaces(self, &part->deferred);
     { NSDictionary *why = nil;   /* N61: before the part is submitted (a part with a GPU copy-out is never submitted ahead, nvmtlSubmitAhead) */
       part->dma = nvmtl_surface_dma_record(part->surfaces, &part->commands, &why); part->dmaWhy = why; }
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
@@ -387,6 +394,15 @@ static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb) {
     _wsMarks = nil; _wsCommitDirty = nil;
     if (!error) {
         for (dispatch_block_t action in _presentations) action();
+    } else if (_presentRoots.count) {   /* N69: the copy-outs of these drawables were deferred to this buffer, which failed */
+        static _Atomic unsigned long long nf;
+        const unsigned long long k = atomic_fetch_add(&nf, 1);
+        if (k < 8 || (k & 1023) == 0) {
+            NSMutableString *ids = [NSMutableString new];
+            for (NVMTLTexture *t in _presentRoots) if (t->_surf) [ids appendFormat:@"%s%u", ids.length ? " " : "", (unsigned)IOSurfaceGetID(t->_surf)];
+            nvlog("commit: N69 a command buffer that presents %lu drawable(s) failed (error %ld): their IOSurface(s) [%s] keep the frame before (copy-outs were deferred to it) (#%llu)",
+                  (unsigned long)_presentRoots.count, (long)error.code, ids.UTF8String, k + 1);
+        }
     }
     [_presentations removeAllObjects]; _present = nil; _presentRoots = nil;
     double deviceStart = 0, deviceEnd = 0;
