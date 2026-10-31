@@ -81,6 +81,42 @@ equivalent.
 - The installer's kernel log keeps only 128 KB (msgbuf) and the PCI
   "childPublished" lines are ALWAYS_ON; `pci_log` flags do not help there.
 
+## Round 1 on bare metal is done (Pi session, 2026-10-31 16:10-17:40)
+
+Read the whole "Round 1 findings" section at the end of
+docs/BAREMETAL-REMOTE.md first; it replaces item 1 below. The Pi session
+pushed only to Forgejo (no GitHub remote there): `git pull` from Forgejo,
+then push to both. In short, in priority order:
+
+1. **The plugin path works** (config-metal): both heads, l10r converted (367
+   of 367), no refusals, no A/B, SDMA copy 0.32 ms per frame, the scanout CRC
+   changes 60 times a second during a window drag. The owner still sees
+   ~30 fps; nothing measured explains it. A 240 fps phone video of a window
+   drag is coming into `~/Downloads` on this Linux: cut it into frames, look
+   for latency behind the hardware cursor or uneven steps (and N59).
+2. **Geekbench 7 GPU (Metal) cannot run**: its worker
+   `Contents/Resources/geekbench_avx2` is outside `%apps` (added by hand on
+   the Mac; put it into `metal/rdna3mtl-allow.txt` or widen `%apps`), then
+   MPS aborts on `AMDConvolution::ndArrayConvolution2DAMD_NHWC`: the
+   translator has no visible / linked function support.
+3. **No plugin (config-driver)**: `swap_gen_cpu=1` flips stale backs (A/B),
+   `=0` holds Terminal text (all holds OLDER, none SAME): the CPU rule needs a
+   criterion other than the write generation. Window drags hang WindowServer
+   for 40 s in the software compositor's gaussian blur (watchdog kill).
+4. Display sleep survives (pageoff fix works), but the mouse does not wake
+   the displays (`caffeinate -u` does).
+5. Visible VRAM heap nearly full with the plugin (21 MiB free of 144,
+   `surfgem refused 2149`).
+
+The Mac now: build 6f55f46 from CI run 91 everywhere (core on the stick,
+old core in `EFI/OC/Kexts-old/RDNA3Accel.kext-pre6f55f46-*`), config.plist =
+config-metal (`rdna3agdc=3`), `reduceTransparency` on for user shrek,
+`geekbench_avx2` appended to `/Library/GPUBundles/rdna3mtl-allow.txt`,
+Geekbench 7.0.0 in /Applications. Reports on the stick:
+`rdna3/report-20261031-162542` (no plugin, after the hang) and
+`rdna3/report-20261031-163520` (plugin); the Pi keeps copies and the
+Geekbench crash in `~/rdna3-bm/`.
+
 ## Open work, in order
 
 1. Read the Pi session's round-1 findings (BAREMETAL-REMOTE.md end, the stick
