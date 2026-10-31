@@ -235,3 +235,13 @@ the stick: `rdna3/report-20261031-162542` (config-driver, after the hang) and
      Crash `~/Library/Logs/DiagnosticReports/geekbench_avx2-2026-10-31-172324.ips`
      and the log stream are on the Pi in `~/rdna3-bm/gb/`.
 - `rdna3_drminfo` crashed once (16:42, before the libdrm symlinks: dyld).
+- **What the panel shows changes at 60 Hz** during a window drag on head 0:
+  `debug.rdna3accel_crc` (CRC32 of the head's scanout, `crc_head=0`) sampled
+  every ~2 ms for 7 s changed 421 times (60.1/s), 419 gaps ~17 ms, presents
+  420 (60.0/s): every present carries new pixels. The mouse (SteelSeries
+  Rival 3 Wireless Gen 2, USB, ReportInterval 1000) delivered ~988 reports/s
+  (`InputReportCount` 139436 -> 146084 in 6.7 s). Nothing measured explains
+  the owner's ~30 fps impression; left: latency (the hardware cursor moves
+  at once, the window trails it by the WindowServer -> plugin -> copy ->
+  flip chain) or uneven step sizes. Next: a 240 fps phone video of a drag
+  (cursor and window), cut into frames.
