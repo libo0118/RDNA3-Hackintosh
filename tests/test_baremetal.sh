@@ -197,7 +197,7 @@ MB=$T/mbin
 mkdir -p "$MB"
 cat > "$MB/id" <<'EOF'
 #!/bin/sh
-[ "${FAKE_NOT_ROOT:-}" = 1 ] && exec /usr/bin/id "$@"
+[ "${FAKE_NOT_ROOT:-}" = 1 ] && { [ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"; exit 0; }
 [ "$1" = -u ] && echo 0 || /usr/bin/id "$@"
 EOF
 for t in log ioreg kmutil system_profiler nvram chown sync; do

@@ -11,7 +11,7 @@ skip=0
 failed=
 for n in "$@"; do
     if [ ! -f "$d/$n.rc" ]; then
-        echo "---- $n: no result (the test did not run to its end)"
+        echo "---- $n: no result (its binary did not compile - see the compiler errors above - or the test was killed)"
         fail=$((fail + 1))
         failed="$failed $n"
         continue

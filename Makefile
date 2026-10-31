@@ -276,12 +276,13 @@ $(eval $(call TEST_RULE,test_scanout,$(BUILD)/rdna3_drminfo_host,sh tests/test_s
 # two jobs in one process each get their own VA (card run 2026-10-12)
 $(eval $(call TEST_RULE,test_drminfo_va,$(BUILD)/rdna3_drminfo_host,sh tests/test_drminfo_va.sh $(BUILD)))
 
+# -k: a binary that does not compile must not stop the others, and the summary (the failed logs, the verdict) runs
+# whatever happened; a test whose binary did not build has no result there and is counted as failed
 test:
 	@rm -rf $(TESTLOG)
-	@$(MAKE) $(TESTJOBS) test-run
+	@$(MAKE) -k $(TESTJOBS) test-run; sh tests/test_summary.sh $(TESTLOG) $(patsubst t.%,%,$(TEST_TARGETS))
 
 test-run: $(TEST_TARGETS)
-	@sh tests/test_summary.sh $(TESTLOG) $(patsubst t.%,%,$(TEST_TARGETS))
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 
