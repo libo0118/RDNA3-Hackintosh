@@ -325,3 +325,56 @@ Checks, in this order (one Mac boot if possible):
    `libdrm_amdgpu.dylib`): make the symlinks as in round 1 (not fixed yet).
 
 Write the findings as "## Round 2 findings" below, push to Forgejo.
+
+## Round 2 findings (2026-10-31 evening, Pi session; build bf2c3fa = fe04d3c + docs, CI run 103)
+
+Run 102 (fe04d3c) was incomplete (macos-tests log cut mid-build, radv-macos skipped: a
+Forgejo outage); run 103 on bf2c3fa (same code) is green and is what was installed.
+Install note: the stick's `install.sh` takes the tarball NEXT TO IT and ignores an
+argument; move the old tarball to `rdna3/old/` first (the first attempt reinstalled
+6f55f46). Copies: `~/rdna3-bm/` on the Pi (r2-*, report-20261031-211339/, r2-gb/).
+
+1. **Judder A/B, phase a only (`iop_latch=0`)**, video `IMG_7135.MOV` (Pi `~/`):
+   during the drag every copy went by SDMA, 0.33 ms a transaction, stale wait 0;
+   `iop_vbl_same` 13 of 1529, `mid` 1434 of 1529 (copies end mid-scan: torn,
+   into the live scanout). The IOP join (report-20261031-211339): the 195 joined
+   frames had present age median 0.4 ms (max 0.5): the scanout is not late; the
+   plugin trace ring wrapped (only 195 of 2596 joined: read the report right
+   after a drag). Before a0 (login): 511 l10r frames converted by the CPU at
+   27 ms each. Phase b (`iop_latch=1`) NOT run yet (the owner moved to the game).
+2. **Geekbench 7 GPU**: N67 works (`link: "AMDConvolution::ndArrayConvolution2DAMD_NHWC"
+   visible functions: linked 2 ... unresolved 0`, translated). It now fails one
+   kernel later: `link FAILED: "depthwiseConv_3x3" linked (676122 B AIR) but did
+   not translate: native emitter: Private pointer phi %metal2vulkan.ct.slot.48 has
+   differing structural sources; raw construction failed: native emitter: pointer
+   merge storage mismatch Function vs Private at Local("%1425") across
+   [Local("%72"), Local("%1425")]`, after 297-311 s of translation (spindump: the
+   translator hashing/cloning Strings), then MPSLibrary.mm:639 and the abort.
+   `NVMTL_LINK_DUMP` dump (kernel.ll, linked.ll, mod.*.ll, err.txt, fc.txt,
+   stitch-*.mtlb) + the .ips: Pi `~/rdna3-bm/r2-gb/gb-linkdump.tgz`.
+3. **Horizon (a wgpu Minecraft client)**: `horizon-client` lives in
+   `~/Library/Application Support/horizon-launcher/versions/.../`, not in an
+   .app, so `%apps` gave it no device ("not allow-listed: no device") and it
+   quit in 0.3 s with no .ips. `horizon-client` was added by hand to
+   `/Library/GPUBundles/rdna3mtl-allow.txt`; add it to `metal/rdna3mtl-allow.txt`.
+   It then renders correctly (the owner: no artefacts), ~180 fps where Linux
+   gives ~2000. Found (DTrace, passtime, plugin fps log): 13 commits and ~5
+   copy-outs of the 1920x1080 drawable (8.3 MB into the IOSurface's host pages,
+   0.44 ms GPU each) per frame; render passes 69-75 us. Fixed by **N69**
+   (merge 243bc28, CI run 107): a presented drawable is copied once, by the
+   presenting buffer. Measured after: copy-outs 702 for 703 presents, ~230-300
+   fps. Left: ~0.8 ms GPU a frame but 4.3 ms a frame; the plugin's execution
+   thread waits on a fence after each of ~6 submits a frame (gpuwait 30-60 %),
+   ~13 commits a frame; `[CAMetalLayer nextDrawable]` 2-4 ms waits (DTrace).
+   rdna3_pmctl reads gfx activity 100 % at 2229 MHz even at 0.8 ms GPU a frame
+   (the SMU's activity is not a GPU-time measure here).
+4. **Live plugin updates: never `cp` over a mapped dylib.** Copying the new
+   `librdna3mtl_translate.dylib` over the old file (same inode) left the
+   kernel's cached code signature of the old one: every process that mapped it
+   afterwards got "code identity has been invalidated" (`codesign -v <pid>`),
+   securityd then "suppressing keychain prompt for invalidly signed client" and
+   the Horizon launcher could not read its Microsoft token
+   (CSSMERR_CSP_OPERATION_AUTH_DENIED, "platform secure storage failure ...
+   already exists in keychain"). `rm` first, then copy (new inode). metal.sh
+   also copies in place but is followed by a reboot.
+5. Not run yet: judder phase b/c, mouse wake (3), bigger BAR0 (4).
