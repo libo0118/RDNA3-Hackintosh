@@ -1,5 +1,13 @@
 # Session handoff (2026-10-24)
 
+> **2026-10-31: the driver runs on the owner's bare-metal Mac** (macOS 26.7.2,
+> MacPro7,1, MSI B550-A PRO + RX 7800 XT, two monitors; installed from the
+> stick that `tools/baremetal/` builds, docs/BAREMETAL.md). A session on the
+> owner's Raspberry Pi tests it over SSH while macOS runs:
+> **docs/BAREMETAL-REMOTE.md** is that session's guide (roles, installing a CI
+> build on the Mac, live switches, the first round's checks). The rest of this
+> file is the VM-era state of 2026-10-24.
+
 Written at the end of a long session so that the next session starts with the
 same knowledge and the same to-do list. Read it whole before doing anything.
 CLAUDE.md, CLAUDE_SUBAGENT.md and docs/DRIVER-PLAN.md stay the rules and the
