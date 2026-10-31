@@ -268,3 +268,60 @@ removed; the script stayed in the Linux session's scratchpad):
   the refresh and the IOP copy take the previous surface?), A/B with
   `debug.rdna3accel_iop_sdma=0` (CPU copy) and with the plugin's surface
   wait off, each with a new 240 fps video.
+
+## Round 2 plan (Linux session, 2026-11-01): build fe04d3c
+
+What changed since round 1 (all merged in `stage1-kext` fe04d3c; take every
+artifact from the ONE full `build.yml` run on fe04d3c: `RDNA3-pkg` tarball,
+`RDNA3Accel-kext` core for the stick, `RDNA3MTL`, `radv-macos-logs`):
+
+- N68: the window-drag judder. Instrumentation K1-K4 (`iop_txn_*`, `iop_vbl_*`,
+  `iop_txn_overlap*`, trace event `RD3_TR_IOP`, plugin `held_us_max`) and an
+  opt-in latched copy: `sudo sysctl -w debug.rdna3accel_iop_latch=1` (live,
+  default 0; boot-arg `rdna3ioplatch`). Details and the expected numbers:
+  docs/AFTER-TESTS.md "Presents at 60 Hz but a dragged window steps unevenly".
+- N67: the Metal translator links visible functions (Geekbench 7 GPU / MPS).
+- `metal/rdna3mtl-allow.txt` carries `geekbench_avx2`.
+- `report.sh` now also saves `trace-stream.bin`, `trace-sec.bin`,
+  `31-plugin-trace/` and dmesg after `debug.rdna3accel_trace_dump`; copy the
+  new `tools/baremetal/stick/report.sh` to `/Volumes/OPENCORE/rdna3/`.
+
+Checks, in this order (one Mac boot if possible):
+
+1. **Judder A/B** (config-metal). Fast window drag for ~8 s, reading the
+   counters listed in AFTER-TESTS N68 before and after each, with a 240 fps
+   phone video each (the owner; videos land in Linux `~/Downloads`):
+   a. `iop_latch=0` (baseline, measures the cause: `iop_vbl_same/skip/mid`).
+   b. `iop_latch=1` (the fix: `iop_latch_n` rises with `swaps_pq_latched`,
+      `iop_latch_fb_*` stay 0, `same`/`skip` near 0).
+   c. optional: `debug.rdna3accel_iop_stale_wait_ms=0` with the better of a/b.
+   Then `report.sh`, and the join:
+   `python3 tools/plugin_trace.py <report>/31-plugin-trace --kernel <report>/trace-stream.bin`
+   (present age per frame). The owner says which run felt smooth.
+2. **Geekbench 7 GPU (Metal)** from the app (the owner). Plugin log lines to
+   find (`log show --last 10m --predicate 'eventMessage CONTAINS "link:"'`):
+   `link: "AMDConvolution::ndArrayConvolution2DAMD_NHWC" visible functions:
+   linked N ...` and no MPSLibrary.mm:639 error. If it still fails: set
+   `NVMTL_LINK_DUMP` and bring back the `.kernel.ll`, `.linked.ll`, `mod.*.ll`,
+   `.err.txt` files (DRIVER-PLAN N67). Score vs the Linux baseline
+   (Geekbench 6 Vulkan 145267; ask the owner for the GB7 Linux number).
+3. **Mouse does not wake the displays.** After `pmset displaysleepnow`: press
+   a key, click, and move the mouse, each on its own, and after each read
+   `ioreg -r -c IOHIDSystem -d1 | grep HIDIdleTime`,
+   `ioreg -r -c IODisplayWrangler | grep CurrentPowerState`, `pmset -g log |
+   tail`, `log show --last 2m --predicate 'process=="hidd" OR
+   process=="powerd"'`; repeat with another USB mouse or port. If HIDIdleTime
+   resets but the wrangler stays at 1, report it: the suspect is
+   fb/rdna3-fb.cpp swallowing `kIOWindowServerActiveAttribute`.
+4. **Bigger BAR0** (visible VRAM heap was 21 of 144 MiB free). The owner sets
+   BIOS Settings -> Advanced -> PCI Subsystem Settings -> Re-Size BAR Support:
+   Enabled (Above 4G stays on). In `/Volumes/OPENCORE/EFI/OC/config.plist`
+   set `Booter/Quirks/ResizeAppleGpuBars` to 10 (1 GiB); reboot; check the
+   dmesg line `VRAM aperture: BAR0 ... MiB, mapped ...` and the heap numbers.
+   If macOS does not come up or BAR0 is not mapped, use 9 (512 MiB, proven in
+   the VM, N62). Linux keeps its 16 GiB BAR (the quirk is macOS-only).
+5. Note: the run's userspace tools need `libdrm.2.dylib` /
+   `libdrm_amdgpu.1.dylib` next to them (the artifact ships `libdrm.dylib` /
+   `libdrm_amdgpu.dylib`): make the symlinks as in round 1 (not fixed yet).
+
+Write the findings as "## Round 2 findings" below, push to Forgejo.
