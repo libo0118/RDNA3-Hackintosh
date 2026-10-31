@@ -117,8 +117,67 @@ Geekbench 7.0.0 in /Applications. Reports on the stick:
 `rdna3/report-20261031-163520` (plugin); the Pi keeps copies and the
 Geekbench crash in `~/rdna3-bm/`.
 
+## Round 2 on bare metal (Pi session, 2026-10-31 20:50 - 11-01 00:20)
+
+Read "Round 2 findings" items 1-12 at the end of docs/BAREMETAL-REMOTE.md and
+DRIVER-PLAN N69-N71. Pushed to Forgejo only (no GitHub remote on the Pi):
+`git pull` from Forgejo, then push to both. What changed and what is open:
+
+1. **Merged and on the card:** N69 (243bc28: a presented drawable is copied
+   into its IOSurface once per frame, not after every command buffer; 5 ->
+   1 copy-outs per frame) and N71 (9c16a43: an app's IOSurface textures stay
+   private while the kernel keeps WindowServer's inputs out of family VRAM,
+   `debug.rdna3accel_a3ws` 0). A wgpu Minecraft client (`horizon-client`, the
+   owner's "Horizon" launcher) went ~180 -> 300-400 fps (owner's counter;
+   ~230 presented/s by DTrace); Linux gives ~2000. Its remaining cap: the
+   main thread waits 50-60 % in `[CAMetalLayer nextDrawable]` (drawables
+   come back by WindowServer's `_XImageQueueCollectable`).
+2. **N70 (branch quick/gsub-last on Forgejo, NOT merged):** submit-ahead past
+   an empty last part works (2910 of 3510 submits ahead) but gave no presented
+   fps. Keep or drop on its merits.
+3. **BAR0 is 1 GiB now:** BIOS Re-Size BAR Support Enabled (the owner),
+   `ResizeAppleGpuBars` 10 in the stick's `EFI/OC/config.plist` only
+   (`config-before-bar.plist` is the old one; config-metal / config-driver
+   still -1: set them too). Visible heap 912 MiB, refused 0.
+4. **The desktop is smooth** (the owner), already on this round's build
+   before the BAR change; the round-1 ~30 fps feel did not come back.
+   `iop_latch` was not exercised (0 latched before the BAR: no VRAM room);
+   retest 1b with the BAR if N68 still matters. Confirm by a 240 fps video.
+5. **Geekbench 7 GPU still aborts**, one kernel further: N67 links
+   `AMDConvolution::ndArrayConvolution2DAMD_NHWC` and it translates; then
+   `depthwiseConv_3x3` fails in the translator's native emitter
+   (`Private pointer phi %metal2vulkan.ct.slot.48 has differing structural
+   sources; pointer merge storage mismatch Function vs Private at
+   Local("%1425") across [Local("%72"), Local("%1425")]`) after ~300 s of
+   translation (String hashing/cloning). The NVMTL_LINK_DUMP files are on
+   the Pi in `~/rdna3-bm/r2-gb/gb-linkdump.tgz` (Apple MPS IR: evidence
+   only, never commit it). Planned as N72 (a hand-written fixture with the
+   same phi shape, the fix, the 300 s hot spot); not started.
+6. **Lessons:** never `cp` over a mapped dylib on the live Mac: the kernel
+   keeps the old code signature, every new process mapping it is "code
+   identity invalidated" and securityd refuses its keychain (the Horizon
+   launcher lost its Microsoft login). `rm` first. Also the stick's
+   `install.sh` ignores its argument (move the old tarball away first), and
+   `/private/tmp` on the Mac is wiped at boot. `log show` needs `sudo` over
+   SSH, and macOS has no `timeout`.
+7. Flaky CI host tests (pass on the Pi): test_baremetal "a damaged copy was
+   not caught" (run 109), test_bootwatch "bash late: no snapshot" (run 111).
+8. Not done from the round-2 plan: mouse wake (item 3).
+
+The Mac now: kexts / RADV / tarball from CI run 103 (bf2c3fa), the plugin
+and translator from run 111 (N69 + N71, no N70), BAR 1 GiB, `iop_latch` 0,
+`a3ws` 0, `horizon-client` and `geekbench_avx2` in
+`/Library/GPUBundles/rdna3mtl-allow.txt` (put horizon-client into
+`metal/rdna3mtl-allow.txt`), no session env set, reduceTransparency on.
+Report on the stick: `rdna3/report-20261031-211339` (judder phase a). Pi
+copies: `~/rdna3-bm/` (r2-*, spindumps, DTrace outputs, the video
+`~/IMG_7135.MOV` = judder phase a, not analysed).
+
 ## Open work, in order
 
+0. Round 2 (above): N72 Geekbench translator fix; the game's nextDrawable
+   wait (WindowServer's drawable hand-back); config-metal/config-driver
+   ResizeAppleGpuBars 10; horizon-client into the allow list; mouse wake.
 1. Read the Pi session's round-1 findings (BAREMETAL-REMOTE.md end, the stick
    reports) and fix what they show (DRIVER-PLAN N65 open a-d: vtable slot 362,
    pageoff flags bit 7, A/B flicker risk without the plugin, the late-upgrade
