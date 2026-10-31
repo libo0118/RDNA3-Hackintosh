@@ -36,4 +36,6 @@ vulkaninfo
 # Geekbench 7: its benchmark worker is Contents/Resources/geekbench_avx2,
 # outside %apps (Contents/MacOS only); bare-metal round 1, 2026-10-31
 geekbench_avx2
+# horizon-client: the owner Horizon launcher wgpu Minecraft client (bare-metal round 2)
+horizon-client
 %apps
