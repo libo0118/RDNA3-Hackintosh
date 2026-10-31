@@ -412,3 +412,17 @@ argument; move the old tarball to `rdna3/old/` first (the first attempt reinstal
 9. Mac state at 23:35: plugin = N69 build (run 107), RADV/kexts run 103, BAR 1 GiB, iop_latch 0,
    NVMTL_NO_SURFACE_SHARE=1 set by launchctl (gone at logout), horizon-client in the allow list,
    reduceTransparency on.
+10. **The EPERM is the A3 policy, not a bug** (kernel log): `surfgem: surface N refused: a WindowServer
+    input ... its writers ... are not ordered with the VRAM WindowServer would sample (card run 58)` and
+    `GEM: IOSurface N import refused: kept out of A3: a WindowServer input (rdna3a3ws=1 lets it in)`
+    (`debug.rdna3accel_a3ws_refused` 18230). Live A/B `debug.rdna3accel_a3ws=1` + no
+    NVMTL_NO_SURFACE_SHARE: WS imported some family VRAM (`-> the family's VRAM, already current (no
+    upload)`, WS CPU 95 %) but the game still ~150 presented fps: WS keeps uploading the game's frames
+    (locked_upload ~128/s, locked_skip_vram did not move), 29 % of ws_main_thread in IOSurfaceClientLock
+    (the lock of a VRAM surface) and it takes the game's frames by `MetalCompositeDetachedIOSurface`
+    with a `newTextureWithDescriptor:iosurface:` per frame. Set back to 0. Best config tonight:
+    a3ws 0 + NVMTL_NO_SURFACE_SHARE=1 in the session (`launchctl setenv`, gone at logout; a
+    LaunchAgent for it was not made: the owner decides). Next for N71: (a) the plugin should not put an
+    app's drawable in family VRAM while WindowServer cannot import it (a3ws 0), so the BAR change needs
+    no env; (b) WindowServer's detached-surface path: a texture per frame + a CPU lock + upload of a
+    surface it already has (cache by IOSurface ID + seed).
