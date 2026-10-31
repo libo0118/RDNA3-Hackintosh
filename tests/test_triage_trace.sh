@@ -658,7 +658,13 @@ hook_pickpresent 4
 hook_didsubmitswap 0
 hook_backready 9
 hook_backready_no 1
-hook_submitupdate 0" "" stream
+hook_submitupdate 0
+swap_gen_cpu 1
+swap_gen_wsmetal 1
+swaps_genhold_same_h0 0
+swaps_genhold_older_h0 0
+swaps_genhold_unwritten_h0 30
+swaps_gencpu_h0 0" "" stream
 out=$(run gencnt)
 has "$out" "INFO swap gen: write generations: swap_gen 1, flipbuf_present 0, swap mode 1; generations handed out by page-on 30 (+5 by its cached descriptor), by copy forward 30 (1 targets kept theirs" triage-gencnt
 hasnt "$out" "counter missing" triage-gencnt

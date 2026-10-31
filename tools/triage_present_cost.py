@@ -111,18 +111,40 @@ def iop_text(c):
                 " (" + "; ".join(heads) + ")" if heads else ""))
 
 
+def _q(c, k):
+    """a counter as text, '?' when the dump lacks it"""
+    return str(c[k]) if k in c else "?"
+
+
 def iop_format_rows(c):
-    """bare metal 2026-10-31: `IOP formats` - the presented surfaces that were not BGRA (l10r converted by the CPU copy,
-    anything else refused); no row while every frame was BGRA or for a kernel without the counters"""
-    l10r, other = c.get("iop_copy_fmt_l10r", 0), c.get("iop_copy_fmt_other", 0)
-    if not l10r and not other:
+    """bare metal 2026-10-31 (N65): `IOP formats` - the presented surfaces that were not BGRA (l10r converted by the
+    CPU copy, anything else refused, the last refused fourcc); no row while every frame was BGRA or for a kernel
+    without the counters; a companion counter missing is '?' and a WARN (ECC review of 48fe3ad)"""
+    seen, l10r, other = c.get("iop_copy_fmt_l10r_seen", 0), c.get("iop_copy_fmt_l10r", 0), c.get("iop_copy_fmt_other", 0)
+    if not l10r and not other and not seen:
         return []
-    text = ("%d l10r (ARGB2101010) frame(s) converted to the 8-bit scanout by the CPU (not by SDMA: fallbacks `format` %d; "
-            "zero-copy flips refused for the format %d); %d frame(s) of another format refused" % (
-                l10r, c.get("iop_copy_sdma_fb_format", 0), c.get("iop_flip_fmt", 0), other))
+    need = ("iop_copy_fmt_l10r", "iop_copy_fmt_l10r_seen", "iop_copy_fmt_other", "iop_copy_fmt_other_last",
+            "iop_copy_sdma_fb_format", "iop_flip_fmt")
+    missing = [k for k in need if k not in c]
+    last = c.get("iop_copy_fmt_other_last", 0)
+    last_txt = ("0x%08x ('%s')" % (last, "".join(chr((last >> s_) & 0xff) if 32 <= ((last >> s_) & 0xff) < 127 else "."
+                                                  for s_ in (24, 16, 8, 0)))) if last else "none"
+    text = ("%s l10r (ARGB2101010) frame(s) converted into the 8-bit scanout by the CPU of %s seen (not by SDMA: "
+            "fallbacks `format` %s; zero-copy flips refused for the format %s); %s frame(s) of another format refused "
+            "(the last: %s)" % (_q(c, "iop_copy_fmt_l10r"), _q(c, "iop_copy_fmt_l10r_seen"),
+                                _q(c, "iop_copy_sdma_fb_format"), _q(c, "iop_flip_fmt"), _q(c, "iop_copy_fmt_other"),
+                                last_txt))
+    why = []
     if other:
-        return [("WARN", "IOP formats", text + ": the `iop: surface 0x.. format 0x........ is not BGRA or l10r` lines name the "
-                 "format; those frames never reached the panel")]
+        why.append("the `iop: surface 0x.. format 0x........ is not BGRA or l10r` lines name the format; those frames "
+                   "never reached the panel")
+    if seen > l10r:
+        why.append("%d l10r frame(s) seen but not converted (refused later: geometry, map, scanout - the `iop:` lines)" %
+                   (seen - l10r))
+    if missing:
+        why.append("counter(s) MISSING from the dump: %s (not 0: the collector's grep or an older kext)" % ", ".join(missing))
+    if why:
+        return [("WARN", "IOP formats", text + ": " + "; ".join(why))]
     return [("INFO", "IOP formats", text + "; WindowServer presents 10-bit surfaces: the DCN 10-bit scanout (N66) would "
              "remove the conversion")]
 

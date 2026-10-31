@@ -245,7 +245,7 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
             | grep -v -e 'vm sticky: [01] =' -e 'surface wait: [01] =' | tail -80 || true
     done
     echo "== sysctl (card run 58)"
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|iop_stale|iop_ok:|iop_copy_|iop_sdma|iop_gate|perf|present_|flipbuf|hook_|vm_|surface_)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_flip_|iop_queue|iop_wrote|iop_stale|iop_ok:|iop_copy_|iop_sdma|iop_gate|perf|present_|flipbuf|hook_|vm_|surface_)")
     if [ -n "$_a3" ]; then echo "$_a3"; else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 } > "$dir/29-surface-vram.txt" 2>/dev/null
 # card run 2026-10-17b: the kernel's per-frame trace (common/rdna3_trace.h),

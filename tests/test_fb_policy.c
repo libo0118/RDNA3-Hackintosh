@@ -580,6 +580,43 @@ static void test_core_late(void)
     CHECK(!strcmp(rd3fb_core_late_name(RD3FB_LATE_GEOMETRY), "the core's head 0 is another scanout"));
 }
 
+/* ECC review of 48fe3ad (T5): the order of the answers, NULL / edge inputs, every name */
+static void test_core_late_edges(void)
+{
+    const struct rd3fb_scan con = { 0xc20000000ull, 1920, 1080, 7680 };
+    struct rd3fb_scan core = con;
+    /* precedence: NOTHEAD0 > ALREADY > UNUSABLE > MODE > GEOMETRY */
+    core.phys = 1;
+    CHECK(rd3fb_core_late(1, 1, 0, &con, &core, 7) == RD3FB_LATE_NOTHEAD0);
+    CHECK(rd3fb_core_late(0, 1, 0, &con, &core, 7) == RD3FB_LATE_ALREADY);
+    CHECK(rd3fb_core_late(0, 0, 0, &con, &core, 7) == RD3FB_LATE_UNUSABLE);
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 7) == RD3FB_LATE_MODE);
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_GEOMETRY);
+    core = con;
+    CHECK(rd3fb_core_late(0, 0, 1, 0, &core, 0) == RD3FB_LATE_GEOMETRY);          /* no console record */
+    core.h = 1081;
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_GEOMETRY);       /* height only */
+    core = con; core.phys = con.phys + (1ull << 32);
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_GEOMETRY);       /* differs only above 4 GiB */
+    core = con;
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0xFFFFFFFFu) == RD3FB_LATE_MODE);
+    CHECK(rd3fb_core_late(0xFFFFFFFFu, 0, 1, &con, &core, 0) == RD3FB_LATE_NOTHEAD0);
+    CHECK(rd3fb_core_late(0, 5, 1, &con, &core, 0) == RD3FB_LATE_ALREADY);        /* any nonzero */
+    CHECK(rd3fb_core_late(0, 0, 7, &con, &core, 0) == RD3FB_LATE_OK);
+    /* every answer has its own name, none "?" */
+    const enum rd3fb_late_ans all[] = { RD3FB_LATE_OK, RD3FB_LATE_NOTHEAD0, RD3FB_LATE_ALREADY, RD3FB_LATE_UNUSABLE,
+                                        RD3FB_LATE_MODE, RD3FB_LATE_GEOMETRY };
+    for (unsigned i = 0; i < sizeof all / sizeof all[0]; i++) {
+        CHECK(strcmp(rd3fb_core_late_name(all[i]), "?") != 0);
+        for (unsigned j = i + 1; j < sizeof all / sizeof all[0]; j++)
+            CHECK(strcmp(rd3fb_core_late_name(all[i]), rd3fb_core_late_name(all[j])) != 0);
+    }
+    CHECK(!strcmp(rd3fb_core_late_name((enum rd3fb_late_ans)42), "?"));
+    /* core_wait: any nonzero is true; matched wins over attached */
+    CHECK(rd3fb_core_wait(7, 0) == RD3FB_CORE_FOUND && rd3fb_core_wait(0, 9) == RD3FB_CORE_WAIT &&
+          rd3fb_core_wait(-1, -1) == RD3FB_CORE_FOUND);
+}
+
 int main(void)
 {
     test_open_order();
@@ -591,6 +628,7 @@ int main(void)
     test_timing();
     test_console();
     test_core_late();
+    test_core_late_edges();
     if (fails) {
         printf("test_fb_policy: %d check(s) failed\n", fails);
         return 1;

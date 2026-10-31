@@ -185,12 +185,105 @@ static void test_l10r(void)
     }
 }
 
+/* ECC review of 48fe3ad (T2): one conversion case against an independent reference (the conversion written out by
+ * channel), the destination outside every row's row_bytes untouched, the source unchanged */
+static uint32_t ref_l10r(uint32_t v)
+{
+    const uint32_t a = v >> 30, r = (v >> 20) & 1023u, g = (v >> 10) & 1023u, b = v & 1023u;
+    const uint32_t a8 = a == 0 ? 0u : a == 1 ? 0x55u : a == 2 ? 0xaau : 0xffu;
+    return (a8 << 24) | ((r >> 2) << 16) | ((g >> 2) << 8) | (b >> 2);
+}
+static int conv_case(uint32_t h, uint32_t sp, uint32_t dp, uint32_t soff, uint32_t doff, uint32_t row, int want_width)
+{
+    const size_t sn = (size_t)sp * (h ? h : 1) + 32, dn = (size_t)dp * (h ? h : 1) + 32;
+    uint8_t *src = malloc(sn), *keep = malloc(sn), *dst = malloc(dn);
+    int bad = 0;
+    if (!src || !keep || !dst) { free(src); free(keep); free(dst); return 0; }
+    for (size_t i = 0; i < sn; i++) src[i] = (uint8_t)(i * 37u + 11u);
+    memcpy(keep, src, sn);
+    memset(dst, 0x5A, dn);
+    const int width = rd3_iop_convert_l10r_rows(dst + doff, dp, src + soff, sp, h, row);
+    if (width != want_width) bad++;
+    for (size_t b = 0; b < dn; b++) {
+        const size_t rel = b - doff;
+        const int inside = b >= doff && rel / dp < h && rel % dp < row;
+        if (!inside) { if (dst[b] != 0x5A) bad++; continue; }
+        if (rel % 4) continue;
+        uint32_t v, o;
+        memcpy(&v, src + soff + (rel / dp) * sp + rel % dp, 4);
+        memcpy(&o, dst + b, 4);
+        if (o != ref_l10r(v)) bad++;
+    }
+    if (memcmp(src, keep, sn)) bad++;   /* the source is only read */
+    free(src); free(keep); free(dst);
+    return bad == 0;
+}
+static void test_l10r_matrix(void)
+{
+    CHECK(conv_case(4, 7680, 7680, 0, 0, 7680, 8));     /* aligned: the 64-bit loop */
+    CHECK(conv_case(4, 7680, 7680, 0, 4, 7680, 4));     /* only the destination misaligned */
+    CHECK(conv_case(4, 7684, 7680, 0, 0, 7680, 4));     /* only the source pitch not 8-aligned */
+    CHECK(conv_case(4, 7680, 7684, 0, 0, 7680, 4));     /* only the destination pitch */
+    CHECK(conv_case(3, 8, 8, 0, 0, 4, 4));              /* w = 1 */
+    CHECK(conv_case(3, 8, 8, 0, 0, 8, 8));              /* w = 2, 8-aligned: the 64-bit path */
+    CHECK(conv_case(4, 7680, 7680, 0, 0, 4096, 8));     /* a crop: row_bytes < 4 w */
+    CHECK(conv_case(0, 7680, 7680, 0, 0, 7680, 8));     /* h = 0: nothing written */
+    CHECK(conv_case(4, 7680, 7680, 0, 0, 0, 8));        /* row_bytes = 0: nothing written */
+    /* the 64-bit path keeps the pixel order: the low word is the first pixel */
+    {
+        uint32_t in[2] = { (3u << 30) | (1023u << 20), (3u << 30) | 1023u }, out[2] = { 0, 0 };
+        uint64_t s64, d64 = 0;
+        memcpy(&s64, in, 8);
+        CHECK(rd3_iop_convert_l10r_rows(&d64, 8, &s64, 8, 1, 8) == 8);
+        memcpy(out, &d64, 8);
+        CHECK(out[0] == 0xffff0000u && out[1] == 0xff0000ffu);
+    }
+}
+/* T3: raw vectors (not built by pack_l10r), a full per-channel sweep, the truncation edges */
+static void test_l10r_vectors(void)
+{
+    CHECK(rd3_iop_l10r_px(0xC0000000u) == 0xFF000000u);
+    CHECK(rd3_iop_l10r_px(0x3FF00000u) == 0x00FF0000u);
+    CHECK(rd3_iop_l10r_px(0x000FFC00u) == 0x0000FF00u);
+    CHECK(rd3_iop_l10r_px(0x000003FFu) == 0x000000FFu);
+    CHECK(rd3_iop_l10r_px(0x80100401u) == 0xAA000000u);   /* each channel 1 (< 4): 0 */
+    int bad = 0;
+    for (uint32_t c = 0; c < 1024; c++) {
+        if (rd3_iop_l10r_px(c << 20) != ((c >> 2) << 16)) bad++;
+        if (rd3_iop_l10r_px(c << 10) != ((c >> 2) << 8)) bad++;
+        if (rd3_iop_l10r_px(c) != (c >> 2)) bad++;
+    }
+    CHECK(bad == 0);
+    CHECK(rd3_iop_l10r_px(1023u) == 255u && rd3_iop_l10r_px(1022u) == 255u && rd3_iop_l10r_px(1020u) == 255u &&
+          rd3_iop_l10r_px(1019u) == 254u);
+    CHECK(RD3_IOP_FMT_BGRA == (((uint32_t)'B' << 24) | ((uint32_t)'G' << 16) | ((uint32_t)'R' << 8) | (uint32_t)'A'));
+}
+/* T4: near misses are other formats; the fallback names are unique and none is "?" */
+static uint32_t fourcc(const char *f)
+{
+    return ((uint32_t)(uint8_t)f[0] << 24) | ((uint32_t)(uint8_t)f[1] << 16) | ((uint32_t)(uint8_t)f[2] << 8) | (uint8_t)f[3];
+}
+static void test_fmt_names(void)
+{
+    const char *near[] = { "ARGB", "RGhA", "2vuy", "r01l", "BGRa", "l10R", "w30r" };
+    for (unsigned i = 0; i < sizeof near / sizeof near[0]; i++) CHECK(rd3_iop_fmt_kind(fourcc(near[i])) == RD3_IOP_FMT_IS_OTHER);
+    CHECK(rd3_iop_fmt_kind(0xFFFFFFFFu) == RD3_IOP_FMT_IS_OTHER);
+    CHECK(rd3_iop_fmt_kind(fourcc("BGRA")) == RD3_IOP_FMT_IS_BGRA && rd3_iop_fmt_kind(fourcc("l10r")) == RD3_IOP_FMT_IS_L10R);
+    for (unsigned i = 0; i < RD3_ISF_N; i++) {
+        CHECK(strcmp(rd3_iop_sdma_fb_name(i), "?") != 0 && rd3_iop_sdma_fb_name(i)[0]);
+        for (unsigned j = i + 1; j < RD3_ISF_N; j++) CHECK(strcmp(rd3_iop_sdma_fb_name(i), rd3_iop_sdma_fb_name(j)) != 0);
+    }
+}
+
 int main(void)
 {
     test_gart_table();
     test_pages();
     test_sdma_policy();
     test_l10r();
+    test_l10r_matrix();
+    test_l10r_vectors();
+    test_fmt_names();
     CHECK(rd3_iop_copy64_ok(0x1000, 0x2000, 7680, 7680, 7680));
     CHECK(!rd3_iop_copy64_ok(0x1004, 0x2000, 7680, 7680, 7680));
     CHECK(!rd3_iop_copy64_ok(0x1000, 0x2000, 7684, 7680, 7680));

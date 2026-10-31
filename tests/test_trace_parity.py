@@ -50,6 +50,13 @@ m2 = re.search(r"enum rd3_wg_why \{(.*?)\};", wg, re.S)
 why = dict((int(v), n) for n, v in re.findall(r"RD3_WGW_(\w+)\s*=\s*(\d+)", m2.group(1) if m2 else ""))
 if sorted(why) != sorted(rdna3_trace.GEN_WHY) or max(why) > rdna3_trace.V1_GEN_WHY_MASK:
     fails.append("enum rd3_wg_why %s, the decoder's GEN_WHY %s" % (sorted(why), sorted(rdna3_trace.GEN_WHY)))
+# ECC review of 48fe3ad (T4): the decoder's GEN_PRESENTS / GEN_HOLDS are rd3_wg_presents / rd3_wg_holds
+num = dict((n, int(v)) for v, n in why.items())
+for fn, want in (("rd3_wg_presents", rdna3_trace.GEN_PRESENTS), ("rd3_wg_holds", rdna3_trace.GEN_HOLDS)):
+    mb = re.search(r"static inline int %s\(enum rd3_wg_why w\)\s*\{(.*?)\}" % fn, wg, re.S)
+    got = sorted(num.get(n, -1) for n in re.findall(r"RD3_WGW_(\w+)", mb.group(1) if mb else ""))
+    if not mb or got != sorted(want):
+        fails.append("%s names %s, the decoder's %s" % (fn, got, sorted(want)))
 m3 = re.search(r"enum rd3_trace_flipbuf \{(.*?)\};", h, re.S)
 fbw = sorted(int(v) for v in re.findall(r"RD3_TRFB_\w+\s*=\s*(\d+)", m3.group(1) if m3 else ""))
 if fbw != sorted(rdna3_trace.FLIPBUF_WHAT):

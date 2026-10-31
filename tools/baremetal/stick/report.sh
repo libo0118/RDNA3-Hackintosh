@@ -27,7 +27,7 @@ ioreg -lw0 > "$o/ioreg.txt" 2>&1
 kmutil showloaded > "$o/kexts.txt" 2>&1
 echo "[3/4] ekrany i ustawienia"
 system_profiler SPDisplaysDataType > "$o/displays.txt" 2>&1
-sysctl -a 2>/dev/null | grep -i rdna3 > "$o/sysctl.txt"
+sysctl -a 2>/dev/null | grep -i rdna3 > "$o/sysctl.txt" || echo "(no rdna3 sysctls)" > "$o/sysctl.txt"
 nvram boot-args > "$o/bootargs.txt" 2>&1
 echo "[4/4] raporty awarii"
 A="$R/Library/Application Support/RDNA3/autoreport.sh"

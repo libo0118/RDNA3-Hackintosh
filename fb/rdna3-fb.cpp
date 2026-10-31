@@ -365,7 +365,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     IONotifier *fCoreNote = nullptr;
     bool        fCoreLateTried = false;
     uint32_t    fCoreLateAns = 0xffffffffu;   /* enum rd3fb_late_ans of the upgrade, ~0 = none asked */
-    uint32_t    fFlipConsole = 0;              /* flips refused because the head is in console mode */
+    volatile uint32_t fFlipConsole = 0;        /* flips refused because the head is in console mode (atomic) */
     void        armCoreLate();
     void        coreLate(IOService *core);
     static bool coreArrived(void *target, void *ref, IOService *s, IONotifier *n);
@@ -645,8 +645,12 @@ void RDNA3Framebuffer::coreLate(IOService *core)
         FBLOG("head %u: RDNA3Accel registered on another device: ignored", fHead);
         return;
     }
-    if (!fModeLock)
+    if (!fModeLock) {
+        FBLOG("head %u: RDNA3Accel registered late but this framebuffer has no mode lock: head 0 stays in console mode",
+              fHead);
+        setProperty("RDNA3,CoreLate", "no mode lock");
         return;
+    }
     struct RD3KDisplayHead h;
     bzero(&h, sizeof(h));
     IOLockLock(fModeLock);
@@ -3130,7 +3134,7 @@ IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, v
             IOLockUnlock(fModeLock);
         } else {
             /* bare metal 2026-10-31: console mode refuses every flip (the accelerator then copies) - said */
-            const uint32_t k = fFlipConsole++;
+            const uint32_t k = (uint32_t)OSIncrementAtomic((volatile SInt32 *)&fFlipConsole);   /* any caller's thread */
             if (k < 4 || (k & 1023) == 0)
                 FBLOG("flip #%u REFUSED: head %u is in console mode (core %s, late upgrade: %s): the accelerator "
                       "copies the frame instead", k + 1, fHead, fCore ? "present, no usable head" : "absent",

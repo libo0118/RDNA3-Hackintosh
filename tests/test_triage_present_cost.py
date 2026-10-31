@@ -95,16 +95,41 @@ L = ("debug.rdna3accel_iop_ok: 70\ndebug.rdna3accel_iop_copy_n: 70\ndebug.rdna3a
      "debug.rdna3accel_iop_copy_us: 350000\ndebug.rdna3accel_iop_copy_64: 70\ndebug.rdna3accel_iop_gate_us: 0\n"
      "debug.rdna3accel_iop_copy_n_h0: 35\ndebug.rdna3accel_iop_copy_us_h0: 175000\n"
      "debug.rdna3accel_iop_copy_sdma_state: 1\ndebug.rdna3accel_iop_copy_sdma_n: 0\ndebug.rdna3accel_iop_copy_sdma_fb: 70\n"
-     "debug.rdna3accel_iop_copy_sdma_fb_format: 70\ndebug.rdna3accel_iop_copy_fmt_l10r: 70\ndebug.rdna3accel_iop_copy_fmt_other: 0\n"
-     "debug.rdna3accel_iop_flip_fmt: 0\n")
+     "debug.rdna3accel_iop_copy_sdma_fb_format: 70\ndebug.rdna3accel_iop_copy_fmt_l10r: 70\n"
+     "debug.rdna3accel_iop_copy_fmt_l10r_seen: 70\ndebug.rdna3accel_iop_copy_fmt_other: 0\n"
+     "debug.rdna3accel_iop_copy_fmt_other_last: 0\ndebug.rdna3accel_iop_flip_fmt: 0\n")
 r = present_rows("", L, True)
 check([n for _l, n, _t in r] == ["IOP copy", "IOP formats"], "l10r rows: %r" % r)
 check(r[0][0] == "INFO" and "fallbacks to the CPU 70 (format 70)" in r[0][2], "l10r IOP copy row: %r" % (r[0],))
-check(r[1][0] == "INFO" and r[1][2].startswith("70 l10r (ARGB2101010) frame(s) converted to the 8-bit scanout by the CPU")
-      and "fallbacks `format` 70" in r[1][2] and "N66" in r[1][2], "l10r row: %r" % (r[1],))
-r = present_rows("", L.replace("fmt_other: 0", "fmt_other: 35"), True)
-check(r[1][0] == "WARN" and "35 frame(s) of another format refused" in r[1][2], "other format: %r" % (r[1],))
+check(r[1][0] == "INFO" and r[1][2].startswith("70 l10r (ARGB2101010) frame(s) converted into the 8-bit scanout by the "
+                                               "CPU of 70 seen")
+      and "fallbacks `format` 70" in r[1][2] and "the last: none" in r[1][2] and "N66" in r[1][2], "l10r row: %r" % (r[1],))
+r = present_rows("", L.replace("fmt_other: 0", "fmt_other: 35").replace("other_last: 0", "other_last: 2016686640"), True)
+check(r[1][0] == "WARN" and "35 frame(s) of another format refused (the last: 0x78343230 ('x420'))" in r[1][2],
+      "other format: %r" % (r[1],))
 check(all(n != "IOP formats" for _l, n, _t in present_rows("", SV, True)), "BGRA only: no IOP formats row")
+# ECC review of 48fe3ad (T7): only another format -> WARN; seen > converted -> WARN; missing companions -> '?' + WARN
+r = present_rows("", L.replace("fmt_l10r: 70", "fmt_l10r: 0").replace("l10r_seen: 70", "l10r_seen: 0")
+                 .replace("fmt_other: 0", "fmt_other: 4"), True)
+check(r[-1][1] == "IOP formats" and r[-1][0] == "WARN" and "4 frame(s) of another format" in r[-1][2], "only other: %r" % (r,))
+r = present_rows("", L.replace("l10r_seen: 70", "l10r_seen: 72"), True)
+check(r[-1][0] == "WARN" and "2 l10r frame(s) seen but not converted" in r[-1][2], "seen > converted: %r" % (r[-1],))
+r = present_rows("", L.replace("debug.rdna3accel_iop_flip_fmt: 0\n", "").replace("debug.rdna3accel_iop_copy_sdma_fb_format: 70\n", ""), True)
+check(r[-1][0] == "WARN" and "fallbacks `format` ?" in r[-1][2] and "refused for the format ?" in r[-1][2]
+      and "MISSING from the dump: iop_copy_sdma_fb_format, iop_flip_fmt" in r[-1][2], "missing -> ?: %r" % (r[-1],))
+# mixed traffic: 70 CPU copies, only 30 of them format fallbacks: the "every copy went to the CPU" WARN stays
+r = present_rows("", L.replace("sdma_fb_format: 70", "sdma_fb_format: 30"), True)
+check(r[0][0] == "WARN" and "every copy went to the CPU" in r[0][2], "mixed traffic keeps the SDMA WARN: %r" % (r[0],))
+# more format fallbacks than copies (counters read one by one): no crash, no SDMA WARN
+r = present_rows("", L.replace("sdma_fb_format: 70", "sdma_fb_format: 90"), True)
+check(r[0][0] == "INFO", "format > copies: %r" % (r[0],))
+# parity: SDMA_FB is the C header's name table, in order
+import re as _re  # noqa: E402
+_h = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common", "rdna3_iop_copy.h")).read()
+_m = _re.search(r"rd3_iop_sdma_fb_name\(unsigned r\)\s*\{\s*static const char \*const n\[RD3_ISF_N\] = \{([^}]*)\}", _h)
+import triage_present_cost  # noqa: E402
+check(_m and tuple(_re.findall(r'"([^"]+)"', _m.group(1))) == triage_present_cost.SDMA_FB,
+      "SDMA_FB %r vs the header's %r" % (triage_present_cost.SDMA_FB, _m and _m.group(1)))
 
 # N64: `vk: ws frame: SUMMARY` (metal/plugin/nvmtl_ws_frame.h nvmtl_wf_format, the body tests/test_ws_frame.c checks)
 W = "2026-10-29 10:00:%02d.1 Df %s (RDNA3MTLDriver) NVMTL: vk: ws frame: SUMMARY %s\n"

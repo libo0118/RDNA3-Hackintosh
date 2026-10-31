@@ -67,7 +67,9 @@ def fb(dep, gl, n40=True, glorder=1, vblonce=1, stats=None, console=0, sw=None, 
               "virq_fallback_runs": 0, "virq_lat_avg_us": 45, "virq_lat_max_us": 300, "virq_pflips": 900,
               "latch_waits": 900, "latch_timeouts": 0, "latch_irq_woke": 880, "pflip_lat_avg_us": 30,
               "pflip_lat_max_us": 200, "core_vblank": 3600, "core_pflip": 900, "core_storms": 0,
-              "virq_noreg": 0, "virq_late_unreg": 0}
+              "virq_noreg": 0, "virq_late_unreg": 0,
+              # N65: head 0 started before the core (99: never asked)
+              "core_late": 99, "flip_console": 0}
         st.update(stats or {})
         for k in drop:
             st.pop(k, None)
@@ -430,5 +432,22 @@ assert any("the pflip interrupt not live at the last wait" in t for t in rows), 
 PY
 grep -q 'sysctl -n debug.rdna3_dispirq' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh does not read debug.rdna3_dispirq"
 sh -n "$ROOT/tools/vm/macos/autoreport.sh" 2>/dev/null || bash -n "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh syntax"
+
+# N65: head 0 started before the core - the "core order" row (helper and the full report's head-0 row)
+run a
+row INFO "core order" a | grep -qF "fb 0: mode dcn; late core: never asked (the core was there) (core_late 99); 0 flip(s) refused in console mode; RDNA3,CoreLate absent" || fail "a: core order INFO"
+python3 -I - "$ROOT" <<'PY' || fail "core order rows"
+import sys
+sys.path.insert(0, sys.argv[1] + "/tools")
+import triage_reports as tr
+lv, n, t = tr._fb_core_late_row("fb 0", {"core_late": 0, "flip_console": 0}, "upgraded to DCN", "dcn")
+assert lv == "INFO" and n == "core order" and "late core: upgraded to DCN (core_late 0)" in t and '"upgraded to DCN"' in t, t
+lv, n, t = tr._fb_core_late_row("fb 0", {"core_late": 5, "flip_console": 120}, "the core's head 0 is another scanout", "console")
+assert lv == "WARN" and "another scanout (core_late 5); 120 flip(s) refused" in t and "ran in console mode" in t, t
+lv, n, t = tr._fb_core_late_row("fb 0", {"core_late": 99, "flip_console": 3}, None, "console")
+assert lv == "WARN" and "3 flip(s) refused" in t, t
+lv, n, t = tr._fb_core_late_row("fb 0", {}, None, None)
+assert lv == "WARN" and "core_late ?" in t and "? flip(s)" in t and "counters missing" in t, t
+PY
 
 echo "test_triage_fb_n40: ok"

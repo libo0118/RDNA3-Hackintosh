@@ -498,7 +498,9 @@ N41_VM_KEYS = ("vm_sticky", "vm_alloc", "vm_dealloc", "vm_refused", "vm_parked",
                "vm_park_trimmed_bytes", "vm_park_trim_held", "vm_park_trim_unknown", "vm_alloc_retry_ok",
                "vm_alloc_retry_fail", "vm_park_cap_mb",
                # bare metal 2026-10-31 (N65 P4): resources without an IOSurface paged off into their own system memory
-               "vm_pageoff_sys", "vm_pageoff_sys_fail", "vm_pageoff_family", "vm_pageoff_sys_us")
+               "vm_pageoff_sys", "vm_pageoff_sys_fail", "vm_pageoff_family", "vm_pageoff_sys_us",
+               "vm_pageoff_sys_fail_nosysmem", "vm_pageoff_sys_fail_prepare", "vm_pageoff_sys_fail_segments",
+               "vm_pageoff_sys_fail_copy", "vm_pageoff_sys_fail_timeout")
 N41_SW_KEYS = ("surface_wait", "surface_wait_ms", "surface_wait_maxus", "surface_wait_iop_maxus", "surface_wait_busy",
                "surface_wait_pending", "surface_wait_ready", "surface_wait_late", "surface_wait_evicted",
                "surface_wait_saturated", "surface_wait_off", "surface_wait_notws", "surface_wait_notown",
@@ -692,6 +694,39 @@ def _n41_plugin_reason(pl):
     return "the plugin is on (%s) but no mark reached the kernel" % pl["decision"][:120]
 
 
+PAGEOFF_FAIL = ("nosysmem", "prepare", "segments", "copy", "timeout")   # accel kRd3Po* (debug.rdna3accel_vm_pageoff_sys_fail_*)
+
+
+def pageoff_sys_rows(c, sv=""):
+    """N65 P4 (bare metal 2026-10-31): resources without an IOSurface paged off into their own system memory by the copy
+    engine (only while WindowServer is not on the Metal plugin), those left to the family's pageoff by reason, and the
+    family's own page-offs. WARN: any left to the family; none taken by the copy engine although the family paged off
+    while WindowServer had no Metal device (swap_gen_wsmetal 0 or unknown). A missing counter is '?'."""
+    keys = ("vm_pageoff_sys", "vm_pageoff_sys_fail", "vm_pageoff_family", "vm_pageoff_sys_us")
+    if not any(c.get(k, 0) for k in keys):
+        return []
+    q = lambda k: str(c[k]) if k in c else "?"
+    n_ok, n_bad, fam = c.get("vm_pageoff_sys", 0), c.get("vm_pageoff_sys_fail", 0), c.get("vm_pageoff_family", 0)
+    m = re.search(r"^debug\.rdna3accel_swap_gen_wsmetal: (\d+)", sv or "", re.M)
+    metal = int(m.group(1)) if m else None
+    avg = ("%.2f ms" % (c["vm_pageoff_sys_us"] / 1000.0 / n_ok)) if n_ok and "vm_pageoff_sys_us" in c else "?"
+    whys = ", ".join("%s %d" % (k, c.get("vm_pageoff_sys_fail_" + k, 0)) for k in PAGEOFF_FAIL
+                     if c.get("vm_pageoff_sys_fail_" + k, 0))
+    text = ("%s resource(s) without an IOSurface paged off into their own system memory by the copy engine (avg %s), "
+            "%s left to the family's pageoff%s; %s page-off(s) by the family itself; WindowServer %s" % (
+                q("vm_pageoff_sys"), avg, q("vm_pageoff_sys_fail"), " (%s)" % whys if whys else "",
+                q("vm_pageoff_family"),
+                "on the Metal plugin (the copy engine path is off: as before)" if metal == 1 else
+                "without a Metal device" if metal == 0 else "Metal state unknown (no swap_gen_wsmetal)"))
+    why = []
+    if n_bad:
+        why.append("a CPU lock of such a resource may fail (the crash after a display sleep): the kernel's 'pageoff (no "
+                   "IOSurface) ... NOT copied' lines")
+    if not n_ok and fam and metal != 1:
+        why.append("the family paged off but the copy engine took none while WindowServer had no Metal device")
+    return [("WARN" if why else "INFO", "pageoff (no IOSurface)", text + (": " + "; ".join(why) if why else ""))]
+
+
 def n41_rows(sv, log, pluginlog="", cdlog=""):
     """DRIVER-PLAN N41: the VRAM parking (vm_*) and the page-off's wait for WindowServer's pending GPU writes
     (surface_wait*) from the sysctl dump in 29-surface-vram.txt, and WindowServer's plugin lines (cdlog, its
@@ -755,17 +790,7 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
         rows.append(("WARN", "VRAM parking", "%d VRAM allocation(s) refused while %d bytes were parked: parking may "
                      "cost VRAM (the kernel's 'VRAM refused:' line; A/B vm_sticky 0)" % (g("vm_refused"),
                                                                                          g("vm_parked_bytes"))))
-    if g("vm_pageoff_sys", 0) or g("vm_pageoff_sys_fail", 0):
-        # N65 P4: the family's pageoff of a resource without an IOSurface left its system memory invalid (the crash
-        # after a display sleep without the plugin); the copy engine does it now
-        n_ok, n_bad = g("vm_pageoff_sys", 0), g("vm_pageoff_sys_fail", 0)
-        rows.append(("WARN" if n_bad else "INFO", "pageoff (no IOSurface)",
-                     "%d resource(s) without an IOSurface paged off into their own system memory by the copy engine "
-                     "(avg %.2f ms), %d left to the family's pageoff%s; %d other page-off(s) by the family" % (
-                         n_ok, g("vm_pageoff_sys_us", 0) / 1000.0 / n_ok if n_ok else 0.0, n_bad,
-                         " (the kernel's 'pageoff (no IOSurface) ... NOT copied' lines say why: a CPU lock of such a "
-                         "resource may fail, the crash after a display sleep)" if n_bad else "",
-                         g("vm_pageoff_family", 0))))
+    rows.extend(pageoff_sys_rows(c, sv))
     if g("vm_free_live", 0):
         rows.append(("INFO", "VRAM parking", "%d vidmem object(s) freed with VRAM still live, released in free() (they "
                      "leaked before N41)" % g("vm_free_live")))
@@ -1676,7 +1701,71 @@ HOOK_INTR_KINDS = ("flipbuf", "scanout", "pickpresent", "didsubmitswap", "backre
 GEN_SLACK = 2
 
 
-def gen_verdict(c, current=False):
+# N65 (bare metal 2026-10-31): WindowServer without the Metal plugin (rdna3_write_gen.h rd3_wg_cpu_rule)
+GEN_GLOBALS_N65 = ("swap_gen_cpu", "swap_gen_wsmetal")
+GEN_COUNTERS_N65 = ("swaps_genhold_same", "swaps_genhold_older", "swaps_genhold_unwritten", "swaps_gencpu")
+WS_METAL_LOG = re.compile(r"WindowServer(?:\[\d+(?::[0-9a-f]+)?\])?:? \(RDNA3MTLDriver\) NVMTL:")
+
+
+def gen_cpu_rows(c, current=False, ws_log=""):
+    """the CPU rule's state: WindowServer's Metal device as the kernel saw it (swap_gen_wsmetal) and the switch
+    (swap_gen_cpu); a missing or inconsistent counter is a WARN, never silence (ECC review of 48fe3ad)"""
+    out = []
+    have = [k for k in GEN_GLOBALS_N65 if k in c]
+    per_head = any(re.match(r"(?:%s)_h\d$" % "|".join(GEN_COUNTERS_N65), k) for k in c)
+    if not have and not per_head:
+        if current:
+            out.append(("WARN", "counter missing: %s and %s although the kext is of these sources (N65): the "
+                                "collector's grep" % (", ".join(GEN_GLOBALS_N65),
+                                                      ", ".join(k + "_h<N>" for k in GEN_COUNTERS_N65))))
+        return out
+    missing = [k for k in GEN_GLOBALS_N65 if k not in c]
+    if missing:
+        out.append(("WARN", "counter missing: %s although %s present: the CPU rule's state is NOT known" % (
+            ", ".join(missing), ", ".join(have) if have else "the per-head N65 counters are")))
+    if "swap_gen_wsmetal" not in c:
+        return out
+    metal, cpu = c.get("swap_gen_wsmetal"), c.get("swap_gen_cpu")
+    text = ("write generations without Metal: WindowServer %s, swap_gen_cpu %s: %s" % (
+        "HAS a Metal device (GPU surface marks seen)" if metal else
+        "has NO Metal device (no GPU surface mark: it composites on the CPU)", "?" if cpu is None else cpu,
+        "the old holds apply" if metal else
+        "SAME / OLDER backs present, only never-written backs hold (never with rdna3agdc)" if cpu == 1 else
+        "SAME / OLDER backs are HELD as before (rdna3swapgencpu=0): small CPU updates may stay off the panel"))
+    out.append(("WARN" if not metal and cpu == 0 else "INFO", text))
+    if not metal and ws_log and WS_METAL_LOG.search(ws_log):
+        out.append(("WARN", "write generations: swap_gen_wsmetal 0 but the log shows WindowServer's Metal plugin "
+                            "(NVMTL lines from WindowServer): its GPU marks never reached the kernel, so the CPU rule "
+                            "may act on a Metal WindowServer (with rdna3agdc it does not)"))
+    return out
+
+
+def gen_cpu_head_rows(c, h):
+    """per head: the holds by reason and the CPU rule's presents; partial / inconsistent counters WARN"""
+    g = lambda k: c.get(k + "_h" + h, 0)
+    present = [k for k in GEN_COUNTERS_N65 if k + "_h" + h in c]
+    if not present:
+        return []
+    out = []
+    if len(present) != len(GEN_COUNTERS_N65):
+        out.append(("WARN", "head %s: the N65 counters are partial: %s missing (a partial dump)" % (
+            h, ", ".join(k + "_h" + h for k in GEN_COUNTERS_N65 if k not in present))))
+    split = g("swaps_genhold_same") + g("swaps_genhold_older") + g("swaps_genhold_unwritten")
+    out.append(("INFO", "head %s: write-generation holds by reason: %d the panel's buffer (same), %d older, %d never "
+                        "written; %d SAME / OLDER presented because WindowServer has no Metal device (swaps_gencpu)" % (
+                            h, g("swaps_genhold_same"), g("swaps_genhold_older"), g("swaps_genhold_unwritten"),
+                            g("swaps_gencpu"))))
+    if len(present) == len(GEN_COUNTERS_N65) and "swaps_genhold_h" + h in c and \
+            abs(split - g("swaps_genhold")) > GEN_SLACK:
+        out.append(("WARN", "head %s: the holds by reason (%d) do not add up to swaps_genhold (%d): a hold without "
+                            "its reason counter (or a kext older than the split)" % (h, split, g("swaps_genhold"))))
+    if "swaps_genpresent_h" + h in c and g("swaps_gencpu") > g("swaps_genpresent") + GEN_SLACK:
+        out.append(("WARN", "head %s: swaps_gencpu %d exceeds the presents (swaps_genpresent %d): the CPU rule's "
+                            "presents are a subset of them" % (h, g("swaps_gencpu"), g("swaps_genpresent"))))
+    return out
+
+
+def gen_verdict(c, current=False, ws_log=""):
     """[(level, text)] from the write generations' and the flip-present hooks' counters (card run 2026-10-17d:
     swap_gen, flipbuf_present, swaps_gen*_h<N>, cf_gennewer_h<N>, flipbuf*_h<N>, hook_*); a kext of these sources
     ('current': the kernel log's accelerator build line is these sources) without them is a WARN, an older kext
@@ -1690,17 +1779,6 @@ def gen_verdict(c, current=False):
             return [("WARN", "counter missing: swap_gen and the write generations' counters (swaps_genhold_h<N>, "
                              "flipbuf_h<N>) although the kext is of these sources: the collector's grep missed them")]
         return []
-    if "swap_gen_wsmetal" in c:
-        # bare metal 2026-10-31: WindowServer without the Metal plugin - its SAME / OLDER backs present (swap_gen_cpu 1)
-        metal = c.get("swap_gen_wsmetal")
-        out_cpu = ("write generations without Metal: WindowServer %s, swap_gen_cpu %s: %s" % (
-            "HAS a Metal device (GPU surface marks seen)" if metal else "has NO Metal device (no GPU surface mark: it "
-            "composites on the CPU)", c.get("swap_gen_cpu", "?"),
-            "the old holds apply" if metal else
-            "SAME / OLDER backs present, only never-written backs hold" if c.get("swap_gen_cpu") == 1 else
-            "SAME / OLDER backs are HELD as before (rdna3swapgencpu=0): small CPU updates may stay off the panel"))
-    else:
-        out_cpu = None
     out = [("INFO", "write generations: swap_gen %s, flipbuf_present %s, swap mode %s; generations handed out by "
                     "page-on %s (+%s by its cached descriptor), by copy forward %s (%s targets kept theirs: the copy "
                     "failed); evicted %s, freed %s, head resets %s" % (
@@ -1708,8 +1786,7 @@ def gen_verdict(c, current=False):
                         c.get("swaps_gen_aperture", "?"), c.get("swaps_gen_apcached", "?"), c.get("swaps_gen_cf", "?"),
                         c.get("swaps_gen_cfnostamp", "?"), c.get("swaps_gen_evicted", "?"),
                         c.get("swaps_gen_freed", "?"), c.get("swaps_gen_resets", "?")))]
-    if out_cpu:
-        out.append(("WARN" if not c.get("swap_gen_wsmetal") and c.get("swap_gen_cpu") == 0 else "INFO", out_cpu))
+    out.extend(gen_cpu_rows(c, current, ws_log))
     if current:
         gmiss = [k for k in GEN_GLOBALS if k not in c]
         if gmiss:
@@ -1763,11 +1840,7 @@ def gen_verdict(c, current=False):
                                 g("cf_gennewer"), g("flipbuf"), g("flipbuf_scanout"), g("flipbuf_presented"),
                                 g("flipbuf_held"), g("flipbuf_emptyheld"), g("flipbuf_failed"), g("flipbuf_busy"),
                                 g("flipbuf_unlocked"))))
-        if "swaps_genhold_same_h" + h in c:
-            out.append(("INFO", "head %s: write-generation holds by reason: %d the panel's buffer (same), %d older, %d "
-                                "never written; %d SAME / OLDER presented because WindowServer has no Metal device "
-                                "(swaps_gencpu)" % (h, g("swaps_genhold_same"), g("swaps_genhold_older"),
-                                                    g("swaps_genhold_unwritten"), g("swaps_gencpu"))))
+        out.extend(gen_cpu_head_rows(c, h))
         if judged_known and abs(judged - outcomes) > GEN_SLACK:
             out.append(("WARN", "head %s: the write generations' outcomes do not add up: %d judged, but presented %d + "
                                 "held %d + would-hold %d + newer buffer %d = %d - a decision without its counter" % (
@@ -3938,7 +4011,12 @@ FB_N40_STATS = (
     "wake_fails", "wake_retries", "wake_gave_up", "wake_stopping",
     "vbl_delivered", "vbl_polls", "vbl_still", "vbl_overlap", "vbl_call_failed",
     "integ_applied", "integ_reset", "integ_late", "open_ungated", "open_fails",
-    "dt_validate", "dt_matched", "dt_refused", "dt_sets", "dt_mapped", "dispflags_asked")
+    "dt_validate", "dt_matched", "dt_refused", "dt_sets", "dt_mapped", "dispflags_asked",
+    # N65 (bare metal 2026-10-31): head 0 started before the core
+    "core_late", "flip_console")
+# common/rdna3_fb_policy.h enum rd3fb_late_ans (FBStats core_late; 99 = the upgrade was never asked)
+FB_CORE_LATE = {0: "upgraded to DCN", 1: "not head 0", 2: "already DCN or tried", 3: "the core's head 0 is not usable",
+                4: "a scaled mode is on", 5: "the core's head 0 is another scanout", 99: "never asked (the core was there)"}
 AGDC_VENDORS = {0: "AMD 0x1002", 1: "NVIDIA 0x10de", 2: "Intel 0x8086"}
 
 
@@ -4121,6 +4199,20 @@ def _fb_vblirq_rows(name, sw, st, g, dcn):
     return out
 
 
+def _fb_core_late_row(name, st, core_late_prop, mode):
+    """N65: head 0 that started before the core - the late upgrade's answer (FBStats core_late), the flips refused in
+    console mode (flip_console) and RDNA3,CoreLate; a missing key is '?' and a WARN"""
+    cl, fc = st.get("core_late"), st.get("flip_console")
+    lvl = "WARN" if cl is None or fc is None or (fc or 0) > 0 or cl not in (0, 99) else "INFO"
+    return (lvl, "core order", "%s: mode %s; late core: %s (core_late %s); %s flip(s) refused in console mode; "
+            "RDNA3,CoreLate %s%s" % (
+                name, mode or "?", FB_CORE_LATE.get(cl, "?") if cl is not None else "?", "?" if cl is None else cl,
+                "?" if fc is None else fc, '"%s"' % core_late_prop if core_late_prop else "absent",
+                ": head 0 ran in console mode (the framebuffer started before the core; the fb log's 'RDNA3Accel ...' "
+                "lines say why)" if lvl == "WARN" and (fc or (cl not in (0, 99, None))) else
+                ": counters missing (a framebuffer before N65)" if lvl == "WARN" else ""))
+
+
 def fb_n40_lines(path, txt="", args=""):
     """[(level, label, text)]: the N40 switches and counters of every framebuffer and the AGDC vendor answer"""
     fbtxt = read_tar_member(path, "12-ioreg-fb.txt")
@@ -4202,6 +4294,8 @@ def fb_n40_lines(path, txt="", args=""):
                         "; overlaps with vblonce=0: the switch's case" if overlap and not sw.get("vblonce") else "",
                         ": " + "; ".join(vwhy) if vwhy else "")))
         out.extend(_fb_vblirq_rows(name, sw, st, g, dcn))
+        if dep == "0":
+            out.append(_fb_core_late_row(name, st, _ioreg_str(blk, "RDNA3,CoreLate"), _ioreg_str(blk, "RDNA3,Mode")))
         out.append(("INFO", "detailed timings", "%s: validateDetailedTiming %d (%d one of our modes, %d refused), "
                     "setDetailedTimings %d, ids mapped %d (rdna3fbdtmap %d)" % (
                         name, g("dt_validate"), g("dt_matched"), g("dt_refused"), g("dt_sets"), g("dt_mapped"),
@@ -5309,7 +5403,7 @@ def summary(path, serial=None):
         if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t or "H-STALE handled" in t or \
                 ": stale back (swap_stale" in t:
             out.append(("swap copy", "%s %s" % (lv, t)))
-    for lv, t in gen_verdict(a3_counters(txt) if txt else {}, accel_current(log)):
+    for lv, t in gen_verdict(a3_counters(txt) if txt else {}, accel_current(log), log):
         if lv != "INFO" or t.startswith(("write generations", "flip-present")) or ": write generations:" in t:
             out.append(("swap gen", "%s %s" % (lv, t[:300])))
     tlv, _ = trace_lines(path, txt, log, args)
@@ -5508,7 +5602,7 @@ def main():
         for lv, label, t in bomem_rows(klog):
             print("   %s %s: %s" % (lv, label, t))
             failed = failed or lv == "FAIL"
-        for lv, t in gen_verdict(a3_counters(ttxt) if ttxt else {}, accel_current(klog)):
+        for lv, t in gen_verdict(a3_counters(ttxt) if ttxt else {}, accel_current(klog), klog):
             print("   %s swap gen: %s" % (lv, t))
             failed = failed or lv == "FAIL"
         tl_lv, tl = trace_lines(p, ttxt, klog)

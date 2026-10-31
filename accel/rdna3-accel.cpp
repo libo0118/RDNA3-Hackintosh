@@ -452,6 +452,11 @@ static int gSwapGen = 1;
  * Metal plugin marks every surface a command buffer writes, N41); sticky, debug.rdna3accel_swap_gen_wsmetal */
 static int gSwapGenCpu = 1;
 static volatile SInt32 gWgWsMetal;
+/* ECC review of 48fe3ad (D1): the AGDC display stack is armed for WindowServer (boot-arg rdna3agdc, the plugin's
+ * profile): the CPU rules never apply there, so that path stays exactly as before */
+static int gWgAgdc;
+/* WindowServer is not on the Metal plugin: no AGDC stack armed for it and no GPU surface mark from it */
+static inline bool rd3AccelWsNoMetal(void) { return !gWgAgdc && !gWgWsMetal; }
 /* debug.rdna3accel_flipbuf_present / boot-arg rdna3flipbufpresent (card
  * run 2026-10-17d): IOAccelLegacyDisplayPipe::submitFlipBuffer and
  * submitScanoutFlipBuffer (the family's other present path, the copy
@@ -1315,9 +1320,11 @@ public:
                         "front as its source (cf_gennewer_h<N>)"
                       : "0 = only counted and traced (swaps_genhold_would_h<N>), the backs presented as before");
         gSwapGenCpu = rd3_arg("rdna3swapgencpu", 1) ? 1 : 0;
+        gWgAgdc = rd3_arg("rdna3agdc", 0) ? 1 : 0;
         ALOG("swap gen cpu: %s (bare metal 2026-10-31; boot-arg rdna3swapgencpu, sysctl debug.rdna3accel_swap_gen_cpu)",
              gSwapGenCpu ? "1 = while WindowServer has no Metal device (no GPU surface mark from it) a back that is the "
-                           "panel's buffer or older presents; only a never-written back holds (swaps_gencpu_h<N>)"
+                           "panel's buffer or older presents; only a never-written back holds (swaps_gencpu_h<N>); "
+                           "never with rdna3agdc (the plugin's stack)"
                          : "0 = such backs are held as before (swaps_genhold_{same,older}_h<N>)");
         gFlipbufPresent = rd3_arg("rdna3flipbufpresent", 0) ? 1 : 0;
         ALOG("flipbuf present: %s (card run 2026-10-17d; boot-arg rdna3flipbufpresent, sysctl "
@@ -2073,7 +2080,7 @@ public:
 
 static int    gRd3Iop = 0;
 static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSurf, gCntIopBlank;
-static SInt64 gCntIopFmtL10r, gCntIopFmtOther;   /* bare metal 2026-10-31: l10r converted, other formats refused */
+static SInt64 gCntIopFmtL10r, gCntIopFmtL10rSeen, gCntIopFmtOther, gCntIopFmtOtherLast;   /* bare metal 2026-10-31 */
 static SInt64 gCntIopOkHead[kRd3MaxFB];
 #define RD3IOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
@@ -2359,12 +2366,23 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
          * the CPU copy below; every other format but BGRA is still refused */
         const enum rd3_iop_fmt fk = rd3_iop_fmt_kind(fmt);
         if (fk == RD3_IOP_FMT_IS_OTHER) {
-            OSAddAtomic64(1, &gCntIopFmtOther);
-            RD3IOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA or l10r", s->getSurfaceID(), fmt);
+            /* ECC review of 48fe3ad (S2): its own rate limit (the first 8, every 1024th, and whenever the fourcc
+             * changes), not RD3IOPLOG's shared budget; the last refused fourcc in iop_copy_fmt_other_last */
+            const SInt64 k = OSAddAtomic64(1, &gCntIopFmtOther);
+            static volatile UInt32 gIopFmtLogged;
+            const bool changed = gIopFmtLogged != fmt;
+            gIopFmtLogged = fmt;
+            gCntIopFmtOtherLast = (SInt64)fmt;
+            OSAddAtomic64(1, &gCntIopFail);
+            if (rd3_iop_copy_log_due((uint64_t)k) || changed)
+                ALOG("iop: surface 0x%x format 0x%08x ('%c%c%c%c') is not BGRA or l10r: refused, the frame stays off "
+                     "the panel (head %u; %lld such)", s->getSurfaceID(), fmt, (fmt >> 24) & 0xff, (fmt >> 16) & 0xff,
+                     (fmt >> 8) & 0xff, fmt & 0xff, head, (long long)k + 1);
+            return kIOReturnUnsupported;
         }
         if (fk == RD3_IOP_FMT_IS_L10R) {
             l10r = true;
-            const SInt64 k = OSAddAtomic64(1, &gCntIopFmtL10r);
+            const SInt64 k = OSAddAtomic64(1, &gCntIopFmtL10rSeen);
             if (rd3_iop_copy_log_due((uint64_t)k))
                 ALOG("iop: l10r #%lld (head %u): surface 0x%x %ux%u row %u is ARGB2101010: the CPU converts it to the "
                      "8-bit scanout (top 8 bits per channel; not by SDMA, not flipped)", (long long)k + 1, head,
@@ -2407,16 +2425,19 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         const uint64_t copy0 = mach_absolute_time();
         const int accessBytes = l10r ? rd3_iop_convert_l10r_rows(q.kva, q.pitch, src, pitch, h, rowBytes)
                                      : rd3_iop_copy_rows(q.kva, q.pitch, src, pitch, h, rowBytes);
+        if (l10r) OSAddAtomic64(1, &gCntIopFmtL10r);   /* S4: converted into the scanout, not only seen */
         rd3AccelIopCopyNote(head, copy0, (uint64_t)rowBytes * h, accessBytes, w, h, pitch, q.pitch, fromRes);
     }
     if (!fromRes && s) rd3AccelIopStaleNote(s, head, staleL, staleU);
     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
     const SInt64 nh = OSAddAtomic64(1, &gCntIopOkHead[head]);
-    unsigned nz = 0, varied = 0; const unsigned first = src[0] & 0xffffffu;
+    /* the samples as the panel shows them: an l10r word converted first (ECC review of 48fe3ad) */
+    unsigned nz = 0, varied = 0; const unsigned first = (l10r ? rd3_iop_l10r_px(src[0]) : src[0]) & 0xffffffu;
     for (unsigned i = 0; i < 8; i++) for (unsigned j = 0; j < 8; j++) {
         unsigned sx = (w * (2 * j + 1)) / 16; if (sx >= spr) sx = spr - 1;
-        const unsigned v = src[(unsigned long)((h * (2 * i + 1)) / 16) * spr + sx] & 0xffffffu;
+        const unsigned raw = src[(unsigned long)((h * (2 * i + 1)) / 16) * spr + sx];
+        const unsigned v = (l10r ? rd3_iop_l10r_px(raw) : raw) & 0xffffffu;
         if (v) nz++;
         if (v != first) varied++;
     }
@@ -2531,7 +2552,9 @@ RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames source
 RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
 static SInt64 gCntIopCopySkip;
 /* bare metal 2026-10-31 (common/rdna3_iop_copy.h): the formats presented surfaces came in, past BGRA */
-RD3ACCEL_CNT(rdna3accel_iop_copy_fmt_l10r,     gCntIopFmtL10r,     "l10r (ARGB2101010) frames the IOP copy converted to the 8-bit scanout by the CPU");
+RD3ACCEL_CNT(rdna3accel_iop_copy_fmt_l10r,     gCntIopFmtL10r,     "l10r (ARGB2101010) frames the IOP copy converted into the 8-bit scanout by the CPU");
+RD3ACCEL_CNT(rdna3accel_iop_copy_fmt_l10r_seen, gCntIopFmtL10rSeen, "l10r frames that reached the copy path (seen; those not converted were refused later: geometry, map, scanout)");
+RD3ACCEL_CNT(rdna3accel_iop_copy_fmt_other_last, gCntIopFmtOtherLast, "the fourcc of the last refused surface format (0 none)");
 RD3ACCEL_CNT(rdna3accel_iop_copy_fmt_other,    gCntIopFmtOther,    "IOP frames refused because the surface is neither BGRA nor l10r (log: is not BGRA or l10r)");
 RD3ACCEL_CNT(rdna3accel_iop_copy_skip,    gCntIopCopySkip,    "frames kept on the panel because the surface's newest pixels were not yet in system memory");
 /* N61 (common/rdna3_iop_copy.h): the display pipe's CPU copy into the scanout, and the gates before it */
@@ -2789,6 +2812,7 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_scanout);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_sdma_fb_format);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_fmt_l10r); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_fmt_other);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_fmt_l10r_seen); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_fmt_other_last);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_fmt);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_wait_ms); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_wait_maxus);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_checked); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_stale_fresh);
@@ -3934,57 +3958,72 @@ static unsigned rd3SVPageoffCall(const struct RD3KRmHandles *h, RD3VidMemory *vm
  * pageoff left the data invalid (it hands the copy to a vendor slot of the 2D context, RD32DContext::_pure362, a
  * stub): "after pageoff, sys memory data still invalid or non-linear", then SkyLight crashed blitting from it.
  * Here such a resource's VRAM is copied into its own IOAccelSysMemory (this + 0x80) by the core's copy engine, as
- * the surface path copies into the IOSurface's pages: the sysmem prepared (wired), its DMA segments
- * (IOAccelSysMemory::getPhysicalSegment: the IODMACommand's, or the descriptor's) as the page list, then bit 0
- * set. Anything missing (no sysmem yet, it will not wire, a segment not on whole pages, the copy failed) leaves
- * it to the family as before, counted and logged with the reason. */
-static SInt64 gCntResPageoffSys, gCntResPageoffSysFail, gCntResPageoffFamily, gCntResPageoffSysUs;
+ * the surface path copies into the IOSurface's pages: the sysmem prepared (wired), the raw physical pages of its
+ * descriptor (IOAccelSysMemory + 0xd0, what its getPhysicalSegment reads when it has no IODMACommand; taken with
+ * kIOMemoryMapperNone like the surface path, not the mapper addresses getPhysicalSegment may return - ECC review of
+ * 48fe3ad, D2) as the page list, then bit 0 set. Only while WindowServer is not on the Metal plugin
+ * (rd3AccelWsNoMetal): the plugin's path is unchanged. Anything missing leaves it to the family as before, counted
+ * by reason and logged. */
+enum { kRd3PoNoSys = 0, kRd3PoPrepare, kRd3PoSegments, kRd3PoCopy, kRd3PoTimeout, kRd3PoN };
+static SInt64 gCntResPageoffSys, gCntResPageoffSysFail, gCntResPageoffFamily, gCntResPageoffSysUs, gCntResPageoffWhy[kRd3PoN];
 RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys,      gCntResPageoffSys,     "bare metal 2026-10-31: resources without an IOSurface whose VRAM the copy engine paged off into their own system memory (the family's pageoff left it invalid)");
-RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail, gCntResPageoffSysFail, "bare metal 2026-10-31: of those tried, left to the family's pageoff (no sysmem, not wired, segments, copy failed: the log says which)");
-RD3ACCEL_CNT(rdna3accel_vm_pageoff_family,   gCntResPageoffFamily,  "resources paged off by the family's own pageoff (no IOSurface and no VRAM / RM handles, or the scanout)");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail, gCntResPageoffSysFail, "bare metal 2026-10-31: of those tried, left to the family's pageoff (the _fail_<reason> counters say why)");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail_nosysmem, gCntResPageoffWhy[kRd3PoNoSys],    "of the failed: no system memory, descriptor or validity record yet, or zero length");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail_prepare,  gCntResPageoffWhy[kRd3PoPrepare],  "of the failed: the system memory would not wire (IOAccelMemory::prepare)");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail_segments, gCntResPageoffWhy[kRd3PoSegments], "of the failed: no page list (its physical segments not whole pages, ended early, or no memory for the list)");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail_copy,     gCntResPageoffWhy[kRd3PoCopy],     "of the failed: the core's copy engine refused or failed the copy");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_fail_timeout,  gCntResPageoffWhy[kRd3PoTimeout],  "of the failed: the copy TIMED OUT (the pages stay wired)");
+RD3ACCEL_CNT(rdna3accel_vm_pageoff_family,   gCntResPageoffFamily,  "resources paged off by the family's own pageoff (no IOSurface and no VRAM / RM handles, the scanout, or WindowServer on the plugin)");
 RD3ACCEL_CNT(rdna3accel_vm_pageoff_sys_us,   gCntResPageoffSysUs,   "bare metal 2026-10-31: microseconds of those copies (the core's copy engine)");
 static void rd3AccelInstallSysctlPageoffSys(void)
 {
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_fail);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_family); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_fail_nosysmem); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_fail_prepare);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_fail_segments); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_fail_copy);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_vm_pageoff_sys_fail_timeout);
 }
-static unsigned rd3SVPageoffCall(const struct RD3KRmHandles *h, RD3VidMemory *vm, unsigned long long *pages,
-                                 unsigned long long n, unsigned long long len, unsigned long long *usec);
-/* true: the VRAM is in the resource's system memory and marked valid; *why says why not otherwise */
+/* true: the VRAM is in the resource's system memory and marked valid; *why / *reason (kRd3Po*) say why not */
 static bool rd3SVPageoffSysmem(IOAccelResource2 *res, RD3VidMemory *vm, const struct RD3KRmHandles *h, unsigned long long *lenOut,
-                               unsigned *stOut, unsigned long long *usecOut, const char **why)
+                               unsigned *stOut, unsigned long long *usecOut, const char **why, unsigned *reason)
 {
     volatile unsigned char *r = (volatile unsigned char *)res;
-    *lenOut = 0; *stOut = RD3K_SS_OFF; *usecOut = 0; *why = nullptr;
+    *lenOut = 0; *stOut = RD3K_SS_OFF; *usecOut = 0; *why = nullptr; *reason = kRd3PoNoSys;
     OSObject *o = *(OSObject *volatile *)(r + 0x80);
     IOAccelSysMemory *sm = o ? OSDynamicCast(IOAccelSysMemory, o) : nullptr;
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
     if (!sm) { *why = o ? "+0x80 is not an IOAccelSysMemory" : "no system memory allocated yet (+0x80 empty)"; return false; }
     if (!valid) { *why = "no validity record (+0x30 empty)"; return false; }
-    unsigned long long len = sm->getLength();
+    OSObject *mo = *(OSObject *volatile *)((volatile unsigned char *)sm + 0xd0);
+    IOMemoryDescriptor *md = mo ? OSDynamicCast(IOMemoryDescriptor, mo) : nullptr;
+    if (!md) { *why = mo ? "its +0xd0 is not an IOMemoryDescriptor" : "its system memory has no descriptor (+0xd0 empty)"; return false; }
+    unsigned long long len = md->getLength();
     if (len > vm->fBytes) len = vm->fBytes;
     if (!len) { *why = "zero-length system memory"; return false; }
-    if (!sm->prepare()) { *why = "its system memory would not wire (IOAccelMemory::prepare)"; return false; }
+    if (!sm->prepare()) { *reason = kRd3PoPrepare; *why = "its system memory would not wire (IOAccelMemory::prepare)"; return false; }
     const unsigned long long pages = (len + 4095) >> 12;
     unsigned long long *pa = (unsigned long long *)IOMalloc(pages * sizeof *pa);
     bool ok = false, mayComplete = true;
     if (!pa) {
-        *why = "no memory for the page list";
+        *reason = kRd3PoSegments; *why = "no memory for the page list";
     } else {
-        unsigned long long i = 0, off = 0;
-        while (i < pages) {
-            unsigned long long seg = 0;
-            const unsigned long long a = sm->getPhysicalSegment(off, &seg);
-            if (!a || !seg || (a & 4095)) break;   /* the copy engine takes whole 4 KiB pages */
-            for (unsigned long long k = 0; k < seg && i < pages; k += 4096, off += 4096) pa[i++] = a + k;
+        unsigned long long i = 0;
+        for (IOByteCount off = 0; i < pages; ) {
+            IOByteCount seglen = 0;
+            const addr64_t phys = md->getPhysicalSegment(off, &seglen, kIOMemoryMapperNone);   /* as the surface path */
+            if (!phys || !seglen || (phys & 4095)) break;   /* the copy engine takes whole 4 KiB pages */
+            for (IOByteCount k = 0; k < seglen && i < pages; k += 4096, off += 4096) pa[i++] = phys + k;
         }
         if (i != pages) {
-            *why = "its segments are not whole pages (or ended early)";
+            *reason = kRd3PoSegments; *why = "its physical segments are not whole pages (or ended early)";
         } else {
             *stOut = rd3SVPageoffCall(h, vm, pa, pages, len, usecOut);
             ok = *stOut == 0;
             if (*stOut == 0x65u) mayComplete = false;   /* timed out: the engine may still write the pages */
-            if (!ok) *why = *stOut == 0x65u ? "the copy engine TIMED OUT (its pages stay wired)" : "the core's copy failed";
+            if (!ok) {
+                *reason = *stOut == 0x65u ? kRd3PoTimeout : kRd3PoCopy;
+                *why = *stOut == 0x65u ? "the copy engine TIMED OUT (its pages stay wired)" : "the core's copy failed";
+            }
         }
         IOFree(pa, pages * sizeof *pa);
     }
@@ -4001,13 +4040,14 @@ void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lo
     RD3VidMemory *vm = rd3res_vidmem(this);
     struct RD3KRmHandles h; rd3SVZero(&h, sizeof h);
     void *surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
-    if (!surf && vm && vm->fRmHandle && !vm->fScanout && vm->fBytes && rd3AccelRmHandles(&h)) {
+    if (!surf && rd3AccelWsNoMetal() && vm && vm->fRmHandle && !vm->fScanout && vm->fBytes && rd3AccelRmHandles(&h)) {
         unsigned long long len = 0, usec = 0;
-        unsigned st = RD3K_SS_OFF;
+        unsigned st = RD3K_SS_OFF, reason = kRd3PoNoSys;
         const char *why = nullptr;
-        const bool ok = rd3SVPageoffSysmem(this, vm, &h, &len, &st, &usec, &why);
+        const bool ok = rd3SVPageoffSysmem(this, vm, &h, &len, &st, &usec, &why, &reason);
         const unsigned flags = *(volatile unsigned *)(r + 0xc);
         const SInt64 k = OSAddAtomic64(1, ok ? &gCntResPageoffSys : &gCntResPageoffSysFail);
+        if (!ok) OSAddAtomic64(1, &gCntResPageoffWhy[reason < kRd3PoN ? reason : kRd3PoNoSys]);
         if (ok) OSAddAtomic64((SInt64)usec, &gCntResPageoffSysUs);
         if (rd3_log_due((uint64_t)k, 8, 1023))
             ALOG("pageoff (no IOSurface) #%lld: res %p, %llu B of VRAM 0x%llx %s (status %#x, %llu us; flags 0x%x%s)",
@@ -4037,6 +4077,7 @@ void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lo
         if (rd3_log_due((uint64_t)k, 4, 4095))
             ALOG("pageoff #%lld: res %p to the family's pageoff (%s)", (long long)k + 1, this,
                  !vm ? "no VRAM" : !vm->fRmHandle ? "no RM handle" : vm->fScanout ? "the scanout" : !vm->fBytes ? "no bytes"
+                 : (!surf && !rd3AccelWsNoMetal()) ? "no IOSurface, WindowServer on the plugin: as before"
                  : "no RM handles of the core");
         IOAccelResource2::pageoff(ev, a1, out, a3);
         return;
@@ -7966,7 +8007,8 @@ static void rd3AccelWgSurfSwap(unsigned head, const void *surf)
 /* the rule on the back at 'phys' for the head: why, and its generation and
  * the head's (for the trace and the log) */
 static enum rd3_wg_why rd3AccelWgDecide(unsigned head, unsigned long long phys, bool sampled,
-                                        unsigned long long sig, unsigned long long *gen, unsigned long long *headGen)
+                                        unsigned long long sig, unsigned long long *gen, unsigned long long *headGen,
+                                        bool apply)
 {
     *gen = 0;
     *headGen = 0;
@@ -7977,8 +8019,10 @@ static enum rd3_wg_why rd3AccelWgDecide(unsigned head, unsigned long long phys, 
     *headGen = gWgHead[head].gen;
     const enum rd3_wg_why w = rd3_wg_decide(&gWgHead[head], phys, *gen, sampled ? 1 : 0, sig, gWg.evictedMax, now);
     IOSimpleLockUnlock(gWgLock);
-    /* bare metal 2026-10-31: a CPU-compositing WindowServer's SAME / OLDER back presents */
-    return rd3_wg_cpu_rule(w, gWgWsMetal != 0, gSwapGenCpu != 0);
+    /* bare metal 2026-10-31: a CPU-compositing WindowServer's SAME / OLDER back presents - only where the rule
+     * acts ('apply': swap_gen 1 and a mode it holds in; ECC review of 48fe3ad D1: swaps_genhold_would unskewed) and
+     * never with the plugin's AGDC stack (rd3AccelWsNoMetal) */
+    return apply ? rd3_wg_cpu_rule(w, rd3AccelWsNoMetal() ? 0 : 1, gSwapGenCpu != 0) : w;
 }
 /* the head presented the buffer at 'phys' with generation 'gen' (as captured at the decision: a write between the
  * decision and the copy is not this frame's) and its samples */
@@ -8653,8 +8697,8 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         if (knownHead < kRd3MaxFB) {
             unsigned long long wgHead = 0;
             const unsigned long long bp = rd3res_phys(back);
-            const enum rd3_wg_why wg = rd3AccelWgDecide(knownHead, bp, sb.rc >= kRcEmpty, sb.sig, &wgGen, &wgHead);
             const bool apply = gSwapGen && mode == RD3_SWAPMODE_COPY;
+            const enum rd3_wg_why wg = rd3AccelWgDecide(knownHead, bp, sb.rc >= kRcEmpty, sb.sig, &wgGen, &wgHead, apply);
             wgJudged = wg != RD3_WGW_OFF;
             if (!wgJudged) rd3AccelWgNotJudged(knownHead, n, "the back has no VRAM address");
             if (apply && rd3_wg_holds(wg)) {
@@ -8908,7 +8952,8 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     if (knownHead < kRd3MaxFB) {
         unsigned long long wgHead = 0;
         const unsigned long long sp = rd3res_phys(src);
-        const enum rd3_wg_why wg = rd3AccelWgDecide(knownHead, sp, ssrc.rc >= kRcEmpty, ssrc.sig, &wgGen, &wgHead);
+        const enum rd3_wg_why wg = rd3AccelWgDecide(knownHead, sp, ssrc.rc >= kRcEmpty, ssrc.sig, &wgGen, &wgHead,
+                                                    gSwapGen != 0);
         wgJudged = wg != RD3_WGW_OFF;
         if (!wgJudged) rd3AccelWgNotJudged(knownHead, n, "the back has no VRAM address (mode 0)");
         if (rd3AccelWgNote(knownHead, wg, gSwapGen != 0, n, sp, wgGen, wgHead,
@@ -10384,7 +10429,8 @@ static unsigned rd3AccelFlipbufPresentLocked(unsigned head, IOService *fb, RD3Di
     }
     /* the write generations: only a buffer written after the head's frame */
     unsigned long long wgGen = 0, wgHead = 0;
-    const enum rd3_wg_why wg = rd3AccelWgDecide(head, phys, sc.rc >= kRcEmpty, sc.sig, &wgGen, &wgHead);
+    const enum rd3_wg_why wg = rd3AccelWgDecide(head, phys, sc.rc >= kRcEmpty, sc.sig, &wgGen, &wgHead,
+                                                gSwapGen && mode != RD3_SWAPMODE_COPY_ALL);
     const unsigned long long expect = mode != RD3_SWAPMODE_FLIP ? rd3AccelScExpect(head) : gLatch[head].phys;
     if (rd3AccelWgNote(head, wg, gSwapGen && mode != RD3_SWAPMODE_COPY_ALL, n, phys, wgGen, wgHead,
                        "the flip buffer", 0, 0, &tr)) {

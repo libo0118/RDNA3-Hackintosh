@@ -355,6 +355,39 @@ static void cpu_compositor(void)
     CHECK(u == RD3_WGW_UNWRITTEN && held_unwritten == 1);
 }
 
+/* ECC review of 48fe3ad (T6): truthy switches, the model's base reasons, the guards unchanged, the kinds' range */
+static void cpu_rule_edges(void)
+{
+    CHECK(rd3_wg_cpu_rule(RD3_WGW_OLDER, 0, 2) == RD3_WGW_CPU && rd3_wg_cpu_rule(RD3_WGW_SAME, 5, 2) == RD3_WGW_SAME &&
+          rd3_wg_cpu_rule(RD3_WGW_SAME, -1, 1) == RD3_WGW_SAME && rd3_wg_cpu_rule(RD3_WGW_OLDER, 0, -3) == RD3_WGW_CPU);
+    /* the guards keep their own reasons under the rule */
+    CHECK(rd3_wg_cpu_rule(RD3_WGW_AGED, 0, 1) == RD3_WGW_AGED && rd3_wg_cpu_rule(RD3_WGW_EVICTED, 0, 1) == RD3_WGW_EVICTED &&
+          rd3_wg_cpu_rule(RD3_WGW_CONTENT, 0, 1) == RD3_WGW_CONTENT && rd3_wg_cpu_rule(RD3_WGW_UNWRITTEN, 0, 1) == RD3_WGW_UNWRITTEN &&
+          rd3_wg_cpu_rule(RD3_WGW_OFF, 0, 1) == RD3_WGW_OFF);
+    for (int w = RD3_WGW_OFF; w <= RD3_WGW_MAX; w++) {
+        const int k = rd3_wg_hold_kind((enum rd3_wg_why)w);
+        CHECK(k == -1 || (k >= 0 && k < RD3_WGH_N));
+    }
+    /* an aged hold stays AGED (the panel is never frozen, the CPU rule does not take its count away) */
+    struct rd3_wg_head h;
+    memset(&h, 0, sizeof h);
+    rd3_wg_presented(&h, 0xb1, 2, 1, 5, 0);
+    rd3_wg_held(&h); rd3_wg_held(&h);
+    const enum rd3_wg_why a = rd3_wg_decide(&h, 0xb0, 1, 1, 5, 0, RD3_WG_AGE_US);
+    CHECK(a == RD3_WGW_AGED && rd3_wg_cpu_rule(a, 0, 1) == RD3_WGW_AGED);
+    /* the bare-metal model's base reasons are only SAME / OLDER (what the rule changes) */
+    memset(&h, 0, sizeof h);
+    rd3_wg_presented(&h, 0xb1, 2, 1, 5, 0);
+    int other = 0;
+    for (unsigned f = 0; f < 10; f++) {
+        const unsigned long long back = (f & 1) ? 0xb0 : 0xb1, gen = (f & 1) ? 1 : 2;
+        const enum rd3_wg_why base = rd3_wg_decide(&h, back, gen, 1, 5, 0, 1000 * f);
+        if (base != RD3_WGW_SAME && base != RD3_WGW_OLDER) other++;
+        rd3_wg_presented(&h, back, gen, 1, 5, 1000 * f);
+    }
+    CHECK(other == 0);
+}
+
 int main(void)
 {
     table();
@@ -362,6 +395,7 @@ int main(void)
     failopen();
     model();
     cpu_compositor();
+    cpu_rule_edges();
     if (fails) {
         printf("test_write_gen: %d check(s) FAILED\n", fails);
         return 1;
