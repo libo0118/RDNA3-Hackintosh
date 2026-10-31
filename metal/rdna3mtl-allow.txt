@@ -33,4 +33,7 @@ vulkaninfo
 # blocks loading anything from /Library/GPUBundles (card run 56), so the
 # app itself would only hold a GPU VM for nothing
 -Safari
+# Geekbench 7: its benchmark worker is Contents/Resources/geekbench_avx2,
+# outside %apps (Contents/MacOS only); bare-metal round 1, 2026-10-31
+geekbench_avx2
 %apps
