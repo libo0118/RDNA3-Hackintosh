@@ -378,3 +378,37 @@ argument; move the old tarball to `rdna3/old/` first (the first attempt reinstal
    already exists in keychain"). `rm` first, then copy (new inode). metal.sh
    also copies in place but is followed by a reboot.
 5. Not run yet: judder phase b/c, mouse wake (3), bigger BAR0 (4).
+6. **N70 (submit ahead past an empty last part), branch quick/gsub-last 4436584, NOT merged.**
+   It works mechanically (horizon-client, 3 s: 2910 submits ahead, 600 in turn; was 35 / 3396; the
+   plugin's execution thread CPU 2.6 s -> 0.68 s per 4 s) but presented frames stayed ~185/s, A/B by
+   NVMTL_GSUB_LAST_EMPTY=0 (the owner's in-game counter read 220 on, 300 off: noise of the view). The
+   game's main thread waits 50-60 % in `[CAMetalLayer nextDrawable]`; drawables come back by
+   WindowServer's `_XImageQueueCollectable` mach message (DTrace stack). Reviewed (code-reviewer: nothing
+   confirmed). CI run 109: host-tests failed in test_baremetal "a damaged copy was not caught"
+   (unrelated, passes 3/3 on the Pi with bash: a flaky test).
+7. **WindowServer and the game, numbers** (before the BAR change): WS commits all 500 of its command
+   buffers in turn (`commitAndWaitUntilSubmitted` -> the plugin's waitUntilCompleted, 366 calls / 3 s,
+   0.6-1 ms each: CoreDisplay AccessComplete, CompositorMetal MetalContext::Flush); ws_main_thread 40 %
+   CPU, half its samples idle in mach_msg; 17 % in nvmtlSurfaceIn (the game's surface uploaded by the
+   CPU, 167/s, 377 MB/s). IOP transactions on the game's head ~134/s (more than the refresh). With
+   `debug.rdna3accel_iop_latch=1` NOTHING latched: `iop_latch_fb_vram` 791 (the visible heap had no
+   8 MiB), set back to 0.
+8. **Bigger BAR0 (plan item 4) done**: BIOS Re-Size BAR Support Enabled (the owner),
+   `Booter/Quirks/ResizeAppleGpuBars` 10 in `EFI/OC/config.plist` (old file `config-before-bar.plist`;
+   config-metal.plist / config-driver.plist still -1). macOS came up; `debug.rdna3_vram visible_kib=933888`
+   (was 147456), refused 0. **But the game got slower** (~123-145 presented fps, WindowServer 187 % CPU):
+   with room in the visible heap the game's drawables became VRAM surfaces ("item 7", `_vramOn`, copy-out
+   "dirty, no copy"), and WindowServer's import of the family VRAM is refused by the kernel:
+   `item 7: surface N plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation
+   not permitted, 8294400 B) - private image + copies` (WS's nvmtl.log; it stops logging after a few), so
+   WS reads every frame through the BAR with the CPU (sin_us ~57 % of its thread, ~4.5 ms a frame,
+   locked_skip_vram 0). Also after the boot WS's `com.apple.coreanimation.pipelines` thread ran 100 %
+   translating CA's shaders (nvmtl_translate_with_fc) for minutes. **Workaround now (not persistent):**
+   `launchctl setenv NVMTL_NO_SURFACE_SHARE 1` in the owner's session -> drawables private again, N61 DMA
+   copy-out, WS 80 % CPU, ~215 presented fps (the owner's counter 300-400). **The fix is in the kernel:**
+   why the family-VRAM import (nvmtl_vk_surface_vram -> libdrm_xnu surface fd -> the accel's surface/GEM
+   import) gives EPERM to WindowServer for a surface another process placed in VRAM; until then a VRAM
+   surface whose consumer cannot import it is slower than a private one.
+9. Mac state at 23:35: plugin = N69 build (run 107), RADV/kexts run 103, BAR 1 GiB, iop_latch 0,
+   NVMTL_NO_SURFACE_SHARE=1 set by launchctl (gone at logout), horizon-client in the allow list,
+   reduceTransparency on.
