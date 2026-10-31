@@ -245,3 +245,26 @@ the stick: `rdna3/report-20261031-162542` (config-driver, after the hang) and
   at once, the window trails it by the WindowServer -> plugin -> copy ->
   flip chain) or uneven step sizes. Next: a 240 fps phone video of a drag
   (cursor and window), cut into frames.
+
+### The 240 fps drag videos (Linux session, 2026-10-31)
+
+`IMG_7132.MOV` (slow drag) and `IMG_7133.MOV` (fast drag), 240 fps, the
+Terminal window tracked frame by frame against the static Dock (camera shake
+removed; the script stayed in the Linux session's scratchpad):
+
+- The window moves on the panel's 60 Hz grid: in the slow drag 196 of the
+  gaps between position changes are exactly 4 camera frames (one refresh);
+  only 18 of 342 refreshes repeat the previous position.
+- **The steps are uneven.** Fast drag, the window's movement per 60 Hz
+  refresh (px at 480-wide scale): `10 1 8 10 4 8 11 0 21 9 44 10 12 11 19 4
+  13 5 19 19 46 17 ...` (median 13, coefficient of variation 0.68). Small
+  steps followed by catch-up jumps of 3-4x read as ~30 fps judder, which is
+  what the owner sees, although every refresh carries new pixels (the CRC
+  measurement above).
+- So WindowServer's composited frame lags the mouse by a varying amount:
+  some presents carry a frame composited from an older mouse position. Next
+  for the Pi session, during fast drags: per-head `iop_*` wait/stale
+  counters and the plugin's `ws frame` timing (does a frame's GPU work miss
+  the refresh and the IOP copy take the previous surface?), A/B with
+  `debug.rdna3accel_iop_sdma=0` (CPU copy) and with the plugin's surface
+  wait off, each with a new 240 fps video.
