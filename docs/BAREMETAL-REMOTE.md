@@ -426,3 +426,11 @@ argument; move the old tarball to `rdna3/old/` first (the first attempt reinstal
     app's drawable in family VRAM while WindowServer cannot import it (a3ws 0), so the BAR change needs
     no env; (b) WindowServer's detached-surface path: a texture per frame + a CPU lock + upload of a
     surface it already has (cache by IOSurface ID + seed).
+11. **N71 (a) merged (9c16a43, CI run 111 metal green)**: with BAR0 1 GiB and NO env, horizon-client
+    300-400 fps (owner's counter), 232 presented/s, copy-outs by the GPU 695/695, WindowServer 73 % CPU.
+    The NVMTL_NO_SURFACE_SHARE session env was removed. Mac state now: plugin run 111 (N69 + N71; N70
+    not in it), RADV/kexts run 103, BAR 1 GiB (`config.plist` ResizeAppleGpuBars 10), a3ws 0, iop_latch 0.
+    Flaky host tests on the macOS-side CI: test_baremetal "a damaged copy was not caught" (run 109),
+    test_bootwatch "bash late: no snapshot" (run 111); both pass on the Pi.
+    Still open from round 2: judder 1b/1c (iop_latch=1 now has VRAM room: retest), mouse wake (3);
+    the game's remaining cap is nextDrawable waits (~50-60 %, drawables handed back by WindowServer).
