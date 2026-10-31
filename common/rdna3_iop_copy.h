@@ -50,6 +50,58 @@ static inline int rd3_iop_copy_rows(volatile void *dst, uint32_t dpitch, const v
     return 4;
 }
 
+/* ==== Bare metal 2026-10-31: the formats a presented surface comes in ====
+ * With the Metal plugin on the MacPro7,1 SMBIOS (two 1920x1080 heads, rdna3agdc=3) WindowServer presents 10-bit
+ * surfaces: IOSurface pixel format 'l10r' (0x6c313072) = kCVPixelFormatType_ARGB2101010LEPacked, one little-endian
+ * 32-bit word per pixel, A[31:30] R[29:20] G[19:10] B[9:0] (DRM_FORMAT_ARGB2101010; the plugin renders it as
+ * VK_FORMAT_A2R10G10B10_UNORM_PACK32 = 58, Metal's BGR10A2Unorm). The scanout is 8 bits per channel (XRGB8888, the
+ * 'BGRA' word B[7:0] G[15:8] R[23:16] A[31:24]), so performTransaction's CPU copy converts it: each channel keeps
+ * its top 8 bits, the 2-bit alpha is widened (a * 0x55). SDMA cannot convert and the zero-copy flip would scan a
+ * 10-bit buffer out as 8-bit: both are refused for l10r (the real port, DCN scanout of ARGB2101010 through
+ * hubp2_program_pixel_format / dpp3_cnv_setup, is DRIVER-PLAN N66). Every other format is still refused. */
+#define RD3_IOP_FMT_BGRA 0x42475241u   /* 'BGRA' */
+#define RD3_IOP_FMT_L10R 0x6c313072u   /* 'l10r' */
+enum rd3_iop_fmt { RD3_IOP_FMT_IS_BGRA = 0, RD3_IOP_FMT_IS_L10R, RD3_IOP_FMT_IS_OTHER };
+static inline enum rd3_iop_fmt rd3_iop_fmt_kind(uint32_t fourcc)
+{
+    return fourcc == RD3_IOP_FMT_BGRA ? RD3_IOP_FMT_IS_BGRA : fourcc == RD3_IOP_FMT_L10R ? RD3_IOP_FMT_IS_L10R : RD3_IOP_FMT_IS_OTHER;
+}
+
+/* one l10r pixel as the scanout's 8-bit word */
+static inline uint32_t rd3_iop_l10r_px(uint32_t v)
+{
+    const uint32_t a = (v >> 30) * 0x55u;
+    return (a << 24) | (((v >> 22) & 0xffu) << 16) | (((v >> 12) & 0xffu) << 8) | ((v >> 2) & 0xffu);
+}
+
+/* rd3_iop_copy_rows for an l10r source: the same rows and bytes, each 32-bit word converted. Two pixels per 64-bit
+ * load / store when everything is 8-aligned (returns 8; the write-combined BAR gets the same access sizes as the
+ * BGRA copy), else one per 32-bit access (returns 4). The source is the surface's system memory (cached), as for
+ * the plain copy; the conversion costs a few ALU operations per pixel on top of the BAR writes. */
+static inline int rd3_iop_convert_l10r_rows(volatile void *dst, uint32_t dpitch, const volatile void *src, uint32_t spitch,
+                                            uint32_t h, uint32_t row_bytes)
+{
+    if (rd3_iop_copy64_ok((uintptr_t)src, (uintptr_t)dst, spitch, dpitch, row_bytes)) {
+        const uint32_t q = row_bytes / 8u;
+        for (uint32_t y = 0; y < h; y++) {
+            const volatile uint64_t *sp = (const volatile uint64_t *)((const volatile uint8_t *)src + (uint64_t)y * spitch);
+            volatile uint64_t *dp = (volatile uint64_t *)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
+            for (uint32_t x = 0; x < q; x++) {
+                const uint64_t v = sp[x];   /* little endian: the first pixel in the low word */
+                dp[x] = (uint64_t)rd3_iop_l10r_px((uint32_t)v) | ((uint64_t)rd3_iop_l10r_px((uint32_t)(v >> 32)) << 32);
+            }
+        }
+        return 8;
+    }
+    const uint32_t words = row_bytes / 4u;
+    for (uint32_t y = 0; y < h; y++) {
+        const volatile uint32_t *sp = (const volatile uint32_t *)((const volatile uint8_t *)src + (uint64_t)y * spitch);
+        volatile uint32_t *dp = (volatile uint32_t *)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
+        for (uint32_t x = 0; x < words; x++) dp[x] = rd3_iop_l10r_px(sp[x]);
+    }
+    return 4;
+}
+
 /* MB/s of `bytes` in `us` microseconds (0 when no time was measured) */
 static inline uint64_t rd3_iop_mbps(uint64_t bytes, uint64_t us)
 {
@@ -193,11 +245,12 @@ enum rd3_iop_sdma_fb {
     RD3_ISF_VERIFY,     /* the scanout's samples after the copy differ from the source: the CPU copied it again */
     RD3_ISF_OFF,        /* three failures in a row switched the SDMA path off until the sysctl is written */
     RD3_ISF_SCANOUT,    /* the scanout's VRAM offset does not name the memory its BAR address does (or no base known) */
+    RD3_ISF_FORMAT,     /* bare metal 2026-10-31: the surface is l10r, which the CPU copy converts and SDMA cannot */
     RD3_ISF_N
 };
 static inline const char *rd3_iop_sdma_fb_name(unsigned r)
 {
-    static const char *const n[RD3_ISF_N] = { "core", "pages", "bind", "copy", "verify", "off", "scanout" };
+    static const char *const n[RD3_ISF_N] = { "core", "pages", "bind", "copy", "verify", "off", "scanout", "format" };
     return r < RD3_ISF_N ? n[r] : "?";
 }
 

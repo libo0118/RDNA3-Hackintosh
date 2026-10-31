@@ -359,6 +359,16 @@ class RDNA3Framebuffer : public IOFramebuffer {
 
     IOService *findCore(IOService *provider);
     bool       readCore();
+    bool       coreHead(struct RD3KDisplayHead *out, const char *when);
+    /* bare metal 2026-10-31: head 0 started on the console before the core (common/rdna3_fb_policy.h rd3fb_core_late):
+     * the core's publish upgrades it to DCN */
+    IONotifier *fCoreNote = nullptr;
+    bool        fCoreLateTried = false;
+    uint32_t    fCoreLateAns = 0xffffffffu;   /* enum rd3fb_late_ans of the upgrade, ~0 = none asked */
+    uint32_t    fFlipConsole = 0;              /* flips refused because the head is in console mode */
+    void        armCoreLate();
+    void        coreLate(IOService *core);
+    static bool coreArrived(void *target, void *ref, IOService *s, IONotifier *n);
     bool       readConsole();
     uint64_t   vblPeriodAbs() const;
     bool       coreStatus(RD3KDisplayStatus *s);
@@ -502,51 +512,179 @@ IOService *RDNA3Framebuffer::probe(IOService *provider, SInt32 *score)
     return super::probe(provider, score);
 }
 
+/* bare metal 2026-10-31 (k1306: the installer config, core only in the Aux KC): IOKit started this framebuffer before
+ * the core on the same IOPCIDevice, and the old 10 s wait here only held up the core, which could start only after it
+ * returned (rdna3_fb_policy.h rd3fb_core_wait). Wait only for a core already attached to the device: it has started
+ * and its registration is on its way; otherwise start on the console now (armCoreLate upgrades head 0 later). */
 IOService *RDNA3Framebuffer::findCore(IOService *provider)
 {
-    /* RDNA3Accel sits on the same IOPCIDevice; it may still be starting */
     OSDictionary *m = serviceMatching("RDNA3Accel");
-    if (!m)
+    if (!m) {
+        FBLOG("head %u: no matching dictionary for RDNA3Accel (no memory): no core, console mode", fHead);
         return nullptr;
-    IOService *c = waitForMatchingService(m, 10ull * 1000 * 1000 * 1000);   /* 10 s */
+    }
+    IOService *c = IOService::copyMatchingService(m);   /* registered and matched already: retained */
+    int attached = 0;
+    if (!c) {
+        OSIterator *it = provider->getClientIterator();
+        if (it) {
+            OSObject *o;
+            while ((o = it->getNextObject()))
+                if (o->metaCast("RDNA3Accel")) {
+                    attached = 1;
+                    break;
+                }
+            it->release();
+        }
+    }
+    const enum rd3fb_core_wait why = rd3fb_core_wait(c != nullptr, attached);
+    if (why == RD3FB_CORE_WAIT) {
+        uint64_t t0 = mach_absolute_time(), ns = 0;
+        c = waitForMatchingService(m, 10ull * 1000 * 1000 * 1000);   /* 10 s: the core's own registration */
+        absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+        if (!c)
+            FBLOG("head %u: RDNA3Accel is attached to the device but did not finish registering in 10 s: no core, "
+                  "console mode (its publish still upgrades head 0)", fHead);
+        else
+            FBLOG("head %u: RDNA3Accel registered after %llu ms", fHead, (unsigned long long)(ns / 1000000));
+    } else if (why == RD3FB_CORE_LATER) {
+        FBLOG("head %u: RDNA3Accel has not started on this device yet (IOKit started the framebuffer first: kext load "
+              "order or probe scores): console mode now, not waiting for it on the matching thread; its publish "
+              "upgrades head 0 to DCN", fHead);
+    }
     m->release();
     if (c && c->getProvider() != provider) {
         FBLOG("RDNA3Accel found on another device, ignoring it");
         c->release();
         c = nullptr;
     }
-    return c;   /* retained by waitForMatchingService */
+    return c;   /* retained by copyMatchingService / waitForMatchingService */
 }
 
-bool RDNA3Framebuffer::readCore()
+/* the core's description of this head; every refusal logged with what tells the cases apart */
+bool RDNA3Framebuffer::coreHead(struct RD3KDisplayHead *out, const char *when)
 {
-    if (!fCore || !fSymInfo)
+    if (!fCore || !fSymInfo) {
+        FBLOG("head %u (%s): no core to ask for the scanout (%s)", fHead, when, fCore ? "no symbol" : "core absent");
         return false;
+    }
     RD3KDisplayInfo *r = (RD3KDisplayInfo *)IOMalloc(sizeof(*r));
-    if (!r)
+    if (!r) {
+        FBLOG("head %u (%s): no memory for the core's display info", fHead, when);
         return false;
+    }
     bzero(r, sizeof(*r));
     r->version = RD3K_DISPLAY_ABI_VERSION;
     IOReturn ret = fCore->callPlatformFunction(fSymInfo, false, r, nullptr, nullptr, nullptr);
-    bool ok = ret == kIOReturnSuccess && r->nheads > fHead && r->head[fHead].usable &&
-              r->head[fHead].format == RD3K_FMT_XRGB8888;
+    const bool has = ret == kIOReturnSuccess && r->nheads > fHead && fHead < RD3K_MAX_HEADS;
+    bool ok = has && r->head[fHead].usable && r->head[fHead].format == RD3K_FMT_XRGB8888;
     if (ret == kIOReturnSuccess)
         FBLOG("core reports %u head(s)%s (this is head %u)", r->nheads,
               r->nheads > fHead ? (r->head[fHead].usable ? "" : ", not usable (tiled/DCC/format/outside BAR0)") : "",
               fHead);
-    if (ok) {
-        fInfo = r->head[fHead];
-        fPhys = fInfo.phys;
-        fW = fInfo.width;
-        fH = fInfo.height;
-        fPitch = fBootPitch = fInfo.pitch;
-        fBytes = (uint64_t)fPitch * fH;
-        fBootVram = fInfo.vramOffset;
-        if (fInfo.refreshMilliHz)
-            fRefreshMilliHz = fInfo.refreshMilliHz;
-    }
+    if (!ok)
+        FBLOG("head %u (%s): the core gives no usable scanout: rc 0x%x, %u head(s), usable %d, format %d (need %u = "
+              "XRGB8888)%s", fHead, when, (unsigned)ret, ret == kIOReturnSuccess ? r->nheads : 0u,
+              has ? (int)r->head[fHead].usable : -1, has ? (int)r->head[fHead].format : -1, RD3K_FMT_XRGB8888,
+              ret != kIOReturnSuccess ? " (the call failed)" : !has ? " (no such head)" : "");
+    if (ok)
+        *out = r->head[fHead];
     IOFree(r, sizeof(*r));
     return ok;
+}
+
+bool RDNA3Framebuffer::readCore()
+{
+    struct RD3KDisplayHead h;
+    bzero(&h, sizeof(h));
+    if (!fCore)
+        return false;   /* findCore said why */
+    if (!coreHead(&h, "start"))
+        return false;
+    fInfo = h;
+    fPhys = fInfo.phys;
+    fW = fInfo.width;
+    fH = fInfo.height;
+    fPitch = fBootPitch = fInfo.pitch;
+    fBytes = (uint64_t)fPitch * fH;
+    fBootVram = fInfo.vramOffset;
+    if (fInfo.refreshMilliHz)
+        fRefreshMilliHz = fInfo.refreshMilliHz;
+    return true;
+}
+
+/* bare metal 2026-10-31: head 0 on the console without a core: hear the core's registration (an existing one is
+ * delivered at once) and take its head 0 over. Armed at the end of start. */
+void RDNA3Framebuffer::armCoreLate()
+{
+    if (fHead || fDcn || fCore || !fPci || fCoreNote)
+        return;
+    OSDictionary *m = serviceMatching("RDNA3Accel");
+    if (m) {
+        fCoreNote = addMatchingNotification(gIOMatchedNotification, m, &RDNA3Framebuffer::coreArrived, this, nullptr, 0);
+        m->release();
+    }
+    FBLOG("head %u: console mode without a core: %s", fHead, fCoreNote ? "waiting for RDNA3Accel's registration to "
+          "upgrade to DCN" : "NO notification for RDNA3Accel (no memory): head 0 stays in console mode");
+    setProperty("RDNA3,CoreLate", fCoreNote ? "armed" : "no notifier");
+}
+
+bool RDNA3Framebuffer::coreArrived(void *target, void *, IOService *s, IONotifier *)
+{
+    RDNA3Framebuffer *me = (RDNA3Framebuffer *)target;
+    if (me && s && !me->fStopping)
+        me->coreLate(s);
+    return true;
+}
+
+/* the core registered after this framebuffer started on the console: same scanout -> DCN (flips, the OTG VBL);
+ * the cursor, EDID, gamma tables and vblank interrupt keep what start set up for the console */
+void RDNA3Framebuffer::coreLate(IOService *core)
+{
+    if (core->getProvider() != fPci) {
+        FBLOG("head %u: RDNA3Accel registered on another device: ignored", fHead);
+        return;
+    }
+    if (!fModeLock)
+        return;
+    struct RD3KDisplayHead h;
+    bzero(&h, sizeof(h));
+    IOLockLock(fModeLock);
+    const int already = fDcn || fCoreLateTried;
+    fCoreLateTried = true;
+    if (!already && !fCore) {
+        core->retain();
+        __sync_synchronize();
+        fCore = core;   /* the VRAM / handle / copy calls forward to it from now on */
+    }
+    const bool usable = !already && coreHead(&h, "the core registered late");
+    const struct rd3fb_scan con = { fPhys, fW, fH, fBootPitch };
+    const struct rd3fb_scan cor = { h.phys, h.width, h.height, h.pitch };
+    const enum rd3fb_late_ans a = rd3fb_core_late(fHead, already, usable, &con, &cor, fCurMode);
+    if (a == RD3FB_LATE_OK) {
+        fInfo = h;
+        fBootVram = h.vramOffset;
+        if (h.refreshMilliHz)
+            fRefreshMilliHz = h.refreshMilliHz;
+        __sync_synchronize();   /* fCore, fInfo, fBootVram before fDcn: the flip handler and vblFire read it unlocked */
+        fDcn = true;
+    }
+    if (!already)
+        fCoreLateAns = (uint32_t)a;
+    IOLockUnlock(fModeLock);
+    if (already)
+        return;
+    FBLOG("head %u: RDNA3Accel registered after the framebuffer started on the console: %s (console 0x%llx %ux%u "
+          "pitch %u, core head 0 0x%llx %ux%u pitch %u VRAM 0x%llx)%s", fHead, rd3fb_core_late_name(a),
+          (unsigned long long)con.phys, con.w, con.h, con.pitch, (unsigned long long)cor.phys, cor.w, cor.h, cor.pitch,
+          (unsigned long long)h.vramOffset,
+          a == RD3FB_LATE_OK ? ": flips now reach DCN; VBL from the OTG frame counter, software cursor, no EDID / gamma "
+                               "until the next boot" : ": head 0 stays in console mode");
+    setProperty("RDNA3,CoreLate", rd3fb_core_late_name(a));
+    if (a == RD3FB_LATE_OK) {
+        setProperty("RDNA3,Mode", "dcn");
+        setProperty("RDNA3,VBLSource", "otg-poll");
+    }
 }
 
 bool RDNA3Framebuffer::readConsole()
@@ -793,6 +931,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
         setProperty("RDNA3,IntegratedAB", txt);
     }
     publishStats();
+    armCoreLate();   /* bare metal 2026-10-31: head 0 on the console without a core */
     return true;
 }
 
@@ -817,6 +956,10 @@ void RDNA3Framebuffer::stop(IOService *provider)
         IOSimpleLockUnlockEnableInterrupt(fLock, st);
     }
     fStarted = false;
+    if (fCoreNote) {
+        fCoreNote->remove();   /* waits for a coreLate in progress */
+        fCoreNote = nullptr;
+    }
     if (fSleepTap) {
         fSleepTap->remove();
         fSleepTap = nullptr;
@@ -1309,8 +1452,12 @@ void RDNA3Framebuffer::modesInit()
                 fModes[fNModes].t = *t;
                 fNModes++;
             }
-            FBLOG("modes from the core: %u timings (0x%x)%s", fNModes - 1, (unsigned)r,
-                  fNativeCore < 0 && fNModes > 1 ? ", the running one not among them: no switching" : "");
+            if (r == kIOReturnUnsupported)
+                FBLOG("modes from the core: none, mode setting is off (rdna3modeset=%u, default 0): the running timing "
+                      "only (and the scaled modes)", rd3_arg("rdna3modeset", 0));
+            else
+                FBLOG("modes from the core: %u timings (0x%x)%s", fNModes - 1, (unsigned)r,
+                      fNativeCore < 0 && fNModes > 1 ? ", the running one not among them: no switching" : "");
             if (fNativeCore < 0)
                 fNModes = 1;   /* no way back to the start timing: offer none */
             IOFree(ml, sizeof(*ml));
@@ -2000,6 +2147,7 @@ void RDNA3Framebuffer::publishStats()
         { "cursor_sets", q.sets }, { "cursor_kicks", q.kicks }, { "cursor_coalesced", q.coalesced },
         { "cursor_same", q.same }, { "cursor_applies", q.applies }, { "cursor_fails", q.fails },
         { "cursor_sync", fCurSync }, { "cursor_images", fCurImages },
+        { "flip_console", fFlipConsole }, { "core_late", fCoreLateAns == 0xffffffffu ? 99u : (uint64_t)fCoreLateAns },
         { "wake_sleeps", w.sleeps }, { "wake_family", w.family_wakes }, { "wake_owed_max", w.owed_max },
         { "wake_plain_on", w.plain_power_ons }, { "wake_didwake_seen", w.didwakes_seen },
         { "wake_unanswered", (uint64_t)(w.will_sleep_off > 0 ? w.will_sleep_off : 0) },
@@ -2980,6 +3128,14 @@ IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, v
                      ? flipToLocked(fBootVram, fW, fH, fBootPitch, &rc, nowait)
                      : flipToLocked(f->allocationCookie, f->width, f->height, f->pitch, &rc, nowait);
             IOLockUnlock(fModeLock);
+        } else {
+            /* bare metal 2026-10-31: console mode refuses every flip (the accelerator then copies) - said */
+            const uint32_t k = fFlipConsole++;
+            if (k < 4 || (k & 1023) == 0)
+                FBLOG("flip #%u REFUSED: head %u is in console mode (core %s, late upgrade: %s): the accelerator "
+                      "copies the frame instead", k + 1, fHead, fCore ? "present, no usable head" : "absent",
+                      fCoreLateAns == 0xffffffffu ? (fCoreNote ? "armed" : "not armed")
+                                                  : rd3fb_core_late_name((enum rd3fb_late_ans)fCoreLateAns));
         }
         f->flipResult = rc;
         return ok ? kIOReturnSuccess : rc == RD3K_FLIP_RESULT_BUSY ? kIOReturnBusy : kIOReturnIOError;

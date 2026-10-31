@@ -556,6 +556,30 @@ static void test_console(void)
     CHECK(rd3fb_owns_console(0, 0, 0x80000000ull, 4096, 1) == 0);
 }
 
+/* bare metal 2026-10-31: a framebuffer that started before the core */
+static void test_core_late(void)
+{
+    CHECK(rd3fb_core_wait(1, 1) == RD3FB_CORE_FOUND && rd3fb_core_wait(1, 0) == RD3FB_CORE_FOUND);
+    CHECK(rd3fb_core_wait(0, 1) == RD3FB_CORE_WAIT);
+    CHECK(rd3fb_core_wait(0, 0) == RD3FB_CORE_LATER);   /* the k1306 boot: no wait for a core that starts after us */
+    const struct rd3fb_scan con = { 0xc20000000ull, 1920, 1080, 7680 };
+    struct rd3fb_scan core = con;
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_OK);
+    CHECK(rd3fb_core_late(1, 0, 1, &con, &core, 0) == RD3FB_LATE_NOTHEAD0);
+    CHECK(rd3fb_core_late(0, 1, 1, &con, &core, 0) == RD3FB_LATE_ALREADY);
+    CHECK(rd3fb_core_late(0, 0, 0, &con, &core, 0) == RD3FB_LATE_UNUSABLE);
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 2) == RD3FB_LATE_MODE);
+    core.phys = 0xc27000000ull;   /* head 1's scanout */
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_GEOMETRY);
+    core = con; core.pitch = 8192;
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_GEOMETRY);
+    core = con; core.w = 2560;
+    CHECK(rd3fb_core_late(0, 0, 1, &con, &core, 0) == RD3FB_LATE_GEOMETRY);
+    CHECK(rd3fb_core_late(0, 0, 1, &con, 0, 0) == RD3FB_LATE_GEOMETRY);
+    CHECK(!strcmp(rd3fb_core_late_name(RD3FB_LATE_OK), "upgraded to DCN"));
+    CHECK(!strcmp(rd3fb_core_late_name(RD3FB_LATE_GEOMETRY), "the core's head 0 is another scanout"));
+}
+
 int main(void)
 {
     test_open_order();
@@ -566,6 +590,7 @@ int main(void)
     test_stop_wake();
     test_timing();
     test_console();
+    test_core_late();
     if (fails) {
         printf("test_fb_policy: %d check(s) failed\n", fails);
         return 1;

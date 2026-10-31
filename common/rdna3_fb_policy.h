@@ -381,4 +381,60 @@ static inline int rd3fb_owns_console(int console_known, uint64_t console_base, u
     return phys && bytes && b >= phys && b - phys < bytes;
 }
 
+/* ==== bare metal 2026-10-31: a framebuffer that started before the core ====
+ * The installer OpenCore config (core only in the Aux KC) put head 0's framebuffer and the core in one matching round of
+ * the IOPCIDevice; IOKit starts the categories in probe-score order, the framebuffer's 30000 above the core's then
+ * 5000, and findCore waited 10 s for a core that could only start after it returned: head 0 stayed in console mode
+ * and refused every flip. The core now scores above the framebuffer; findCore waits only for a core already attached
+ * to the device (started, its registration on the way) and otherwise starts on the console with a publish
+ * notification, upgrading head 0 to DCN when the core comes. */
+
+/* why findCore waits (or not) for the core */
+enum rd3fb_core_wait {
+    RD3FB_CORE_FOUND = 0,   /* the core is registered and matched: no wait */
+    RD3FB_CORE_WAIT,        /* attached to the device (its start ran) but not matched yet: wait, bounded */
+    RD3FB_CORE_LATER        /* not on the device at all: it starts after this framebuffer; console now, upgrade later */
+};
+static inline enum rd3fb_core_wait rd3fb_core_wait(int matched, int attached)
+{
+    return matched ? RD3FB_CORE_FOUND : attached ? RD3FB_CORE_WAIT : RD3FB_CORE_LATER;
+}
+
+/* the late core may take over head 0 (console -> DCN) only if its head 0 is usable and is the very scanout the
+ * console framebuffer publishes (same CPU address, size and pitch) and no scaled mode is in use: IOGraphics, the
+ * accelerator and WindowServer keep the aperture and geometry they already have */
+struct rd3fb_scan { uint64_t phys; uint32_t w, h, pitch; };
+enum rd3fb_late_ans {
+    RD3FB_LATE_OK = 0,
+    RD3FB_LATE_NOTHEAD0,     /* only head 0 starts without the core (other heads are nubs of the core) */
+    RD3FB_LATE_ALREADY,      /* already DCN, or already tried once */
+    RD3FB_LATE_UNUSABLE,     /* the core does not report a usable XRGB8888 head 0 */
+    RD3FB_LATE_MODE,         /* a scaled / switched mode is on (cannot be: no core, but checked) */
+    RD3FB_LATE_GEOMETRY      /* the core's head 0 is another scanout than the console's */
+};
+static inline enum rd3fb_late_ans rd3fb_core_late(unsigned head, int already, int usable, const struct rd3fb_scan *console,
+                                                  const struct rd3fb_scan *core, uint32_t cur_mode)
+{
+    if (head) return RD3FB_LATE_NOTHEAD0;
+    if (already) return RD3FB_LATE_ALREADY;
+    if (!usable) return RD3FB_LATE_UNUSABLE;
+    if (cur_mode) return RD3FB_LATE_MODE;
+    if (!console || !core || console->phys != core->phys || console->w != core->w || console->h != core->h ||
+        console->pitch != core->pitch)
+        return RD3FB_LATE_GEOMETRY;
+    return RD3FB_LATE_OK;
+}
+static inline const char *rd3fb_core_late_name(enum rd3fb_late_ans a)
+{
+    switch (a) {
+    case RD3FB_LATE_OK: return "upgraded to DCN";
+    case RD3FB_LATE_NOTHEAD0: return "not head 0";
+    case RD3FB_LATE_ALREADY: return "already DCN or tried";
+    case RD3FB_LATE_UNUSABLE: return "the core's head 0 is not usable";
+    case RD3FB_LATE_MODE: return "a scaled mode is on";
+    case RD3FB_LATE_GEOMETRY: return "the core's head 0 is another scanout";
+    }
+    return "?";
+}
+
 #endif

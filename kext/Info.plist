@@ -32,8 +32,20 @@
 			<string>0x747e1002</string>
 			<key>IOUserClientClass</key>
 			<string>RDNA3UserClient</string>
+			<!-- Bare metal 2026-10-31: above the framebuffer's 30000 (and
+			     IONDRVFramebuffer's 20000). The core, the framebuffer
+			     (IOMatchCategory IOFramebuffer) and the accelerator
+			     (IOAccelerator, 100) are in different categories, so
+			     the score decides no winner between them; it orders
+			     their starts when IOKit matches them on the device in
+			     one round (each category starts in score order on the
+			     device's matching thread). At 5000 the framebuffer
+			     started first and waited for a core that could only
+			     start after it. Now: core, framebuffer, accelerator -
+			     the order the OpenCore-injected boot already had (core
+			     in the boot KC, matched before the others). -->
 			<key>IOProbeScore</key>
-			<integer>5000</integer>
+			<integer>31000</integer>
 		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>

@@ -89,6 +89,23 @@ check(r[0][0] == "WARN" and "every copy went to the CPU" in r[0][2], "SDMA on, u
 r = present_rows("", SV + "debug.rdna3accel_iop_copy_sdma_state: 3\ndebug.rdna3accel_iop_copy_sdma_n: 0\n", True)
 check(r[0][0] == "INFO" and "core older than N63" in r[0][2], "old core: %r" % (r[0],))
 
+# bare metal 2026-10-31: l10r frames converted by the CPU (SDMA on: every CPU copy a `format` fallback, no WARN for
+# "every copy went to the CPU"), and a frame of another format refused (WARN)
+L = ("debug.rdna3accel_iop_ok: 70\ndebug.rdna3accel_iop_copy_n: 70\ndebug.rdna3accel_iop_copy_bytes: 580608000\n"
+     "debug.rdna3accel_iop_copy_us: 350000\ndebug.rdna3accel_iop_copy_64: 70\ndebug.rdna3accel_iop_gate_us: 0\n"
+     "debug.rdna3accel_iop_copy_n_h0: 35\ndebug.rdna3accel_iop_copy_us_h0: 175000\n"
+     "debug.rdna3accel_iop_copy_sdma_state: 1\ndebug.rdna3accel_iop_copy_sdma_n: 0\ndebug.rdna3accel_iop_copy_sdma_fb: 70\n"
+     "debug.rdna3accel_iop_copy_sdma_fb_format: 70\ndebug.rdna3accel_iop_copy_fmt_l10r: 70\ndebug.rdna3accel_iop_copy_fmt_other: 0\n"
+     "debug.rdna3accel_iop_flip_fmt: 0\n")
+r = present_rows("", L, True)
+check([n for _l, n, _t in r] == ["IOP copy", "IOP formats"], "l10r rows: %r" % r)
+check(r[0][0] == "INFO" and "fallbacks to the CPU 70 (format 70)" in r[0][2], "l10r IOP copy row: %r" % (r[0],))
+check(r[1][0] == "INFO" and r[1][2].startswith("70 l10r (ARGB2101010) frame(s) converted to the 8-bit scanout by the CPU")
+      and "fallbacks `format` 70" in r[1][2] and "N66" in r[1][2], "l10r row: %r" % (r[1],))
+r = present_rows("", L.replace("fmt_other: 0", "fmt_other: 35"), True)
+check(r[1][0] == "WARN" and "35 frame(s) of another format refused" in r[1][2], "other format: %r" % (r[1],))
+check(all(n != "IOP formats" for _l, n, _t in present_rows("", SV, True)), "BGRA only: no IOP formats row")
+
 # N64: `vk: ws frame: SUMMARY` (metal/plugin/nvmtl_ws_frame.h nvmtl_wf_format, the body tests/test_ws_frame.c checks)
 W = "2026-10-29 10:00:%02d.1 Df %s (RDNA3MTLDriver) NVMTL: vk: ws frame: SUMMARY %s\n"
 

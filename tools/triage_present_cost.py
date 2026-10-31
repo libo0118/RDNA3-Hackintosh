@@ -42,14 +42,15 @@ def plugin_summaries(plugin_text):
 
 
 def kernel_counters(surfvram):
-    """{short name: int} of debug.rdna3accel_iop_copy* / iop_gate_us* / iop_ok*"""
+    """{short name: int} of debug.rdna3accel_iop_copy* / iop_gate_us* / iop_ok* / iop_flip_fmt"""
     out = {}
-    for m in re.finditer(r"^debug\.rdna3accel_(iop_copy\w*|iop_gate_us\w*|iop_ok\w*): (-?\d+)\s*$", surfvram or "", re.M):
+    for m in re.finditer(r"^debug\.rdna3accel_(iop_copy\w*|iop_gate_us\w*|iop_ok\w*|iop_flip_fmt): (-?\d+)\s*$",
+                         surfvram or "", re.M):
         out[m.group(1)] = int(m.group(2))
     return out
 
 
-SDMA_FB = ("core", "pages", "bind", "copy", "verify", "off", "scanout")   # common/rdna3_iop_copy.h enum rd3_iop_sdma_fb
+SDMA_FB = ("core", "pages", "bind", "copy", "verify", "off", "scanout", "format")   # common/rdna3_iop_copy.h enum rd3_iop_sdma_fb
 SDMA_STATE = {0: "off (debug.rdna3accel_iop_sdma=0 / rdna3iopsdma=0)", 1: "on", 2: "switched OFF after 3 failures in a row",
               3: "the core does not answer rdna3IopSdma (a core older than N63)"}
 
@@ -108,6 +109,22 @@ def iop_text(c):
     return ("%d IOP copies (path %s), avg %.2f ms; %s%s; gates before the copies avg %.2f ms%s" % (
                 tot, iop_path(c), tot_us / 1000.0 / tot, cpu, "; " + sd if sd else "", c.get("iop_gate_us", 0) / 1000.0 / tot,
                 " (" + "; ".join(heads) + ")" if heads else ""))
+
+
+def iop_format_rows(c):
+    """bare metal 2026-10-31: `IOP formats` - the presented surfaces that were not BGRA (l10r converted by the CPU copy,
+    anything else refused); no row while every frame was BGRA or for a kernel without the counters"""
+    l10r, other = c.get("iop_copy_fmt_l10r", 0), c.get("iop_copy_fmt_other", 0)
+    if not l10r and not other:
+        return []
+    text = ("%d l10r (ARGB2101010) frame(s) converted to the 8-bit scanout by the CPU (not by SDMA: fallbacks `format` %d; "
+            "zero-copy flips refused for the format %d); %d frame(s) of another format refused" % (
+                l10r, c.get("iop_copy_sdma_fb_format", 0), c.get("iop_flip_fmt", 0), other))
+    if other:
+        return [("WARN", "IOP formats", text + ": the `iop: surface 0x.. format 0x........ is not BGRA or l10r` lines name the "
+                 "format; those frames never reached the panel")]
+    return [("INFO", "IOP formats", text + "; WindowServer presents 10-bit surfaces: the DCN 10-bit scanout (N66) would "
+             "remove the conversion")]
 
 
 WS_HALF_FRAME_MS = 8.0   # one command buffer over this (record or GPU) takes half of a 60 Hz frame; WindowServer commits ~2 a frame
@@ -187,9 +204,11 @@ def _present_rows(plugin_text, surfvram, iop_on=True):
             lvl, why = "WARN", why + ": the SDMA path switched itself OFF (the `iop sdma (N63): switched OFF` and `iop: sdma -> CPU` lines say why)"
         elif c.get("iop_copy_sdma_fb_verify", 0) or c.get("iop_copy_sdma_fb_copy", 0):
             lvl, why = "WARN", why + ": SDMA copies failed or read back wrong (the `iop: sdma -> CPU` lines)"
-        elif st == 1 and c.get("iop_copy_n", 0) and not c.get("iop_copy_sdma_n", 0):
+        elif (st == 1 and c.get("iop_copy_n", 0) and not c.get("iop_copy_sdma_n", 0)
+              and c.get("iop_copy_sdma_fb_format", 0) < c.get("iop_copy_n", 0)):
             lvl, why = "WARN", why + ": the SDMA path is on but every copy went to the CPU (the fallback reasons above)"
         out.append((lvl, "IOP copy", iop + why))
+    out.extend(iop_format_rows(c))
     n_all, us_all = iop_counts(c)
     iop_avg = ("%.2f ms (%s)" % (us_all / 1000.0 / n_all, iop_path(c))) if n_all else "unknown"
     sums = plugin_summaries(plugin_text)

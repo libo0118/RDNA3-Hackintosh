@@ -496,7 +496,9 @@ N41_VM_KEYS = ("vm_sticky", "vm_alloc", "vm_dealloc", "vm_refused", "vm_parked",
                # security review of N41: only a BO's allocation parked; parks no BO holds released under pressure / cap
                "vm_park_noimport", "vm_park_trim_pressure", "vm_park_trim_cap", "vm_park_trimmed",
                "vm_park_trimmed_bytes", "vm_park_trim_held", "vm_park_trim_unknown", "vm_alloc_retry_ok",
-               "vm_alloc_retry_fail", "vm_park_cap_mb")
+               "vm_alloc_retry_fail", "vm_park_cap_mb",
+               # bare metal 2026-10-31 (N65 P4): resources without an IOSurface paged off into their own system memory
+               "vm_pageoff_sys", "vm_pageoff_sys_fail", "vm_pageoff_family", "vm_pageoff_sys_us")
 N41_SW_KEYS = ("surface_wait", "surface_wait_ms", "surface_wait_maxus", "surface_wait_iop_maxus", "surface_wait_busy",
                "surface_wait_pending", "surface_wait_ready", "surface_wait_late", "surface_wait_evicted",
                "surface_wait_saturated", "surface_wait_off", "surface_wait_notws", "surface_wait_notown",
@@ -753,6 +755,17 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
         rows.append(("WARN", "VRAM parking", "%d VRAM allocation(s) refused while %d bytes were parked: parking may "
                      "cost VRAM (the kernel's 'VRAM refused:' line; A/B vm_sticky 0)" % (g("vm_refused"),
                                                                                          g("vm_parked_bytes"))))
+    if g("vm_pageoff_sys", 0) or g("vm_pageoff_sys_fail", 0):
+        # N65 P4: the family's pageoff of a resource without an IOSurface left its system memory invalid (the crash
+        # after a display sleep without the plugin); the copy engine does it now
+        n_ok, n_bad = g("vm_pageoff_sys", 0), g("vm_pageoff_sys_fail", 0)
+        rows.append(("WARN" if n_bad else "INFO", "pageoff (no IOSurface)",
+                     "%d resource(s) without an IOSurface paged off into their own system memory by the copy engine "
+                     "(avg %.2f ms), %d left to the family's pageoff%s; %d other page-off(s) by the family" % (
+                         n_ok, g("vm_pageoff_sys_us", 0) / 1000.0 / n_ok if n_ok else 0.0, n_bad,
+                         " (the kernel's 'pageoff (no IOSurface) ... NOT copied' lines say why: a CPU lock of such a "
+                         "resource may fail, the crash after a display sleep)" if n_bad else "",
+                         g("vm_pageoff_family", 0))))
     if g("vm_free_live", 0):
         rows.append(("INFO", "VRAM parking", "%d vidmem object(s) freed with VRAM still live, released in free() (they "
                      "leaked before N41)" % g("vm_free_live")))
@@ -1004,7 +1017,8 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"_stalehold_changed|_stalenocf|_stalereset|_staleevict|_stalegone|"
                        r"_stalecheck_(?:norecord|changed|cf|sameshown|nopanel|nohead)|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait|"
-                       r"_genpresent|_genhold|_genhold_would|_genfirst|_gencontent|_genunwritten|_gen_judged|_gen_aged|"
+                       r"_genpresent|_genhold|_genhold_would|_genhold_same|_genhold_older|_genhold_unwritten|_gencpu|"
+                       r"_genfirst|_gencontent|_genunwritten|_gen_judged|_gen_aged|"
                        r"_gen_evictpresent|_gen_landed|_gennotjudged|_gen_resets|"
                        r"_pq_(?:prog|queued|replaced|joined|busy|refused|latched|latchus|latchmax|next|timeout|unknown|"
                        r"dropped|dropmode|early|wait|waitus|waitmax|waittimeout|inplace|inline|polled|iop|"
@@ -1015,7 +1029,8 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"gpuns|nosubns|nosub|creditfail|stale|merged|lostjobs|inflight|cappedns|ringns_(?:gfx|comp|sdma)|"
                        r"unc_(?:vcn|jpeg|other|kcopy|userq)|sdmaend_(?:irq|wait|take|sub|reset)|lastret|winreset|"
                        r"submitters|uccbad|cmdqueues|creditwait|pendingns|nolast)|"
-                       r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
+                       r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen_cpu|swap_gen_wsmetal|swap_gen|"
+                       r"flipbuf_present|cf_gennewer_h\d|"
                        r"flipbuf(?:_scanout|_presented|_held|_failed|_busy|_unlocked|_emptyheld)?_h\d|"
                        r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
                        r"hook_(?:intr_(?:flipbuf|scanout|pickpresent|didsubmitswap|backready|submitupdate)|intr|intoff|pickpresent|"
@@ -1675,6 +1690,17 @@ def gen_verdict(c, current=False):
             return [("WARN", "counter missing: swap_gen and the write generations' counters (swaps_genhold_h<N>, "
                              "flipbuf_h<N>) although the kext is of these sources: the collector's grep missed them")]
         return []
+    if "swap_gen_wsmetal" in c:
+        # bare metal 2026-10-31: WindowServer without the Metal plugin - its SAME / OLDER backs present (swap_gen_cpu 1)
+        metal = c.get("swap_gen_wsmetal")
+        out_cpu = ("write generations without Metal: WindowServer %s, swap_gen_cpu %s: %s" % (
+            "HAS a Metal device (GPU surface marks seen)" if metal else "has NO Metal device (no GPU surface mark: it "
+            "composites on the CPU)", c.get("swap_gen_cpu", "?"),
+            "the old holds apply" if metal else
+            "SAME / OLDER backs present, only never-written backs hold" if c.get("swap_gen_cpu") == 1 else
+            "SAME / OLDER backs are HELD as before (rdna3swapgencpu=0): small CPU updates may stay off the panel"))
+    else:
+        out_cpu = None
     out = [("INFO", "write generations: swap_gen %s, flipbuf_present %s, swap mode %s; generations handed out by "
                     "page-on %s (+%s by its cached descriptor), by copy forward %s (%s targets kept theirs: the copy "
                     "failed); evicted %s, freed %s, head resets %s" % (
@@ -1682,6 +1708,8 @@ def gen_verdict(c, current=False):
                         c.get("swaps_gen_aperture", "?"), c.get("swaps_gen_apcached", "?"), c.get("swaps_gen_cf", "?"),
                         c.get("swaps_gen_cfnostamp", "?"), c.get("swaps_gen_evicted", "?"),
                         c.get("swaps_gen_freed", "?"), c.get("swaps_gen_resets", "?")))]
+    if out_cpu:
+        out.append(("WARN" if not c.get("swap_gen_wsmetal") and c.get("swap_gen_cpu") == 0 else "INFO", out_cpu))
     if current:
         gmiss = [k for k in GEN_GLOBALS if k not in c]
         if gmiss:
@@ -1735,6 +1763,11 @@ def gen_verdict(c, current=False):
                                 g("cf_gennewer"), g("flipbuf"), g("flipbuf_scanout"), g("flipbuf_presented"),
                                 g("flipbuf_held"), g("flipbuf_emptyheld"), g("flipbuf_failed"), g("flipbuf_busy"),
                                 g("flipbuf_unlocked"))))
+        if "swaps_genhold_same_h" + h in c:
+            out.append(("INFO", "head %s: write-generation holds by reason: %d the panel's buffer (same), %d older, %d "
+                                "never written; %d SAME / OLDER presented because WindowServer has no Metal device "
+                                "(swaps_gencpu)" % (h, g("swaps_genhold_same"), g("swaps_genhold_older"),
+                                                    g("swaps_genhold_unwritten"), g("swaps_gencpu"))))
         if judged_known and abs(judged - outcomes) > GEN_SLACK:
             out.append(("WARN", "head %s: the write generations' outcomes do not add up: %d judged, but presented %d + "
                                 "held %d + would-hold %d + newer buffer %d = %d - a decision without its counter" % (

@@ -68,8 +68,8 @@ V1_GEN_WHY_SHIFT, V1_GEN_WHY_MASK = 28, 15   # SWAP v1: the rule's reason (rdna3
 V1_FLIPBUF = 1 << 27                  # SWAP v1: a flip-buffer present (debug.rdna3accel_flipbuf_present=1)
 GEN_WHY = {0: "not judged", 1: "newer", 2: "first after a reset", 3: "changed with no write seen",
            4: "same as the panel's", 5: "older", 6: "never written", 7: "aged (no present for 250 ms)",
-           8: "a newer generation was evicted"}
-GEN_PRESENTS, GEN_HOLDS = (1, 2, 3, 7, 8), (4, 5, 6)
+           8: "a newer generation was evicted", 9: "same / older, WindowServer without Metal (swap_gen_cpu)"}
+GEN_PRESENTS, GEN_HOLDS = (1, 2, 3, 7, 8, 9), (4, 5, 6)
 COPY_US_CAP = 0xffff                  # SWAP v2's copy time saturates here (v2 >> 16 is the generation)
 FLIPBUF_WHAT = {0: "traced", 1: "PRESENTED", 2: "held", 3: "present FAILED", 4: "no head", 5: "no VRAM resource",
                 6: "lock busy"}

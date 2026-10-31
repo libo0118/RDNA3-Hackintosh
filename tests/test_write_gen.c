@@ -313,12 +313,55 @@ static void model(void)
     CHECK(m.staleShown > 0 && m.olderCf > 0 && m.replaced > 0);
 }
 
+/* bare metal 2026-10-31: WindowServer composites on the CPU through an aperture mapping it keeps (no page-on per
+ * frame): its Terminal text lands in the shown buffer (in place, SAME) or in the other one (OLDER), with no new
+ * generation. Without a Metal WindowServer those present; the never-written back still holds; with Metal (the VM's
+ * path) every decision is exactly as before. */
+static void cpu_compositor(void)
+{
+    struct rd3_wg_head h;
+    memset(&h, 0, sizeof h);
+    /* the mapping */
+    for (int w = RD3_WGW_OFF; w <= RD3_WGW_MAX; w++) {
+        const enum rd3_wg_why why = (enum rd3_wg_why)w;
+        CHECK(rd3_wg_cpu_rule(why, 1, 1) == why);   /* a Metal WindowServer: unchanged */
+        CHECK(rd3_wg_cpu_rule(why, 0, 0) == why);   /* the switch off: unchanged */
+        CHECK(rd3_wg_cpu_rule(why, 0, 1) == ((why == RD3_WGW_SAME || why == RD3_WGW_OLDER) ? RD3_WGW_CPU : why));
+    }
+    CHECK(rd3_wg_presents(RD3_WGW_CPU) && !rd3_wg_holds(RD3_WGW_CPU));
+    CHECK(rd3_wg_hold_kind(RD3_WGW_SAME) == RD3_WGH_SAME && rd3_wg_hold_kind(RD3_WGW_OLDER) == RD3_WGH_OLDER &&
+          rd3_wg_hold_kind(RD3_WGW_UNWRITTEN) == RD3_WGH_UNWRITTEN && rd3_wg_hold_kind(RD3_WGW_CPU) == -1 &&
+          rd3_wg_hold_kind(RD3_WGW_NEWER) == -1 && RD3_WGH_N == 3);
+    /* every hold reason has its kind, every other reason none */
+    for (int w = RD3_WGW_OFF; w <= RD3_WGW_MAX; w++)
+        CHECK((rd3_wg_hold_kind((enum rd3_wg_why)w) >= 0) == rd3_wg_holds((enum rd3_wg_why)w));
+    /* the model: b0 / b1, both paged on once at start (gens 1, 2), the head shows b1; then WindowServer writes
+     * new text into b1 in place and into b0 through the kept mapping, swapping each, with no page-on. Samples
+     * do not catch the few changed characters (the same sig). */
+    rd3_wg_presented(&h, 0xb1, 2, 1, 5, 0);
+    unsigned shown_cpu = 0, shown_metal = 0, held_unwritten = 0;
+    for (unsigned f = 0; f < 10; f++) {
+        const unsigned long long back = (f & 1) ? 0xb0 : 0xb1, gen = (f & 1) ? 1 : 2;
+        const enum rd3_wg_why base = rd3_wg_decide(&h, back, gen, 1, 5, 0, 1000 * f);
+        if (rd3_wg_presents(rd3_wg_cpu_rule(base, 0, 1))) shown_cpu++;
+        if (rd3_wg_presents(rd3_wg_cpu_rule(base, 1, 1))) shown_metal++;
+        rd3_wg_presented(&h, back, gen, 1, 5, 1000 * f);   /* keep the head's record as a present would */
+    }
+    CHECK(shown_cpu == 10);    /* every new frame reaches the panel */
+    CHECK(shown_metal == 0);   /* the old rule: held (SAME / OLDER), the text stayed old until a window moved */
+    /* the never-written back still holds without Metal */
+    const enum rd3_wg_why u = rd3_wg_decide(&h, 0xb2, 0, 1, 9, 0, 20000);
+    if (rd3_wg_holds(rd3_wg_cpu_rule(u, 0, 1))) held_unwritten++;
+    CHECK(u == RD3_WGW_UNWRITTEN && held_unwritten == 1);
+}
+
 int main(void)
 {
     table();
     decide();
     failopen();
     model();
+    cpu_compositor();
     if (fails) {
         printf("test_write_gen: %d check(s) FAILED\n", fails);
         return 1;

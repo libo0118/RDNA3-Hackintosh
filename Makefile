@@ -304,6 +304,7 @@ test: $(BUILD)/test_attr_ring $(BUILD)/test_bar_window $(BUILD)/test_agdc_k5 $(B
 	python3 -I -B tests/test_triage_attr_ring.py
 	python3 -I -B tests/test_triage_bar.py
 	python3 -I -B tests/test_triage_present_cost.py
+	python3 -I -B tests/test_triage_write_gen.py
 	python3 -I -B tests/test_lookimg.py
 	python3 -I -B tests/test_triage_parallel.py
 	python3 -I -B tests/test_glyph_verdict.py

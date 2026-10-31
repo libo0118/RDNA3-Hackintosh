@@ -121,7 +121,8 @@ static void test_sdma_policy(void)
     rd3_iop_sample_xy(5, 1, 1, 3, &x, &y);        CHECK(x == 0 && y == 0);
     rd3_iop_sample_xy(5, 0, 0, 3, &x, &y);        CHECK(x == 0 && y == 0);
     CHECK(!strcmp(rd3_iop_sdma_fb_name(RD3_ISF_COPY), "copy") && !strcmp(rd3_iop_sdma_fb_name(RD3_ISF_N), "?"));
-    CHECK(!strcmp(rd3_iop_sdma_fb_name(RD3_ISF_SCANOUT), "scanout") && RD3_ISF_N == 7);
+    CHECK(!strcmp(rd3_iop_sdma_fb_name(RD3_ISF_SCANOUT), "scanout") && RD3_ISF_N == 8);
+    CHECK(!strcmp(rd3_iop_sdma_fb_name(RD3_ISF_FORMAT), "format"));
     /* the scanout's VRAM offset against its BAR address */
     CHECK(rd3_iop_scanout_ok(0x80000000ull, 0x80000000ull + 0x1000000, 0x1000000, 8294400, 0));
     CHECK(rd3_iop_scanout_ok(0x80000000ull, 0x80000000ull, 0, 8294400, 16ull << 30));        /* offset 0 at the BAR's start */
@@ -131,11 +132,65 @@ static void test_sdma_policy(void)
     CHECK(!rd3_iop_scanout_ok(0x80000000ull, 0x80000000ull + (16ull << 30) - 4096, (16ull << 30) - 4096, 8192, 16ull << 30));
 }
 
+/* bare metal 2026-10-31: 'l10r' (ARGB2101010, A[31:30] R[29:20] G[19:10] B[9:0]) into the 8-bit scanout word */
+static uint32_t pack_l10r(uint32_t a, uint32_t r, uint32_t g, uint32_t b) { return (a << 30) | (r << 20) | (g << 10) | b; }
+static void test_l10r(void)
+{
+    CHECK(rd3_iop_fmt_kind(0x42475241u) == RD3_IOP_FMT_IS_BGRA);
+    CHECK(rd3_iop_fmt_kind(0x6c313072u) == RD3_IOP_FMT_IS_L10R);
+    CHECK(rd3_iop_fmt_kind(0x77333072u) == RD3_IOP_FMT_IS_OTHER && rd3_iop_fmt_kind(0) == RD3_IOP_FMT_IS_OTHER);
+    /* the fourcc is the ASCII name, big-endian in the word (IOSurface's convention) */
+    CHECK(RD3_IOP_FMT_L10R == (((uint32_t)'l' << 24) | ((uint32_t)'1' << 16) | ((uint32_t)'0' << 8) | (uint32_t)'r'));
+    /* opaque white, black, pure channels: each channel's top 8 bits land in the BGRA word */
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 1023, 1023, 1023)) == 0xffffffffu);
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 0, 0, 0)) == 0xff000000u);
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 1023, 0, 0)) == 0xffff0000u);   /* red -> bits 23:16 */
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 0, 1023, 0)) == 0xff00ff00u);   /* green -> bits 15:8 */
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 0, 0, 1023)) == 0xff0000ffu);   /* blue -> bits 7:0 */
+    CHECK(rd3_iop_l10r_px(pack_l10r(0, 0, 0, 0)) == 0u);
+    CHECK(rd3_iop_l10r_px(pack_l10r(1, 0, 0, 0)) == 0x55000000u && rd3_iop_l10r_px(pack_l10r(2, 0, 0, 0)) == 0xaa000000u);
+    /* 10 -> 8 bits drops the two low bits: 0x200 (half) -> 0x80, 0x203 -> 0x80, 0x204 -> 0x81, 0x3 -> 0 */
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 0x200, 0x203, 0x204)) == 0xff808081u);
+    CHECK(rd3_iop_l10r_px(pack_l10r(3, 0x3, 0x3, 0x3)) == 0xff000000u);
+    /* rows: both loops give the per-pixel conversion; bytes beyond each row and below the last stay untouched */
+    const uint32_t cases[][5] = {   /* w, h, spitch, dpitch, src offset */
+        { 1920, 6, 7680, 7680, 0 },  /* WindowServer's 1920x1080 l10r frame: 64-bit loop */
+        { 1366, 4, 5504, 5464, 0 },  /* a padded source pitch */
+        { 1365, 4, 5460, 5504, 0 },  /* an odd width: the 32-bit loop */
+        { 640, 3, 2560, 2560, 4 },   /* a source only 4-byte aligned */
+    };
+    for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        const uint32_t w = cases[c][0], h = cases[c][1], sp = cases[c][2], dp = cases[c][3], so = cases[c][4];
+        const size_t sn = (size_t)sp * h + 16, dn = (size_t)dp * h + 16;
+        uint8_t *src = malloc(sn), *dst = malloc(dn);
+        if (!src || !dst) { free(src); free(dst); CHECK(0); continue; }
+        for (size_t i = 0; i < sn; i++) src[i] = (uint8_t)(i * 151u + 3u);
+        memset(dst, 0xA5, dn);
+        const uint32_t row = w * 4u;
+        const int width = rd3_iop_convert_l10r_rows(dst, dp, src + so, sp, h, row);
+        CHECK(width == (((so & 7u) || (sp & 7u) || (dp & 7u) || (row & 7u)) ? 4 : 8));
+        int bad = 0;
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t v, o;
+                memcpy(&v, src + so + (size_t)y * sp + 4u * x, 4);
+                memcpy(&o, dst + (size_t)y * dp + 4u * x, 4);
+                if (o != rd3_iop_l10r_px(v)) bad++;
+            }
+            for (uint32_t b = row; b < dp; b++) if (dst[(size_t)y * dp + b] != 0xA5) bad++;
+        }
+        for (size_t b = (size_t)dp * h; b < dn; b++) if (dst[b] != 0xA5) bad++;
+        CHECK(bad == 0);
+        free(src); free(dst);
+    }
+}
+
 int main(void)
 {
     test_gart_table();
     test_pages();
     test_sdma_policy();
+    test_l10r();
     CHECK(rd3_iop_copy64_ok(0x1000, 0x2000, 7680, 7680, 7680));
     CHECK(!rd3_iop_copy64_ok(0x1004, 0x2000, 7680, 7680, 7680));
     CHECK(!rd3_iop_copy64_ok(0x1000, 0x2000, 7684, 7680, 7680));

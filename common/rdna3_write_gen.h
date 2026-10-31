@@ -173,14 +173,40 @@ enum rd3_wg_why {
     RD3_WGW_UNWRITTEN = 6,  /* no write recorded (never, evicted or freed) and not presented here: held */
     RD3_WGW_AGED = 7,       /* would hold, but the head has not presented for RD3_WG_AGE_US and RD3_WG_AGE_HOLDS
                              * holds in a row: presented (a hold never freezes the panel) */
-    RD3_WGW_EVICTED = 8     /* no generation, and one newer than the head's frame was evicted: presented */
+    RD3_WGW_EVICTED = 8,    /* no generation, and one newer than the head's frame was evicted: presented */
+    RD3_WGW_CPU = 9         /* bare metal 2026-10-31: SAME or OLDER, but WindowServer has no Metal device (it
+                             * composites on the CPU, through aperture mappings it keeps: its writes stamp no
+                             * generation): presented (rd3_wg_cpu_rule) */
 };
-#define RD3_WGW_MAX RD3_WGW_EVICTED
+#define RD3_WGW_MAX RD3_WGW_CPU
 
 static inline int rd3_wg_presents(enum rd3_wg_why w)
 {
     return w == RD3_WGW_NEWER || w == RD3_WGW_FIRST || w == RD3_WGW_CONTENT || w == RD3_WGW_AGED ||
-           w == RD3_WGW_EVICTED;
+           w == RD3_WGW_EVICTED || w == RD3_WGW_CPU;
+}
+
+/* ==== bare metal 2026-10-31: WindowServer without the Metal plugin ====
+ * The generations are stamped by the family's page-on and by copy forward. In the VM (card run 2026-10-17d) a
+ * CPU-compositing WindowServer paged each frame on; on bare metal it keeps the aperture mapped and writes through
+ * it, so a frame of new Terminal text stamps nothing: 805 of 1980 judged swaps held (report 2026-10-31 13:23,
+ * swaps_genhold_h0), the panel kept the old text until a window moved, and the 64-sample content guard misses a
+ * few changed characters. When WindowServer has no Metal device (no GPU surface mark from it: the plugin marks
+ * every surface a command buffer writes, N41) a back that is the panel's buffer (SAME) or written before the
+ * head's frame (OLDER) presents; only the never-written back (UNWRITTEN, the b2 WindowServer never draws) holds,
+ * and the empty-back rule is unchanged. 'on' = debug.rdna3accel_swap_gen_cpu (boot-arg rdna3swapgencpu, default 1;
+ * 0 = held as before). With a Metal WindowServer nothing changes. */
+static inline enum rd3_wg_why rd3_wg_cpu_rule(enum rd3_wg_why w, int ws_metal, int on)
+{
+    return (on && !ws_metal && (w == RD3_WGW_SAME || w == RD3_WGW_OLDER)) ? RD3_WGW_CPU : w;
+}
+
+/* the hold counters by reason (debug.rdna3accel_swaps_genhold_{same,older,unwritten}_h<N>); -1 not a hold */
+enum rd3_wg_hold_kind { RD3_WGH_SAME = 0, RD3_WGH_OLDER, RD3_WGH_UNWRITTEN, RD3_WGH_N };
+static inline int rd3_wg_hold_kind(enum rd3_wg_why w)
+{
+    return w == RD3_WGW_SAME ? RD3_WGH_SAME : w == RD3_WGW_OLDER ? RD3_WGH_OLDER
+         : w == RD3_WGW_UNWRITTEN ? RD3_WGH_UNWRITTEN : -1;
 }
 static inline int rd3_wg_holds(enum rd3_wg_why w)
 {
