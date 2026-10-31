@@ -284,7 +284,8 @@ static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb, NSSet **deferred) {
     NVMTLSubmissionPart *part = [NVMTLSubmissionPart new];
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
-    part->resources = [_resources copy]; part->surfaces = nvmtl_seal_surfaces(self, &part->deferred);
+    part->resources = [_resources copy];
+    { NSSet *deferred = nil; part->surfaces = nvmtl_seal_surfaces(self, &deferred); part->deferred = deferred; }   /* N69 (ARC: no write-back into another object's ivar) */
     { NSDictionary *why = nil;   /* N61: before the part is submitted (a part with a GPU copy-out is never submitted ahead, nvmtlSubmitAhead) */
       part->dma = nvmtl_surface_dma_record(part->surfaces, &part->commands, &why); part->dmaWhy = why; }
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
