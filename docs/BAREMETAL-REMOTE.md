@@ -118,3 +118,68 @@ the Linux session reads from the stick or the Pi.
   report's layout: read `sysctl.txt`, `dmesg.txt`, `rdna3-3h.log` directly.
 - DCN scanout of 10-bit surfaces (N66) instead of the CPU conversion.
 - The CI `macos-tests` job has failed since run 86 (not investigated yet).
+
+## Round 1 findings (2026-10-31, Pi session, build 6f55f46, CI run 91)
+
+Installed from run 91's artifacts only (tarball via `install.sh`, the core
+`RDNA3Accel.kext` on the stick, plugin + translator + RADV via `metal.sh`).
+Old core kept as `EFI/OC/Kexts-old/RDNA3Accel.kext-pre6f55f46-*`. Reports on
+the stick: `rdna3/report-20261031-162542` (config-driver, after the hang) and
+`rdna3/report-20261031-163520` (config-metal).
+
+### config-driver (no plugin): broken in three ways
+
+1. **WindowServer watchdog kill when a window is dragged** (16:24:11,
+   `WindowServer-2026-10-31-162411.ips` + `.userspace_watchdog_timeout.spin`):
+   main thread waited 40 s on a `CompositorSW::CompositeLayersToDestination`
+   worker that was in `CA::gaussian_blur` / `box_filter_8`
+   (CA::OGL::render_layers, CPU only; the kernel frames there were interrupts,
+   no thread in our kexts). The software compositor's blur (vibrancy, window
+   backgrounds) is too slow on the CPU. `reduceTransparency` set to true for
+   user shrek as a workaround (`defaults write com.apple.universalaccess
+   reduceTransparency -bool true`; still set).
+2. **`swap_gen_cpu=1` (default) shows a stale frame**: the screen stayed on
+   one old frame, a window drag showed the new one for a fraction of a second,
+   then the old came back. `swaps_abab_h0` 1 -> 10, `h1` 0 -> 9,
+   `ababwide_h<N>` 3, `swaps_gencpu_h0` 357. This is N65 open item (c).
+3. **`swap_gen_cpu=0` (live)**: no A/B any more (abab unchanged), the menu-bar
+   clock updates, but Terminal text waits for a window move: 122 holds in
+   ~1 min, **all `genhold_older_h0`, `genhold_same` 0**. So the backs judged
+   OLDER sometimes carry the newest CPU-drawn content and sometimes are really
+   stale: the write generation alone cannot tell them apart without the
+   plugin. Needs a different criterion (content, or which back WindowServer
+   last drew into) - Linux session.
+4. Display sleep (`pmset displaysleepnow`): WindowServer survived (same pid),
+   `vm_pageoff_sys` 2, `vm_pageoff_sys_us` 5598, every `_fail_*` 0 (P4 works).
+   But **moving the mouse did not wake the displays** (IODisplayWrangler stayed
+   1/4); `caffeinate -u` woke them at once (4/4 USEABLE, gamma reprogrammed on
+   both MPCCs). HID wake path or USB (dmesg has `IOHIDInterface ...
+   SetElementValues failed: 0xe0005000` / `Set LED` failures) - not checked.
+
+### config-metal (`rdna3agdc=3`, the plugin): works
+
+- The desktop comes up on both heads and refreshes by itself; the owner: a
+  YouTube video plays much smoother than without the plugin (~3 fps before).
+- `iop_copy_fmt_l10r` 367 == `iop_copy_fmt_l10r_seen` 367, `_fmt_other` 0,
+  `iop_flip_fmt` 0, `iop_copy_sdma_fb_format` 367 (SDMA skipped for l10r as
+  designed), no `REFUSED` / `not BGRA` in dmesg, `swaps_abab_*` 0,
+  `genhold_*` 0, no new WindowServer crash.
+- CPU conversion cost: `iop_copy_us_h0` 5954923 / 500 copies (avg 11.9 ms,
+  dominated by the first frames after boot: the next 4 copies added 1.3 ms in
+  total), `iop_copy_us_h1` 5110992 / 1978, then +607092 us for +1848 copies =
+  **0.33 ms per frame** in steady state on head 1. N66 is not urgent for
+  speed; measure h0 again under load.
+- `swap_gen_wsmetal` stays 0 with the plugin and `swaps_h<N>` /
+  `hook_didsubmitswap` 0: WindowServer presents through IOPresentment only,
+  the swap path is unused here.
+- VRAM heap (dmesg 101 s): visible 147456 KiB, free 21260 + 924 KiB, `gem`
+  refused 1, surfgem `refused 2149` (ok 8).
+
+### For the Linux session
+
+- (no plugin) replace / refine the CPU write-generation rule (3 above); the
+  blur hang (1) makes the no-plugin path unusable for window drags even with
+  a correct rule unless reduceTransparency stays on.
+- the mouse not waking the displays (4).
+- `surfgem refused 2149` and the nearly full visible VRAM heap with the plugin.
+- Geekbench 6 is not installed on the Mac yet.
