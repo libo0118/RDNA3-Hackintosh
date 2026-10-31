@@ -132,14 +132,25 @@ BW_POLL=1; BW_REPEAT=1; BW_MAXN=2; BW_MAXSEC=40; BW_N=1
 eval "$SCEN"
 EOF2
 
-# timeout(1) is GNU coreutils: macOS has none, perl's alarm does the same there
-tmo() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else perl -e 'alarm shift; exec @ARGV' "$@"; fi; }
 
 run_scen() {   # run_scen <shell> <name> <scenario body> [bin dir] [system PATH]: a fresh state directory
     local sh=$1 name=$2 body=$3 bin=${4:-$T/bin}
     S=$T/$sh-$name; mkdir -p "$S"; : > "$S/calls"
-    SCEN=$body SCEN_SYS=${5:-$PATH} tmo 120 "$sh" "$T/scen.sh" "$S" "$bin" "$T/block.sh" > "$S/out.txt" 2>&1 ||
-        fail "$sh $name: the scenario failed: $(tail -5 "$S/out.txt")"
+    # not timeout(1): a scenario that hangs (CI run 95: dash "stuck", 120 s, nothing in the log) must leave its process
+    # table and the stubs it called behind in the failure message, which a killed-from-outside child cannot
+    SCEN=$body SCEN_SYS=${5:-$PATH} "$sh" "$T/scen.sh" "$S" "$bin" "$T/block.sh" > "$S/out.txt" 2>&1 &
+    local sp=$! t0 rc=0
+    t0=$(date +%s)
+    while kill -0 "$sp" 2>/dev/null; do
+        if [ $(( $(date +%s) - t0 )) -ge 240 ]; then
+            { echo "== HUNG after 240 s: processes"; ps -eo pid,ppid,stat,etime,args 2>/dev/null | cut -c1-200 | grep -E "scen\.sh|sleep|spindump|ioreg|sample|curl|log |PID" | head -30
+              echo "== last stub calls"; tail -8 "$S/calls"; } >> "$S/out.txt" 2>&1
+            pkill -9 -P "$sp" 2>/dev/null || true; kill -9 "$sp" 2>/dev/null || true; rc=124; break
+        fi
+        sleep 0.2
+    done
+    [ "$rc" = 124 ] || wait "$sp" || rc=$?
+    [ "$rc" = 0 ] || fail "$sh $name: the scenario failed (exit $rc): $(tail -30 "$S/out.txt")"
 }
 
 for sh in bash $(command -v dash >/dev/null 2>&1 && echo dash); do

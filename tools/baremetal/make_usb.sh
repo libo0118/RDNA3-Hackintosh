@@ -42,6 +42,9 @@ STEP=0
 CHUNK_MB=8
 SMALL_FILE=$((CHUNK_MB * 1048576))
 
+fsize() { wc -c < "$1" | tr -d ' '; }   # stat -c is GNU only, BSD wc pads
+# dd of one chunk: GNU dd syncs it (conv=fsync, status=none); the BSD dd of macOS knows neither, so it falls back
+ddc() { dd "$@" bs=1048576 conv=notrunc,fsync status=none 2>/dev/null || dd "$@" bs=1048576 conv=notrunc 2>/dev/null; }
 die() { echo "make_usb.sh: $*" >&2; exit 1; }
 step() { STEP=$((STEP + 1)); printf '\n[%d/%d] %s\n' "$STEP" "$TOTAL" "$*"; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
@@ -76,7 +79,7 @@ fi
 # lsblk -P: NAME="sda" RM="1" TRAN="usb" TYPE="disk" SIZE="61530439680" MODEL="..." VENDOR="..."
 info=$($LSBLK -dnb -P -o NAME,RM,TRAN,TYPE,SIZE,MODEL,VENDOR "$DEV" 2>/dev/null) || die "lsblk cannot read $DEV"
 [ -n "$info" ] || die "lsblk knows nothing about $DEV"
-field() { printf '%s\n' "$info" | sed -n "s/.*\\b$1=\"\\([^\"]*\\)\".*/\\1/p" | head -1; }
+field() { printf '%s\n' "$info" | sed -n -E "s/(^|.* )$1=\"([^\"]*)\".*/\\2/p" | head -1; }   # -E: BSD sed has no \b
 rm_flag=$(field RM); tran=$(field TRAN); type=$(field TYPE); size=$(field SIZE)
 model=$(field MODEL); vendor=$(field VENDOR)
 [ "$type" = "disk" ] || die "$DEV is a '$type', not a whole disk (give /dev/sdX, not /dev/sdX1)"
@@ -187,9 +190,9 @@ $MOUNT "$PART" "$MNT"
 FILES=$(mktemp)
 (cd "$DIR" && { find efi/EFI -type f -print; find recovery -type f ! -name '.*' -print; }) | sort > "$FILES"
 TOTAL_BYTES=0
-while IFS= read -r f; do TOTAL_BYTES=$((TOTAL_BYTES + $(stat -c %s "$DIR/$f"))); done < "$FILES"
+while IFS= read -r f; do TOTAL_BYTES=$((TOTAL_BYTES + $(fsize "$DIR/$f"))); done < "$FILES"
 DONE_BYTES=0
-NFILES=$(wc -l < "$FILES")
+NFILES=$(wc -l < "$FILES" | tr -d " ")
 
 dest_of() {   # efi/EFI/OC/x -> EFI/OC/x ; recovery/x -> com.apple.recovery.boot/x
     case "$1" in
@@ -212,11 +215,11 @@ progress() {   # progress LABEL DONE_OF_FILE FILE_SIZE
 
 copy_big() {   # copy_big SRC DST LABEL: 8 MiB at a time, with a percentage
     local src=$1 dst=$2 label=$3 size done=0 blk=0
-    size=$(stat -c %s "$src")
+    size=$(fsize "$src")
     : > "$dst"
     LAST_PRINTED=x
     while [ "$done" -lt "$size" ]; do
-        dd if="$src" of="$dst" bs=1M skip=$((blk * CHUNK_MB)) seek=$((blk * CHUNK_MB)) count=$CHUNK_MB conv=notrunc,fsync status=none
+        ddc if="$src" of="$dst" skip=$((blk * CHUNK_MB)) seek=$((blk * CHUNK_MB)) count=$CHUNK_MB
         blk=$((blk + 1))
         done=$((blk * SMALL_FILE))
         [ "$done" -gt "$size" ] && done=$size
@@ -230,7 +233,7 @@ step "Copying OpenCore and the macOS recovery ($NFILES files, $((TOTAL_BYTES / 1
 small=0 small_bytes=0
 while IFS= read -r f; do
     d=$MNT/$(dest_of "$f")
-    s=$(stat -c %s "$DIR/$f")
+    s=$(fsize "$DIR/$f")
     mkdir -p "$(dirname "$d")"
     if [ "$s" -ge "$SMALL_FILE" ]; then
         copy_big "$DIR/$f" "$d" "$(basename "$f")"

@@ -44,7 +44,7 @@ END
 python3 -I -B tools/frame_order.py "$T/frameorder-slow.log" | grep -q '3 frames seen, 27 skipped, 0 torn sample(s); displayed 1.5 fps of the page.s 15.0 fps (10 %)' || no "the displayed / page fps is wrong: $(python3 -I -B tools/frame_order.py "$T/frameorder-slow.log")"
 python3 -I -B tools/frame_order.py "$T/frameorder-slow.log" | grep -q 'probe UNPACED' || no "an old probe's burst does not say it was unpaced"
 # N64: the paced probe says so in its file, the row says it was paced
-sed '1a # pacing: sleep after each round as long as its reads took (50% duty, at most 8000 us)' "$T/frameorder-slow.log" > "$T/frameorder-paced.log"
+awk 'NR == 1 { print; print "# pacing: sleep after each round as long as its reads took (50% duty, at most 8000 us)"; next } { print }' "$T/frameorder-slow.log" > "$T/frameorder-paced.log"   # not sed 1a: BSD sed needs a backslash
 python3 -I -B tools/frame_order.py "$T/frameorder-paced.log" | grep -q 'displayed 1.5 fps of the page.s 15.0 fps (10 %); probe paced (50 % duty)' || no "the paced probe is not said: $(python3 -I -B tools/frame_order.py "$T/frameorder-paced.log")"
 printf '# frameorder none\nE 0 10 0\n' > "$T/frameorder-none.log"
 python3 -I -B tools/frame_order.py "$T/frameorder-none.log" | grep -q '^WARN frame order: frameorder-none: NO strip found' || no "a burst with no strip is not a WARN"
