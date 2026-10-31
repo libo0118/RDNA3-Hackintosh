@@ -25,7 +25,7 @@ HW      += hw/dcn32_txstate.c
 UAPI    := uapi/rdna3_drm.c
 COMMON_H := $(wildcard common/*.h) $(wildcard hw/*.h) $(wildcard uapi/*.h)
 
-.PHONY: all test tools kext clean
+.PHONY: all test test-run tools kext clean
 
 all: test tools
 
@@ -219,133 +219,69 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c common/rdna3_strip.h $(LI
 	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $(SAN) $(LIBDRM_INC) $(INC) -D_GNU_SOURCE -o $@ \
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
-# RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_attr_ring $(BUILD)/test_bar_window $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_iop_stale $(BUILD)/test_iop_copy $(BUILD)/test_strip $(BUILD)/test_handoff $(BUILD)/test_present_cost $(BUILD)/test_ws_frame $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_fbgate $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_coh $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_gpu_time_queue $(BUILD)/test_ab_switch $(BUILD)/test_surf_census $(BUILD)/test_surfin_cache $(BUILD)/test_copy_pack $(BUILD)/test_capture $(BUILD)/test_msupload $(BUILD)/test_msdl $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host $(BUILD)/test_ci_refl
-	$(BUILD)/test_discovery
-	$(BUILD)/test_fw $(RDNA3_FW_DIR)
-	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
-	$(BUILD)/test_uapi
-	$(BUILD)/test_range_alloc
-	$(BUILD)/test_vram_place
-	$(BUILD)/test_bo_map
-	$(BUILD)/test_bo_map_race
-	$(BUILD)/test_mtl_allow metal/rdna3mtl-allow.txt
-	$(BUILD)/test_linear_pitch
-	$(BUILD)/test_gpu_time_queue
-	$(BUILD)/test_ab_switch
-	$(BUILD)/test_surf_census
-	$(BUILD)/test_surfin_cache
-	$(BUILD)/test_ci_refl
-	$(BUILD)/test_copy_pack
-	$(BUILD)/test_capture $(BUILD)/capture_sample.bin
-	python3 tools/capture_decode.py --check $(BUILD)/capture_sample.bin
-	$(BUILD)/test_msupload
-	$(BUILD)/test_msdl
-	$(BUILD)/test_spirv_fbfetch
-	$(BUILD)/test_fbfetch_plan
-	$(BUILD)/test_agdc_k5
-	$(BUILD)/test_agdc_n48
-	$(BUILD)/test_bootargs
-	$(BUILD)/test_a3_display
-	$(BUILD)/test_gamma_judge
-	$(BUILD)/test_swap_front
-	$(BUILD)/test_attr_ring
-	$(BUILD)/test_bar_window
-	$(BUILD)/test_flip_latch
-	$(BUILD)/test_iop_stale
-	$(BUILD)/test_iop_copy
-	$(BUILD)/test_handoff
-	$(BUILD)/test_present_cost
-	$(BUILD)/test_ws_frame
-	$(BUILD)/test_vbl_irq
-	$(BUILD)/test_tcall
-	$(BUILD)/test_fbgate
-	$(BUILD)/test_flip_queue
-	$(BUILD)/test_gpu_busy
-	$(BUILD)/test_coh
-	$(BUILD)/test_fb_policy
-	$(BUILD)/test_swap_copy
-	$(BUILD)/test_write_gen
-	$(BUILD)/test_vram_park
-	$(BUILD)/test_surf_pending
-	$(BUILD)/test_trace
-	$(BUILD)/test_libdrm_amdgpu
-	rm -f $(BUILD)/scanout-pipe*.ppm
-	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '1 pipe(s) lit'
-	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '^  TX problems: none$$'
-	$(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q '1 pipe(s) lit'
-	# the hires look is the surface's native 1920x1080 (every pixel, rows cut in segments of rgb[]: the picture is
-	# put together right across the cuts at 1280) and the host triage turns it into a PNG of that size
-	test "$$(sed -n 2p $(BUILD)/scanout-pipe0.ppm)" = '1920 1080'
-	python3 -c "import sys; d=open(sys.argv[1],'rb').read(); d=d[d.index(b'255\n')+4:]; px=lambda x,y: tuple(d[(y*1920+x)*3:(y*1920+x)*3+3]); box=lambda x,y: 140<=x*320//1920<180 and 70<=y*180//1080<110; sys.exit(0 if len(d)==1920*1080*3 and all(px(x,y)==((255,255,255) if box(x,y) else (0,y*255//1080,x*255//1920)) for x in (0,1,1279,1280,1281,1919,900,1000) for y in (0,1,539,540,1079)) else 1)" $(BUILD)/scanout-pipe0.ppm
-	$(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q 'picture 1920x1080: .* (native)$$'
-	sh tests/test_frame_order.sh $(BUILD)
-	$(BUILD)/test_strip
-	python3 tools/triage_reports.py --picture $(BUILD)/scanout-pipe0.ppm | grep -q 'png'
-	python3 -c "import struct,sys; d=open(sys.argv[1],'rb').read(); sys.exit(0 if struct.unpack('>II', d[16:24]) == (1920, 1080) else 1)" $(BUILD)/scanout-pipe0.png
-	# a kext from before the native look (RDNA3_LB_SCANOUT_V1): its 1280-wide sample, and the output says so
-	RDNA3_LB_SCANOUT_V1=1 $(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q 'native look: NOT available, the kext predates it (abi 0): this is its 1280-wide sample'
-	test "$$(sed -n 2p $(BUILD)/scanout-pipe0.ppm)" = '1280 720'
-	# two jobs in one process each get their own VA (card run 2026-10-12)
-	! $(BUILD)/rdna3_drminfo_host --dma-test --gfx-test 2>&1 | grep -q 'GEM_VA'
-	tests/test_oc_install.sh
-	tests/test_make_pkg.sh
-	tests/test_triage_a3.sh
-	python3 -I -B tests/test_accel_hash_parity.py
-	python3 -I -B tests/test_fb_agdc_hash_parity.py
-	python3 -I -B tests/test_trace_parity.py
-	python3 -I -B tests/test_triage_park.py
-	python3 -I -B tests/test_triage_n43.py
-	python3 -I -B tests/test_triage_gpuq.py
-	python3 -I -B tests/test_triage_n48.py
-	python3 -I -B tests/test_triage_bootwatch.py
-	python3 -I -B tests/test_triage_glyphs.py
-	python3 -I -B tests/test_triage_coherence.py
-	python3 -I -B tests/test_triage_attr_ring.py
-	python3 -I -B tests/test_triage_bar.py
-	python3 -I -B tests/test_triage_present_cost.py
-	python3 -I -B tests/test_triage_write_gen.py
-	python3 -I -B tests/test_lookimg.py
-	python3 -I -B tests/test_triage_parallel.py
-	python3 -I -B tests/test_glyph_verdict.py
-	python3 -I -B tests/test_fb_class.py
-	python3 -I -B tests/test_triage_iop_log.py
-	python3 -I -B tests/test_triage_agdc_n48.py
-	python3 -I -B tests/test_triage_pairing.py
-	python3 -I -B tests/test_triage_nocard.py
-	python3 -I -B tests/test_kext_kpi_versions.py
-	python3 -I -B tests/test_kmutil_kpi_guard.py
-	python3 -I -B tests/test_triage_tcall.py
-	python3 -I -B tests/test_triage_bomem.py
-	tests/test_coredisplay_prefs.sh
-	tests/test_prune_traces.sh
-	tests/test_membw_load.sh
-	python3 -I -B tests/test_accel_slots.py
-	python3 -I -B tests/test_accel_locks.py
-	tests/test_triage_tx.sh
-	tests/test_triage_stale_plugin.sh
-	tests/test_triage_latch.sh
-	tests/test_result_checklist.sh
-	tests/test_triage_trace.sh
-	tests/test_triage_vram.sh
-	tests/test_plugin_trace.sh
-	tests/test_triage_bisect.sh
-	tests/test_bisect_step.sh
-	tests/test_play_step.sh
-	tests/test_ladder_step.sh
-	tests/test_apps_step.sh
-	python3 -I -B tests/test_triage_apps.py
-	tests/test_bootwatch.sh
-	tests/test_approve_gate.sh
-	tests/test_forgejo_update.sh
-	tests/test_triage_stale_kexts.sh
-	tests/test_vm_present_ab.sh
-	tests/test_vm_amd_cpu.sh
-	tests/test_baremetal.sh
-	python3 -I tests/test_ocpatchsim.py
-	tests/test_triage_present.sh
-	tests/test_triage_fb_n40.sh
-	tests/test_probe_coredisplay.sh
+# ---- make test: one target per test, run in parallel -----------------------------------------------------------
+# `make test` runs every test as its own target `t.<name>` (a test starts as soon as its binary is built), with
+# one job per hardware thread when no -j is given: -jN / JOBS=N choose another number, `make -j1 test` or JOBS=1
+# is serial. The output of each test goes to $(TESTLOG)/<name>.log (tests/run_one.sh), failed logs are printed
+# at the end with one summary line (tests/test_summary.sh); the exit status is 1 if any test failed.
+# RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files.
+#
+# Every test works in its own mktemp directory (or in $(BUILD) under a name only it uses), so any order and any
+# number of jobs is fine. Two tests are one target because their steps depend on each other: t.test_capture (the
+# writer, then the decoder reads its file) and t.test_scanout (tests/test_scanout.sh: the loopback's picture,
+# then what reads it).
+TESTLOG := build/test-logs
+# `make test` has to hand -jN to a recursive make: a -j set inside the Makefile is not reliable on make 3.81
+# (the macOS runner's). Detect the user's own -j in MAKEFLAGS (any spelling contains "-j"); nproc is GNU, hw.ncpu BSD.
+NPROC    = $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+TESTJOBS = $(if $(findstring -j,$(MAKEFLAGS)),,-j$(if $(JOBS),$(JOBS),$(NPROC)))
+
+# the tests without arguments: shell and python tests (the slow ones first, they need no build and run while the
+# binaries compile; make starts the targets in this order), then the binaries
+C_TESTS := test_discovery test_uapi test_range_alloc test_vram_place test_bo_map test_bo_map_race \
+    test_linear_pitch test_gpu_time_queue test_ab_switch test_surf_census test_surfin_cache test_ci_refl \
+    test_copy_pack test_msupload test_msdl test_spirv_fbfetch test_fbfetch_plan test_agdc_k5 test_agdc_n48 \
+    test_bootargs test_a3_display test_gamma_judge test_swap_front test_attr_ring test_bar_window \
+    test_flip_latch test_iop_stale test_iop_copy test_handoff test_present_cost test_ws_frame test_vbl_irq \
+    test_tcall test_fbgate test_flip_queue test_gpu_busy test_coh test_fb_policy test_swap_copy test_write_gen \
+    test_vram_park test_surf_pending test_trace test_libdrm_amdgpu test_strip
+PY_TESTS := test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash_parity \
+    test_fb_agdc_hash_parity test_trace_parity test_triage_park test_triage_n43 test_triage_gpuq \
+    test_triage_n48 test_triage_bootwatch test_triage_glyphs test_triage_coherence test_triage_attr_ring \
+    test_triage_bar test_triage_present_cost test_triage_write_gen test_fb_class test_triage_iop_log \
+    test_triage_agdc_n48 test_triage_pairing test_triage_nocard test_kext_kpi_versions test_kmutil_kpi_guard \
+    test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps
+SH_TESTS := test_bisect_step test_bootwatch test_membw_load test_ladder_step test_apps_step test_triage_a3 \
+    test_baremetal test_triage_trace test_oc_install test_make_pkg test_coredisplay_prefs test_prune_traces \
+    test_triage_tx test_triage_stale_plugin test_triage_latch test_result_checklist test_triage_vram \
+    test_plugin_trace test_triage_bisect test_play_step test_approve_gate test_forgejo_update \
+    test_triage_stale_kexts test_vm_present_ab test_vm_amd_cpu test_triage_present test_triage_fb_n40 \
+    test_probe_coredisplay
+define TEST_RULE
+.PHONY: t.$(1)
+t.$(1): $(2)
+	@sh tests/run_one.sh $(TESTLOG) $(1) $(3)
+TEST_TARGETS += t.$(1)
+endef
+TEST_TARGETS :=
+$(foreach t,$(SH_TESTS),$(eval $(call TEST_RULE,$(t),,tests/$(t).sh)))
+$(foreach t,$(PY_TESTS),$(eval $(call TEST_RULE,$(t),,python3 -I -B tests/$(t).py)))
+$(foreach t,$(C_TESTS),$(eval $(call TEST_RULE,$(t),$(BUILD)/$(t),$(BUILD)/$(t))))
+$(eval $(call TEST_RULE,test_fw,$(BUILD)/test_fw,$(BUILD)/test_fw $(RDNA3_FW_DIR)))
+$(eval $(call TEST_RULE,sim_navi32,$(BUILD)/sim_navi32,$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)))
+$(eval $(call TEST_RULE,test_mtl_allow,$(BUILD)/test_mtl_allow,$(BUILD)/test_mtl_allow metal/rdna3mtl-allow.txt))
+$(eval $(call TEST_RULE,test_ocpatchsim,,python3 -I tests/test_ocpatchsim.py))
+$(eval $(call TEST_RULE,test_capture,$(BUILD)/test_capture,sh tests/test_capture_decode.sh $(BUILD)))
+$(eval $(call TEST_RULE,test_scanout,$(BUILD)/rdna3_drminfo_host,sh tests/test_scanout.sh $(BUILD)))
+# two jobs in one process each get their own VA (card run 2026-10-12)
+$(eval $(call TEST_RULE,test_drminfo_va,$(BUILD)/rdna3_drminfo_host,sh tests/test_drminfo_va.sh $(BUILD)))
+
+test:
+	@rm -rf $(TESTLOG)
+	@$(MAKE) $(TESTJOBS) test-run
+
+test-run: $(TEST_TARGETS)
+	@sh tests/test_summary.sh $(TESTLOG) $(patsubst t.%,%,$(TEST_TARGETS))
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

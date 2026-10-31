@@ -258,7 +258,13 @@ Report pipeline:
 ## 4. Tests and CI
 
 `make test` (root `Makefile`; builds into `build/host`, ASan/UBSan, `-Werror`; `RDNA3_FW_DIR` adds real
-firmware checks). It runs, by area:
+firmware checks). Each test is its own target `t.<name>` (lists `C_TESTS`/`PY_TESTS`/`SH_TESTS` and the
+`TEST_RULE` calls in the Makefile; a new test goes into one of them), run in parallel: one job per hardware
+thread unless `-jN` or `JOBS=N` says otherwise (`make -j1 test` / `JOBS=1` is serial). Each test's output is
+`build/test-logs/<name>.log` (`tests/run_one.sh`); failed logs and one summary line come last
+(`tests/test_summary.sh`). A test must use its own `mktemp -d` (or a `build/host` name only it uses): tests run
+in any order beside each other; steps that depend on each other are one target (`tests/test_scanout.sh`,
+`tests/test_capture_decode.sh`). It runs, by area:
 
 | Area | Tests |
 |---|---|

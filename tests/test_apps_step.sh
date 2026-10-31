@@ -391,5 +391,5 @@ sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
 ma=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$st")
 [ "$ma" -ge 40 ] && [ "$ma" -lt 70 ] || fail "rdna3vm: auto_limit apps $ma (15 apps of 50-130 s need ~25 min and the report: expected 40..69)"
 grep -q 'apps_rows' "$ROOT/tools/triage_reports.py" && grep -q 'lv_ == 5' "$ROOT/tools/triage_reports.py" || fail "triage_reports.py: the app survey is not read"
-grep -q 'test_apps_step.sh' "$ROOT/Makefile" && grep -q 'test_triage_apps.py' "$ROOT/Makefile" || fail "Makefile: the survey's tests are not in make test"
+grep -qw 'test_apps_step' "$ROOT/Makefile" && grep -qw 'test_triage_apps' "$ROOT/Makefile" || fail "Makefile: the survey's tests are not in make test"
 echo "test_apps_step: ok"
