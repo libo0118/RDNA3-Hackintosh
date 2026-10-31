@@ -21,6 +21,7 @@
 #include "nvmtl_sampler_state.h"
 #include "nvmtl_linear_pitch.h"
 #include "nvmtl_ab_switch.h"
+#include "nvmtl_surface_share.h"
 #include "nvmtl_trace.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -2043,10 +2044,18 @@ int nvmtl_vk_surface_share_on(void)
         int drm = pnvk_stage_import ? 0 : nvmtl_drm_surface_probe();
         if (drm < 0) return 0;   /* not decided yet: private until the accelerator answers */
         on = (pnvk_stage_import || drm) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
-        nvlog("item 7: IOSurface textures %s (NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s)",
+        /* N71: while the kernel keeps WindowServer's inputs out of family VRAM (debug.rdna3accel_a3ws 0), an app's drawable placed
+         * there is read by WindowServer through the BAR with the CPU (slower than a private image + the GPU copy-out); keep them private */
+        const char *me = getprogname(), *fe = getenv("NVMTL_SURFACE_SHARE");
+        int a3ws = -1; { int v = 0; size_t n = sizeof v; if (sysctlbyname("debug.rdna3accel_a3ws", &v, &n, NULL, 0) == 0) a3ws = v; }
+        const int kept = on && nvmtl_surface_share_kept_private(me && strcmp(me, "WindowServer") == 0, a3ws, fe && fe[0] == '1');
+        if (kept) on = 0;
+        nvlog("item 7: IOSurface textures %s (NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s; "
+              "N71: debug.rdna3accel_a3ws %d, NVMTL_SURFACE_SHARE=%s%s)",
               on ? "live in the surface's family VRAM (one per surface, every process)" : "private per process (copies)",
               pnvk_stage_import ? "present" : "ABSENT", drm ? "present" : pdrm_surface_fd ? "not offered by the kext" : "ABSENT",
-              g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset");
+              g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset", a3ws, fe ?: "unset",
+              kept ? ": kept private - the kernel keeps WindowServer's inputs out of family VRAM, so WindowServer could only read them through the BAR" : "");
     }
     return on;
 }
