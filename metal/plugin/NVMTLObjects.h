@@ -117,6 +117,7 @@ extern id gNVMTLMainDevice;
   NSMutableDictionary *_userDictionary;
   @public nvk_cmdbuf _c; NVMTLCommandQueue *_queue; BOOL _committed; BOOL _capacityHeld; MTLCommandBufferStatus _cbstatus;
   NVMTLTexture *_present;
+  NSMutableSet *_presentRoots;   // N69: the root textures of every drawable this command buffer presents (_present holds only the last)
   NSMutableArray *_presentations;
   NSMutableArray *_handlers;
   NSMutableArray *_scratch;
@@ -298,7 +299,7 @@ typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_p
 #include "nvmtl_present_cost.h"
 /* N61: the IOSurface's own pages imported as a GPU buffer (the root texture only), where the plane's rows land in it, how
  * many copy-outs the texture had, and why it is never copied by the GPU (_soDead, _soWhy: NVMTL_SO_WHY_*) */
-@interface NVMTLTexture () { @public nvk_buffer _soBuf; uintptr_t _soBase; size_t _soOff; uint32_t _soRow, _soOuts; int _soWhy; BOOL _soDead; } @end
+@interface NVMTLTexture () { @public nvk_buffer _soBuf; uintptr_t _soBase; size_t _soOff; uint32_t _soRow, _soOuts; int _soWhy; BOOL _soDead; BOOL _soDrawable; /* N69: this root texture was handed to a present call */ } @end
 static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, NSUInteger off, NSUInteger len);
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared);
 @interface NVMTLIndirectCommandBuffer () { @public uint32_t _purge; } @end

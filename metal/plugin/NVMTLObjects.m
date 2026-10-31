@@ -5877,6 +5877,12 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];
         nvmtl_surf_dirty(self, _present); nvmtl_cen_note(_present, NVC_PRESENT, 1);
+        if (_present) {   /* N69: the seal leaves this texture's copy-out to the command buffer that presents it */
+            NVMTLTexture *pr = _present->_parent ? _present->_parent : _present;
+            pr->_soDrawable = YES;
+            if (!_presentRoots) _presentRoots = [NSMutableSet new];
+            [_presentRoots addObject:pr];
+        }
     }
     if (!_presentations) _presentations = [NSMutableArray new];
     [_presentations addObject:[action copy]];
