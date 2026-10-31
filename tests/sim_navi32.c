@@ -13977,6 +13977,8 @@ int main(int argc, char **argv)
     run(NULL);
     if (argc > 1 && argv[1][0])
         run(argv[1]);
+    else
+        printf("sim_navi32: skip: the run on the real Navi 32 firmware (no RDNA3_FW_DIR: not fetched or incomplete)\n");
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

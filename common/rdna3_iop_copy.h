@@ -35,16 +35,16 @@ static inline int rd3_iop_copy_rows(volatile void *dst, uint32_t dpitch, const v
     if (rd3_iop_copy64_ok((uintptr_t)src, (uintptr_t)dst, spitch, dpitch, row_bytes)) {
         const uint32_t q = row_bytes / 8u;
         for (uint32_t y = 0; y < h; y++) {
-            const volatile uint64_t *sp = (const volatile uint64_t *)((const volatile uint8_t *)src + (uint64_t)y * spitch);
-            volatile uint64_t *dp = (volatile uint64_t *)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
+            const volatile uint64_t *sp = (const volatile uint64_t *)(uintptr_t)((const volatile uint8_t *)src + (uint64_t)y * spitch);
+            volatile uint64_t *dp = (volatile uint64_t *)(uintptr_t)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
             for (uint32_t x = 0; x < q; x++) dp[x] = sp[x];
         }
         return 8;
     }
     const uint32_t words = row_bytes / 4u;
     for (uint32_t y = 0; y < h; y++) {
-        const volatile uint32_t *sp = (const volatile uint32_t *)((const volatile uint8_t *)src + (uint64_t)y * spitch);
-        volatile uint32_t *dp = (volatile uint32_t *)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
+        const volatile uint32_t *sp = (const volatile uint32_t *)(uintptr_t)((const volatile uint8_t *)src + (uint64_t)y * spitch);
+        volatile uint32_t *dp = (volatile uint32_t *)(uintptr_t)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
         for (uint32_t x = 0; x < words; x++) dp[x] = sp[x];
     }
     return 4;
@@ -84,8 +84,8 @@ static inline int rd3_iop_convert_l10r_rows(volatile void *dst, uint32_t dpitch,
     if (rd3_iop_copy64_ok((uintptr_t)src, (uintptr_t)dst, spitch, dpitch, row_bytes)) {
         const uint32_t q = row_bytes / 8u;
         for (uint32_t y = 0; y < h; y++) {
-            const volatile uint64_t *sp = (const volatile uint64_t *)((const volatile uint8_t *)src + (uint64_t)y * spitch);
-            volatile uint64_t *dp = (volatile uint64_t *)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
+            const volatile uint64_t *sp = (const volatile uint64_t *)(uintptr_t)((const volatile uint8_t *)src + (uint64_t)y * spitch);
+            volatile uint64_t *dp = (volatile uint64_t *)(uintptr_t)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
             for (uint32_t x = 0; x < q; x++) {
                 const uint64_t v = sp[x];   /* little endian: the first pixel in the low word */
                 dp[x] = (uint64_t)rd3_iop_l10r_px((uint32_t)v) | ((uint64_t)rd3_iop_l10r_px((uint32_t)(v >> 32)) << 32);
@@ -95,8 +95,8 @@ static inline int rd3_iop_convert_l10r_rows(volatile void *dst, uint32_t dpitch,
     }
     const uint32_t words = row_bytes / 4u;
     for (uint32_t y = 0; y < h; y++) {
-        const volatile uint32_t *sp = (const volatile uint32_t *)((const volatile uint8_t *)src + (uint64_t)y * spitch);
-        volatile uint32_t *dp = (volatile uint32_t *)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
+        const volatile uint32_t *sp = (const volatile uint32_t *)(uintptr_t)((const volatile uint8_t *)src + (uint64_t)y * spitch);
+        volatile uint32_t *dp = (volatile uint32_t *)(uintptr_t)((volatile uint8_t *)dst + (uint64_t)y * dpitch);
         for (uint32_t x = 0; x < words; x++) dp[x] = rd3_iop_l10r_px(sp[x]);
     }
     return 4;
