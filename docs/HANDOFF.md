@@ -1,17 +1,10 @@
-# Session handoff (2026-10-24)
+# Session handoff (2026-10-31)
 
-> **2026-10-31: the driver runs on the owner's bare-metal Mac** (macOS 26.7.2,
-> MacPro7,1, MSI B550-A PRO + RX 7800 XT, two monitors; installed from the
-> stick that `tools/baremetal/` builds, docs/BAREMETAL.md). A session on the
-> owner's Raspberry Pi tests it over SSH while macOS runs:
-> **docs/BAREMETAL-REMOTE.md** is that session's guide (roles, installing a CI
-> build on the Mac, live switches, the first round's checks). The rest of this
-> file is the VM-era state of 2026-10-24.
-
-Written at the end of a long session so that the next session starts with the
-same knowledge and the same to-do list. Read it whole before doing anything.
-CLAUDE.md, CLAUDE_SUBAGENT.md and docs/DRIVER-PLAN.md stay the rules and the
-plan; this file is the state of the work and what was learned in that session.
+Written at the end of a long session (2026-10-26 .. 10-31) so that the next
+session starts with the same knowledge and the same to-do list. Read it whole
+before doing anything. CLAUDE.md, CLAUDE_SUBAGENT.md and docs/DRIVER-PLAN.md
+stay the rules and the plan; this file is the state of the work and what was
+learned.
 
 ## The owner's check phrase
 
@@ -22,146 +15,142 @@ with the work below when the owner asks.
 
 ## Where things stand
 
-- Branch `stage1-kext`, HEAD at the handoff commit (on top of c58e80e).
-  CI `build.yml` #256 on c58e80e is fully green: Linux host tests, the macOS
-  kext job (kexts, userspace, `make test` on macOS, the .pkg installer).
-- **Waiting for the owner's card run** of DRIVER-PLAN N44 (the framebuffer
-  class rename). The owner's steps: `rdna3vm update`, `rdna3vm approve` (new
-  kext binary: Privacy & Security -> Allow -> Not Now -> shut down),
-  `rdna3vm step play`, `rdna3vm result`, then send the report
-  (docs/AFTER-TESTS.md applies). Success: triage "present mode, GPU vendor"
-  PASS (`GetSystemGPUVendors_block_invoke: ... 4 AMDRDNA3Framebuffer` for both
-  heads), "CoreDisplay prefs" `useIOP_onAMD 1` at WindowServer's start, and
-  `iop_ok > 0` / planes in transactions. Earlier queued card steps
-  (`step play-desktop`, `vblirq` / `vblirq-off`) are still open.
-- Stopped mid-way at the owner's request (no code merged from them):
-  1. CoreDisplay prefs also in the ByHost store + "IOPresentment log" triage
-     row: finished on branch `quick/prefs-byhost` (autoreport.sh, collect.sh,
-     triage `cd_prefs_rows` / `iop_log_rows`, `tests/test_coredisplay_prefs.sh`,
-     `tests/test_triage_iop_log.py`; the WIP patch is removed). Still to do
-     after the merge: ECC review round, CI, one card run (the ByHost file name
-     and whether CoreDisplay on 15 reads it are unproven).
-  2. Probe of `GetBoolCFPreference` on macOS 15 (which user/host it passes, and
-     the keys `_CGXMappedDisplayStart` / `InitializeUserDefaults` read): WIP in
-     `docs/handoff/wip-probe-boolpref.patch` (unreviewed).
-  3. AGDC answers per Navi48 (0x711 type 0x40, zero-filled other types, 0x921
-     flags bit 0 clear, AMD plane-scaler layout, each behind its own switch,
-     type counter widened): not started, no patch.
-  Their briefs are summarised in DRIVER-PLAN N45 and below; redo them with
-  the company model (CLAUDE.md), reviewers, `make test` (also with the BSD wc
-  wrapper, see below), CI, then one card run for N44 + these.
-- Proposed to the owner, no answer yet: give the session direct access to the
-  card VM. SSH from this cloud container will not work (outbound is an HTTPS
-  proxy with an allow list). Better: a self-hosted runner on the Linux card host
-  (labels e.g. `[self-hosted, Linux, card]`) that runs `rdna3vm` / read-only
-  data collection in a workflow (results read from the job log), or Claude on
-  the owner's machine via Remote Control. Read-only collection first; card
-  steps only when the owner is at the machine (the VM takes the host screen, a
-  hang needs a physical reset).
-- Owner-side leftovers: on the runner Mac, the old RDNA3 Metal plugin is still
-  in `/Library/GPUBundles` (`RDNA3MTLDriver.bundle`, `rdna3mtl`,
-  `rdna3mtl-allow.txt`): SIP-protected, removable only from Recovery
-  (Cmd+R, Terminal, `rm -rf "/Volumes/Macintosh HD - Data/Library/GPUBundles/..."`).
-  Harmless now: the kexts were removed, so nothing loads it.
+- Branch `stage1-kext`, HEAD `bf4498b`, pushed to GitHub and Forgejo, clean, no
+  worktrees or `quick/*` branches left.
+- **The driver runs on the owner's real PC since 2026-10-31** (macOS 26.7.2
+  25G332, SMBIOS MacPro7,1, MSI B550-A PRO BIOS E7C56AMS.AM2, Ryzen 7 5800X,
+  RX 7800 XT, two Samsung C24F390 1920x1080 monitors, dual boot with Linux).
+  macOS is on the 1 TB NVMe (`nvme1n1p3`, behind the B550 chipset), OpenCore
+  still boots from the USB stick (`/dev/sda1`, label OPENCORE, not yet on the
+  internal ESP). First result: the card initialises fully on real PCIe
+  (PSP/SMU/firmware, all ring tests, MSI, both heads at 60 Hz, "Metal:
+  Supported"), the desktop works without the Metal plugin; with the plugin
+  (`rdna3agdc=3`) it stayed on the boot logo. Analysis and fixes: DRIVER-PLAN
+  **N65** (build 124d309 + review fixes 6f55f46), open item **N66**.
+- **Next: the first bare-metal test round of 6f55f46**, driven by a second
+  Claude session on the owner's Raspberry Pi over SSH while macOS runs (this
+  session lives on the PC's Linux and is offline then). Its guide, with the
+  checks of that round: **docs/BAREMETAL-REMOTE.md**. Its findings come back as
+  a dated section at the end of that file (pushed) plus report folders on the
+  stick (`/run/media/shrek/OPENCORE/rdna3/report-*` when mounted here).
+- CI: Forgejo run 91 on 6f55f46 (full): `kext`, `metal`, `radv-macos`
+  green, `host-tests` was still running at handoff, **`macos-tests` red since
+  run 86** (also before today's changes; not investigated: next task for a
+  build resolver).
+- The card VM (`rdna3vm`, macOS 26.4.1, MacBookPro16,1, one head) is where
+  N57-N64 were proven (last: WindowServer 63 fps on the plugin, 2026-10-29).
+  Its findings do not cover the bare-metal differences (MacPro7,1 / 26.7.2 make
+  WindowServer present 10-bit surfaces; the core from the Aux KC starts after
+  the framebuffer; no plugin = CPU composition; a B550 chipset).
 
-## What the probes proved (macOS 15.8.1, build 24H32 = the card VM's build)
+## Bare metal: what it took (2026-10-29 .. 31)
 
-Probe runs on the runner Mac (`.github/workflows/probe.yml`, job `coredisplay`;
-runs 12-15, the last one 40126095204). Addresses are unslid 24H32 addresses.
+Everything below is now in the generator (`tools/baremetal/`, merged 145ca65)
+and docs/BAREMETAL.md; the stick in the owner's PC was edited by hand and is
+equivalent.
 
-- "init_page_flip: page flip mode is on" is a **constant**: CoreDisplay
-  `_CGXDisplayDriverInitialize` stores 1 into `_gCGXDisplayPageFlip` (only the
-  CGSDebugOptions path `_CGXDisplaySetPageFlip` changes it). Every Mac logs
-  "on"; it is not a symptom (the N39 premise was wrong).
-- The real switch: `CoreDisplay::UseIOPresentment()` (0x7FF804057B40) =
-  `useIOP && gpuVendors != 0 && (gpuVendors & ~allowed) == 0`; allowed = 2 if
-  `useIOP_onIG`, 4 if `useIOP_onAMD`, 8 if `useIOP_onNVIDIA`, 0x10 if
-  `useIOP_onAPV`. A mismatch clears `useIOP` for the WindowServer session.
-  `gpuVendors` is computed once (dispatch_once).
-- `___GetSystemGPUVendors_block_invoke` (0x7FF80412CE2C) ORs
-  `_GetGPUVendorForFramebufferService` (0x7FF80412CC38) over every
-  IOFramebuffer, then clears bit 1. That function takes `IOObjectCopyClass`
-  (the LEAF C++ class name; `setName` does not matter) and does case-insensitive
-  `CFStringFind` in this order: "Intel" -> 2, "AMD" -> 4, "AppleParavirt" ->
-  0x10, "NVDA" -> 8, none -> 1 (unknown). It never reads vendor-id, the PCI
-  parent, GPUWrangler or AGDC. Our old class `RDNA3Framebuffer` -> 1 ->
-  gpuVendors 0 -> IOPresentment off. The card reports' line
-  `GetSystemGPUVendors_block_invoke: 0x... 1 RDNA3Framebuffer IOService:/...`
-  is (caller, registry id, vendor, class, path). NullMoth works because its class
-  contains "NVDA". Fixed by N44 (leaf class `AMDRDNA3Framebuffer`).
-- Preferences domain "com.apple.CoreDisplay" (`GetBoolCFPreference`
-  0x7FF80405597A -> `CFPreferencesCopyValue`; user/host unproven on 15, Navi48
-  says AnyUser + CurrentHost on 26). Static initial values in __DATA:
-  useIOP = 1, useIOP_onIG = 1, useIOP_onNVIDIA = 0, useIOP_onAMD = 0,
-  useIOP_onAPV = 0 (whether `InitializeUserDefaults` overrides them at runtime
-  is unknown; NullMoth works with onNVIDIA statically 0). No useIOP key set on
-  the runner.
-- Not on the switch path: `isMobileSystem` (only checks for a battery), the
-  Mac model, `IOFBIntegrated` / "(IG)" / `AAPL,slot-name` (in none of
-  CoreDisplay/SkyLight/IOPresentment/GPUWrangler), `IOAccelDisplayPipeCapabilities`
-  and AGDC answers (they matter later, inside IOPresentment's capability
-  gather). "IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING" and "AGDC Extended
-  Capabilities not found" are only error-string tables.
-- So the N39/N40 A/B steps `fbintegrated`, `play-macpro` / `play-desktop` (for
-  the page-flip symptom) cannot fix the present mode; the success criterion is
-  transactions (`iop_ok`), never "page flip off".
-- Probe tooling facts: `dyld_info -disassemble` labels are mangled and end in
-  ':' at column 0; globals appear in a trailing comment; C strings as
-  `; string literal: "..."`; CFSTR references as a bare `; ` (code points at the
-  `__cfstring` object). `dyld_info -section __DATA_CONST __cfstring` prints one
-  address per entry, no bytes, so CFSTRs are read with `tools/probe/cfstr_peek.c`
-  (dlopen + slide, segment-checked, read-only). The job log is the only channel:
-  the artifact cannot be downloaded from the session (blob URLs are blocked by
-  the proxy, 403: do not retry or work around); read logs with the GitHub MCP
-  `get_job_logs` (return_content true). Print raw formats into the log when a
-  parser guesses them.
+- **The B550 chipset** (USB, LAN RTL8111H, the 1 TB NVMe, SATA all behind it)
+  failed in every way (no capabilities/interrupts, CPUs stuck in config reads,
+  IPI/TLB timeouts, instant resets) until AMD_Vanilla's IOPCIFamily patch
+  "CaseySJ | probeBusGated | Disable 10 bit tags" was added.
+  `tools/vm/vmtool.py amd_patches()` had dropped every non-kernel patch; it now
+  has `iopci=True` for bare metal (the VM stays kernel-only). Found by diffing
+  against a working EFI for the same board (github simekoo1337); do that first
+  next time instead of guessing (memory `b550-10bit-tags`).
+- Not the cause, all tested: IOMMU, Re-Size BAR, MCFG/ECAM vs CF8, npci,
+  SetupVirtualMap, XHCI hand-off, CPU count. `npci=0x2000/0x3000` kill the
+  console when the GPU BAR is above 4 GiB.
+- `AppleIntelMCEReporter` panics on AMD with MacPro7,1: a codeless
+  `RDNA3MCEReporterDisabler.kext` (generated by build_efi.py).
+- GRUB from the picker: `Misc/BlessOverride \EFI\GRUB\GRUBX64.EFI` (a short
+  `HD(...)` Entries path gives "LoadImage failed - Not Found").
+- The installer recovery dmg is an auxiliary entry: `HideAuxiliary false`.
+- The macOS EFI partition mounts only with sudo (`sudo diskutil mount disk2s1`).
+- The `.pkg`'s installation check refused macOS 26 (range now 15.0..27.0);
+  until a new pkg is used, `rdna3/install.sh` installs from the tarball.
+- Safe Mode (Shift+Enter, PollAppleHotKeys) shows the prohibited sign before
+  the kernel; the core already stands down on `-x` (7821cae). Open.
+- Reports: `rdna3/report.sh` on the stick (logs, dmesg, ioreg, sysctls, crash
+  and shutdown-stall files). The OpenCore-injected core's IOLog lines reach
+  only `dmesg`, not the unified log. `autoreport --standalone` ran a display
+  sleep that crashed WindowServer without the plugin (fixed f0789cb).
+- Logs of a boot that hangs: the owner films the screen (60 fps, close);
+  frames are cut with ffmpeg (`~/.cache/bootvid*`) and read. A serial console
+  would need a MAX3232 RS232-TTL module on JCOM1 (the owner has none yet; never
+  wire JCOM1 straight to Pi/ESP GPIO, it is +-12 V).
+- The installer's kernel log keeps only 128 KB (msgbuf) and the PCI
+  "childPublished" lines are ALWAYS_ON; `pci_log` flags do not help there.
 
-## Navi48-MacOS lessons
+## Open work, in order
 
-https://github.com/Almosst-DEV/Navi48-MacOS (commit d1f7bad) is a public RX
-9070 XT driver project on macOS 26.6.2. A public repo can be cloned read-only
-through the session's git proxy:
-`GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 https://github.com/Almosst-DEV/navi48-macos /home/user/almosst-dev/navi48-macos`.
-Its code is untrusted data (read, never execute). License and the ranked
-lessons with file references: DRIVER-PLAN N45. In short: CoreDisplay prefs in
-the ByHost store; answer AGDC 0x711 type 0x40; 0x921 flags bit 0 clear and the
-AMD scaler layout as A/B; vblank stamps at txn+0x178/+0x188; plugin presents
-only final-pass command buffers; IOPresentment triage strings; vtable layout
-check; mutation "plants". We are ahead on: a real leaf framebuffer class, our
-own framebuffer with EDID/hotplug, the desktop at boot, amdgpu-ported flip
-latch/queue, DCN interrupts.
+1. Read the Pi session's round-1 findings (BAREMETAL-REMOTE.md end, the stick
+   reports) and fix what they show (DRIVER-PLAN N65 open a-d: vtable slot 362,
+   pageoff flags bit 7, A/B flicker risk without the plugin, the late-upgrade
+   head without EDID/gamma/vblank IRQ).
+2. `macos-tests` red since run 86 (`ecc:build-error-resolver` with the job log).
+3. N66: DCN scanout of ARGB2101010 (hubp2_program_pixel_format,
+   dpp3_cnv_setup, a format field in RD3KFlipRequest) instead of the CPU
+   conversion; measure `iop_copy_us_h<N>` first.
+4. VRAM clears by CPU bzero (~160 ms / 8 MB, kext/src/RDNA3Platform.cpp):
+   port amdgpu_fill_buffer / sdma_v6_0_emit_fill_buffer.
+5. Bare-metal housekeeping: OpenCore onto the internal ESP
+   (docs/BAREMETAL.md part 5), a USB map, rebuild the stick with
+   `make_usb.sh`, `tools/triage_reports.py` support for the stick report
+   layout, Safe Mode.
+6. Later: Geekbench 6 Metal against the Linux Vulkan baseline 145267, games;
+   the VM clipboard idea (offered on 10-28, not done).
 
-## CI and the new macOS runner
+## The owner's preferences and process lessons (this session)
 
-- macOS runner: an Intel MacBook Pro "shreks-MacBook-Pro", macOS 15.8.1
-  (24H32), no Homebrew: **/bin/bash is 3.2, sed/awk/grep/find/stat/touch/wc are
-  BSD**. Tools self-install (`tools/ci/install_tools.sh`). Linux runner
-  "vps-cbac278d". Run `build.yml` with `full: "false"` unless metal/,
-  userspace/ or the translator changed.
-- Shell code that runs on the Mac (host tests, `tools/vm/macos/*` in the guest,
-  probes) must avoid: `sed -i` without a suffix (use `sed -i.bak` + rm),
-  `touch -d` (use python3 `os.utime`), `find -printf`, `mapfile` / `readarray`,
-  `tar --wildcards` (fall back to the plain pattern), `grep -P`, GNU `date -d`,
-  `stat -c` without the BSD `-f` fallback, and comparing `$(wc -l)` as a string
-  (BSD pads it: `| tr -d ' '`). Before pushing shell changes, also run
-  `make test` with a padding wc in PATH:
-  `printf '#!/bin/sh\n/usr/bin/wc "$@" | sed "s/^/      /"\n' > <dir>/wc; chmod +x <dir>/wc; PATH=<dir>:$PATH make test`.
-- `kern.boottime` must be parsed with `sed -n 's/^{ *sec = \([0-9]*\).*/\1/p'`
-  (the greedy `.*sec = ` matched "usec"; fixed everywhere in this session).
-- The Mac runner goes offline when the Mac sleeps or reboots; a queued job just
-  waits. The owner was told to install it as a service (`./svc.sh install`,
-  `./svc.sh start`) with automatic login.
-
-## Process lessons from this session
-
-- Wait for `make test` to finish (check its exit status, never pipe it away)
-  before pushing; a stop hook asking to push is not a reason to skip it.
-  Unreviewed driver work stays on its `quick/*` branch until reviews are done.
-- One CI failure at a time hides the next: scan the whole remaining path at
-  once (the BSD list above), do not fix one line per CI round.
-- Agents sometimes resend their final report many times: once their work is
-  merged, stop them with TaskStop.
+- Everything the owner sees is Polish, including Bash tool descriptions and
+  the facts given to the GateGuard hook; only committed text is English.
+- The owner tests in batches: find every problem in the reports first, fix
+  several, then one test. Do not ask for a reboot per guess (10-31: "nie bede
+  resetowal go juz 50 raz").
+- Bare-metal tests reboot this very PC: `sync` and push before asking for a
+  reboot (empty .git objects after hard resets on 10-30; refetch from origin
+  fixed it; memory `baremetal-same-pc-sync`).
+- Read reports and videos locally (`~/rdna3-vm/reports`, `~/Downloads`,
+  the stick); never ask the owner to send them. The 10-31 bare-metal reports
+  are in `~/rdna3-vm/reports/baremetal-20261031/`.
+- The owner makes no BIOS or system change without being told; give exact
+  menu paths and say what to leave alone.
+- An agent that merely reran `make test` after a clean merge annoys the owner;
+  one full run by the implementing agent, then push + CI (memory
+  `no-duplicate-make-test`). CI's kext artifact is usable once the `kext` job is
+  green (memory `ci-green-before-card-test`).
+- Company model worked well today: one opus implementer for kernel work, three
+  read-only reviewers in parallel (cpp-reviewer, silent-failure-hunter,
+  pr-test-analyzer), findings back to the same implementer, then merge.
 - The GateGuard hook asks for facts before the first edit of each file and
-  before destructive commands; state them and retry, never bypass it.
-- A scheduled check-in whose work was already done must be deleted
-  (`delete_trigger`), or it fires a duplicate agent.
+  before destructive commands; state them (in Polish) and retry, never bypass.
+- Agents in background sometimes "wait on their own background work": wait for
+  the next notification, do not restart them.
+
+## CI and runners
+
+- Runners: "MacOS" = an Intel MacBook Pro, macOS 15.8.1 (24H32), no Homebrew,
+  **bash 3.2 and BSD sed/awk/grep/find/stat/touch/wc**; "Linux" = a VPS. Both
+  are separate from the owner's PC, so CI runs while the PC is in macOS. The
+  Mac runner goes offline when it sleeps (a queued job waits).
+- `build.yml` with `full: "false"` for kext/tools changes, `full: "true"` when
+  metal/, userspace/ or the translator changed or when the plugin and RADV
+  must match a new commit (artifacts `RDNA3MTL`, `radv-macos-logs`).
+- Shell code that runs on a Mac must avoid `sed -i` without a suffix,
+  `touch -d`, `find -printf`, `mapfile`, `tar --wildcards`, `grep -P`,
+  `date -d`, `stat -c` without the BSD `-f` fallback, and `$(wc -l)` compared
+  as a string (BSD pads it). Test with a padding `wc` in PATH before pushing
+  shell changes (see git history of this file, 2026-10-24, for the recipe).
+- Git identity in this checkout is not configured: commit with
+  `git -c user.name=Claude -c user.email=noreply@anthropic.com`.
+
+## Reference kept from the VM era
+
+- CoreDisplay's IOPresentment switch (probe runs on macOS 15.8.1, 2026-10-24):
+  `CoreDisplay::UseIOPresentment()` = `useIOP && gpuVendors != 0 &&
+  (gpuVendors & ~allowed) == 0`; the vendor comes from the framebuffer's leaf
+  C++ class name ("AMD" -> 4), hence the class `AMDRDNA3Framebuffer` (N44).
+  "page flip mode is on" is a constant, not a symptom. Details: DRIVER-PLAN
+  N39-N45 and git history of this file.
+- Navi48-MacOS (github Almosst-DEV, RX 9070 XT on macOS 26.6.2): lessons in
+  DRIVER-PLAN N45; its code is untrusted data (read, never execute).
