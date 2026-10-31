@@ -86,6 +86,9 @@ $(BUILD)/test_iop_stale: tests/test_iop_stale.c common/rdna3_iop_stale.h | $(BUI
 
 $(BUILD)/test_iop_copy: tests/test_iop_copy.c common/rdna3_iop_copy.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_iop_copy.c
+
+$(BUILD)/test_iop_latch: tests/test_iop_latch.c common/rdna3_iop_latch.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_iop_latch.c
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
 # DRIVER-PLAN N42: IOGraphics' VBL from the vblank interrupt, the poll as fallback
@@ -242,7 +245,7 @@ C_TESTS := test_discovery test_uapi test_range_alloc test_vram_place test_bo_map
     test_linear_pitch test_gpu_time_queue test_ab_switch test_surf_census test_surfin_cache test_ci_refl \
     test_copy_pack test_msupload test_msdl test_spirv_fbfetch test_fbfetch_plan test_agdc_k5 test_agdc_n48 \
     test_bootargs test_a3_display test_gamma_judge test_swap_front test_attr_ring test_bar_window \
-    test_flip_latch test_iop_stale test_iop_copy test_handoff test_present_cost test_ws_frame test_vbl_irq \
+    test_flip_latch test_iop_stale test_iop_copy test_iop_latch test_handoff test_present_cost test_ws_frame test_vbl_irq \
     test_tcall test_fbgate test_flip_queue test_gpu_busy test_coh test_fb_policy test_swap_copy test_write_gen \
     test_vram_park test_surf_pending test_trace test_libdrm_amdgpu test_strip
 PY_TESTS := test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash_parity \
@@ -250,7 +253,7 @@ PY_TESTS := test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash
     test_triage_n48 test_triage_bootwatch test_triage_glyphs test_triage_coherence test_triage_attr_ring \
     test_triage_bar test_triage_present_cost test_triage_write_gen test_fb_class test_triage_iop_log \
     test_triage_agdc_n48 test_triage_pairing test_triage_nocard test_kext_kpi_versions test_kmutil_kpi_guard \
-    test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps
+    test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps test_iop_join
 SH_TESTS := test_bisect_step test_bootwatch test_membw_load test_ladder_step test_apps_step test_triage_a3 \
     test_baremetal test_triage_trace test_oc_install test_make_pkg test_coredisplay_prefs test_prune_traces \
     test_triage_tx test_triage_stale_plugin test_triage_latch test_result_checklist test_triage_vram \

@@ -214,6 +214,7 @@ public:
     }
 };
 OSDefineMetaClassAndStructors(RD3Surface, IOAccelLegacySurface)
+struct Rd3IopTxn;   /* DRIVER-PLAN N68: one transaction's timing (rdna3-accel.cpp) */
 class RD3DisplayPipe : public IOAccelLegacyDisplayPipe {
     OSDeclareDefaultStructors(RD3DisplayPipe)
     NM_TAHOE_FWD(RD3DisplayPipe)
@@ -221,6 +222,8 @@ public:
     IOAccelMemory *initFramebufferResource(unsigned int index, IOAccelResource2 *res) APPLE_KEXT_OVERRIDE;
     IOReturn validateTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
     IOReturn performTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
+    /* N68: performTransaction's body, timed by it (not virtual: no vtable slot) */
+    IOReturn performTransactionTimed(IOAccelDisplayPipeTransaction2 *txn, Rd3IopTxn *t);
     bool     isTransactionComplete(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
     void     free() APPLE_KEXT_OVERRIDE;
     /* the family's flip-buffer present path (card run 2026-10-17d: copy

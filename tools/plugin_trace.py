@@ -27,6 +27,10 @@ process and per IOSurface:
     --utc-offset H   show wall-clock times shifted by H hours (the card's time zone)
     --check          exit 1 when a FAIL finding exists
     --triage         print only 'LEVEL text' lines, for tools/triage_reports.py
+    --kernel FILE    DRIVER-PLAN N68: the kernel's frame trace too (trace-stream.bin, sysctl -b
+                     debug.rdna3accel_trace): each IOP frame the display pipe copied (RD3_TR_IOP) joined with
+                     WindowServer's newest surface-out of that IOSurface before it - the present age per frame,
+                     where in the scan its copy ended, and frames that presented an already presented publish
 
 Times are seconds since the process opened its trace (+S.mmm) and the wall clock the
 trace recorded then plus that (UTC unless --utc-offset); compare with the process's
@@ -996,6 +1000,86 @@ def triage_lines(path, big=(1024, 600), ab_window=None, boottime=None):
     return triage(path, big, ab_window, boottime)[0]
 
 
+AGE_STALE_MS = 16.7   # a present whose newest publish is older than one 60 Hz refresh
+
+
+def iop_join(traces, ktrace):
+    """DRIVER-PLAN N68: [(head, kernel_ns, fields, age_ms or None, reused)] for every RD3_TR_IOP event with a surface,
+    joined with the newest K_SURF_OUT of that IOSurface in a WindowServer trace published before the kernel's event
+    (both clocks are mach_absolute_time); reused: that publish was already presented by an earlier frame"""
+    import rdna3_trace as rt
+    outs = {}
+    for tr in traces:
+        if not tr.proc.startswith("WindowServer"):
+            continue
+        for r in tr.recs:
+            if r.kind == K_SURF_OUT and r.surf and r.path in OUT_COPIES + (1,):
+                outs.setdefault(r.surf, []).append((r.abs * tr.tb_n // tr.tb_d, r.seq))
+    for v in outs.values():
+        v.sort()
+    used = set()
+    rows = []
+    for e in ktrace.by("IOP", rt.SRC_ACCEL):
+        f = rt.iop_fields(e)
+        if not f["surf"]:
+            continue
+        kns = ktrace.ns(e, e.src)
+        cand = [o for o in outs.get(f["surf"], []) if o[0] <= kns]
+        if not cand:
+            rows.append((e.head, kns, f, None, False))
+            continue
+        pub_ns, seq = cand[-1]
+        key = (f["surf"], seq)
+        reused = key in used
+        used.add(key)
+        rows.append((e.head, kns, f, (kns - pub_ns) / 1e6, reused))
+    return rows
+
+
+def _pct(v, q):
+    if not v:
+        return 0.0
+    v = sorted(v)
+    return v[min(len(v) - 1, int(q * (len(v) - 1) + 0.5))]
+
+
+def iop_join_lines(rows, frames=12):
+    """the join as text: per head a summary (present age median / p90 / max, frames over one refresh, publishes
+    presented twice, frames with no publish, K2's classes and bins, the latched / direct split), then the last
+    'frames' frames"""
+    import rdna3_trace as rt
+    out = []
+    if not rows:
+        return ["IOP join: no RD3_TR_IOP event with an IOSurface in the kernel trace (a kernel before DRIVER-PLAN N68, "
+                "or no IOP copy in the window)"]
+    for h in sorted(set(r[0] for r in rows)):
+        hr = [r for r in rows if r[0] == h]
+        ages = [r[3] for r in hr if r[3] is not None]
+        cls = collections.Counter(rt.IOP_VBL_CLASS.get(r[2]["cls"], "?") for r in hr if r[2]["cls"] is not None)
+        bins = collections.Counter(rt.IOP_BIN.get(r[2]["bin"], "?") for r in hr if r[2]["bin"] is not None)
+        paths = collections.Counter(rt.IOP_PATH.get(r[2]["path"], r[2]["path"]) for r in hr)
+        out.append("IOP join head %d: %d frame(s) (%s); present age median %.1f ms, p90 %.1f, max %.1f; %d over %.1f ms; "
+                   "%d presented a publish ALREADY presented; %d with no publish before them; scan end: %s; bins: %s; "
+                   "txn avg %.2f ms (gates %.2f, stale wait %.2f, copy %.2f, latch wait %.2f)" % (
+                       h, len(hr), ", ".join("%s %d" % kv for kv in sorted(paths.items())),
+                       _pct(ages, 0.5), _pct(ages, 0.9), max(ages) if ages else 0.0,
+                       sum(1 for a in ages if a > AGE_STALE_MS), AGE_STALE_MS, sum(1 for r in hr if r[4]),
+                       sum(1 for r in hr if r[3] is None), ", ".join("%s %d" % kv for kv in sorted(cls.items())) or "-",
+                       ", ".join("%s %d" % kv for kv in sorted(bins.items())) or "-",
+                       sum(r[2]["txn_us"] for r in hr) / 1000.0 / len(hr), sum(r[2]["gate_us"] for r in hr) / 1000.0 / len(hr),
+                       sum(r[2]["stale_us"] for r in hr) / 1000.0 / len(hr), sum(r[2]["copy_us"] for r in hr) / 1000.0 / len(hr),
+                       sum(r[2]["wait_us"] for r in hr) / 1000.0 / len(hr)))
+    if frames:
+        t0 = rows[0][1]
+        for h, kns, f, age, reused in rows[-frames:]:
+            out.append("  +%9.3f ms h%d %-13s surface 0x%x age %s%s frame %s line %s txn %d us" % (
+                (kns - t0) / 1e6, h, rt.IOP_PATH.get(f["path"], f["path"]), f["surf"],
+                "%.1f ms" % age if age is not None else "?", " REUSED" if reused else "",
+                f["frame"] if f["frame"] is not None else "?", f["scanline"] if f["scanline"] is not None else "?",
+                f["txn_us"]))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="decode the Metal plugin's frame trace (see the module docstring)")
     ap.add_argument("paths", nargs="+")
@@ -1008,6 +1092,7 @@ def main(argv=None):
     ap.add_argument("--utc-offset", type=float, default=0.0)
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--triage", action="store_true")
+    ap.add_argument("--kernel", action="append", default=[])
     a = ap.parse_args(argv)
     try:
         bw, bh = (int(x) for x in a.big.lower().split("x"))
@@ -1041,6 +1126,11 @@ def main(argv=None):
             print_failures(tr, a.utc_offset, out)
         print_frames(tr, an, None if a.all else a.frames, a.utc_offset, out)
         failed = failed or any(f[0] == "FAIL" for f in an.findings)
+    if a.kernel:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import rdna3_trace as rt
+        for line in iop_join_lines(iop_join(traces, rt.load(a.kernel)), None if a.all else a.frames):
+            out.write(clean(line) + "\n")
     return 1 if (a.check and failed) else 0
 
 

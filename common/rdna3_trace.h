@@ -71,6 +71,8 @@ enum rd3_trace_type {
                            * submitUpdate: traced and forwarded */
     RD3_TR_PRESENT = 25,  /* the present queue (DRIVER-PLAN N38, rdna3_flip_queue.h): a present queued,
                            * programmed, latched, dropped; a writer waiting for the buffer leaving the panel */
+    RD3_TR_IOP = 26,      /* DRIVER-PLAN N68: an IOP transaction's frame copied (or not): its path, the gates' and
+                           * the copy's time, where in the scan it ended (rdna3_iop_latch.h) */
     RD3_TR_TYPES
 };
 
@@ -191,6 +193,23 @@ enum rd3_trace_pq_kind { RD3_TRPK_SWAP = 0, RD3_TRPK_FLIPBUF = 1, RD3_TRPK_IOP =
 /* RD3_TRP_LATCHED's flags | this: the framebuffer's latch wait was ended by the head's pflip interrupt (flip done,
  * DRIVER-PLAN N42), v3 the interrupt's latency in us; without it the latch was seen by a poll */
 #define RD3_TRP_IRQ_DONE 0x40u
+/* RD3_TR_IOP's arg (DRIVER-PLAN N68): the path the transaction's frame took */
+enum rd3_trace_iop {
+    RD3_TRI_NONE = 0,         /* no copy (refused, held by the page-off gate, a flip of the surface itself) */
+    RD3_TRI_DIRECT_CPU = 1,   /* the CPU copied it into the head's LIVE scanout (home) */
+    RD3_TRI_DIRECT_SDMA = 2,  /* SDMA copied it into the live scanout */
+    RD3_TRI_LATCH_CPU = 3,    /* the CPU copied it into the buffer the panel does not scan, flipped at the latch */
+    RD3_TRI_LATCH_SDMA = 4,   /* SDMA did, flipped at the latch */
+    RD3_TRI_ZEROCOPY = 5      /* no copy: the head flipped to the surface's own VRAM (debug.rdna3accel_iop_flip) */
+};
+/* RD3_TR_IOP's flags */
+#define RD3_TRI_L10R      0x01u   /* an l10r surface, converted by the CPU */
+#define RD3_TRI_STALE     0x02u   /* N59: its seeds had not moved since the head last copied it */
+#define RD3_TRI_STALE_MOV 0x04u   /* ... and the stale wait saw them move (the new frame copied) */
+#define RD3_TRI_TO_D      0x08u   /* latched: into the second buffer (else home) */
+#define RD3_TRI_OVERLAP   0x10u   /* another head's transaction was inside performTransaction at the same time */
+#define RD3_TRI_VBL       0x20u   /* the head's frame / scanline were read at the copy's end (v4, pb) */
+#define RD3_TRI_FALLBACK  0x40u   /* the latched path was on but this frame took the direct copy (ba[0] why) */
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 
@@ -320,6 +339,13 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          wait: the writer's wait), v2 the replaced or dropped token, v3
  *          flipResult, v4 the IOReturn; pa the present's address, pb the
  *          address in flight after it, pc the queued one
+ *  IOP     head; arg rd3_trace_iop, flags RD3_TRI_*; v0 the IOSurface id, v1 its
+ *          unlock seed at the copy, v2 the gates' us (N59 stale wait + page-off),
+ *          v3 the copy's us, v4 the head's OTG frame at the copy's end (RD3_TRI_VBL);
+ *          pa the buffer copied into, pb the scanline | in-vblank << 32, pc the
+ *          transaction's us from entry to exit; ba[0] rd3_il_fb (RD3_TRI_FALLBACK),
+ *          ba[1] the K2 class (rd3_il_vbl), ba[2] the scanline bin (rd3_il_scan_bin);
+ *          bb: the N59 stale wait's us (32 bit) | the latch wait's us (32 bit)
  *  SWAP's write generations: v1 bits 25, 26, 27 and 28-31 (RD3_TRV1_GEN_*,
  *          RD3_TRV1_FLIPBUF); v2 = the copy's us (16 bits, saturated at 65535) | the
  *          back's generation << 16 (its low 16 bits); v3 the head's

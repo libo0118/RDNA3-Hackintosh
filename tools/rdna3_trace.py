@@ -45,7 +45,7 @@ READ_ALL, READ_STREAM, READ_SEC = 0, 1, 2
 TYPES = {0: "none", 1: "SWAP", 2: "CF", 3: "SHAPE", 4: "VMALLOC", 5: "VMFREE", 6: "APERTURE", 7: "PAGEOFF",
          8: "SURFGEM", 9: "MODE", 10: "FLIP", 11: "LATCH", 12: "SYNC", 13: "GONE", 14: "MODESET", 15: "SCAN",
          16: "CS", 17: "FENCE", 18: "GPUWAIT", 19: "RESET", 20: "VMFAULT", 21: "SURFRES", 22: "PANEL",
-         23: "FLIPBUF", 24: "HOOK", 25: "PRESENT"}
+         23: "FLIPBUF", 24: "HOOK", 25: "PRESENT", 26: "IOP"}
 T = dict((v, k) for k, v in TYPES.items())
 SWAP_ARG = {0: "skip", 1: "flip", 2: "flip refused, copied", 3: "flip refused", 4: "copy", 5: "hold", 6: "copy FAILED",
             7: "no head"}
@@ -74,6 +74,30 @@ COPY_US_CAP = 0xffff                  # SWAP v2's copy time saturates here (v2 >
 FLIPBUF_WHAT = {0: "traced", 1: "PRESENTED", 2: "held", 3: "present FAILED", 4: "no head", 5: "no VRAM resource",
                 6: "lock busy"}
 HOOK_KIND = {0: "pickPresentType", 1: "didSubmitSwap", 2: "isBackBufferReady", 3: "submitUpdate"}
+# IOP (DRIVER-PLAN N68, common/rdna3_trace.h rd3_trace_iop / RD3_TRI_*, common/rdna3_iop_latch.h)
+IOP_PATH = {0: "no copy", 1: "direct CPU", 2: "direct SDMA", 3: "latched CPU", 4: "latched SDMA", 5: "zero-copy flip"}
+IOP_L10R, IOP_STALE, IOP_STALE_MOV, IOP_TO_D, IOP_OVERLAP, IOP_VBL, IOP_FALLBACK = 1, 2, 4, 8, 16, 32, 64
+IOP_FB = {0: "queue", 1: "vram", 2: "resize", 3: "busy", 4: "refused", 5: "geom"}
+IOP_VBL_CLASS = {0: "first", 1: "next", 2: "SAME refresh", 3: "SKIP"}
+IOP_BIN = {0: "q1", 1: "q2", 2: "q3", 3: "q4", 4: "blank"}
+
+
+def iop_fields(e):
+    """an IOP event as a dict: path, surface, unlock seed, gate / copy / stale / latch-wait / transaction us, frame,
+    scanline, in vblank, K2 class and bin (None without RD3_TRI_VBL), fallback reason (None), the buffer"""
+    bb = e.bb if isinstance(e.bb, (bytes, bytearray)) else bytes(8)
+    stale_us, wait_us = struct.unpack("<II", bb[:8])
+    vbl = bool(e.flags & IOP_VBL)
+    return {"path": e.arg, "surf": e.v0, "useed": e.v1, "gate_us": e.v2, "copy_us": e.v3, "frame": e.v4 if vbl else None,
+            "scanline": (e.pb & 0xffffffff) if vbl else None, "inblank": bool(e.pb >> 32) if vbl else None,
+            "txn_us": e.pc, "stale_us": stale_us, "wait_us": wait_us, "target": e.pa,
+            "cls": e.ba[1] if vbl else None, "bin": e.ba[2] if vbl else None,
+            "fb": IOP_FB.get(e.ba[0], e.ba[0]) if e.flags & IOP_FALLBACK else None,
+            "l10r": bool(e.flags & IOP_L10R), "stale": bool(e.flags & IOP_STALE),
+            "stale_moved": bool(e.flags & IOP_STALE_MOV), "to_d": bool(e.flags & IOP_TO_D),
+            "overlap": bool(e.flags & IOP_OVERLAP)}
+
+
 # PRESENT (DRIVER-PLAN N38, common/rdna3_flip_queue.h): rd3_trace_present
 PRESENT_ARG = {0: "programmed", 1: "queued", 2: "replaced (newest wins)", 3: "joined the flip in flight",
                4: "Busy, kept", 5: "REFUSED", 6: "latched", 7: "programmed at the latch", 8: "TIMEOUT: completed EARLY",
@@ -1648,6 +1672,16 @@ def _fmt_event(trace, e, ms, n):
             ms, e.head if e.head != 0xff else "-", "submitScanoutFlipBuffer" if e.arg == 1 else "submitFlipBuffer",
             e.v0, e.v1, e.pa, e.pb, FLIPBUF_WHAT.get(e.v4, e.v4), " (flipbuf_present 1)" if e.flags & 1 else "",
             " (took the family's lock)" if e.flags & 2 else "", e.pc))
+    if n == "IOP":
+        f = iop_fields(e)
+        where = (" frame %d line %d%s (%s, %s)" % (f["frame"], f["scanline"], " blank" if f["inblank"] else "",
+                                                 IOP_VBL_CLASS.get(f["cls"], f["cls"]), IOP_BIN.get(f["bin"], f["bin"]))
+                 if f["frame"] is not None else "")
+        return "%10.3f ms IOP h%s %s surface 0x%x seed %d into 0x%x%s: txn %d us = gates %d (stale wait %d) + copy %d + latch wait %d%s%s%s%s" % (
+            ms, e.head if e.head != 0xff else "-", IOP_PATH.get(e.arg, e.arg), f["surf"], f["useed"], f["target"],
+            " (D)" if f["to_d"] else "", f["txn_us"], f["gate_us"], f["stale_us"], f["copy_us"], f["wait_us"], where,
+            " l10r" if f["l10r"] else "", " STALE%s" % (" (moved)" if f["stale_moved"] else "") if f["stale"] else "",
+            (" FALLBACK %s" % f["fb"]) if f["fb"] is not None else "") + (" overlap" if f["overlap"] else "")
     if n == "PRESENT":
         if e.arg == 11:
             return "%10.3f ms PRESENT h%s a %s into 0x%x waited %d us for the flip away from it%s" % (

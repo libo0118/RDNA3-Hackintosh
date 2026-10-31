@@ -28,6 +28,7 @@
 #include "../common/rdna3_fbgate.h"  // N58: the framebuffers' controller gates before the display machine
 #include "../common/rdna3_iop_stale.h"   // N59: an IOP copy of a buffer nothing wrote since it was last shown
 #include "../common/rdna3_iop_copy.h"    // N61: the IOP copy into the scanout and its cost
+#include "../common/rdna3_iop_latch.h"   // N68: the IOP copy's timing and its latched variant
 #include <IOKit/IOWorkLoop.h>
 #include <mach/mach_time.h>
 #include <sys/kauth.h>
@@ -87,6 +88,7 @@ static void               rd3AccelWriteStamp(int index, unsigned int value);
 static void               rd3AccelSurfNoteDisplayClient(const char *path);
 static bool               rd3AccelLocksInit(void);
 static void               rd3AccelInstallSysctlPageoffSys(void);   /* bare metal 2026-10-31 */
+static void               rd3AccelInstallSysctlLatch(void);        /* DRIVER-PLAN N68 */
 /* card run 2026-10-17b: the per-frame trace (rdna3_trace.h) and the swap as
  * a copy (rdna3_swap_copy.h); hooks the classes above their definitions call */
 void                      rd3AccelTraceShape(const void *surf, unsigned mask, unsigned w, unsigned h, unsigned smode,
@@ -280,6 +282,11 @@ static int gSwapAsync = 1;
  * boot-arg rdna3iopqueue, default 1; 0 = the old worker: up to 50 ms of 1 ms
  * sleeps on WindowServer's thread, then the frame dropped) */
 static int gIopQueue = 1;
+/* DRIVER-PLAN N68 (common/rdna3_iop_latch.h): an IOP frame the display pipe copies (l10r, or a BGRA frame that is not
+ * flipped) goes into the head's buffer the panel does not scan and is flipped to through the present queue, the
+ * transaction complete at the latch (debug.rdna3accel_iop_latch, boot-arg rdna3ioplatch, default 0: the copy into
+ * the live scanout as before) */
+static int gIopLatch = 0;
 /* that zero-copy flip only for VRAM the Metal plugin wrote (its dirty mark
  * recorded this allocation: rd3_iop_flip_ok), else the copy
  * (debug.rdna3accel_iop_wrote, boot-arg rdna3iopwrote, default 1) */
@@ -299,6 +306,7 @@ static IOLock *volatile gPresLock;
 static bool rd3AccelPresentInit(void);
 static void rd3AccelPresentStop(void);
 static void rd3AccelIopStop(void);
+static void rd3AccelIopLbStop(void);
 static void rd3AccelPresentReuseRes(IOAccelResource2 *res, unsigned what);
 static void rd3AccelPresentForgetAll(const char *why);
 static bool rd3AccelPresentIopBusy(const void *pipe);
@@ -629,6 +637,10 @@ static void rd3AccelVramBase(unsigned long long phys, unsigned long long cookie)
 {
     if (!gVramPhysBase && phys && phys >= cookie) gVramPhysBase = phys - cookie;
 }
+/* N68: a display mode change programmed every head's own scanout (home): the latched copy's record of the buffer it
+ * last flipped to is stale (read at the head's next latched transaction) */
+static volatile UInt32 gIopLbModeGen;
+static void rd3AccelIopLbModeChanged(void) { OSIncrementAtomic((volatile SInt32 *)&gIopLbModeGen); }
 class RD3DisplayMachine : public IOAccelLegacyDisplayMachine {
     OSDeclareDefaultStructors(RD3DisplayMachine)
     NM_TAHOE_FWD(RD3DisplayMachine)
@@ -638,6 +650,7 @@ public:
         ALOG("DM displayModeDidChange -> true");
         rd3AccelTraceMode(1);
         rd3AccelLatchForgetAll("display mode change");   /* the framebuffer flipped to its own scanout */
+        rd3AccelIopLbModeChanged();                       /* N68: the latched copy's heads show home */
         rd3AccelScModeChanged();                          /* mode 1/2: the panel shows home now */
         if (gEnableAccel) gEnableAccel("displayModeDidChange");
         return true;
@@ -1234,6 +1247,11 @@ public:
         gSwapSameNoFlip = rd3_arg("rdna3swapsamenoflip", 1) ? 1 : 0;
         gSwapAsync = rd3_arg("rdna3swapasync", 1) ? 1 : 0;
         gIopQueue = rd3_arg("rdna3iopqueue", 1) ? 1 : 0;
+        gIopLatch = rd3_arg("rdna3ioplatch", 0) ? 1 : 0;
+        ALOG("iop latch (N68): a copied IOP frame goes %s (boot-arg rdna3ioplatch, sysctl debug.rdna3accel_iop_latch; "
+             "counters debug.rdna3accel_iop_latch_* / iop_txn_* / iop_vbl_*)",
+             gIopLatch ? "into the buffer the panel does not scan and is flipped to at the next vblank, the transaction "
+                         "complete at the latch" : "straight into the head's live scanout, the transaction complete at once (0)");
         gIopWrote = rd3_arg("rdna3iopwrote", 1) ? 1 : 0;
         gPerfStats = rd3_arg("rdna3perfstats", 1) ? 1 : 0;
         gVmSticky = rd3_arg("rdna3vmsticky", 1) ? 1 : 0;
@@ -1431,6 +1449,7 @@ public:
         rd3AccelPresentStop();   /* N38: workers stopped, queued presents completed, thread calls freed */
         IOGraphicsAccelerator2::stop(provider);
         rd3AccelIopStop();   /* N38 (ECC review round 2): no IOP transaction comes any more */
+        rd3AccelIopLbStop();   /* N68: the latched copy's second buffers given back where the panel does not scan them */
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
@@ -2146,7 +2165,8 @@ bool RD3DisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
 }
 
 static bool rd3AccelSurfCopyReady(IOSurface *s, unsigned head);
-static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, unsigned *useed);
+static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, unsigned *useed, uint32_t *waitUs,
+                                 uint8_t *trFlags);
 static void rd3AccelIopGateNote(unsigned head, uint64_t t0);   /* N61 */
 static void rd3AccelIopCopyNote(unsigned head, uint64_t t0, uint64_t bytes, int accessBytes, unsigned w, unsigned h,
                                 unsigned spitch, unsigned dpitch, bool fromRes);
@@ -2156,6 +2176,56 @@ static bool rd3AccelIopBySdma(RD3DisplayPipe::RD3IopSrc *e, unsigned head, const
 static void rd3AccelIopSdmaFmtFallback(unsigned head, unsigned surf);   /* bare metal 2026-10-31: l10r is no SDMA copy */
 static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static void rd3AccelIopHome(IOService *fb, unsigned head);
+static uint64_t rd3AccelUsSince(uint64_t abs0);
+
+/* DRIVER-PLAN N68 (common/rdna3_iop_latch.h): one transaction as K1-K4 see it - filled by performTransactionTimed,
+ * counted, logged when slow and traced (RD3_TR_IOP) by rd3AccelIopTxnEnd */
+struct Rd3IopTxn {
+    uint64_t t0;
+    unsigned head;
+    bool entered;                  /* the head is known: counted in gIopInside */
+    bool plane;                    /* a transaction with a plane (traced) */
+    uint8_t path;                  /* enum rd3_trace_iop */
+    uint8_t flags;                 /* RD3_TRI_* */
+    uint8_t fbWhy;                 /* enum rd3_il_fb (RD3_TRI_FALLBACK) */
+    uint8_t vblClass, bin;         /* K2 */
+    uint32_t gateUs, staleUs, copyUs, latchWaitUs;
+    unsigned surf, useed;
+    uint32_t frame, scanline, inVblank;
+    unsigned long long target;
+};
+static void rd3AccelIopTxnEnter(Rd3IopTxn *t, unsigned head);
+static void rd3AccelIopTxnEnd(Rd3IopTxn *t);
+static void rd3AccelIopVblNote(IOService *fb, unsigned head, unsigned height, bool direct, Rd3IopTxn *t);
+static bool rd3AccelIopLatchCopy(void *pipe, IOService *fb, unsigned head, const struct RD3KVramRequest *home,
+                                 RD3DisplayPipe::RD3IopSrc *srcSlot, const volatile unsigned int *src, unsigned w,
+                                 unsigned h, unsigned pitch, bool l10r, bool fromRes, IOSurface *s, Rd3IopTxn *t);
+static void rd3AccelIopLbRelease(IOService *fb, unsigned head);
+/* the frame into 'dst' (the head's live scanout, or N68's buffer the panel does not scan): SDMA0 when it can (N63),
+ * else the CPU (N61; l10r converted); returns whether SDMA did it, *us the copy's time */
+static bool rd3AccelIopCopyInto(RD3DisplayPipe::RD3IopSrc *srcSlot, unsigned head, const struct RD3KVramRequest *dst,
+                                const volatile unsigned int *src, unsigned w, unsigned h, unsigned pitch, bool l10r,
+                                bool fromRes, IOSurface *s, uint32_t *us)
+{
+    const unsigned rowBytes = ((pitch < dst->pitch) ? pitch : dst->pitch) & ~3u;
+    const uint64_t t0 = mach_absolute_time();
+    /* N63: SDMA0 copies it from the surface's pages bound to the GART, the fence waited for; any failure leaves
+     * the frame to the CPU copy below (counted by reason) */
+    if (l10r) rd3AccelIopSdmaFmtFallback(head, s ? (unsigned)s->getSurfaceID() : 0u);   /* SDMA cannot convert */
+    const bool bySdma = !fromRes && !l10r && srcSlot && rd3AccelIopBySdma(srcSlot, head, dst, src, w, h, pitch, rowBytes);
+    if (!bySdma) {
+        /* N61 (common/rdna3_iop_copy.h): the same bytes as the old 32-bit loop, 8 at a time when everything is 8-aligned; timed.
+         * l10r: the same rows, each pixel converted to the scanout's 8 bits per channel */
+        const uint64_t copy0 = mach_absolute_time();
+        const int accessBytes = l10r ? rd3_iop_convert_l10r_rows(dst->kva, dst->pitch, src, pitch, h, rowBytes)
+                                     : rd3_iop_copy_rows(dst->kva, dst->pitch, src, pitch, h, rowBytes);
+        if (l10r) OSAddAtomic64(1, &gCntIopFmtL10r);   /* S4: converted into the scanout, not only seen */
+        rd3AccelIopCopyNote(head, copy0, (uint64_t)rowBytes * h, accessBytes, w, h, pitch, dst->pitch, fromRes);
+    }
+    const uint64_t cu = rd3AccelUsSince(t0);
+    *us = cu > 0xffffffffull ? 0xffffffffu : (uint32_t)cu;
+    return bySdma;
+}
 
 /* The base class's performTransaction for a plane-less (gamma) transaction.
  * Card run 30: with this display pipe active, macOS sends the gamma tables
@@ -2288,7 +2358,20 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
     return r;
 }
 
+/* DRIVER-PLAN N68: every transaction timed from entry to exit (K1), its overlap with the other heads' (K4), its
+ * frame traced (K3, RD3_TR_IOP) - the body below fills the record */
 IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
+{
+    Rd3IopTxn t;
+    bzero(&t, sizeof t);
+    t.t0 = mach_absolute_time();
+    t.fbWhy = 0xff;
+    const IOReturn r = performTransactionTimed(txn, &t);
+    rd3AccelIopTxnEnd(&t);
+    return r;
+}
+
+IOReturn RD3DisplayPipe::performTransactionTimed(IOAccelDisplayPipeTransaction2 *txn, Rd3IopTxn *t)
 {
     if (!gRd3Iop) return (IOReturn)0xe00002c7;
     if (!txn) RD3IOP_FAIL(kIOReturnBadArgument, "performTransaction(NULL)");
@@ -2296,6 +2379,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     unsigned head = 0;
     IOService *fb = a ? a->pipeFramebuffer(this, &head) : nullptr;
     if (!fb) RD3IOP_FAIL(kIOReturnNotAttached, "no accelerator, or pipe %p drives a framebuffer that is none of ours", this);
+    rd3AccelIopTxnEnter(t, head);   /* N68 K4 */
     /* N41 security review: whose marks are taken - only a transaction that drives one of our heads (round 3) */
     rd3AccelSurfNoteDisplayClient("display-pipe transaction");
 
@@ -2318,6 +2402,8 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         const IOReturn br = rd3AccelIopGammaToBase(this, txn, &handled);
         return handled ? br : kIOReturnSuccess;
     }
+    t->plane = true;
+    if (s) t->surf = (unsigned)s->getSurfaceID();
 
     const volatile unsigned int *src = nullptr; unsigned w = 0, h = 0, pitch = 0; bool fromRes = false;
     unsigned staleL = 0, staleU = 0;
@@ -2347,6 +2433,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         src = (const volatile unsigned int *)vm->fKva; fromRes = true;
     } else if (s && rd3AccelIopFlip(fb, head, s, this)) {
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
+        t->path = RD3_TRI_ZEROCOPY;
         return kIOReturnSuccess;
     } else if (s) {
         /* NullMoth c2af33d: a copied frame must come from the surface's
@@ -2357,9 +2444,11 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         /* N59: a buffer of WindowServer's present ring nothing wrote since this head last copied it holds an
          * older frame (the plugin's copy-out of the new one is still on its way): wait for it, bounded */
         const uint64_t gate0 = mach_absolute_time();
-        rd3AccelIopStaleGate(s, head, &staleL, &staleU);
+        rd3AccelIopStaleGate(s, head, &staleL, &staleU, &t->staleUs, &t->flags);
         const bool copyReady = rd3AccelSurfCopyReady(s, head);
         rd3AccelIopGateNote(head, gate0);   /* N61: what the gates cost this transaction */
+        t->gateUs = rd3TrSat(rd3AccelUsSince(gate0));
+        t->useed = staleU;
         if (!copyReady) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
         /* bare metal 2026-10-31 (common/rdna3_iop_copy.h): 'l10r' (ARGB2101010) is converted to the 8-bit scanout by
@@ -2382,6 +2471,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         }
         if (fk == RD3_IOP_FMT_IS_L10R) {
             l10r = true;
+            t->flags |= RD3_TRI_L10R;
             const SInt64 k = OSAddAtomic64(1, &gCntIopFmtL10rSeen);
             if (rd3_iop_copy_log_due((uint64_t)k))
                 ALOG("iop: l10r #%lld (head %u): surface 0x%x %ux%u row %u is ARGB2101010: the CPU converts it to the "
@@ -2412,22 +2502,20 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
      * (the surface's is checked above, the VRAM resource's and the scanout's only >= 4: cpp-reviewer of 42c31bb) */
     if ((pitch & 3u) || (q.pitch & 3u))
         RD3IOP_FAIL(kIOReturnBadArgument, "source pitch %u or scanout pitch %u is not a whole number of 32-bit words", pitch, q.pitch);
-    rd3AccelIopHome(fb, head);
-    const unsigned rowBytes = ((pitch < q.pitch) ? pitch : q.pitch) & ~3u;
     const unsigned spr = pitch / 4;
-    /* N63: SDMA0 copies it from the surface's pages bound to the GART, the fence waited for; any failure leaves
-     * the frame to the CPU copy below (counted by reason) */
-    if (l10r) rd3AccelIopSdmaFmtFallback(head, s ? (unsigned)s->getSurfaceID() : 0u);   /* SDMA cannot convert */
-    const bool bySdma = !fromRes && !l10r && srcSlot && rd3AccelIopBySdma(srcSlot, head, &q, src, w, h, pitch, rowBytes);
-    if (!bySdma) {
-        /* N61 (common/rdna3_iop_copy.h): the same bytes as the old 32-bit loop, 8 at a time when everything is 8-aligned; timed.
-         * l10r: the same rows, each pixel converted to the scanout's 8 bits per channel */
-        const uint64_t copy0 = mach_absolute_time();
-        const int accessBytes = l10r ? rd3_iop_convert_l10r_rows(q.kva, q.pitch, src, pitch, h, rowBytes)
-                                     : rd3_iop_copy_rows(q.kva, q.pitch, src, pitch, h, rowBytes);
-        if (l10r) OSAddAtomic64(1, &gCntIopFmtL10r);   /* S4: converted into the scanout, not only seen */
-        rd3AccelIopCopyNote(head, copy0, (uint64_t)rowBytes * h, accessBytes, w, h, pitch, q.pitch, fromRes);
+    /* N68: the latched copy (debug.rdna3accel_iop_latch) - into the buffer the panel does not scan, flipped to
+     * through the present queue, the transaction complete at the latch; anything missing: the direct copy below,
+     * counted by reason (debug.rdna3accel_iop_latch_fb_<reason>) */
+    const bool latched = gIopLatch &&
+        rd3AccelIopLatchCopy(this, fb, head, &q, srcSlot, src, w, h, pitch, l10r, fromRes, s, t);
+    if (!latched) {
+        rd3AccelIopHome(fb, head);
+        if (!gIopLatch) rd3AccelIopLbRelease(fb, head);   /* N68 switched off: its second buffer given back */
+        const bool bySdma = rd3AccelIopCopyInto(srcSlot, head, &q, src, w, h, pitch, l10r, fromRes, s, &t->copyUs);
+        t->path = bySdma ? RD3_TRI_DIRECT_SDMA : RD3_TRI_DIRECT_CPU;
+        t->target = q.phys;
     }
+    rd3AccelIopVblNote(fb, head, q.height, !latched, t);   /* N68 K2: where in the scan the copy ended */
     if (!fromRes && s) rd3AccelIopStaleNote(s, head, staleL, staleU);
     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
@@ -4918,9 +5006,11 @@ static bool rd3AccelIopBySdma(RD3DisplayPipe::RD3IopSrc *e, unsigned head, const
  * dma_resv_wait_timeout before the flip). Not for a buffer with a VRAM page-off pending: its system memory is
  * filled by rd3AccelSurfCopyReady without a seed move. */
 static rd3_is_head gIopStale[kRd3MaxFB];
-static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, unsigned *useed)
+static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, unsigned *useed, uint32_t *waitUs,
+                                 uint8_t *trFlags)
 {
     *lseed = s->getLockSeed(); *useed = s->getUnlockSeed();
+    *waitUs = 0;   /* N68 K1: the wait's share of the transaction, RD3_TRI_STALE(_MOV) for its trace */
     IOSimpleLock *l = gIopStaleLock;
     if (!l || head >= kRd3MaxFB) return;
     const unsigned id = s->getSurfaceID();
@@ -4937,6 +5027,7 @@ static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, u
     const SInt64 nc = OSAddAtomic64(1, &gCntIopStaleChecked);
     if (v == RD3_IS_FRESH) { OSAddAtomic64(1, &gCntIopStaleFresh); return; }
     const SInt64 n = OSAddAtomic64(1, &gCntIopStale);
+    *trFlags |= RD3_TRI_STALE;
     uint64_t agoNs = 0;
     if (lastT) absolutetime_to_nanoseconds(mach_absolute_time() - lastT, &agoNs);
     if (!allowUs) {
@@ -4973,6 +5064,8 @@ static void rd3AccelIopStaleGate(IOSurface *s, unsigned head, unsigned *lseed, u
     }
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     const unsigned us = (unsigned)(ns / 1000);
+    *waitUs = us;
+    if (moved) *trFlags |= RD3_TRI_STALE_MOV;
     OSAddAtomic64((SInt64)us, &gCntIopStaleWaitUs);
     if ((int)us > gIopStaleWaitMaxUs) gIopStaleWaitMaxUs = (int)us;
     IOSimpleLockLock(l);
@@ -5889,6 +5982,7 @@ struct RD3PresReq {
     uint32_t hash[kFlickBands];        /* the band hash at the swap (the torn test), when 'hashed' */
     bool hashed;
     uint8_t kind;
+    bool lb, lbHome;                   /* N68: an IOP frame the latched path copied into a buffer of ours (D, or home) */
 };
 struct RD3Pres {
     struct rd3_fq q;
@@ -6055,8 +6149,10 @@ static unsigned rd3AccelPqProgramLocked(unsigned head, RD3PresDone *d, IOReturn 
         if (gIopFlipPrev[head]) rd3AccelPqDoneSurf(d, gIopFlipPrev[head]);
         gIopFlipPrev[head] = gIopFlipFront[head];
         gIopFlipFront[head] = R.surf;
-        gIopFlipped[head] = true;
+        /* N68: a latched copy's flip to home leaves the head home (the direct copy's flip home is not needed) */
+        gIopFlipped[head] = !(R.lb && R.lbHome);
         R.surf = nullptr;
+        if (R.lb) return kPqProgOk;   /* N68: counted by the latched path (iop_latch_*), not as a zero-copy flip */
         const SInt64 n = OSAddAtomic64(1, &gCntIopFlip);
         OSAddAtomic64(1, &gCntIopAsync);
         if (n < 4 || n == 600 || (n & 0xffff) == 0)
@@ -6756,6 +6852,492 @@ static bool rd3AccelPresentIop(unsigned head, IOService *fb, void *pipe, IOSurfa
     rq.kind = kPqIop;
     rq.tok = (uint32_t)OSAddAtomic64(1, &gCntPqIop[head]) + 1;
     return rd3AccelPresentSubmit(head, fb, &rq, 0) != kPqOutRefused;
+}
+
+/* ---- DRIVER-PLAN N68 (common/rdna3_iop_latch.h): the IOP transactions' timing and the latched copy ----
+ * Bare metal 2026-10-31: presents at 60 Hz, but a dragged window steps unevenly (the 240 fps videos). K1 times each
+ * transaction from entry to exit per head (the N59 stale wait, the gates, the copy, the latch wait), K2 reads the
+ * head's OTG frame and scanline at the copy's end (two copies in one refresh, refreshes with none, copies that end
+ * mid-scan), K3 traces each frame (RD3_TR_IOP: tools/plugin_trace.py --kernel joins it with the plugin's surface-out),
+ * K4 counts transactions of two heads inside at once. The latched copy (debug.rdna3accel_iop_latch) follows amdgpu's
+ * page flip: amdgpu_dm_commit_planes programs the new address of a buffer the HUBP does not scan,
+ * dm_pflip_high_irq completes the event at the latch, and the next commit waits for that flip
+ * (drm_atomic_helper_wait_for_dependencies). Lock order: gIopLbLock[head], then gPresLock (the present queue's). */
+static volatile SInt32 gIopInside[kRd3MaxFB];
+static SInt64 gCntIopTxnN[kRd3MaxFB], gCntIopTxnUs[kRd3MaxFB], gCntIopTxnMaxUs[kRd3MaxFB], gCntIopTxnSlow[kRd3MaxFB];
+static SInt64 gCntIopTxnStaleUs[kRd3MaxFB], gCntIopTxnOverlap, gCntIopTxnOverlapSame;
+static SInt64 gCntIopVblN[kRd3MaxFB], gCntIopVblSame[kRd3MaxFB], gCntIopVblSkip[kRd3MaxFB], gCntIopVblMid[kRd3MaxFB];
+static SInt64 gCntIopVblBin0[kRd3MaxFB], gCntIopVblBin1[kRd3MaxFB], gCntIopVblBin2[kRd3MaxFB], gCntIopVblBin3[kRd3MaxFB];
+static SInt64 gCntIopVblBlank[kRd3MaxFB], gCntIopVblUnread;
+static SInt64 gCntIopLbN[kRd3MaxFB], gCntIopLbD[kRd3MaxFB], gCntIopLbWait[kRd3MaxFB], gCntIopLbWaitUs[kRd3MaxFB];
+static SInt64 gCntIopLbFbHead[kRd3MaxFB], gCntIopLbFb[RD3_IL_FB_N];
+static SInt64 gCntIopLbVramBytes, gCntIopLbVramAllocs, gCntIopLbVramFrees, gCntIopLbVramRefused, gCntIopLbFreeWait;
+static uint32_t gIopVblPrev[kRd3MaxFB];
+static bool gIopVblHave[kRd3MaxFB];
+static SInt32 gIopTxnLogs[kRd3MaxFB], gIopVblLogs, gIopLbFbLogs[RD3_IL_FB_N], gIopLbVramLogs, gIopLbFreeLogs;
+static const char *const kIopPathName[6] = { "no copy", "direct CPU copy", "direct SDMA copy", "latched CPU copy",
+                                             "latched SDMA copy", "zero-copy flip" };
+
+static void rd3AccelIopTxnEnter(Rd3IopTxn *t, unsigned head)
+{
+    if (head >= kRd3MaxFB) return;
+    t->head = head;
+    t->entered = true;
+    bool other = false;
+    for (unsigned h = 0; h < kRd3MaxFB; h++)
+        if (h != head && __atomic_load_n(&gIopInside[h], __ATOMIC_ACQUIRE) > 0) other = true;
+    if (OSIncrementAtomic(&gIopInside[head]) > 0) OSAddAtomic64(1, &gCntIopTxnOverlapSame);
+    if (other) {
+        OSAddAtomic64(1, &gCntIopTxnOverlap);
+        t->flags |= RD3_TRI_OVERLAP;
+    }
+}
+static void rd3AccelIopMax(SInt64 *m, SInt64 v)
+{
+    SInt64 o = *m;
+    while (v > o && !OSCompareAndSwap64((UInt64)o, (UInt64)v, (volatile UInt64 *)m)) o = *m;
+}
+static void rd3AccelIopTxnEnd(Rd3IopTxn *t)
+{
+    if (!t->entered || t->head >= kRd3MaxFB) return;
+    const unsigned head = t->head;
+    const uint64_t us = rd3AccelUsSince(t->t0);
+    OSDecrementAtomic(&gIopInside[head]);
+    OSAddAtomic64(1, &gCntIopTxnN[head]);
+    OSAddAtomic64((SInt64)us, &gCntIopTxnUs[head]);
+    OSAddAtomic64((SInt64)t->staleUs, &gCntIopTxnStaleUs[head]);
+    rd3AccelIopMax(&gCntIopTxnMaxUs[head], (SInt64)us);
+    if (rd3_il_txn_slow(us)) {
+        const SInt64 k = OSAddAtomic64(1, &gCntIopTxnSlow[head]);
+        if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopTxnLogs[head]), 8, 255))
+            ALOG("iop txn: head %u: a transaction held WindowServer's thread %llu us (over %u us; %lld such on this head): "
+                 "gates %u us (of them the N59 stale wait %u us, debug.rdna3accel_iop_stale_wait_ms %d), copy %u us, "
+                 "latch wait %u us; %s%s%s%s, surface 0x%x%s", head, (unsigned long long)us, RD3_IL_SLOW_US,
+                 (long long)k + 1, t->gateUs, t->staleUs, gIopStaleWaitMs, t->copyUs, t->latchWaitUs,
+                 t->path < 6 ? kIopPathName[t->path] : "?", (t->flags & RD3_TRI_FALLBACK) ? " (latched path fell back: " : "",
+                 (t->flags & RD3_TRI_FALLBACK) ? rd3_il_fb_name(t->fbWhy) : "", (t->flags & RD3_TRI_FALLBACK) ? ")" : "",
+                 t->surf,
+                 (t->flags & RD3_TRI_OVERLAP) ? ", another head's transaction inside at the same time" : "");
+    }
+    if (!t->plane) return;
+    struct rd3_trace_ev e = rd3TrEv(RD3_TR_IOP, head);
+    e.arg = t->path;
+    e.flags = t->flags;
+    e.v0 = t->surf;
+    e.v1 = t->useed;
+    e.v2 = t->gateUs;
+    e.v3 = t->copyUs;
+    e.v4 = t->frame;
+    e.pa = t->target;
+    e.pb = (uint64_t)t->scanline | ((uint64_t)(t->inVblank ? 1u : 0u) << 32);
+    e.pc = us;
+    e.ba[0] = (t->flags & RD3_TRI_FALLBACK) ? t->fbWhy : 0xffu;
+    e.ba[1] = t->vblClass;
+    e.ba[2] = t->bin;
+    memcpy(&e.bb[0], &t->staleUs, 4);
+    memcpy(&e.bb[4], &t->latchWaitUs, 4);
+    rd3Trace(e);
+}
+/* K2: the head's frame and scanline at the copy's end; 'direct': into the live scanout (a copy ending in the active
+ * area there was seen half old, half new) */
+static void rd3AccelIopVblNote(IOService *fb, unsigned head, unsigned height, bool direct, Rd3IopTxn *t)
+{
+    if (head >= kRd3MaxFB) return;
+    RD3KDisplayStatus st;
+    RD3StatusWhy w;
+    if (!rd3AccelDispStatus(fb, head, &st, &w)) {
+        const SInt64 k = OSAddAtomic64(1, &gCntIopVblUnread);
+        if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopVblLogs), 4, 4095))
+            ALOG("iop vbl: head %u: the head's frame / scanline after the copy are unknown: %s (0x%x) -- "
+                 "iop_vbl_* not counted for it (%lld such)", head, w.why ? w.why : "?", (unsigned)w.ret, (long long)k + 1);
+        return;
+    }
+    uint32_t delta = 0;
+    const enum rd3_il_vbl c = rd3_il_vbl_class(gIopVblHave[head], gIopVblPrev[head], st.frame, &delta);
+    gIopVblHave[head] = true;
+    gIopVblPrev[head] = st.frame;
+    const unsigned bin = rd3_il_scan_bin(st.scanline, st.inVblank != 0, height);
+    OSAddAtomic64(1, &gCntIopVblN[head]);
+    if (c == RD3_IL_VBL_SAME) OSAddAtomic64(1, &gCntIopVblSame[head]);
+    if (c == RD3_IL_VBL_SKIP) OSAddAtomic64((SInt64)(delta - 1), &gCntIopVblSkip[head]);   /* refreshes repeated */
+    SInt64 *const bins[5] = { &gCntIopVblBin0[head], &gCntIopVblBin1[head], &gCntIopVblBin2[head],
+                              &gCntIopVblBin3[head], &gCntIopVblBlank[head] };
+    OSAddAtomic64(1, bins[bin <= RD3_IL_BIN_BLANK ? bin : RD3_IL_BIN_BLANK]);
+    if (direct && bin != RD3_IL_BIN_BLANK) OSAddAtomic64(1, &gCntIopVblMid[head]);
+    t->flags |= RD3_TRI_VBL;
+    t->frame = st.frame;
+    t->scanline = st.scanline;
+    t->inVblank = st.inVblank;
+    t->vblClass = (uint8_t)c;
+    t->bin = (uint8_t)bin;
+}
+
+/* the latched copy's head: its second scanout buffer D (VRAM of the accelerator's own, counted as swap_d in
+ * debug.rdna3_vram), the buffer it last flipped to, the framebuffer it was made for */
+struct RD3IopLb {
+    void *dHandle, *dKva;
+    unsigned long long dPhys, dCookie, dBytes;
+    unsigned dW, dH, dPitch;
+    unsigned long long last;
+    unsigned retry;
+    uint32_t modeGen;
+    IOService *fb;
+};
+static RD3IopLb gIopLb[kRd3MaxFB];
+static IOLock *volatile gIopLbLock[kRd3MaxFB];
+
+/* the HUBP's address now as a BAR address (rd3AccelTracePanel's read, untraced: once per latched frame) */
+static void rd3AccelIopHubp(unsigned head, IOService *fb, struct rd3_il_state *st, bool *pending)
+{
+    st->scan_known = 0;
+    st->scan = 0;
+    *pending = false;
+    IOService *core = rd3AccelCore();
+    RD3StatusWhy w = { nullptr, kIOReturnSuccess };
+    unsigned coreHead = 0;
+    const unsigned long long base = gVramPhysBase;
+    if (!core || !fb || !base || !rd3AccelCoreHead(fb, &coreHead, &w)) return;
+    struct RD3KDisplayScanAddr q;
+    bzero(&q, sizeof q);
+    q.version = RD3K_DISPLAY_ABI_VERSION;
+    q.head = coreHead;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_SCANADDR);
+    const IOReturn r = sym ? core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+    if (sym) sym->release();
+    if (r != kIOReturnSuccess || q.inUse < q.fbStart) return;
+    st->scan_known = 1;
+    st->scan = base + (q.inUse - q.fbStart);
+    *pending = q.flipPending != 0;
+}
+/* what rd3_il_pick reads: the present queue's record (a latch the worker has not seen yet taken first, as a present
+ * would) and the HUBP's address. Under gIopLbLock[head], not gPresLock */
+static void rd3AccelIopLbState(unsigned head, IOService *fb, struct rd3_il_state *st)
+{
+    RD3PresDone d = {};
+    bool pending = false;
+    IOLockLock(gPresLock);
+    rd3AccelPqLookLocked(head, &d);
+    st->shown = gPres[head].q.shown;
+    st->inflight = gPres[head].q.inflight;
+    st->queued = gPres[head].q.queued;
+    IOLockUnlock(gPresLock);
+    rd3AccelPqDoneRun(&d);
+    rd3AccelIopHubp(head, fb, st, &pending);
+    /* a flip the queue does not know of (a mode set's, the framebuffer's own): the HUBP's in-use address is the
+     * buffer it leaves - neither is free until it latched */
+    if (pending && !st->inflight) st->inflight = RD3_FQ_FOREIGN;
+}
+/* one flip in flight per head: the latched frame waits for its latch (drm_atomic_helper_wait_for_dependencies),
+ * bounded by the head's cap; woken by the worker at the latch. Returns the us waited */
+static uint32_t rd3AccelIopLbWait(unsigned head)
+{
+    RD3Pres &P = gPres[head];
+    const uint64_t t0 = mach_absolute_time();
+    IOLockLock(gPresLock);
+    const uint64_t cap = P.capUs ? P.capUs : RD3_LATCH_CAP_US;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline((uint32_t)cap, kMicrosecondScale, &deadline);
+    rd3AccelPqArmLocked(head);
+    while (P.q.inflight && !gPresStopping && mach_absolute_time() < deadline)
+        IOLockSleepDeadline(gPresLock, &P.q, deadline, THREAD_UNINT);
+    IOLockUnlock(gPresLock);
+    const uint64_t us = rd3AccelUsSince(t0);
+    OSAddAtomic64(1, &gCntIopLbWait[head]);
+    OSAddAtomic64((SInt64)us, &gCntIopLbWaitUs[head]);
+    return rd3TrSat(us);
+}
+/* D given back when nothing holds it and the HUBP is seen elsewhere (rd3_il_d_freeable); false: kept, counted.
+ * Under gIopLbLock[head] */
+static bool rd3AccelIopLbFree(unsigned head, IOService *fb, const char *why)
+{
+    RD3IopLb &L = gIopLb[head];
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!L.dHandle) return true;
+    struct rd3_il_state st;
+    bzero(&st, sizeof st);
+    st.d = L.dPhys;
+    st.last = L.last;
+    if (gPresReady) rd3AccelIopLbState(head, fb, &st);
+    else { bool pending = false; rd3AccelIopHubp(head, fb, &st, &pending); if (pending) st.inflight = RD3_FQ_FOREIGN; }
+    if (!a || !rd3_il_d_freeable(&st)) {
+        const SInt64 k = OSAddAtomic64(1, &gCntIopLbFreeWait);
+        if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbFreeLogs), 8, 1023))
+            ALOG("iop latch: head %u: its second scanout buffer (phys 0x%llx) is not freed yet (%s): %s (HUBP %s0x%llx, "
+                 "queue shown 0x%llx in flight 0x%llx queued 0x%llx; %lld such)", head, L.dPhys, why,
+                 !a ? "no accelerator" : "the panel may still read it", st.scan_known ? "" : "UNKNOWN ", st.scan,
+                 st.shown, st.inflight, st.queued, (long long)k + 1);
+        return false;
+    }
+    struct RD3KVramRequest r;
+    bzero(&r, sizeof r);
+    r.version = RD3K_VRAM_ABI_VERSION;
+    r.handle = L.dHandle; r.kva = L.dKva; r.actualSize = L.dBytes; r.allocationCookie = L.dCookie;
+    const IOReturn fr = a->askFramebufferForVram(&r, false);
+    OSAddAtomic64(-(SInt64)L.dBytes, &gCntIopLbVramBytes);
+    OSAddAtomic64(1, &gCntIopLbVramFrees);
+    ALOG("iop latch: head %u: second scanout buffer phys 0x%llx (%ux%u, %llu bytes) freed (%s) -> 0x%x", head, L.dPhys,
+         L.dW, L.dH, L.dBytes, why, (unsigned)fr);
+    if (L.last == L.dPhys) L.last = 0;
+    L.dHandle = nullptr; L.dKva = nullptr; L.dPhys = L.dCookie = L.dBytes = 0; L.dW = L.dH = L.dPitch = 0;
+    return true;
+}
+/* D for a w x h head; false: *why (VRAM refused, or the old one of another size still on the panel). Under
+ * gIopLbLock[head] */
+static bool rd3AccelIopLbEnsureD(unsigned head, IOService *fb, unsigned w, unsigned h, unsigned *why)
+{
+    RD3IopLb &L = gIopLb[head];
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (L.dHandle && L.dW == w && L.dH == h) return true;
+    if (!a) { *why = RD3_IL_FB_VRAM; return false; }
+    if (L.dHandle && !rd3AccelIopLbFree(head, fb, "a mode of another size")) { *why = RD3_IL_FB_RESIZE; return false; }
+    if (L.retry) { L.retry--; *why = RD3_IL_FB_VRAM; return false; }
+    const unsigned pitch = rd3_sc_pitch(w);
+    struct RD3KVramRequest r;
+    bzero(&r, sizeof r);
+    r.version = RD3K_VRAM_ABI_VERSION;
+    r.size = (unsigned long long)pitch * h;
+    r.flags = RD3K_VRAM_OWNER_SWAP_D;   /* counted as swap_d in debug.rdna3_vram: the accelerator's second scanouts */
+    const IOReturn ret = a->askFramebufferForVram(&r, true);
+    const char *bad = ret != kIOReturnSuccess || !r.handle || !r.phys ? "refused"
+                    : !r.kva ? "granted without a CPU mapping (the CPU copy needs one)"
+                    : r.actualSize < (unsigned long long)pitch * h ? "granted smaller than asked" : nullptr;
+    if (bad) {
+        if (ret == kIOReturnSuccess && r.handle) {   /* given back: unusable */
+            struct RD3KVramRequest f = r;
+            f.version = RD3K_VRAM_ABI_VERSION;
+            (void)a->askFramebufferForVram(&f, false);
+        }
+        L.retry = RD3_IL_VRAM_RETRY;
+        const SInt64 k = OSAddAtomic64(1, &gCntIopLbVramRefused);
+        if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbVramLogs), 8, 255))
+            ALOG("iop latch: head %u: no VRAM for the second scanout buffer (%ux%u pitch %u, %llu bytes): %s (0x%x; "
+                 "%llu MiB handed out) -- its frames are copied into the live scanout (iop_latch_fb_vram), tried "
+                 "again in %u latched frames (%lld such)", head, w, h, pitch, (unsigned long long)pitch * h, bad,
+                 (unsigned)ret, r.mappedTotal >> 20, RD3_IL_VRAM_RETRY, (long long)k + 1);
+        *why = RD3_IL_FB_VRAM;
+        return false;
+    }
+    L.dHandle = r.handle; L.dKva = r.kva; L.dPhys = r.phys; L.dCookie = r.allocationCookie; L.dBytes = r.actualSize;
+    L.dW = w; L.dH = h; L.dPitch = pitch; L.fb = fb;
+    rd3AccelVramBase(r.phys, r.allocationCookie);
+    OSAddAtomic64((SInt64)r.actualSize, &gCntIopLbVramBytes);
+    OSAddAtomic64(1, &gCntIopLbVramAllocs);
+    ALOG("iop latch: head %u: second scanout buffer phys 0x%llx %ux%u pitch %u (%llu bytes; %llu MiB of VRAM handed out "
+         "now): its frames are copied into the buffer the panel does not scan, flipped at the next vblank", head, r.phys,
+         w, h, pitch, r.actualSize, r.mappedTotal >> 20);
+    return true;
+}
+/* a latched frame that took the direct copy: counted per reason, logged (the first 4, then every 1024th) */
+static bool rd3AccelIopLbFb(unsigned head, unsigned why, Rd3IopTxn *t, const char *detail)
+{
+    if (why >= RD3_IL_FB_N) why = RD3_IL_FB_BUSY;
+    const SInt64 k = OSAddAtomic64(1, &gCntIopLbFb[why]);
+    if (head < kRd3MaxFB) OSAddAtomic64(1, &gCntIopLbFbHead[head]);
+    t->flags |= RD3_TRI_FALLBACK;
+    t->fbWhy = (uint8_t)why;
+    if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbFbLogs[why]), 4, 1023))
+        ALOG("iop latch: head %u: this frame is copied into the LIVE scanout instead (%s: %s; iop_latch_fb_%s %lld)",
+             head, rd3_il_fb_name(why), detail, rd3_il_fb_name(why), (long long)k + 1);
+    return false;
+}
+static bool rd3AccelIopLatchCopy(void *pipe, IOService *fb, unsigned head, const struct RD3KVramRequest *home,
+                                 RD3DisplayPipe::RD3IopSrc *srcSlot, const volatile unsigned int *src, unsigned w,
+                                 unsigned h, unsigned pitch, bool l10r, bool fromRes, IOSurface *s, Rd3IopTxn *t)
+{
+    if (head >= kRd3MaxFB || !fb || !home) return false;
+    if (!gIopQueue || !gPresReady || !pipe || gPresStopping)
+        return rd3AccelIopLbFb(head, RD3_IL_FB_QUEUE, t, "no present queue (debug.rdna3accel_iop_queue 0, or not started)");
+    IOLock *l = rd3LockOnce(&gIopLbLock[head]);
+    if (!l) return rd3AccelIopLbFb(head, RD3_IL_FB_QUEUE, t, "no lock for the head's latched copy");
+    IOLockLock(l);
+    RD3IopLb &L = gIopLb[head];
+    const uint32_t mg = __atomic_load_n(&gIopLbModeGen, __ATOMIC_ACQUIRE);
+    if (L.modeGen != mg) {   /* a mode set programmed home since: that is what the head scans */
+        L.modeGen = mg;
+        L.last = home->phys;
+    }
+    rd3AccelVramBase(home->phys, home->allocationCookie);
+    unsigned why = RD3_IL_FB_VRAM;
+    if (!rd3AccelIopLbEnsureD(head, fb, home->width, home->height, &why)) {
+        IOLockUnlock(l);
+        return rd3AccelIopLbFb(head, why, t, why == RD3_IL_FB_RESIZE ? "the old second buffer is still on the panel"
+                                                                      : "no VRAM for the second buffer");
+    }
+    struct rd3_il_state st;
+    bzero(&st, sizeof st);
+    st.home = home->phys;
+    st.d = L.dPhys;
+    st.last = L.last;
+    rd3AccelIopLbState(head, fb, &st);
+    enum rd3_il_pick p = rd3_il_pick(&st);
+    if (p == RD3_IL_WAIT) {
+        t->latchWaitUs = rd3AccelIopLbWait(head);
+        rd3AccelIopLbState(head, fb, &st);
+        p = rd3_il_pick(&st);
+    }
+    if (p != RD3_IL_HOME && p != RD3_IL_D) {
+        IOLockUnlock(l);
+        char det[160];
+        snprintf(det, sizeof det, "%s (HUBP %s0x%llx, queue shown 0x%llx in flight 0x%llx queued 0x%llx, last 0x%llx)",
+                 p == RD3_IL_WAIT ? "a flip still in flight after the wait" : "both buffers in use",
+                 st.scan_known ? "" : "unknown ", st.scan, st.shown, st.inflight, st.queued, st.last);
+        return rd3AccelIopLbFb(head, RD3_IL_FB_BUSY, t, det);
+    }
+    struct RD3KVramRequest tq = *home;
+    const bool toD = p == RD3_IL_D;
+    if (toD) {
+        tq.kva = L.dKva; tq.phys = L.dPhys; tq.allocationCookie = L.dCookie; tq.actualSize = L.dBytes;
+        tq.pitch = L.dPitch; tq.width = L.dW; tq.height = L.dH; tq.handle = L.dHandle;
+    }
+    if (!tq.kva || (tq.pitch & 3u) || tq.pitch < 4ull * w || tq.width != w || tq.height != h ||
+        (unsigned long long)h * tq.pitch > tq.actualSize) {
+        IOLockUnlock(l);
+        char det[128];
+        snprintf(det, sizeof det, "%s %ux%u pitch %u (%llu bytes) for a %ux%u frame", toD ? "D" : "home", tq.width,
+                 tq.height, tq.pitch, tq.actualSize, w, h);
+        return rd3AccelIopLbFb(head, RD3_IL_FB_GEOM, t, det);
+    }
+    const bool bySdma = rd3AccelIopCopyInto(srcSlot, head, &tq, src, w, h, pitch, l10r, fromRes, s, &t->copyUs);
+    RD3PresReq rq;
+    rd3AccelPqZero(&rq);
+    rq.f.version = RD3K_FLIP_ABI_VERSION;
+    rq.f.kapiMemory = toD ? L.dHandle : nullptr;
+    rq.f.allocationCookie = tq.allocationCookie;   /* home: the framebuffer's own (fBootVram), as its HOME flip */
+    rq.f.width = tq.width; rq.f.height = tq.height; rq.f.pitch = tq.pitch;
+    rq.phys = tq.phys;
+    rq.cookie = tq.allocationCookie;
+    rq.pipe = pipe;
+    rq.kind = kPqIop;
+    rq.lb = true;
+    rq.lbHome = !toD;
+    rq.tok = (uint32_t)OSAddAtomic64(1, &gCntPqIop[head]) + 1;
+    const unsigned out = rd3AccelPresentSubmit(head, fb, &rq, 0);
+    if (out == kPqOutRefused) {
+        IOLockUnlock(l);
+        return rd3AccelIopLbFb(head, RD3_IL_FB_REFUSED, t, "the framebuffer refused the flip (copied again into home)");
+    }
+    L.last = tq.phys;
+    IOLockUnlock(l);
+    rd3AccelForgetShown(head);   /* none of WindowServer's buffers is on the panel (copy forward's record) */
+    t->path = bySdma ? RD3_TRI_LATCH_SDMA : RD3_TRI_LATCH_CPU;
+    t->target = tq.phys;
+    if (toD) { t->flags |= RD3_TRI_TO_D; OSAddAtomic64(1, &gCntIopLbD[head]); }
+    const SInt64 n = OSAddAtomic64(1, &gCntIopLbN[head]);
+    if (n < 4 || (n & 0xffff) == 0)
+        ALOG("iop latch: head %u: frame #%lld copied into %s (phys 0x%llx, %u us) and %s; the transaction completes at "
+             "the latch", head, (long long)n + 1, toD ? "the second buffer" : "home", tq.phys, t->copyUs,
+             out == kPqOutShown ? "flipped to (programmed)" : "queued behind the flip in flight");
+    return true;
+}
+/* debug.rdna3accel_iop_latch 0: the head's second buffer given back once the panel left it (the direct copy's flip
+ * home moves it) */
+static void rd3AccelIopLbRelease(IOService *fb, unsigned head)
+{
+    if (head >= kRd3MaxFB || !gIopLb[head].dHandle) return;
+    IOLock *l = gIopLbLock[head];
+    if (!l) return;
+    IOLockLock(l);
+    (void)rd3AccelIopLbFree(head, fb, "debug.rdna3accel_iop_latch is 0");
+    IOLockUnlock(l);
+}
+/* the accelerator's stop (after the family's and the present queue's): a D the HUBP does not scan is freed, one it
+ * may scan is kept (VRAM lost until the next boot - freed, the next allocation would scribble on the panel) */
+static void rd3AccelIopLbStop(void)
+{
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        RD3IopLb &L = gIopLb[h];
+        if (!L.dHandle) continue;
+        IOService *fb = a && L.fb && a->fFBs[h] == L.fb ? L.fb : nullptr;
+        IOLock *l = gIopLbLock[h];
+        if (l) IOLockLock(l);
+        if (!fb || !rd3AccelIopLbFree(h, fb, "the accelerator stops"))
+            ALOG("iop latch: stop: head %u's second scanout buffer (phys 0x%llx, %llu bytes) KEPT: %s -- that VRAM is "
+                 "lost until the next boot", h, L.dPhys, L.dBytes,
+                 fb ? "the panel may still scan it" : "its framebuffer is gone (the HUBP cannot be asked)");
+        if (l) IOLockUnlock(l);
+    }
+}
+static int rdna3accel_iop_latch_sysctl SYSCTL_HANDLER_ARGS
+{
+    int v = gIopLatch;
+    const int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr) return err;
+    const int was = gIopLatch;
+    gIopLatch = v ? 1 : 0;
+    if (was != gIopLatch)
+        ALOG("iop latch (N68): debug.rdna3accel_iop_latch %d -> %d: copied IOP frames go %s", was, gIopLatch,
+             gIopLatch ? "into the buffer the panel does not scan, flipped at the latch (second buffers made on first use)"
+                       : "into the live scanout again (the second buffers given back once the panel left them)");
+    return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_iop_latch, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+            rdna3accel_iop_latch_sysctl, "I",
+            "N68: 1 = a copied IOP frame goes into the head's buffer the panel does not scan and is flipped to through "
+            "the present queue, the transaction complete at the latch; 0 (default, boot-arg rdna3ioplatch) = copied "
+            "into the live scanout, complete at once");
+RD3ACCEL_CNT4(rdna3accel_iop_txn_n, gCntIopTxnN, "N68 K1: IOP transactions timed (every one past the head lookup)");
+RD3ACCEL_CNT4(rdna3accel_iop_txn_us, gCntIopTxnUs, "N68 K1: microseconds from performTransaction's entry to its exit, summed");
+RD3ACCEL_CNT4(rdna3accel_iop_txn_max_us, gCntIopTxnMaxUs, "N68 K1: the longest transaction, microseconds");
+RD3ACCEL_CNT4(rdna3accel_iop_txn_slow, gCntIopTxnSlow, "N68 K1: transactions over 8 ms (the `iop txn:` lines split them)");
+RD3ACCEL_CNT4(rdna3accel_iop_txn_stale_us, gCntIopTxnStaleUs, "N68 K1: of the transactions' time, the N59 stale wait's, us");
+RD3ACCEL_CNT(rdna3accel_iop_txn_overlap, gCntIopTxnOverlap, "N68 K4: transactions entered while another head's was inside");
+RD3ACCEL_CNT(rdna3accel_iop_txn_overlap_same, gCntIopTxnOverlapSame, "N68 K4: transactions entered while one of the same head was inside");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_n, gCntIopVblN, "N68 K2: copies whose end was placed in the scan (the head's frame and scanline read)");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_same, gCntIopVblSame, "N68 K2: copies that ended in the same refresh as the head's copy before (one never shown)");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_skip, gCntIopVblSkip, "N68 K2: refreshes between two copies that got none (the panel repeated a frame)");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_mid, gCntIopVblMid, "N68 K2: direct copies into the live scanout that ended in the active scan (torn)");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_bin0, gCntIopVblBin0, "N68 K2: copies that ended in the first quarter of the active scan");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_bin1, gCntIopVblBin1, "N68 K2: copies that ended in the second quarter of the active scan");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_bin2, gCntIopVblBin2, "N68 K2: copies that ended in the third quarter of the active scan");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_bin3, gCntIopVblBin3, "N68 K2: copies that ended in the last quarter of the active scan");
+RD3ACCEL_CNT4(rdna3accel_iop_vbl_blank, gCntIopVblBlank, "N68 K2: copies that ended in the vertical blank");
+RD3ACCEL_CNT(rdna3accel_iop_vbl_unread, gCntIopVblUnread, "N68 K2: copies whose head state could not be read (not placed)");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_n, gCntIopLbN, "N68: latched frames presented (copied off the panel, flipped at the latch)");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_d, gCntIopLbD, "N68: of them into the second buffer (the rest into home)");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_wait, gCntIopLbWait, "N68: latched frames that waited for the flip in flight to latch");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_wait_us, gCntIopLbWaitUs, "N68: microseconds those waits took, summed");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_fb, gCntIopLbFbHead, "N68: frames of the latched path copied into the live scanout instead");
+RD3ACCEL_CNT(rdna3accel_iop_latch_fb_queue, gCntIopLbFb[RD3_IL_FB_QUEUE], "N68: direct instead: no present queue");
+RD3ACCEL_CNT(rdna3accel_iop_latch_fb_vram, gCntIopLbFb[RD3_IL_FB_VRAM], "N68: direct instead: no VRAM for the second buffer");
+RD3ACCEL_CNT(rdna3accel_iop_latch_fb_resize, gCntIopLbFb[RD3_IL_FB_RESIZE], "N68: direct instead: the old second buffer of another mode still on the panel");
+RD3ACCEL_CNT(rdna3accel_iop_latch_fb_busy, gCntIopLbFb[RD3_IL_FB_BUSY], "N68: direct instead: both buffers in use, or a flip still in flight after the wait");
+RD3ACCEL_CNT(rdna3accel_iop_latch_fb_refused, gCntIopLbFb[RD3_IL_FB_REFUSED], "N68: direct instead: the framebuffer refused the flip");
+RD3ACCEL_CNT(rdna3accel_iop_latch_fb_geom, gCntIopLbFb[RD3_IL_FB_GEOM], "N68: direct instead: the frame and the buffer have no common extent");
+static_assert(RD3_IL_FB_N == 6, "N68: a new fallback reason needs its debug.rdna3accel_iop_latch_fb_<name> counter");
+RD3ACCEL_CNT(rdna3accel_iop_latch_vram_bytes, gCntIopLbVramBytes, "N68: bytes of VRAM the second buffers hold now (all heads)");
+RD3ACCEL_CNT(rdna3accel_iop_latch_vram_allocs, gCntIopLbVramAllocs, "N68: second buffers allocated");
+RD3ACCEL_CNT(rdna3accel_iop_latch_vram_frees, gCntIopLbVramFrees, "N68: second buffers freed");
+RD3ACCEL_CNT(rdna3accel_iop_latch_vram_refused, gCntIopLbVramRefused, "N68: second buffers refused (the visible VRAM heap full)");
+RD3ACCEL_CNT(rdna3accel_iop_latch_freewait, gCntIopLbFreeWait, "N68: frees put off because the panel may still scan the buffer");
+static void rd3AccelInstallSysctlLatch(void)
+{
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch);
+    RD3ACCEL_REG4(rdna3accel_iop_txn_n);   RD3ACCEL_REG4(rdna3accel_iop_txn_us);
+    RD3ACCEL_REG4(rdna3accel_iop_txn_max_us); RD3ACCEL_REG4(rdna3accel_iop_txn_slow);
+    RD3ACCEL_REG4(rdna3accel_iop_txn_stale_us);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_txn_overlap);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_txn_overlap_same);
+    RD3ACCEL_REG4(rdna3accel_iop_vbl_n);   RD3ACCEL_REG4(rdna3accel_iop_vbl_same);
+    RD3ACCEL_REG4(rdna3accel_iop_vbl_skip); RD3ACCEL_REG4(rdna3accel_iop_vbl_mid);
+    RD3ACCEL_REG4(rdna3accel_iop_vbl_bin0); RD3ACCEL_REG4(rdna3accel_iop_vbl_bin1);
+    RD3ACCEL_REG4(rdna3accel_iop_vbl_bin2); RD3ACCEL_REG4(rdna3accel_iop_vbl_bin3);
+    RD3ACCEL_REG4(rdna3accel_iop_vbl_blank);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_vbl_unread);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_n); RD3ACCEL_REG4(rdna3accel_iop_latch_d);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_wait); RD3ACCEL_REG4(rdna3accel_iop_latch_wait_us);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_fb);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_fb_queue);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_fb_vram);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_fb_resize);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_fb_busy);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_fb_refused);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_fb_geom);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_bytes);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_allocs);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_frees);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_refused);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_freewait);
 }
 
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_async, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapAsync, 0,
@@ -11294,6 +11876,7 @@ static void rd3AccelInstallSysctl2(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_copybrktrips);
     rd3AccelInstallSysctlGen();   /* card run 2026-10-17d */
     rd3AccelInstallSysctlPq();    /* DRIVER-PLAN N38: the present queue, the GPU utilization */
+    rd3AccelInstallSysctlLatch(); /* DRIVER-PLAN N68: the IOP transactions' timing, the latched copy */
     rd3AccelInstallSysctlPark();  /* DRIVER-PLAN N41: VRAM parking, WindowServer's pending GPU writes */
 }
 

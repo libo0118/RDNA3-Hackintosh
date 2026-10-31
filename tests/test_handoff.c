@@ -21,9 +21,11 @@ int main(void)
     nvmtl_ho_publish(&s, NVMTL_HO_WAIT, 3000000, 0, 0);
     nvmtl_ho_publish(&s, NVMTL_HO_HANDLER, 1000000, 0, 0);
     nvmtl_ho_publish(&s, NVMTL_HO_NONE, 0, 1, 2000000);
+    nvmtl_ho_publish(&s, NVMTL_HO_NONE, 0, 1, 6000000);   /* N68: the longest hold is its own field */
     nvmtl_ho_publish(&s, NVMTL_HO_STATUS, 2000000, 0, 0);
     CHECK(nvmtl_ho_format(&s, 1, line, sizeof line) == 1);
-    CHECK(!strcmp(line, "cbs=5 early=3 by_handler=1 by_wait=1 by_status=1 gap_us_avg=2000 gap_us_max=3000 held=1 held_us_avg=2000 hold=1"));
+    CHECK(!strcmp(line, "cbs=6 early=3 by_handler=1 by_wait=1 by_status=1 gap_us_avg=2000 gap_us_max=3000 held=2 held_us_avg=4000 "
+                       "held_us_max=6000 hold=1"));
     CHECK(nvmtl_ho_hold_on("1") && !nvmtl_ho_hold_on("0") && nvmtl_ho_hold_on(NULL) && nvmtl_ho_hold_on(""));   /* on by default */
     printf("test_handoff: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

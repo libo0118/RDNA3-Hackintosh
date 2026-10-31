@@ -17,7 +17,14 @@ Sources:
     line per process: what one frame (a command buffer that began a render pass) costs to record and on the GPU, its draws,
     framebuffer-fetch draws and the barriers before them (image / old memory barrier), the surface-in uploads.
 
+  * N68: `debug.rdna3accel_iop_txn_*` / `iop_vbl_*` / `iop_latch*` (same file, or a bare-metal stick report's
+    sysctl.txt): every transaction's time on WindowServer's thread per head, where in the scan its copy ended (two
+    copies in one refresh, refreshes with none, direct copies ending mid-scan), both heads inside at once, and the
+    latched copy (debug.rdna3accel_iop_latch): frames flipped at the latch, its fallbacks by reason, its VRAM.
+
     present_rows(plugin_text, surfvram, iop_on) -> [(LEVEL, name, text)]   (the `ws frame` rows included)
+    iop_latch_rows(counters) -> [(LEVEL, 'IOP timing' | 'IOP latch', text)]
+    python3 tools/triage_present_cost.py SYSCTL_DUMP [PLUGIN_LOG]   (prints the rows; the Pi session's sysctl.txt)
     ws_frame_rows(plugin_text) -> [(LEVEL, 'ws frame', text)]
 """
 import re
@@ -44,7 +51,8 @@ def plugin_summaries(plugin_text):
 def kernel_counters(surfvram):
     """{short name: int} of debug.rdna3accel_iop_copy* / iop_gate_us* / iop_ok* / iop_flip_fmt"""
     out = {}
-    for m in re.finditer(r"^debug\.rdna3accel_(iop_copy\w*|iop_gate_us\w*|iop_ok\w*|iop_flip_fmt): (-?\d+)\s*$",
+    for m in re.finditer(r"^debug\.rdna3accel_(iop_copy\w*|iop_gate_us\w*|iop_ok\w*|iop_flip_fmt|iop_txn\w*|iop_vbl\w*|"
+                         r"iop_latch\w*|iop_stale_wait_ms): (-?\d+)\s*$",
                          surfvram or "", re.M):
         out[m.group(1)] = int(m.group(2))
     return out
@@ -149,6 +157,74 @@ def iop_format_rows(c):
              "remove the conversion")]
 
 
+SAME_WARN, SKIP_WARN = 0.02, 0.05   # N68: of the placed copies, two in one refresh / refreshes repeated
+
+
+def iop_latch_rows(c):
+    """N68: `IOP timing` (K1 / K2 / K4 per head) and `IOP latch` (the latched copy); no row for a kernel before N68
+    unless it presented (then a WARN: the counters are missing)"""
+    heads = [h for h in range(4) if c.get("iop_txn_n_h%d" % h, 0)]
+    if "iop_txn_n_h0" not in c:
+        if c.get("iop_ok", 0):
+            return [("WARN", "IOP timing", "no debug.rdna3accel_iop_txn_* counters although IOP frames were presented "
+                     "(iop_ok %d): a kernel before DRIVER-PLAN N68, or a collector that does not grep iop_txn / iop_vbl / "
+                     "iop_latch - the transactions' timing is UNKNOWN" % c.get("iop_ok", 0))]
+        return []
+    out = []
+    for h in heads:
+        n = c["iop_txn_n_h%d" % h]
+        g = lambda k: c.get("%s_h%d" % (k, h), 0)   # noqa: E731
+        vn = g("iop_vbl_n")
+        bins = "/".join(str(g("iop_vbl_bin%d" % b)) for b in range(4)) + " blank %d" % g("iop_vbl_blank")
+        text = ("head %d: %d transaction(s), avg %.2f ms, longest %.2f ms, %d over 8 ms (the `iop txn:` lines split "
+                "them), N59 stale wait %.2f ms a transaction (stale_wait_ms %s); %d copies placed in the scan: %d in the "
+                "SAME refresh as the one before, %d refresh(es) with NO copy, %d direct copies ending mid-scan (torn); "
+                "scan quarters %s" % (
+                    h, n, g("iop_txn_us") / 1000.0 / n, g("iop_txn_max_us") / 1000.0, g("iop_txn_slow"),
+                    g("iop_txn_stale_us") / 1000.0 / n, _q(c, "iop_stale_wait_ms"), vn, g("iop_vbl_same"),
+                    g("iop_vbl_skip"), g("iop_vbl_mid"), bins))
+        why = []
+        if g("iop_txn_slow"):
+            why.append("transactions held WindowServer's thread over 8 ms")
+        if vn and g("iop_vbl_same") > SAME_WARN * vn:
+            why.append("copies land two in one refresh (one never shown): uneven steps")
+        if vn and g("iop_vbl_skip") > SKIP_WARN * vn:
+            why.append("refreshes get no new frame (a repeated frame): uneven steps")
+        out.append(("WARN" if why else "INFO", "IOP timing", text + (": " + "; ".join(why) if why else "")))
+    ov, ovs = c.get("iop_txn_overlap", 0), c.get("iop_txn_overlap_same", 0)
+    if ov or ovs or c.get("iop_vbl_unread", 0):
+        out.append(("INFO", "IOP timing", "%d transaction(s) entered while another head's was inside, %d while one of "
+                    "the same head was; %d copies whose head state could not be read" % (ov, ovs, c.get("iop_vbl_unread", 0))))
+    if "iop_latch" not in c:
+        out.append(("WARN", "IOP latch", "no debug.rdna3accel_iop_latch in the dump although the N68 timing counters are "
+                    "there: the collector's grep misses it"))
+        return out
+    on = c.get("iop_latch", 0)
+    fbs = ", ".join("%s %d" % (k, c.get("iop_latch_fb_" + k, 0)) for k in
+                    ("queue", "vram", "resize", "busy", "refused", "geom") if c.get("iop_latch_fb_" + k, 0))
+    per = "; ".join("head %d: %d latched (%d into D, %d waited avg %.2f ms), %d direct instead" % (
+        h, c.get("iop_latch_n_h%d" % h, 0), c.get("iop_latch_d_h%d" % h, 0), c.get("iop_latch_wait_h%d" % h, 0),
+        c.get("iop_latch_wait_us_h%d" % h, 0) / 1000.0 / max(1, c.get("iop_latch_wait_h%d" % h, 0)),
+        c.get("iop_latch_fb_h%d" % h, 0)) for h in heads)
+    latched = sum(c.get("iop_latch_n_h%d" % h, 0) for h in range(4))
+    text = ("debug.rdna3accel_iop_latch %s; %s; fallbacks: %s; second buffers: %d MiB held, %d allocated, %d freed, "
+            "%d refused, %d free(s) put off" % (
+                "ON (copied frames flipped at the latch)" if on else "off (copied into the live scanout)", per or "-",
+                fbs or "none", c.get("iop_latch_vram_bytes", 0) >> 20, c.get("iop_latch_vram_allocs", 0),
+                c.get("iop_latch_vram_frees", 0), c.get("iop_latch_vram_refused", 0), c.get("iop_latch_freewait", 0)))
+    why = []
+    if on and not latched and sum(c.get("iop_vbl_n_h%d" % h, 0) for h in heads):
+        why.append("it is ON but no frame was latched (the fallback reasons)")
+    if c.get("iop_latch_vram_refused", 0):
+        why.append("the visible VRAM heap refused the second buffer (`iop latch: ... no VRAM` lines)")
+    if c.get("iop_latch_fb_refused", 0) or c.get("iop_latch_fb_geom", 0):
+        why.append("flips refused or buffers of the wrong shape (`iop latch:` lines)")
+    if not on and c.get("iop_latch_vram_bytes", 0):
+        why.append("off, but a second buffer is still held (the panel may still scan it: iop_latch_freewait)")
+    out.append(("WARN" if why else "INFO", "IOP latch", text + (": " + "; ".join(why) if why else "")))
+    return out
+
+
 WS_HALF_FRAME_MS = 8.0   # one command buffer over this (record or GPU) takes half of a 60 Hz frame; WindowServer commits ~2 a frame
 
 
@@ -231,6 +307,7 @@ def _present_rows(plugin_text, surfvram, iop_on=True):
             lvl, why = "WARN", why + ": the SDMA path is on but every copy went to the CPU (the fallback reasons above)"
         out.append((lvl, "IOP copy", iop + why))
     out.extend(iop_format_rows(c))
+    out.extend(iop_latch_rows(c))
     n_all, us_all = iop_counts(c)
     iop_avg = ("%.2f ms (%s)" % (us_all / 1000.0 / n_all, iop_path(c))) if n_all else "unknown"
     sums = plugin_summaries(plugin_text)
@@ -264,3 +341,24 @@ def _present_rows(plugin_text, surfvram, iop_on=True):
             lvl = "WARN"
         out.append((lvl, "present cost", text))
     return out
+
+
+def main(argv):
+    """the rows of a sysctl dump (and a plugin log) - for a bare-metal stick report's sysctl.txt"""
+    if len(argv) < 2:
+        print("usage: triage_present_cost.py SYSCTL_DUMP [PLUGIN_LOG]")
+        return 2
+    with open(argv[1], errors="replace") as f:
+        sysctls = f.read()
+    plugin = ""
+    if len(argv) > 2:
+        with open(argv[2], errors="replace") as f:
+            plugin = f.read()
+    for lvl, name, text in present_rows(plugin, sysctls, True):
+        print("%s %-14s %s" % (lvl, name, text))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv))

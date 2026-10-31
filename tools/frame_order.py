@@ -190,9 +190,9 @@ def handoff_rows(plugin_text):
     for proc, d in sorted(last.items()):
         early, cbs = int(d.get("early", "0") or 0), int(d.get("cbs", "0") or 0)
         text = ("%s: %d of %d command buffer(s) writing an IOSurface were seen scheduled BEFORE the write was in the surface "
-                "(handler %s, waitUntilScheduled %s, status %s; gap avg %s us, max %s us); NVMTL_SCHED_AFTER_PUBLISH %s, held %s (avg %s us)" % (
+                "(handler %s, waitUntilScheduled %s, status %s; gap avg %s us, max %s us); NVMTL_SCHED_AFTER_PUBLISH %s, held %s (avg %s us, longest %s us)" % (
                     proc, early, cbs, d.get("by_handler", "?"), d.get("by_wait", "?"), d.get("by_status", "?"), d.get("gap_us_avg", "?"), d.get("gap_us_max", "?"),
-                    "ON" if d.get("hold") == "1" else "off", d.get("held", "?"), d.get("held_us_avg", "?")))
+                    "ON" if d.get("hold") == "1" else "off", d.get("held", "?"), d.get("held_us_avg", "?"), d.get("held_us_max", "?")))
         out.append(("WARN" if early else "INFO", "handoff", text))
     return out
 

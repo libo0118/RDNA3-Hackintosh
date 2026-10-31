@@ -6,7 +6,15 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
-from triage_present_cost import present_rows, plugin_summaries, kernel_counters, ws_frame_rows, ws_summaries  # noqa: E402
+from triage_present_cost import present_rows as _all_rows, plugin_summaries, kernel_counters, ws_frame_rows, ws_summaries  # noqa: E402
+
+
+N68_ROWS = ("IOP timing", "IOP latch")
+
+
+def present_rows(*a):
+    """the rows before N68 (its own rows are checked at the end)"""
+    return [row for row in _all_rows(*a) if row[1] not in N68_ROWS]
 
 FAILS = []
 
@@ -159,6 +167,44 @@ check(r[0][0] == "WARN" and "GPU UNKNOWN" in r[0][2] and "avg 9.00 + GPU ? ms" i
 r = ws_frame_rows(W % (4, "WindowServer[207:2cd]", wbody(bi=0, bm=300000, membar=1)))
 check(r[0][0] == "INFO" and "NVMTL_FBF_MEMBAR ON (the old barrier)" in r[0][2] and "OLD memory 300000" in r[0][2], "A/B membar: %r" % (r[0],))
 check(ws_frame_rows("") == [], "no plugin log: no ws frame row")
+
+# N68: the transactions' timing and the latched copy (iop_latch_rows), from a bare-metal sysctl.txt
+r = [x for x in _all_rows("", "debug.rdna3accel_iop_ok: 10\n", True) if x[1] in N68_ROWS]
+check(len(r) == 1 and r[0][0] == "WARN" and "timing is UNKNOWN" in r[0][2], "pre-N68 kernel that presented: %r" % r)
+check(not [x for x in _all_rows("", "", True) if x[1] in N68_ROWS], "nothing presented: no N68 row")
+N68 = ("debug.rdna3accel_iop_ok: 1000\ndebug.rdna3accel_iop_stale_wait_ms: 12\n"
+       "debug.rdna3accel_iop_txn_n_h0: 1000\ndebug.rdna3accel_iop_txn_us_h0: 3000000\ndebug.rdna3accel_iop_txn_max_us_h0: 13000\n"
+       "debug.rdna3accel_iop_txn_slow_h0: 7\ndebug.rdna3accel_iop_txn_stale_us_h0: 500000\n"
+       "debug.rdna3accel_iop_txn_n_h1: 0\ndebug.rdna3accel_iop_txn_overlap: 40\ndebug.rdna3accel_iop_txn_overlap_same: 0\n"
+       "debug.rdna3accel_iop_vbl_n_h0: 1000\ndebug.rdna3accel_iop_vbl_same_h0: 120\ndebug.rdna3accel_iop_vbl_skip_h0: 130\n"
+       "debug.rdna3accel_iop_vbl_mid_h0: 900\ndebug.rdna3accel_iop_vbl_bin0_h0: 250\ndebug.rdna3accel_iop_vbl_bin1_h0: 250\n"
+       "debug.rdna3accel_iop_vbl_bin2_h0: 200\ndebug.rdna3accel_iop_vbl_bin3_h0: 200\ndebug.rdna3accel_iop_vbl_blank_h0: 100\n"
+       "debug.rdna3accel_iop_vbl_unread: 0\ndebug.rdna3accel_iop_latch: 0\ndebug.rdna3accel_iop_latch_vram_bytes: 0\n")
+r = triage_present_cost.iop_latch_rows(kernel_counters(N68))
+t = [x for x in r if x[1] == "IOP timing"]
+check(t and t[0][0] == "WARN" and "head 0: 1000 transaction(s), avg 3.00 ms, longest 13.00 ms, 7 over 8 ms" in t[0][2]
+      and "stale wait 0.50 ms a transaction (stale_wait_ms 12)" in t[0][2] and "120 in the SAME refresh" in t[0][2]
+      and "130 refresh(es) with NO copy" in t[0][2] and "900 direct copies ending mid-scan" in t[0][2]
+      and "scan quarters 250/250/200/200 blank 100" in t[0][2] and "uneven steps" in t[0][2], "timing row: %r" % r)
+check(any(x[1] == "IOP timing" and "40 transaction(s) entered while another head's" in x[2] for x in r), "overlap row: %r" % r)
+lat = [x for x in r if x[1] == "IOP latch"]
+check(lat and lat[0][0] == "INFO" and "off (copied into the live scanout)" in lat[0][2], "latch off: %r" % lat)
+ON = N68.replace("iop_latch: 0", "iop_latch: 1") + (
+    "debug.rdna3accel_iop_latch_n_h0: 0\ndebug.rdna3accel_iop_latch_fb_h0: 1000\ndebug.rdna3accel_iop_latch_fb_vram: 1000\n"
+    "debug.rdna3accel_iop_latch_vram_refused: 2\n")
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(ON)) if x[1] == "IOP latch"]
+check(lat and lat[0][0] == "WARN" and "fallbacks: vram 1000" in lat[0][2] and "no frame was latched" in lat[0][2]
+      and "refused the second buffer" in lat[0][2], "latch on, no VRAM: %r" % lat)
+OK = ON.replace("latch_n_h0: 0", "latch_n_h0: 1000").replace("latch_fb_h0: 1000", "latch_fb_h0: 0").replace(
+    "fb_vram: 1000", "fb_vram: 0").replace("vram_refused: 2", "vram_refused: 0").replace(
+    "vram_bytes: 0", "vram_bytes: 16777216").replace("mid_h0: 900", "mid_h0: 0").replace("same_h0: 120", "same_h0: 0").replace(
+    "skip_h0: 130", "skip_h0: 2").replace("slow_h0: 7", "slow_h0: 0") + "debug.rdna3accel_iop_latch_d_h0: 500\n"
+r = triage_present_cost.iop_latch_rows(kernel_counters(OK))
+check([x[0] for x in r if x[1] == "IOP timing"][0] == "INFO", "latched, even: timing INFO: %r" % r)
+lat = [x for x in r if x[1] == "IOP latch"]
+check(lat[0][0] == "INFO" and "head 0: 1000 latched (500 into D" in lat[0][2] and "16 MiB held" in lat[0][2], "latched ok: %r" % lat)
+r = triage_present_cost.iop_latch_rows(kernel_counters(N68.replace("debug.rdna3accel_iop_latch: 0\n", "")))
+check(any(x[0] == "WARN" and "misses it" in x[2] for x in r), "iop_latch missing: %r" % r)
 
 if FAILS:
     sys.exit("test_triage_present_cost: %d FAILED" % len(FAILS))
