@@ -2565,7 +2565,10 @@ PLAY_FIRST=${PLAY_FIRST:-300}; PLAY_SECOND=${PLAY_SECOND:-600}
 # the tests below gate on the same settings
 case " $args " in
     *" rdna3lvl="*|*" rdna3profile=0 "*) ;;
-    *) args="$args rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1" ;;
+    *) args="$args rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1"
+       # the display sleep test only when asked: a standalone run on the bare-metal Mac
+       # (2026-10-31, no Metal plugin) put the display to sleep and WindowServer crashed on wake
+       [ -n "$STANDALONE" ] || args="$args rdna3dpms=1" ;;
 esac
 lvl=$(echo "$args" | sed -n 's/.*rdna3lvl=\([0-9]*\).*/\1/p')
 # no idle system sleep while the tests run: with rdna3resume=1 QEMU lets

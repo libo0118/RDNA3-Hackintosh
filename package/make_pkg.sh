@@ -19,12 +19,18 @@
 #   --version V      package version (default: CFBundleVersion of RDNA3Accel)
 #   --no-pkg         only the tarball (automatic where pkgbuild is missing)
 #
+# The .pkg's installation check accepts macOS 15 and 26 (MACOS_MIN=15.0 up to, not including,
+# MACOS_BEFORE=27.0; environment variables): the payload carries the Sequoia accelerator and the
+# Tahoe one (kexts-tahoe, which the postinstall picks on Darwin 25).
+#
 # Output: RDNA3-Hackintosh-<version>-<commit>.pkg and .tar.gz. What gets
 # installed where: docs/INSTALL-OPENCORE.md. macOS (pkgbuild, productbuild,
 # install_name_tool); elsewhere only the tarball, for tests.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 P=$ROOT/package
+MACOS_MIN=${MACOS_MIN:-15.0}
+MACOS_BEFORE=${MACOS_BEFORE:-27.0}
 SRCS=(); FW=""; OUT=$ROOT/build/pkg; VER=""; NOPKG=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,6 +43,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ ${#SRCS[@]} -gt 0 ] || SRCS=("$ROOT/build")
+render_distribution() {   # render_distribution FILE VERSION: the installer script with the macOS range filled in
+    sed -e "s/@VERSION@/$2/g" -e "s/@MACOS_MIN@/$MACOS_MIN/g" -e "s/@MACOS_BEFORE@/$MACOS_BEFORE/g" "$1"
+}
 mkdir -p "$OUT" && OUT=$(cd "$OUT" && pwd)
 command -v pkgbuild >/dev/null 2>&1 && command -v productbuild >/dev/null 2>&1 || NOPKG=1
 say() { echo "make_pkg: $*"; }
@@ -244,8 +253,7 @@ cp "$P/pkg/conclusion.html" "$W/res/"
   echo "licensed under PolyForm Noncommercial 1.0.0 (installed next to this text in"
   echo "/Library/Application Support/RDNA3). AMD firmware: not part of this package unless built"
   echo "with --fw; downloaded from linux-firmware under LICENSE.amdgpu (docs/FIRMWARE.md)."; } > "$W/res/license.txt"
-sed -e "s/@VERSION@/$VER/g" -e "s/@MACOS_MIN@/${MACOS_MIN:-15.0}/g" -e "s/@MACOS_BEFORE@/${MACOS_BEFORE:-16.0}/g" \
-    "$P/pkg/distribution.xml" > "$W/distribution.xml"
+render_distribution "$P/pkg/distribution.xml" "$VER" > "$W/distribution.xml"
 productbuild --distribution "$W/distribution.xml" --resources "$W/res" --package-path "$W/pkgs" \
     "$OUT/$NAME.pkg" >/dev/null
 say "$OUT/$NAME.pkg"

@@ -37,12 +37,15 @@ def minimal_sample():
         "ACPI": {"Add": [], "Delete": [], "Patch": [], "Quirks": {}},
         "Booter": {"MmioWhitelist": [], "Patch": [], "Quirks": {"ResizeAppleGpuBars": -1, "SetupVirtualMap": False}},
         "DeviceProperties": {"Add": {}, "Delete": {}},
-        "Kernel": {"Add": [{"BundlePath": "Sample.kext"}], "Block": [], "Force": [], "Patch": [{"Comment": "sample"}],
+        "Kernel": {"Add": [{"BundlePath": "Sample.kext"}],
+                   "Block": [{"Arch": "Any", "Comment": "", "Enabled": False, "Identifier": "com.apple.driver.AppleTyMCEDriver",
+                              "MaxKernel": "", "MinKernel": "", "Strategy": "Disable"}], "Force": [], "Patch": [{"Comment": "sample"}],
                    "Emulate": {"Cpuid1Data": b"\x01", "Cpuid1Mask": b"\x01", "DummyPowerManagement": False,
                                "MaxKernel": "", "MinKernel": ""},
                    "Quirks": {"ProvideCurrentCpuInfo": False, "XhciPortLimit": True}, "Scheme": {}},
-        "Misc": {"Boot": {"ShowPicker": False, "Timeout": 5}, "Debug": {}, "Entries": [entry],
-                 "Security": {"ScanPolicy": 17760515, "SecureBootModel": "Default"}, "Tools": [{"Name": "Shell"}]},
+        "Misc": {"Boot": {"ShowPicker": False, "Timeout": 5, "PollAppleHotKeys": False, "HideAuxiliary": True},
+                 "Debug": {"AppleDebug": False, "ApplePanic": False, "Target": 3}, "BlessOverride": [], "Entries": [entry],
+                 "Security": {"ScanPolicy": 17760515, "SecureBootModel": "Default", "DmgLoading": "Signed"}, "Tools": [{"Name": "Shell"}]},
         "NVRAM": {"Add": {be.GUID_APPLE_BOOT: {"boot-args": "-v", "csr-active-config": b"\0\0\0\0",
                                                 "ForceDisplayRotationInEFI": 0, "SystemAudioVolume": b"F"},
                           be.GUID_APPLE_UI: {}},
@@ -74,6 +77,8 @@ def kext_list(tmp):
     kexts = []
     for _, bundle, comment in be.KEXTS:
         kexts.append(be.kext_entry(bundle, fake_kext(tmp, bundle), comment))
+        if bundle == "Lilu":
+            kexts.append(be.mce_entry("MacPro7,1"))
     kexts.append(be.kext_entry(be.CORE_KEXT, fake_kext(tmp, be.CORE_KEXT), "core", enabled=False,
                                min_kernel=be.CORE_KERNEL_MIN, max_kernel=be.CORE_KERNEL_MAX))
     return kexts
@@ -91,14 +96,28 @@ kexts = kext_list(os.path.join(tmp, "k"))
 
 # ---- patches: the VM's AMD_Vanilla file, the core count byte in exactly the four core patches
 patches = be.amd_kernel_patches(8, vm)
-check(len(patches) == len(vm.amd_patches()) and len(patches) >= 20, "AMD_Vanilla patch count %d" % len(patches))
+check(len(patches) == len(vm.amd_patches(iopci=True)) and len(patches) >= 20, "AMD_Vanilla patch count %d" % len(patches))
+# the VM keeps the kernel-only list; the bare-metal EFI adds IOPCIFamily's (ROOT CAUSE of the B550
+# chipset failure 2026-10-29..31: macOS enabled 10-bit tags and USB / LAN / NVMe / SATA behind it died)
+check(not any(p["Identifier"] != "kernel" for p in vm.amd_patches()), "vmtool.amd_patches() default is kernel patches only (the VM)")
+pci = [p for p in patches if p["Identifier"] == "com.apple.iokit.IOPCIFamily"]
+check(len(pci) == 3 and patches[-3:] == pci, "three IOPCIFamily patches, after the kernel ones: %d" % len(pci))
+tags = [p for p in pci if "Disable 10 bit tags" in p["Comment"]]
+check(len(tags) == 2 and all(p["Enabled"] and p["Base"] == "__ZN11IOPCIBridge13probeBusGatedEP14probeBusParams" for p in tags),
+      "both 10-bit tags patches (12.0-15.x and 26.0+) enabled, on probeBusGated")
+check(sorted((p["MinKernel"], p["MaxKernel"]) for p in tags) == [("21.0.0", "24.99.99"), ("25.0.0", "25.99.99")],
+      "10-bit tags patches cover Darwin 21..24 and 25: %r" % [(p["MinKernel"], p["MaxKernel"]) for p in tags])
+hot = [p for p in pci if "IOPCIIsHotplugPort" in p["Comment"]]
+check(len(hot) == 1 and hot[0]["Enabled"] is False, "the AM5 IOPCIIsHotplugPort patch is disabled")
+check(all(p["Arch"] == "x86_64" and p["Count"] == 1 and p["Find"] and p["Replace"] for p in pci), "IOPCIFamily patches carry their bytes")
 cp = [p for p in patches if vm.AMD_CORES_COMMENT in p["Comment"]]
 check(len(cp) == 4, "four cpuid_cores_per_package patches, got %d" % len(cp))
 check(all(p["Replace"][1] == 8 and p["Replace"][0] in (0xB8, 0xBA) for p in cp), "core count 8 in the Replace byte")
-check(all(p["Comment"].startswith("AMD_Vanilla: ") and p["Identifier"] == "kernel" for p in patches),
+check(all(p["Comment"].startswith("AMD_Vanilla: ") and p["Identifier"] in ("kernel", "com.apple.iokit.IOPCIFamily")
+          for p in patches),
       "patch comments / identifiers")
 # AMD_Vanilla ships two optional MTRR patches disabled; they stay as the file has them
-check([p["Enabled"] for p in patches] == [bool(p.get("Enabled")) for p in vm.amd_patches()]
+check([p["Enabled"] for p in patches] == [bool(p.get("Enabled")) for p in vm.amd_patches()] + [True, True, False]
       and sum(1 for p in patches if p["Enabled"]) >= 20, "patch Enabled flags as in the file")
 check(all(p["Replace"][1] == 16 for p in be.amd_kernel_patches(16, vm) if vm.AMD_CORES_COMMENT in p["Comment"]),
       "core count 16")
@@ -116,6 +135,9 @@ core = [k for k in c["Kernel"]["Add"] if k["BundlePath"] == "RDNA3Accel.kext"]
 check(len(core) == 1 and core[0]["Enabled"] is False, "installer: RDNA3Accel present but disabled")
 check(c["Kernel"]["Add"][0]["BundlePath"] == "Lilu.kext" and c["Kernel"]["Add"][-1]["BundlePath"] == "RDNA3Accel.kext",
       "Lilu first, core kext last")
+check(c["Kernel"]["Add"][1]["BundlePath"] == "RDNA3MCEReporterDisabler.kext" and c["Kernel"]["Add"][1]["Enabled"]
+      and c["Kernel"]["Add"][1]["ExecutablePath"] == "" and c["Kernel"]["Add"][1]["PlistPath"] == "Contents/Info.plist",
+      "codeless MCE kext right after Lilu, no executable")
 check(core[0]["MinKernel"] == "25.0.0" and core[0]["MaxKernel"] == "25.99.99", "core kext Darwin 25 range")
 args = c["NVRAM"]["Add"][be.GUID_APPLE_BOOT]["boot-args"]
 check("rdna3" not in args and "amfi" not in args and "alcid=13" in args and "-v" in args.split(), "installer boot-args: " + args)
@@ -127,12 +149,24 @@ check(q["ProvideCurrentCpuInfo"] and q["DisableIoMapper"] and not q["XhciPortLim
 e = c["Kernel"]["Emulate"]
 check(e["Cpuid1Data"] == b"" and e["Cpuid1Mask"] == b"" and e["DummyPowerManagement"], "AMD: no CPUID spoof, dummy PM")
 b = c["Booter"]["Quirks"]
-check(b["RebuildAppleMemoryMap"] and b["SyncRuntimePermissions"] and b["SetupVirtualMap"] and not b["EnableWriteUnprotector"]
-      and b["ResizeAppleGpuBars"] == 10, "booter quirks (Ryzen)")
-check(cfg("installer", sample, kexts, resize_bars=-1)["Booter"]["Quirks"]["ResizeAppleGpuBars"] == -1, "resize_bars=-1")
+check(b["RebuildAppleMemoryMap"] and b["SyncRuntimePermissions"] and b["SetupVirtualMap"] is False
+      and not b["EnableWriteUnprotector"], "booter quirks (Ryzen, B550 2020+ firmware: SetupVirtualMap off)")
+check(b["ResizeAppleGpuBars"] == -1, "ResizeAppleGpuBars -1 by default (the BIOS's 256 MiB BAR)")
+check(cfg("installer", sample, kexts, resize_bars=10)["Booter"]["Quirks"]["ResizeAppleGpuBars"] == 10, "resize_bars=10")
+blk = c["Kernel"]["Block"]
+check(len(blk) == 2 and blk[1]["Identifier"] == "com.apple.driver.AppleAHCIPort" and blk[1]["Enabled"]
+      and blk[1]["Strategy"] == "Disable" and blk[1]["MinKernel"] == "20.0.0", "AppleAHCIPort blocked: %r" % (blk,))
+check(len(cfg("installer", sample, kexts, block_ahci=False)["Kernel"]["Block"]) == 1, "block_ahci=False leaves the Sample's blocks")
 s = c["Misc"]["Security"]
 check(s["SecureBootModel"] == "Disabled" and s["ScanPolicy"] == 0 and s["AllowSetDefault"], "security")
+check(s["DmgLoading"] == "Any", "DmgLoading Any (the recovery dmg)")
 check(c["Misc"]["Boot"]["ShowPicker"] and c["Misc"]["Boot"]["Timeout"] == 0 and c["Misc"]["Tools"] == [], "picker visible, no timeout")
+check(c["Misc"]["Boot"]["PollAppleHotKeys"] is True and c["Misc"]["Boot"]["HideAuxiliary"] is False,
+      "PollAppleHotKeys on, auxiliary entries (the installer dmg) shown")
+check(c["Misc"]["Debug"] == {"AppleDebug": False, "ApplePanic": False, "Target": 3}, "debug off by default")
+dbg = cfg("installer", sample, kexts, debug=True)["Misc"]["Debug"]
+check(dbg["Target"] == 67 and dbg["AppleDebug"] is True and dbg["ApplePanic"] is True, "debug=True: Target 67, AppleDebug, ApplePanic")
+check("msgbuf=1048576" in c["NVRAM"]["Add"][be.GUID_APPLE_BOOT]["boot-args"].split(), "boot-args keep msgbuf=1048576")
 g = c["PlatformInfo"]["Generic"]
 check(g["SystemProductName"] == "MacPro7,1" and g["SystemSerialNumber"] == IDENT["serial"] and g["MLB"] == IDENT["mlb"]
       and g["ROM"] == bytes.fromhex(IDENT["rom"]) and c["PlatformInfo"]["Automatic"], "SMBIOS")
@@ -144,9 +178,10 @@ check(c["UEFI"]["Quirks"]["ReleaseUsbOwnership"], "ReleaseUsbOwnership")
 d = cfg("driver", sample, kexts)
 dargs = d["NVRAM"]["Add"][be.GUID_APPLE_BOOT]["boot-args"]
 check(d["Kernel"]["Add"][-1]["Enabled"] is True, "driver: RDNA3Accel enabled")
-for tok in ("amfi=0x80", "rdna3agdc=3", "alcid=13", "keepsyms=1"):
+for tok in ("amfi=0x80", "alcid=13", "keepsyms=1"):
     check(tok in dargs.split(), "driver boot-args has %s: %s" % (tok, dargs))
-for tok in ("serial=3", "gemini_check=SUCCESS", "-rdna3off", "rdna3probe=1"):
+# rdna3agdc=3 only once the Metal plugin is installed: tools/baremetal/stick/metal.sh adds it
+for tok in ("rdna3agdc=3", "serial=3", "gemini_check=SUCCESS", "-rdna3off", "rdna3probe=1"):
     check(tok not in dargs.split(), "driver boot-args has no VM/test token %s" % tok)
 d2 = copy.deepcopy(d)
 c2 = copy.deepcopy(c)
@@ -173,8 +208,12 @@ check(found == [("GRUB", "HD(1,GPT,a46e195a-7c06-4ae7-a77b-7e2092cc3306,0x800,0x
       "efibootmgr parse: %r" % (found,))
 ce = cfg("installer", sample, kexts, entries=found)
 check(len(ce["Misc"]["Entries"]) == 1 and ce["Misc"]["Entries"][0]["Name"] == "GRUB" and ce["Misc"]["Entries"][0]["Enabled"],
-      "Misc/Entries from efibootmgr")
-check(c["Misc"]["Entries"] == [], "no entries by default")
+      "Misc/Entries from --entry")
+check(c["Misc"]["Entries"] == [] and c["Misc"]["BlessOverride"] == [], "no entries, no BlessOverride by default")
+check(be.bless_path(found[0][1]) == "\\EFI\\GRUB\\GRUBX64.EFI", "bless_path: %r" % be.bless_path(found[0][1]))
+check(be.bless_path("PciRoot(0x0)") == "", "bless_path of a path without a loader")
+cb = cfg("installer", sample, kexts, bless=["\\EFI\\GRUB\\GRUBX64.EFI"])
+check(cb["Misc"]["BlessOverride"] == ["\\EFI\\GRUB\\GRUBX64.EFI"] and cb["Misc"]["Entries"] == [], "BlessOverride, no Misc/Entries")
 
 # ---- identity: macserial's output, reused on the second run, private file
 fake_ms = os.path.join(tmp, "macserial")
@@ -248,8 +287,8 @@ for src_dir, bundle, _ in be.KEXTS:
     os.makedirs(os.path.join(out, "src", src_dir, "junk.dSYM"), exist_ok=True)
     os.makedirs(os.path.join(base, bundle + ".kext", "Contents", "Resources"), exist_ok=True)
     open(os.path.join(base, bundle + ".kext", ".DS_Store"), "w").write("x")
-rc = be.main(["--out", out, "--kext-zip", zp, "--cores", "8", "--no-validate", "--entry",
-              "Linux=HD(1,GPT,00000000-0000-0000-0000-000000000000,0x800,0x200000)/\\EFI\\GRUB\\GRUBX64.EFI"])
+rc = be.main(["--out", out, "--kext-zip", zp, "--cores", "8", "--no-validate", "--bless", "\\EFI\\GRUB\\GRUBX64.EFI",
+              "--entry", "Linux=PciRoot(0x0)/Pci(0x1,0x1)/HD(1,GPT,00000000-0000-0000-0000-000000000000,0x800,0x200000)/\\EFI\\X\\X.EFI"])
 check(rc == 0, "build() returned %r" % rc)
 ocd = os.path.join(out, "efi", "EFI", "OC")
 for stage_file in ("config.plist", "config-installer.plist", "config-driver.plist"):
@@ -257,15 +296,47 @@ for stage_file in ("config.plist", "config-installer.plist", "config-driver.plis
         built = plistlib.load(f)
     for k in built["Kernel"]["Add"]:
         kp = os.path.join(ocd, "Kexts", k["BundlePath"])
-        check(os.path.isfile(os.path.join(kp, k["PlistPath"])) and os.path.isfile(os.path.join(kp, k["ExecutablePath"])),
+        check(os.path.isfile(os.path.join(kp, k["PlistPath"])) and (os.path.isfile(os.path.join(kp, k["ExecutablePath"]))
+                                                                    or (k["ExecutablePath"] == "" and "MCE" in k["BundlePath"])),
               "%s: Kernel/Add %s exists" % (stage_file, k["BundlePath"]))
     check(all(os.path.isfile(os.path.join(ocd, "Drivers", x["Path"])) for x in built["UEFI"]["Drivers"]), stage_file + " drivers exist")
     check(all(os.path.isfile(os.path.join(ocd, "ACPI", x["Path"])) for x in built["ACPI"]["Add"]), stage_file + " ACPI exist")
-    check(len(built["Kernel"]["Patch"]) == len(vm.amd_patches()), stage_file + " patch count")
+    check(len(built["Kernel"]["Patch"]) == len(vm.amd_patches(iopci=True)), stage_file + " patch count")
     check(built["Misc"]["Entries"] and built["Misc"]["Entries"][0]["Name"] == "Linux", stage_file + " --entry")
+    check(built["Misc"]["BlessOverride"] == ["\\EFI\\GRUB\\GRUBX64.EFI"], stage_file + " --bless")
+    adds = [k["BundlePath"] for k in built["Kernel"]["Add"]]
+    check(adds[:2] == ["Lilu.kext", "RDNA3MCEReporterDisabler.kext"] and adds[-1] == "RDNA3Accel.kext",
+          "%s: MCE kext right after Lilu: %r" % (stage_file, adds))
+    check(built["Booter"]["Quirks"]["SetupVirtualMap"] is False and built["Booter"]["Quirks"]["ResizeAppleGpuBars"] == -1,
+          stage_file + " booter quirks")
+    check(any(p["Identifier"] == "com.apple.iokit.IOPCIFamily" and p["Enabled"] for p in built["Kernel"]["Patch"]),
+          stage_file + " has an enabled IOPCIFamily patch")
 check(open(os.path.join(ocd, "config.plist"), "rb").read() == open(os.path.join(ocd, "config-installer.plist"), "rb").read(),
       "config.plist is the installer config")
 check(not os.path.exists(os.path.join(ocd, "Kexts", "Lilu.kext", ".DS_Store")), "no .DS_Store copied")
+mce = os.path.join(ocd, "Kexts", "RDNA3MCEReporterDisabler.kext")
+check(sorted(os.listdir(mce)) == ["Contents"] and os.listdir(os.path.join(mce, "Contents")) == ["Info.plist"],
+      "the MCE kext is only Contents/Info.plist")
+with open(os.path.join(mce, "Contents", "Info.plist"), "rb") as f:
+    mi = plistlib.load(f)
+check(mi["CFBundleIdentifier"] == "org.rdna3.MCEReporterDisabler" and mi["OSBundleRequired"] == "Root"
+      and "CFBundleExecutable" not in mi and mi["CFBundlePackageType"] == "KEXT", "MCE Info.plist header")
+pers = mi["IOKitPersonalities"]
+check(sorted(pers) == ["DisableMCEInterruptController", "DisableMCEReporter"], "two MCE personalities: %r" % sorted(pers))
+check(all(x["CFBundleIdentifier"] == "com.apple.driver.AppleIntelMCEReporter" and x["IOClass"] == "IOService"
+          and x["IOProbeScore"] == 5000 for x in pers.values()), "MCE personalities impersonate AppleIntelMCEReporter at score 5000")
+a, b = pers["DisableMCEInterruptController"], pers["DisableMCEReporter"]
+check(a["IOProviderClass"] == "IOPlatformExpertDevice" and a["IOMatchCategory"] == "AppleIntelMCEInterruptController"
+      and a["IOPropertyMatch"] == [{"board-id": "Mac-27AD2F918AE68F61"}], "MCE interrupt controller personality")
+check(b["IOProviderClass"] == "AppleIntelMCEInterruptNub" and b["IOMatchCategory"] == "AppleIntelMCEReporter"
+      and "IOPropertyMatch" not in b, "MCE reporter personality")
+try:
+    be.mce_board_id("iMac19,1")
+    check(False, "MCE board-id for an unknown SMBIOS accepted")
+except be.BuildError:
+    pass
+check(be.main(["--out", out, "--kext-zip", zp, "--cores", "8", "--no-validate", "--bless", "EFI/GRUB/x.efi"]) == 2,
+      "a bad --bless is refused")
 check(os.path.isfile(os.path.join(out, "efi", "EFI", "BOOT", "BOOTx64.efi")), "BOOTx64.efi")
 check(json.load(open(os.path.join(out, "identity.json")))["serial"] == "F5KKMLZDP7QM", "identity.json written")
 # a second build keeps the identity
@@ -297,13 +368,14 @@ if os.path.isfile(tool) and os.path.isfile(os.path.join(real, "src", "OpenCorePk
         p = os.path.join(tmp, "real-%s.plist" % stage)
         with open(p, "wb") as f:
             plistlib.dump(x, f)
-        ok, text = be.run_ocvalidate(tool, p, allow_bar_note=True)
-        check(ok, "ocvalidate %s on the real Sample.plist: %s" % (stage, text))
-        # ... and with the quirk off (Resizable BAR off in the BIOS) it needs no exception at all
-        with open(p, "wb") as f:
-            plistlib.dump(cfg(stage, rs, kexts, resize_bars=-1), f)
+        # the default (ResizeAppleGpuBars -1, MCE kext, BlessOverride, AHCI block) needs no exception at all
         ok, text = be.run_ocvalidate(tool, p)
-        check(ok, "ocvalidate %s resize_bars=-1: %s" % (stage, text))
+        check(ok, "ocvalidate %s on the real Sample.plist: %s" % (stage, text))
+        # ... with the quirk on (Re-Size BAR on in the BIOS) only its own note is accepted
+        with open(p, "wb") as f:
+            plistlib.dump(cfg(stage, rs, kexts, resize_bars=10, bless=["\\EFI\\GRUB\\GRUBX64.EFI"], debug=True), f)
+        ok, text = be.run_ocvalidate(tool, p, allow_bar_note=True)
+        check(ok, "ocvalidate %s resize_bars=10 + debug: %s" % (stage, text))
     print("test_baremetal_efi: real Sample.plist + ocvalidate checked")
 else:
     print("test_baremetal_efi: no ~/rdna3-baremetal, ocvalidate part skipped")

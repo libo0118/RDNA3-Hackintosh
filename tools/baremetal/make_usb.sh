@@ -5,8 +5,11 @@
 #
 # Wipes DEVICE completely (nothing on it is kept or read), makes a GPT with one FAT32 partition
 # labelled OPENCORE and copies DIR/efi/EFI (OpenCore) and DIR/recovery (as
-# com.apple.recovery.boot) onto it. DIR is what fetch.sh and build_efi.py made (default:
-# ~/rdna3-baremetal of the user who ran sudo).
+# com.apple.recovery.boot) onto it, plus the helper scripts the owner runs inside macOS
+# (tools/baremetal/stick/: install.sh, report.sh, metal.sh) into rdna3/ and everything in
+# DIR/rdna3/ (the release tarball RDNA3-Hackintosh-*.tar.gz, metal/ with the Metal plugin and
+# RADV; docs/BAREMETAL.md part 5) next to them. DIR is what fetch.sh and build_efi.py made
+# (default: ~/rdna3-baremetal of the user who ran sudo).
 #
 # It refuses, before touching anything:
 #   - anything that is not a whole disk that is removable AND on USB (override: --force-not-usb,
@@ -31,6 +34,9 @@ FINDMNT=${MAKE_USB_FINDMNT:-findmnt}
 TEST_MODE=${MAKE_USB_TEST_MODE:-}     # 1: not root, not a block device, no partition wait
 # MAKE_USB_TEST_MNT=DIR: the "mounted" stick is that plain directory
 
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+STICK_SRC=$SELF_DIR/stick
+STICK_SCRIPTS="install.sh report.sh metal.sh"
 TOTAL=7
 STEP=0
 CHUNK_MB=8
@@ -106,6 +112,10 @@ REC_SRC=$DIR/recovery
 for f in "$EFI_SRC/BOOT/BOOTx64.efi" "$EFI_SRC/OC/OpenCore.efi" "$EFI_SRC/OC/config.plist" \
          "$REC_SRC/BaseSystem.dmg" "$REC_SRC/BaseSystem.chunklist"; do
     [ -s "$f" ] || die "$f is missing: run tools/baremetal/fetch.sh and build_efi.py first"
+done
+
+for f in $STICK_SCRIPTS; do
+    [ -s "$STICK_SRC/$f" ] || die "$STICK_SRC/$f is missing (the helper script for macOS)"
 done
 
 echo
@@ -232,6 +242,12 @@ while IFS= read -r f; do
 done < "$FILES"
 echo "  copied $small small files ($((small_bytes / 1024)) KB), all: 100 %"
 rm -f "$FILES"
+# rdna3/: whatever the user put in DIR/rdna3 (release tarball, metal/), then the helper
+# scripts of this checkout (they win over a stale copy in DIR/rdna3)
+mkdir -p "$MNT/rdna3"
+if [ -d "$DIR/rdna3" ]; then cp -R "$DIR/rdna3/." "$MNT/rdna3/"; fi
+for f in $STICK_SCRIPTS; do cp "$STICK_SRC/$f" "$MNT/rdna3/$f"; done
+echo "  rdna3/: $STICK_SCRIPTS$([ -d "$DIR/rdna3" ] && echo " + $(cd "$DIR/rdna3" && find . -type f | wc -l) files of $DIR/rdna3")"
 
 step "Flushing to the USB, this can take a minute (sync, unmount)"
 $SYNC &
@@ -254,11 +270,22 @@ for f in efi/EFI/OC/config.plist efi/EFI/OC/OpenCore.efi efi/EFI/BOOT/BOOTx64.ef
     printf '  checking %s ... ' "$(basename "$f")"
     if cmp -s "$DIR/$f" "$d"; then echo ok; else echo "DIFFERENT"; bad=1; fi
 done
+for f in $STICK_SCRIPTS; do
+    printf '  checking rdna3/%s ... ' "$f"
+    if cmp -s "$STICK_SRC/$f" "$MNT/rdna3/$f"; then echo ok; else echo "DIFFERENT"; bad=1; fi
+done
+if [ -d "$DIR/rdna3" ]; then
+    while IFS= read -r f; do
+        case "$f" in install.sh|report.sh|metal.sh) continue ;; esac
+        printf '  checking rdna3/%s ... ' "$f"
+        if cmp -s "$DIR/rdna3/$f" "$MNT/rdna3/$f"; then echo ok; else echo "DIFFERENT"; bad=1; fi
+    done < <(cd "$DIR/rdna3" && find . -type f | sed 's|^\./||' | sort)
+fi
 $UMOUNT "$MNT"
 rmmnt "$MNT"
 MNT=""
 [ $bad = 0 ] || die "the copy on $DEV differs from $DIR: do not use this stick, run again (another port or stick if it repeats)"
 
 echo
-echo "Done. $DEV is a macOS installer stick (EFI/OC + com.apple.recovery.boot)."
+echo "Done. $DEV is a macOS installer stick (EFI/OC + com.apple.recovery.boot + rdna3/ helper scripts)."
 echo "Next: docs/BAREMETAL.md, 'First boot'. Boot it from the BIOS boot menu (F11 on MSI), UEFI entry of the stick."

@@ -224,16 +224,40 @@ PATCH_FIELDS = ("Arch", "Base", "Comment", "Count", "Enabled", "Find", "Identifi
                 "MaxKernel", "MinKernel", "Replace", "ReplaceMask", "Skip")
 
 
-def amd_patches(path=None):
-    """the Kernel/Patch entries of the vendored AMD_Vanilla file that patch the kernel
-    itself (Identifier "kernel"; the IOPCIFamily ones are for Zen 4 boards)"""
+IOPCI_ID = "com.apple.iokit.IOPCIFamily"
+IOPCI_TAGS_COMMENT = "Disable 10 bit tags"
+
+
+def amd_patches(path=None, iopci=False):
+    """the Kernel/Patch entries of the vendored AMD_Vanilla file that patch the kernel itself
+    (Identifier "kernel"). The VM calls it as is: its chipset is QEMU's, nothing to patch in
+    IOPCIFamily.
+
+    iopci=True (the real AMD PC, tools/baremetal/build_efi.py) adds the file's IOPCIFamily
+    patches after them: CaseySJ's "Disable 10 bit tags" (probeBusGated; the 12.0-15.x and the
+    26.0+ variant, enabled as in the file) - macOS enables PCIe 10-bit tags on every device
+    that reports them and the AMD chipset (B550: USB, LAN, SATA and the NVMe behind it) does not
+    work with that (bare metal 2026-10-29..31) - and the AM5 "IOPCIIsHotplugPort" one, which a
+    Zen 3 / AM4 board does not need and which is returned disabled."""
     path = path or AMD_PATCH_FILE
     with open(path, "rb") as f:
         raw = f.read()
     if path == AMD_PATCH_FILE and hashlib.sha256(raw).hexdigest() != AMD_PATCH_SHA256:
         raise PlistEditError("%s was edited (sha256 differs from tools/vm/data/amd_vanilla.SOURCE)" % path)
     patches = plistlib.loads(raw)["Kernel"]["Patch"]
-    return [p for p in patches if p.get("Identifier") == "kernel"]
+    out = [p for p in patches if p.get("Identifier") == "kernel"]
+    if iopci:
+        pci = []
+        for p in patches:
+            if p.get("Identifier") != IOPCI_ID:
+                continue
+            p = dict(p)
+            p["Enabled"] = bool(p.get("Enabled")) and IOPCI_TAGS_COMMENT in p.get("Comment", "")
+            pci.append(p)
+        if sum(1 for p in pci if p["Enabled"]) < 2:
+            raise PlistEditError("%s has no IOPCIFamily '%s' patches (12.0-15.x and 26.0+)" % (path, IOPCI_TAGS_COMMENT))
+        out += pci
+    return out
 
 
 def _patch_xml(p, cores):
