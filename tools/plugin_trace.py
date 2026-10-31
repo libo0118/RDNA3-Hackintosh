@@ -1004,9 +1004,10 @@ AGE_STALE_MS = 16.7   # a present whose newest publish is older than one 60 Hz r
 
 
 def iop_join(traces, ktrace):
-    """DRIVER-PLAN N68: [(head, kernel_ns, fields, age_ms or None, reused)] for every RD3_TR_IOP event with a surface,
+    """DRIVER-PLAN N68: ([(head, kernel_ns, fields, age_ms or None, reused)], dropped) for every RD3_TR_IOP event with a surface,
     joined with the newest K_SURF_OUT of that IOSurface in a WindowServer trace published before the kernel's event
-    (both clocks are mach_absolute_time); reused: that publish was already presented by an earlier frame"""
+    (both clocks are mach_absolute_time); reused: that publish was already presented by an earlier frame; dropped: the
+    IOP events without an IOSurface (a VRAM-resource source), not joined"""
     import rdna3_trace as rt
     outs = {}
     for tr in traces:
@@ -1019,9 +1020,11 @@ def iop_join(traces, ktrace):
         v.sort()
     used = set()
     rows = []
+    dropped = 0
     for e in ktrace.by("IOP", rt.SRC_ACCEL):
         f = rt.iop_fields(e)
         if not f["surf"]:
+            dropped += 1
             continue
         kns = ktrace.ns(e, e.src)
         cand = [o for o in outs.get(f["surf"], []) if o[0] <= kns]
@@ -1033,7 +1036,7 @@ def iop_join(traces, ktrace):
         reused = key in used
         used.add(key)
         rows.append((e.head, kns, f, (kns - pub_ns) / 1e6, reused))
-    return rows
+    return rows, dropped
 
 
 def _pct(v, q):
@@ -1043,32 +1046,40 @@ def _pct(v, q):
     return v[min(len(v) - 1, int(q * (len(v) - 1) + 0.5))]
 
 
-def iop_join_lines(rows, frames=12):
+def iop_join_lines(rows, frames=12, dropped=0):
     """the join as text: per head a summary (present age median / p90 / max, frames over one refresh, publishes
     presented twice, frames with no publish, K2's classes and bins, the latched / direct split), then the last
     'frames' frames"""
     import rdna3_trace as rt
     out = []
+    drop = ("IOP join: %d IOP event(s) without an IOSurface (a VRAM-resource source) not joined" % dropped) if dropped else None
     if not rows:
         return ["IOP join: no RD3_TR_IOP event with an IOSurface in the kernel trace (a kernel before DRIVER-PLAN N68, "
-                "or no IOP copy in the window)"]
+                "or no IOP copy in the window)"] + ([drop] if drop else [])
     for h in sorted(set(r[0] for r in rows)):
         hr = [r for r in rows if r[0] == h]
         ages = [r[3] for r in hr if r[3] is not None]
         cls = collections.Counter(rt.IOP_VBL_CLASS.get(r[2]["cls"], "?") for r in hr if r[2]["cls"] is not None)
         bins = collections.Counter(rt.IOP_BIN.get(r[2]["bin"], "?") for r in hr if r[2]["bin"] is not None)
         paths = collections.Counter(rt.IOP_PATH.get(r[2]["path"], r[2]["path"]) for r in hr)
-        out.append("IOP join head %d: %d frame(s) (%s); present age median %.1f ms, p90 %.1f, max %.1f; %d over %.1f ms; "
+        age_txt = ("present age median %.1f ms, p90 %.1f, max %.1f" % (_pct(ages, 0.5), _pct(ages, 0.9), max(ages))
+                   if ages else "present age n/a (no frame joined)")
+        out.append("IOP join head %d: %d frame(s) (%s); %s; %d over %.1f ms; "
                    "%d presented a publish ALREADY presented; %d with no publish before them; scan end: %s; bins: %s; "
                    "txn avg %.2f ms (gates %.2f, stale wait %.2f, copy %.2f, latch wait %.2f)" % (
-                       h, len(hr), ", ".join("%s %d" % kv for kv in sorted(paths.items())),
-                       _pct(ages, 0.5), _pct(ages, 0.9), max(ages) if ages else 0.0,
+                       h, len(hr), ", ".join("%s %d" % kv for kv in sorted(paths.items())), age_txt,
                        sum(1 for a in ages if a > AGE_STALE_MS), AGE_STALE_MS, sum(1 for r in hr if r[4]),
                        sum(1 for r in hr if r[3] is None), ", ".join("%s %d" % kv for kv in sorted(cls.items())) or "-",
                        ", ".join("%s %d" % kv for kv in sorted(bins.items())) or "-",
                        sum(r[2]["txn_us"] for r in hr) / 1000.0 / len(hr), sum(r[2]["gate_us"] for r in hr) / 1000.0 / len(hr),
                        sum(r[2]["stale_us"] for r in hr) / 1000.0 / len(hr), sum(r[2]["copy_us"] for r in hr) / 1000.0 / len(hr),
                        sum(r[2]["wait_us"] for r in hr) / 1000.0 / len(hr)))
+        if len(ages) * 2 < len(hr):
+            out.append("WARN IOP join head %d: only %d of %d frame(s) joined with a WindowServer surface-out: the plugin's "
+                       "trace does not cover the kernel's window (its ring wrapped, another boot) or WindowServer's trace "
+                       "is missing - the ages above are not representative" % (h, len(ages), len(hr)))
+    if drop:
+        out.append(drop)
     if frames:
         t0 = rows[0][1]
         for h, kns, f, age, reused in rows[-frames:]:
@@ -1129,7 +1140,8 @@ def main(argv=None):
     if a.kernel:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import rdna3_trace as rt
-        for line in iop_join_lines(iop_join(traces, rt.load(a.kernel)), None if a.all else a.frames):
+        rows, dropped = iop_join(traces, rt.load(a.kernel))
+        for line in iop_join_lines(rows, None if a.all else a.frames, dropped):
             out.write(clean(line) + "\n")
     return 1 if (a.check and failed) else 0
 

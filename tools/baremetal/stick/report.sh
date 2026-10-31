@@ -35,6 +35,21 @@ if [ "${RDNA3_FULL:-0}" = 1 ]; then
     if [ -f "$A" ]; then sh "$A" --standalone > "$o/autoreport.out" 2>&1; else echo "UWAGA: brak autoreport.sh"; fi
 fi
 cp -R "$R/Users/Shared/rdna3-reports" "$o/" 2>/dev/null
+# DRIVER-PLAN N68: the kernel's frame trace (its IOP events) and the plugin's per-process traces, read together by
+#   python3 tools/plugin_trace.py <report>/31-plugin-trace --kernel <report>/trace-stream.bin
+# the newest events also into the kernel log (trace_dump) before dmesg below takes it
+if sysctl -n debug.rdna3accel_swap_mode >/dev/null 2>&1; then
+    sysctl -b debug.rdna3accel_trace_stream > "$o/trace-stream.bin" 2>"$o/trace.err"
+    sysctl -b debug.rdna3accel_trace_sec > "$o/trace-sec.bin" 2>>"$o/trace.err"
+    [ "$(head -c 4 "$o/trace-stream.bin" 2>/dev/null)" = R3TR ] ||
+        echo "trace-stream.bin is NOT a binary trace ($(wc -c < "$o/trace-stream.bin") bytes): sysctl -b failed" >> "$o/trace.err"
+    sysctl -w debug.rdna3accel_trace_dump=2000 >/dev/null 2>>"$o/trace.err"
+else
+    echo "(no debug.rdna3accel_trace_stream: an accelerator without the frame trace, or none)" > "$o/trace.err"
+fi
+mkdir -p "$o/31-plugin-trace"
+cp "$R"/var/tmp/rdna3-nvmtl/*.trace "$o/31-plugin-trace/" 2>/dev/null ||
+    echo "(no plugin traces in /var/tmp/rdna3-nvmtl)" > "$o/31-plugin-trace/none.txt"
 cp "$R"/Library/Logs/DiagnosticReports/*.ips "$R"/Library/Logs/DiagnosticReports/*.shutdownStall "$o/" 2>/dev/null
 # the OpenCore-injected core's IOLog lines do not reach the unified log on bare metal: the
 # kernel message buffer of this boot (msgbuf=1048576) is the only copy of them

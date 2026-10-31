@@ -116,13 +116,15 @@ static inline enum rd3_il_pick rd3_il_pick(const struct rd3_il_state *s)
     return RD3_IL_NONE;
 }
 /* D may be given back (switched off, another mode's size, the accelerator's stop): nothing of the queue holds it
- * and the panel does not scan it - the HUBP's own address must say so (unknown: kept; a freed D is VRAM the next
- * allocation scribbles on while it is on the panel) */
+ * and the panel does not scan it - the HUBP's own address must say so, with no flip of any target in flight
+ * (unknown: kept; a freed D is VRAM the next allocation scribbles on while it is on the panel) */
 static inline int rd3_il_d_freeable(const struct rd3_il_state *s)
 {
     if (!s->d)
         return 0;
-    if (s->d == s->inflight || s->d == s->queued || s->d == s->shown)
+    /* any flip in flight or queued may be one to D (RD3_FQ_FOREIGN, a pending flip the queue does not know of: its
+     * target unknown; ECC cpp-reviewer of aeb57cf, C1): kept until it latched */
+    if (s->inflight || s->queued || s->d == s->shown)
         return 0;
     return s->scan_known && s->scan != s->d;
 }

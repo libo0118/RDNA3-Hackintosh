@@ -59,18 +59,24 @@ class P(object):
 
 ws = P("WindowServer", [R(10 * MS, 1, 5), R(30 * MS, 2, 6), R(36 * MS, 3, 6), R(50 * MS, 4, 7)])
 other = P("Terminal", [R(53 * MS, 9, 5)])   # another process's publish of the same id: not WindowServer's, ignored
-rows = pt.iop_join([ws, other], k)
-check(len(rows) == 4, "joined rows: %r" % rows)
+rows, dropped = pt.iop_join([ws, other], k)
+check(len(rows) == 4 and dropped == 1, "joined rows: %r, dropped %d" % (rows, dropped))
 check(abs(rows[0][3] - 10.0) < 1e-6 and not rows[0][4], "frame 1 age 10 ms: %r" % (rows[0],))
 check(abs(rows[1][3] - 1.0) < 1e-6, "frame 2: the newest publish before it (36 ms): %r" % (rows[1],))
 check(abs(rows[2][3] - 44.0) < 1e-6 and rows[2][4], "frame 3 re-presents publish 1: %r" % (rows[2],))
 check(rows[3][3] is None, "head 1: no publish: %r" % (rows[3],))
-out = pt.iop_join_lines(rows, frames=2)
+out = pt.iop_join_lines(rows, frames=2, dropped=dropped)
 check(out[0].startswith("IOP join head 0: 3 frame(s) (latched CPU 3)") and "1 over 16.7 ms" in out[0]
+      and "present age median 10.0 ms" in out[0]
       and "1 presented a publish ALREADY presented" in out[0] and "next 3" in out[0], "head 0 summary: %s" % out[0])
-check(out[1].startswith("IOP join head 1: 1 frame(s) (direct CPU 1)") and "1 with no publish" in out[1], "head 1: %s" % out[1])
-check(len(out) == 4 and "REUSED" not in out[3] and "age ?" in out[3], "frame lines: %r" % out[2:])
+check(out[1].startswith("IOP join head 1: 1 frame(s) (direct CPU 1)") and "1 with no publish" in out[1]
+      and "present age n/a (no frame joined)" in out[1], "head 1: %s" % out[1])
+check(out[2].startswith("WARN IOP join head 1: only 0 of 1 frame(s) joined"), "S4 WARN: %s" % out[2])
+check(out[3] == "IOP join: 1 IOP event(s) without an IOSurface (a VRAM-resource source) not joined", "S4 dropped: %s" % out[3])
+check(len(out) == 6 and "REUSED" not in out[5] and "age ?" in out[5], "frame lines: %r" % out[4:])
+check(not any(x.startswith("WARN IOP join head 0") for x in out), "head 0 joined 3 of 3: no WARN")
 check(pt.iop_join_lines([])[0].startswith("IOP join: no RD3_TR_IOP"), "no events")
+check(pt.iop_join_lines([], dropped=2)[1].startswith("IOP join: 2 IOP event(s) without"), "no rows, dropped said")
 
 if FAILS:
     sys.exit("test_iop_join: %d FAILED" % len(FAILS))

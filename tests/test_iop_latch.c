@@ -137,6 +137,12 @@ static void test_freeable(void)
     CHECK(!rd3_il_d_freeable(&s));                   /* in flight */
     s = st(0, 1, D, 1, HOME, D);
     CHECK(!rd3_il_d_freeable(&s));                   /* queued */
+    s = st(0, 1 /* RD3_FQ_FOREIGN */, 0, 1, HOME, D);
+    CHECK(!rd3_il_d_freeable(&s));                   /* C1: a pending flip of unknown target (it may be to D) */
+    s = st(0, HOME, 0, 1, D, D);
+    CHECK(!rd3_il_d_freeable(&s));                   /* the flip away from D not latched: still scanned */
+    s = st(0, HOME, 0, 1, HOME, D);
+    CHECK(!rd3_il_d_freeable(&s));                   /* any flip in flight: kept until it latched */
     s = st(D, 0, 0, 1, HOME, D);
     CHECK(!rd3_il_d_freeable(&s));                   /* the queue's record still says D: next time */
     s = st(0, 0, 0, 0, 0, HOME);

@@ -6872,8 +6872,10 @@ static SInt64 gCntIopVblBlank[kRd3MaxFB], gCntIopVblUnread;
 static SInt64 gCntIopLbN[kRd3MaxFB], gCntIopLbD[kRd3MaxFB], gCntIopLbWait[kRd3MaxFB], gCntIopLbWaitUs[kRd3MaxFB];
 static SInt64 gCntIopLbFbHead[kRd3MaxFB], gCntIopLbFb[RD3_IL_FB_N];
 static SInt64 gCntIopLbVramBytes, gCntIopLbVramAllocs, gCntIopLbVramFrees, gCntIopLbVramRefused, gCntIopLbFreeWait;
-static uint32_t gIopVblPrev[kRd3MaxFB];
-static bool gIopVblHave[kRd3MaxFB];
+static SInt64 gCntIopLbVramFreeFailed;
+/* K2: the head's frame at its copy before, | 1 << 32 once there was one: one 64-bit word swapped atomically, so two
+ * transactions of a head never read a half-written pair (ECC cpp-reviewer of aeb57cf, C4) */
+static volatile uint64_t gIopVblPrev[kRd3MaxFB];
 static SInt32 gIopTxnLogs[kRd3MaxFB], gIopVblLogs, gIopLbFbLogs[RD3_IL_FB_N], gIopLbVramLogs, gIopLbFreeLogs;
 static const char *const kIopPathName[6] = { "no copy", "direct CPU copy", "direct SDMA copy", "latched CPU copy",
                                              "latched SDMA copy", "zero-copy flip" };
@@ -6953,9 +6955,8 @@ static void rd3AccelIopVblNote(IOService *fb, unsigned head, unsigned height, bo
         return;
     }
     uint32_t delta = 0;
-    const enum rd3_il_vbl c = rd3_il_vbl_class(gIopVblHave[head], gIopVblPrev[head], st.frame, &delta);
-    gIopVblHave[head] = true;
-    gIopVblPrev[head] = st.frame;
+    const uint64_t prev = __atomic_exchange_n(&gIopVblPrev[head], (1ull << 32) | (uint64_t)st.frame, __ATOMIC_ACQ_REL);
+    const enum rd3_il_vbl c = rd3_il_vbl_class((prev >> 32) != 0, (uint32_t)prev, st.frame, &delta);
     const unsigned bin = rd3_il_scan_bin(st.scanline, st.inVblank != 0, height);
     OSAddAtomic64(1, &gCntIopVblN[head]);
     if (c == RD3_IL_VBL_SAME) OSAddAtomic64(1, &gCntIopVblSame[head]);
@@ -7073,10 +7074,19 @@ static bool rd3AccelIopLbFree(unsigned head, IOService *fb, const char *why)
     r.version = RD3K_VRAM_ABI_VERSION;
     r.handle = L.dHandle; r.kva = L.dKva; r.actualSize = L.dBytes; r.allocationCookie = L.dCookie;
     const IOReturn fr = a->askFramebufferForVram(&r, false);
-    OSAddAtomic64(-(SInt64)L.dBytes, &gCntIopLbVramBytes);
-    OSAddAtomic64(1, &gCntIopLbVramFrees);
-    ALOG("iop latch: head %u: second scanout buffer phys 0x%llx (%ux%u, %llu bytes) freed (%s) -> 0x%x", head, L.dPhys,
-         L.dW, L.dH, L.dBytes, why, (unsigned)fr);
+    if (fr == kIOReturnSuccess) {
+        OSAddAtomic64(-(SInt64)L.dBytes, &gCntIopLbVramBytes);
+        OSAddAtomic64(1, &gCntIopLbVramFrees);
+        ALOG("iop latch: head %u: second scanout buffer phys 0x%llx (%ux%u, %llu bytes) freed (%s)", head, L.dPhys, L.dW,
+             L.dH, L.dBytes, why);
+    } else {
+        /* ECC silent-failure-hunter of aeb57cf (S5): the core kept it - its bytes stay counted as held, the record is
+         * dropped (never retried: the same answer would come every frame) */
+        const SInt64 k = OSAddAtomic64(1, &gCntIopLbVramFreeFailed);
+        ALOG("iop latch: head %u: the core REFUSED to free the second scanout buffer phys 0x%llx (%ux%u, %llu bytes; %s) "
+             "-> 0x%x: that VRAM stays allocated, counted in iop_latch_vram_bytes (iop_latch_vram_free_failed %lld)", head,
+             L.dPhys, L.dW, L.dH, L.dBytes, why, (unsigned)fr, (long long)k + 1);
+    }
     if (L.last == L.dPhys) L.last = 0;
     L.dHandle = nullptr; L.dKva = nullptr; L.dPhys = L.dCookie = L.dBytes = 0; L.dW = L.dH = L.dPitch = 0;
     return true;
@@ -7105,7 +7115,13 @@ static bool rd3AccelIopLbEnsureD(unsigned head, IOService *fb, unsigned w, unsig
         if (ret == kIOReturnSuccess && r.handle) {   /* given back: unusable */
             struct RD3KVramRequest f = r;
             f.version = RD3K_VRAM_ABI_VERSION;
-            (void)a->askFramebufferForVram(&f, false);
+            const IOReturn gr = a->askFramebufferForVram(&f, false);
+            if (gr != kIOReturnSuccess) {
+                OSAddAtomic64((SInt64)f.actualSize, &gCntIopLbVramBytes);   /* still held: counted (S5) */
+                OSAddAtomic64(1, &gCntIopLbVramFreeFailed);
+                ALOG("iop latch: head %u: the unusable grant (phys 0x%llx, %llu bytes) could not be given back (0x%x): "
+                     "that VRAM stays allocated", head, f.phys, f.actualSize, (unsigned)gr);
+            }
         }
         L.retry = RD3_IL_VRAM_RETRY;
         const SInt64 k = OSAddAtomic64(1, &gCntIopLbVramRefused);
@@ -7144,13 +7160,20 @@ static bool rd3AccelIopLatchCopy(void *pipe, IOService *fb, unsigned head, const
                                  RD3DisplayPipe::RD3IopSrc *srcSlot, const volatile unsigned int *src, unsigned w,
                                  unsigned h, unsigned pitch, bool l10r, bool fromRes, IOSurface *s, Rd3IopTxn *t)
 {
-    if (head >= kRd3MaxFB || !fb || !home) return false;
+    if (head >= kRd3MaxFB || !fb || !home)   /* never expected (the caller checked them): said (S7) */
+        return rd3AccelIopLbFb(head, RD3_IL_FB_GEOM, t, "no head, framebuffer or scanout description");
     if (!gIopQueue || !gPresReady || !pipe || gPresStopping)
         return rd3AccelIopLbFb(head, RD3_IL_FB_QUEUE, t, "no present queue (debug.rdna3accel_iop_queue 0, or not started)");
     IOLock *l = rd3LockOnce(&gIopLbLock[head]);
     if (!l) return rd3AccelIopLbFb(head, RD3_IL_FB_QUEUE, t, "no lock for the head's latched copy");
     IOLockLock(l);
+    /* ECC cpp-reviewer of aeb57cf (C2): the stop may have run while this waited for the lock - no D after it */
+    if (!gPresReady || gPresStopping) {
+        IOLockUnlock(l);
+        return rd3AccelIopLbFb(head, RD3_IL_FB_QUEUE, t, "the present queue stopped (the accelerator stops)");
+    }
     RD3IopLb &L = gIopLb[head];
+    L.fb = fb;   /* C3: the framebuffer the head has now (the stop asks its HUBP through it) */
     const uint32_t mg = __atomic_load_n(&gIopLbModeGen, __ATOMIC_ACQUIRE);
     if (L.modeGen != mg) {   /* a mode set programmed home since: that is what the head scans */
         L.modeGen = mg;
@@ -7310,6 +7333,7 @@ RD3ACCEL_CNT(rdna3accel_iop_latch_vram_allocs, gCntIopLbVramAllocs, "N68: second
 RD3ACCEL_CNT(rdna3accel_iop_latch_vram_frees, gCntIopLbVramFrees, "N68: second buffers freed");
 RD3ACCEL_CNT(rdna3accel_iop_latch_vram_refused, gCntIopLbVramRefused, "N68: second buffers refused (the visible VRAM heap full)");
 RD3ACCEL_CNT(rdna3accel_iop_latch_freewait, gCntIopLbFreeWait, "N68: frees put off because the panel may still scan the buffer");
+RD3ACCEL_CNT(rdna3accel_iop_latch_vram_free_failed, gCntIopLbVramFreeFailed, "N68: second buffers the core refused to free (their VRAM stays allocated, still in iop_latch_vram_bytes)");
 static void rd3AccelInstallSysctlLatch(void)
 {
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch);
@@ -7338,6 +7362,7 @@ static void rd3AccelInstallSysctlLatch(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_frees);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_refused);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_freewait);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_free_failed);
 }
 
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_async, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapAsync, 0,

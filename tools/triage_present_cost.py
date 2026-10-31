@@ -158,6 +158,8 @@ def iop_format_rows(c):
 
 
 SAME_WARN, SKIP_WARN = 0.02, 0.05   # N68: of the placed copies, two in one refresh / refreshes repeated
+VBL_PLACED_MIN = 0.9                # N68 K2: fewer copies placed than this share of the head's copies: data missing
+LATCH_FB_WARN = 0.01                # N68: the latched path's frames that took the direct copy
 
 
 def iop_latch_rows(c):
@@ -184,6 +186,12 @@ def iop_latch_rows(c):
                     g("iop_txn_stale_us") / 1000.0 / n, _q(c, "iop_stale_wait_ms"), vn, g("iop_vbl_same"),
                     g("iop_vbl_skip"), g("iop_vbl_mid"), bins))
         why = []
+        copies = g("iop_copy_n") or n   # the head's copies (CPU + SDMA); a kernel without them: its transactions
+        if not vn:
+            why.append("NO copy was placed in the scan (iop_vbl_n 0): K2 is missing - the head state unreadable "
+                       "(iop_vbl_unread, the `iop vbl:` lines) or the counters not collected")
+        elif vn < VBL_PLACED_MIN * copies:
+            why.append("only %d of %d copies placed in the scan: K2 is partial (iop_vbl_unread)" % (vn, copies))
         if g("iop_txn_slow"):
             why.append("transactions held WindowServer's thread over 8 ms")
         if vn and g("iop_vbl_same") > SAME_WARN * vn:
@@ -191,10 +199,21 @@ def iop_latch_rows(c):
         if vn and g("iop_vbl_skip") > SKIP_WARN * vn:
             why.append("refreshes get no new frame (a repeated frame): uneven steps")
         out.append(("WARN" if why else "INFO", "IOP timing", text + (": " + "; ".join(why) if why else "")))
-    ov, ovs = c.get("iop_txn_overlap", 0), c.get("iop_txn_overlap_same", 0)
-    if ov or ovs or c.get("iop_vbl_unread", 0):
-        out.append(("INFO", "IOP timing", "%d transaction(s) entered while another head's was inside, %d while one of "
-                    "the same head was; %d copies whose head state could not be read" % (ov, ovs, c.get("iop_vbl_unread", 0))))
+    ov, ovs, unread = c.get("iop_txn_overlap", 0), c.get("iop_txn_overlap_same", 0), c.get("iop_vbl_unread", 0)
+    if ov or ovs or unread:
+        out.append(("WARN" if unread else "INFO", "IOP timing",
+                    "%d transaction(s) entered while another head's was inside, %d while one of the same head was; %d "
+                    "copies whose head state could not be read%s" % (
+                        ov, ovs, unread, " (the `iop vbl:` lines say why: K2 misses them)" if unread else "")))
+    gaps = []
+    if "iop_stale_wait_ms" not in c:
+        gaps.append("debug.rdna3accel_iop_stale_wait_ms is MISSING from the dump (the N59 switch during the run unknown)")
+    txn_all = sum(c.get("iop_txn_n_h%d" % h, 0) for h in range(4))
+    if txn_all < c.get("iop_ok", 0):
+        gaps.append("%d transactions timed but %d presented (iop_ok): counters from two kernels, or a head beyond 4"
+                    % (txn_all, c.get("iop_ok", 0)))
+    if gaps:
+        out.append(("WARN", "IOP timing", "; ".join(gaps)))
     if "iop_latch" not in c:
         out.append(("WARN", "IOP latch", "no debug.rdna3accel_iop_latch in the dump although the N68 timing counters are "
                     "there: the collector's grep misses it"))
@@ -213,6 +232,16 @@ def iop_latch_rows(c):
                 fbs or "none", c.get("iop_latch_vram_bytes", 0) >> 20, c.get("iop_latch_vram_allocs", 0),
                 c.get("iop_latch_vram_frees", 0), c.get("iop_latch_vram_refused", 0), c.get("iop_latch_freewait", 0)))
     why = []
+    fb_all = sum(c.get("iop_latch_fb_" + k, 0) for k in ("queue", "vram", "resize", "busy", "refused", "geom"))
+    if on and fb_all > LATCH_FB_WARN * max(1, latched + fb_all):
+        why.append("%d of %d frames of the latched path took the direct copy (over %.0f %%: the reasons above, the "
+                   "`iop latch: ... copied into the LIVE scanout instead` lines)" % (fb_all, latched + fb_all,
+                                                                                     LATCH_FB_WARN * 100))
+    if not on and latched:
+        why.append("it reads 0 but %d frame(s) were latched: switched off during the run (the counters mix both "
+                   "phases; the `iop latch (N68): ... -> 0` line says when)" % latched)
+    if c.get("iop_latch_vram_free_failed", 0):
+        why.append("%d second buffer(s) the core refused to free (that VRAM stays allocated)" % c["iop_latch_vram_free_failed"])
     if on and not latched and sum(c.get("iop_vbl_n_h%d" % h, 0) for h in heads):
         why.append("it is ON but no frame was latched (the fallback reasons)")
     if c.get("iop_latch_vram_refused", 0):

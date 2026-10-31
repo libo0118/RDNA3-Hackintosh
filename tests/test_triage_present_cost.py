@@ -206,6 +206,34 @@ check(lat[0][0] == "INFO" and "head 0: 1000 latched (500 into D" in lat[0][2] an
 r = triage_present_cost.iop_latch_rows(kernel_counters(N68.replace("debug.rdna3accel_iop_latch: 0\n", "")))
 check(any(x[0] == "WARN" and "misses it" in x[2] for x in r), "iop_latch missing: %r" % r)
 
+# ECC silent-failure-hunter of aeb57cf: S2 (latched fallbacks over 1 %, latch 0 with latched frames, a failed free),
+# S3 (K2 missing / partial / unread), S6 (stale_wait_ms missing, fewer transactions than presents)
+def rows_of(text, name):
+    return [x for x in triage_present_cost.iop_latch_rows(kernel_counters(text)) if x[1] == name]
+
+
+lat = rows_of(OK.replace("latch_fb_h0: 0", "latch_fb_h0: 20") + "debug.rdna3accel_iop_latch_fb_busy: 20\n", "IOP latch")
+check(lat[0][0] == "WARN" and "20 of 1020 frames of the latched path took the direct copy" in lat[0][2], "S2 busy: %r" % lat)
+lat = rows_of(OK + "debug.rdna3accel_iop_latch_fb_busy: 5\n", "IOP latch")
+check(lat[0][0] == "INFO", "S2: 5 of 1005 is under 1 %%: %r" % lat)
+lat = rows_of(OK.replace("iop_latch: 1", "iop_latch: 0").replace("vram_bytes: 16777216", "vram_bytes: 0"), "IOP latch")
+check(lat[0][0] == "WARN" and "switched off during the run" in lat[0][2], "S2 latch 0 with latched frames: %r" % lat)
+lat = rows_of(OK + "debug.rdna3accel_iop_latch_vram_free_failed: 1\n", "IOP latch")
+check(lat[0][0] == "WARN" and "refused to free" in lat[0][2], "S5 free failed: %r" % lat)
+t = rows_of(OK.replace("iop_vbl_n_h0: 1000", "iop_vbl_n_h0: 0"), "IOP timing")
+check(t[0][0] == "WARN" and "NO copy was placed in the scan" in t[0][2], "S3 vbl_n 0: %r" % t)
+t = rows_of(OK.replace("iop_vbl_n_h0: 1000", "iop_vbl_n_h0: 800"), "IOP timing")
+check(t[0][0] == "WARN" and "only 800 of 1000 copies placed" in t[0][2], "S3 partial: %r" % t)
+t = rows_of(OK + "debug.rdna3accel_iop_copy_n_h0: 850\n", "IOP timing")
+check(t[0][0] == "INFO", "S3: 1000 placed of 850 copies is complete: %r" % t)
+t = rows_of(OK.replace("iop_vbl_unread: 0", "iop_vbl_unread: 3"), "IOP timing")
+check(any(x[0] == "WARN" and "3 copies whose head state could not be read" in x[2] for x in t), "S3 unread: %r" % t)
+t = rows_of(OK.replace("debug.rdna3accel_iop_stale_wait_ms: 12\n", ""), "IOP timing")
+check(any(x[0] == "WARN" and "iop_stale_wait_ms is MISSING" in x[2] for x in t), "S6 stale_wait_ms: %r" % t)
+t = rows_of(OK.replace("iop_ok: 1000", "iop_ok: 1500"), "IOP timing")
+check(any(x[0] == "WARN" and "1000 transactions timed but 1500 presented" in x[2] for x in t), "S6 txn < ok: %r" % t)
+check(not [x for x in rows_of(OK, "IOP timing") if x[0] == "WARN"], "the even run has no IOP timing WARN")
+
 if FAILS:
     sys.exit("test_triage_present_cost: %d FAILED" % len(FAILS))
 print("test_triage_present_cost: ok")

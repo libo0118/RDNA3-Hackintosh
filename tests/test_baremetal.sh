@@ -268,6 +268,9 @@ for f in rdna3-3h.log kernel-3h.log boot.log ioreg.txt kexts.txt displays.txt sy
 done
 [ -e "$rep/rdna3-reports/x.txt" ] || fail "report.sh: /Users/Shared/rdna3-reports not copied"
 grep -q rdna3 "$rep/sysctl.txt" || fail "report.sh: sysctl rdna3 empty"
+[ -e "$rep/trace-stream.bin" ] && [ -e "$rep/trace.err" ] || fail "report.sh: no kernel frame trace (N68)"
+grep -q "NOT a binary trace" "$rep/trace.err" || fail "report.sh: a non-binary trace not said: $(cat "$rep/trace.err")"
+[ -e "$rep/31-plugin-trace/none.txt" ] || fail "report.sh: no plugin traces not said"
 [ ! -e "$T/autoreport.args" ] || fail "report.sh ran autoreport.sh without RDNA3_FULL=1"
 RDNA3_FULL=1 RDNA3_REPORT_DIR=$T/full sm sh "$VOL/rdna3/report.sh" > "$T/out.txt" 2>&1 || fail "report.sh RDNA3_FULL=1 failed"
 [ "$(cat "$T/autoreport.args")" = "--standalone" ] || fail "RDNA3_FULL=1 did not run autoreport.sh --standalone"
