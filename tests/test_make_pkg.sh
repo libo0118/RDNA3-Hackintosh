@@ -134,4 +134,36 @@ case "$out" in *Removed*"OpenCore ("*"Left alone"*) ;; *) fail "uninstall does n
 case "$("$ROOT/package/uninstall.sh" --root "$T/sys4")" in *"no OpenCore EFI was found"*) ;; *) fail "uninstall: no word on OpenCore";; esac
 # without OpenCore in the picture (no --efi, not on macOS): nothing to remove, no error
 "$ROOT/package/uninstall.sh" --root "$T/sys4" >/dev/null || fail "uninstall of an empty root"
+# --- the .pkg's installation check (distribution.xml, filled in by make_pkg.sh's
+#     render_distribution): macOS 15 and 26 are accepted (the payload has the Tahoe accelerator,
+#     card run 2026-10-31 had the .pkg refuse macOS 26), 14 and 27 are not
+eval "$(sed -n '/^render_distribution()/,/^}/p' "$ROOT/package/make_pkg.sh")"
+eval "$(grep -E '^(MACOS_MIN|MACOS_BEFORE)=' "$ROOT/package/make_pkg.sh")"
+[ "$MACOS_MIN" = 15.0 ] && [ "$MACOS_BEFORE" = 27.0 ] || fail "default macOS range is $MACOS_MIN..$MACOS_BEFORE, not 15.0..27.0"
+render_distribution "$ROOT/package/pkg/distribution.xml" 9.9.9 > "$T/distribution.xml"
+grep -q '@' "$T/distribution.xml" && fail "distribution.xml still has a placeholder"
+grep -q 'RDNA3-Hackintosh 9.9.9' "$T/distribution.xml" || fail "distribution.xml: version not filled in"
+grep -q 'for macOS 15.0 up to (not including) 27.0' "$T/distribution.xml" || fail "distribution.xml: message does not say 15.0 up to 27.0"
+grep -q "kexts-tahoe" "$ROOT/package/make_pkg.sh" || fail "make_pkg.sh no longer carries the Tahoe accelerator the range assumes"
+if command -v node >/dev/null 2>&1; then
+    sed -n '/CDATA\[/,/\]\]>/p' "$T/distribution.xml" | sed '1s/.*CDATA\[//; $d' > "$T/check.js"
+    cat >> "$T/check.js" <<'JS'
+function cmp(a, b) {
+    var x = a.split('.').map(Number), y = b.split('.').map(Number);
+    for (var i = 0; i < 3; i++) { var d = (x[i] || 0) - (y[i] || 0); if (d) return d < 0 ? -1 : 1; }
+    return 0;
+}
+var system = { version: { ProductVersion: process.argv[2] }, compareVersions: cmp };
+var my = { result: {} };
+console.log(rd3_check() ? 'accept' : 'refuse');
+JS
+    for v in 15.0 15.7.1 26.0 26.6.2 26.7.2; do
+        [ "$(node "$T/check.js" "$v")" = accept ] || fail "installation check refuses macOS $v"
+    done
+    for v in 14.7.2 11.0 27.0 27.1; do
+        [ "$(node "$T/check.js" "$v")" = refuse ] || fail "installation check accepts macOS $v"
+    done
+else
+    echo "test_make_pkg: no node, the installation check script was not run"
+fi
 echo "test_make_pkg: all checks passed"

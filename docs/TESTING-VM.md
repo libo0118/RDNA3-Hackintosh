@@ -977,8 +977,9 @@ What `host` does:
   back with `--no-amd-cpu`, which every other `CPU_MODEL` runs. A second run changes
   nothing. The patch list is vendored in `tools/vm/data/` (source, commit,
   licence and sha256 in `amd_vanilla.SOURCE`; the patches are not downloaded).
-  Only the kernel patches are used, not AMD_Vanilla's IOPCIFamily ones (Zen 4
-  boards).
+  Only the kernel patches are used, not AMD_Vanilla's IOPCIFamily ones (the VM's
+  chipset is QEMU's; the bare-metal EFI of `tools/baremetal/build_efi.py` needs the
+  "Disable 10 bit tags" ones for the B550 chipset, `docs/BAREMETAL.md` part 6).
 - **The CPU name in About This Mac** (RestrictEvents). macOS shows the Mac
   model's CPU ("8-Core Intel Xeon W" for MacBookPro16,1) whatever the VM has.
   In the same mode `rdna3vm` puts Acidanthera's RestrictEvents 1.1.6 and Lilu

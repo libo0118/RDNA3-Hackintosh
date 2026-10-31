@@ -10,7 +10,8 @@ Source:   https://github.com/AMD-OSX/AMD_Vanilla, master eaf52ef292abf4ebec899df
           (https://github.com/AMD-OSX/AMD_Vanilla/pull/215, branch master of
           laobamac/AMD_Vanilla):
             2878877  non-monotonic time panic fix for Darwin 25.4.0+ (macOS 26.4+)
-            a174cca  probeBusGated patch for macOS 26 (IOPCIFamily, Zen 4 only; not used here)
+            a174cca  probeBusGated patch for macOS 26 (IOPCIFamily "Disable 10 bit tags"; not used by the VM,
+                     used by the bare-metal EFI: tools/baremetal/build_efi.py)
           The file is the one of a174cca80efe2377fde3b902666c70863ea66454:
           https://raw.githubusercontent.com/laobamac/AMD_Vanilla/a174cca80efe2377fde3b902666c70863ea66454/patches.plist
           Why the PR: master's thread_invoke / thread_dispatch patch does not match the

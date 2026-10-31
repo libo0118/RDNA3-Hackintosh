@@ -82,7 +82,7 @@ kernel_only = [p for p in upstream if p["Identifier"] == "kernel"]
 if len(kernel_only) != 24 or len(upstream) != 27:
     fail("expected 24 kernel patches of 27 in the vendored file (3 are IOPCIFamily), got %d of %d" % (len(kernel_only), len(upstream)))
 if any("IOPCIFamily" in p["Identifier"] for p in v.amd_patches()):
-    fail("IOPCIFamily patches (Zen 4 boards) must not be applied")
+    fail("IOPCIFamily patches must not be applied in the VM (only the bare-metal EFI uses them: amd_patches(iopci=True))")
 
 def patches(text):
     # the Kernel dict alone: the fixture has an XML header plistlib needs, Kernel is complete
