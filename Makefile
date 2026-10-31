@@ -256,7 +256,7 @@ SH_TESTS := test_bisect_step test_bootwatch test_membw_load test_ladder_step tes
     test_triage_tx test_triage_stale_plugin test_triage_latch test_result_checklist test_triage_vram \
     test_plugin_trace test_triage_bisect test_play_step test_approve_gate test_forgejo_update \
     test_triage_stale_kexts test_vm_present_ab test_vm_amd_cpu test_triage_present test_triage_fb_n40 \
-    test_probe_coredisplay
+    test_probe_coredisplay test_fetch_fw
 define TEST_RULE
 .PHONY: t.$(1)
 t.$(1): $(2)

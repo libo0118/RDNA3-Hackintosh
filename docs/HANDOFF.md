@@ -172,6 +172,11 @@ Geekbench crash in `~/rdna3-bm/`.
 - `build.yml` with `full: "false"` for kext/tools changes, `full: "true"` when
   metal/, userspace/ or the translator changed or when the plugin and RADV
   must match a new commit (artifacts `RDNA3MTL`, `radv-macos-logs`).
+- The "Linux" runner runs its jobs in a fresh docker container (`node:22-bookworm`, /workspace), so `$HOME/.cache` does
+  not survive a job; the firmware cache for the header tests is restored by `actions/cache` (best effort) and
+  `tools/ci/fetch_fw.sh` fetches the pinned, SHA-256-checked set (package/firmware.sh) from gitlab.com, then
+  git.kernel.org, within 150 s. Without the full set `test_fw` / `sim_navi32` print a skip note (CI run 97+: the old
+  step retried a 429 for 14 minutes). Tested without network by `tests/test_fetch_fw.sh`.
 - Shell code that runs on a Mac must avoid `sed -i` without a suffix,
   `touch -d`, `find -printf`, `mapfile`, `tar --wildcards`, `grep -P`,
   `date -d`, `stat -c` without the BSD `-f` fallback, and `$(wc -l)` compared

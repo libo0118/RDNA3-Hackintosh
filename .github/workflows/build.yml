@@ -70,29 +70,30 @@ jobs:
     runs-on: linux
     steps:
       - uses: actions/checkout@v4
+      - name: Restore the firmware cache
+        # the Linux runner runs jobs in a fresh container, so $HOME/.cache does not survive a job by itself; this is
+        # best effort (the runner's cache service may be off): a failure or a hang here costs at most 3 minutes
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rdna3-fw
+          key: rdna3-fw-${{ hashFiles('package/firmware.sh') }}
       - name: Fetch Navi 32 firmware for header tests (not redistributed)
-        run: |
-          # a cache on the runner host (jobs run on the host, $HOME stays): gitlab.com answers 429 to a burst of
-          # raw fetches (run 61: RLC, MES, DMCUB, VCN missing, test_fw failed); only missing files are fetched,
-          # with retries that wait
-          cache="${RDNA3_FW_CACHE:-$HOME/.cache/rdna3-fw}"
-          mkdir -p "$cache" "$RUNNER_TEMP/fw"
-          for f in psp_13_0_10_sos psp_13_0_10_ta smu_13_0_10 sdma_6_0_3 gc_11_0_3_imu gc_11_0_3_pfp \
-                   gc_11_0_3_me gc_11_0_3_mec gc_11_0_3_rlc gc_11_0_3_mes_2 \
-                   gc_11_0_3_mes1 dcn_3_2_0_dmcub vcn_4_0_0; do
-            if [ ! -s "$cache/$f.bin" ]; then
-              curl -sSfL --retry 6 --retry-delay 10 --retry-all-errors \
-                   "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/amdgpu/$f.bin" -o "$cache/$f.bin.part" &&
-                [ -s "$cache/$f.bin.part" ] && mv "$cache/$f.bin.part" "$cache/$f.bin" || echo "could not fetch $f"
-              sleep 1
-            fi
-            [ -s "$cache/$f.bin" ] && cp "$cache/$f.bin" "$RUNNER_TEMP/fw/$f.bin"
-          done
-          ls "$RUNNER_TEMP/fw" | wc -l
+        # tools/ci/fetch_fw.sh: the pinned tag and SHA-256 of package/firmware.sh, cache, then gitlab.com, then
+        # git.kernel.org, a time budget of 150 s, exit 0 always; without the full set the real-firmware checks are skipped
+        timeout-minutes: 5
+        run: sh tools/ci/fetch_fw.sh "$RUNNER_TEMP/fw"
       - name: Unit tests + fuzz (ASan/UBSan), real firmware headers
-        run: make test RDNA3_FW_DIR="$RUNNER_TEMP/fw"
+        run: |
+          # the real-firmware checks (test_fw, sim_navi32) run only with the complete verified set, else they print a skip note
+          fw="$RUNNER_TEMP/fw"; [ -f "$fw/.complete" ] || fw=""
+          make test RDNA3_FW_DIR="$fw"
       - name: Firmware load plan
-        run: make tools && build/host/amd_fw_dump "$RUNNER_TEMP/fw"
+        run: |
+          make tools
+          if [ -f "$RUNNER_TEMP/fw/.complete" ]; then build/host/amd_fw_dump "$RUNNER_TEMP/fw"
+          else echo "skip: no firmware fetched (rate limited or unreachable), the load plan is not checked"; fi
       - name: Host tools
         run: make tools
       - name: README status is up to date

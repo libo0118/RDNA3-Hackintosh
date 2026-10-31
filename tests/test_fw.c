@@ -369,6 +369,8 @@ int main(int argc, char **argv)
     ta_synthetic();
     if (argc > 1 && argv[1][0])
         real(argv[1]);
+    else
+        printf("test_fw: skip: the checks on the real Navi 32 firmware (no RDNA3_FW_DIR: not fetched or incomplete)\n");
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;
