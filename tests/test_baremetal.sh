@@ -282,7 +282,8 @@ ORIG=$(cat "$VOL/EFI/OC/config.plist" | md5sum)
 sm sh "$VOL/rdna3/metal.sh" > "$T/out.txt" 2>&1 && fail "metal.sh ran before install.sh"
 grep -q "najpierw sudo sh" "$T/out.txt" || fail "metal.sh: no 'install first' message"
 mkdir -p "$SB/Library/GPUBundles/rdna3mtl" "$SB/Library/Application Support/RDNA3/tools/macos"
-printf '#!/bin/sh\necho "$*" >> "%s/sync.args"\n' "$T" > "$SB/Library/Application Support/RDNA3/autoreport.sh"
+# like the real sync_metal: --sync-metal DIR puts DIR's RADV into the plugin's directory
+printf '#!/bin/sh\necho "$*" >> "%s/sync.args"\n[ "$1" = --sync-metal ] && cp "$2/libvulkan_radeon.dylib" "%s/Library/GPUBundles/rdna3mtl/"\nexit 0\n' "$T" "$SB" > "$SB/Library/Application Support/RDNA3/autoreport.sh"
 printf '#!/bin/sh\necho "tracedir $*" >> "%s/sync.args"\n' "$T" > "$SB/Library/Application Support/RDNA3/tools/macos/fix_tracedir.sh"
 sm sh "$VOL/rdna3/metal.sh" > "$T/out.txt" 2>&1 && fail "metal.sh ran without the plugin files"
 grep -q "brak .*metal/RDNA3MTLDriver.bundle" "$T/out.txt" || fail "metal.sh: no message for a missing plugin: $(cat "$T/out.txt")"

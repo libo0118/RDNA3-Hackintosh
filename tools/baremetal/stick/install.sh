@@ -26,6 +26,7 @@ echo "[2/3] instalacja (pobiera firmware AMD, potrzebny internet)"
 bash "${REL}install.sh" || { echo "instalacja nie powiodla sie"; exit 1; }
 echo "[3/3] sprawdzenie"
 ls -d /Library/Extensions/RDNA3*.kext
-ls "/Library/Application Support/RDNA3/firmware" 2>/dev/null | head -3 || echo "brak firmware"
+fw="/Library/Application Support/RDNA3/firmware"
+if [ -n "$(ls "$fw" 2>/dev/null)" ]; then ls "$fw" | head -3; else echo "UWAGA: brak firmware w $fw (potrzebny internet)"; fi
 echo "gotowe. Ustawienia systemowe -> Prywatnosc i ochrona -> Zezwol (jesli prosi), restart,"
 echo "potem wylacz komputer i wroc do Linuksa (config-driver.plist jako config.plist)."

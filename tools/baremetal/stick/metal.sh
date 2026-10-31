@@ -29,14 +29,14 @@ done
 echo "[1/4] plugin Metal"
 rm -rf "$GB/RDNA3MTLDriver.bundle"
 cp -R "$S/metal/RDNA3MTLDriver.bundle" "$GB/" || { echo "kopiowanie plugina nie powiodlo sie"; exit 1; }
-cp "$S/metal/librdna3mtl_translate.dylib" "$DIR/"
-cp "$S/metal/rdna3mtl-allow.txt" "$GB/"
+cp "$S/metal/librdna3mtl_translate.dylib" "$DIR/" || { echo "kopiowanie translatora nie powiodlo sie"; exit 1; }
+cp "$S/metal/rdna3mtl-allow.txt" "$GB/" || { echo "kopiowanie listy rdna3mtl-allow.txt nie powiodlo sie"; exit 1; }
 
 echo "[2/4] RADV (Vulkan)"
 T=${RDNA3_STICK_TMP:-/private/tmp}/rdna3-radv
 rm -rf "$T"; mkdir -p "$T"
 cp "$S/metal/libvulkan_radeon.dylib" "$T/"
-sh "$A/autoreport.sh" --sync-metal "$T" || echo "UWAGA: --sync-metal zwrocil blad"
+sh "$A/autoreport.sh" --sync-metal "$T" || { echo "instalacja RADV (--sync-metal) nie powiodla sie"; exit 1; }
 ls -la "$DIR"
 
 echo "[3/4] uprawnienia"
@@ -45,6 +45,10 @@ chown -R root:wheel "$DIR" "$GB/RDNA3MTLDriver.bundle" "$GB/rdna3mtl-allow.txt"
 chmod -R go-w,a+rX "$GB/RDNA3MTLDriver.bundle" "$DIR"
 chmod 644 "$GB/rdna3mtl-allow.txt"
 sh "$A/tools/macos/fix_tracedir.sh" ${R:+"$R"} || echo "UWAGA: katalog sladow klatek nie ustawiony"
+# a half-installed plugin with rdna3agdc=3 leaves WindowServer on the boot logo: stop before the config
+for f in "$GB/RDNA3MTLDriver.bundle" "$DIR/librdna3mtl_translate.dylib" "$DIR/libvulkan_radeon.dylib" "$GB/rdna3mtl-allow.txt"; do
+    [ -e "$f" ] || { echo "brak $f po instalacji: config.plist NIE zmieniony"; exit 1; }
+done
 
 echo "[4/4] OpenCore: rdna3agdc=3 (WindowServer na pluginie)"
 K=NVRAM.Add.7C436110-AB2A-4BBB-A880-FE41995C9F82.boot-args

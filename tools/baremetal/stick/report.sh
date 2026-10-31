@@ -35,6 +35,9 @@ if [ "${RDNA3_FULL:-0}" = 1 ]; then
     if [ -f "$A" ]; then sh "$A" --standalone > "$o/autoreport.out" 2>&1; else echo "UWAGA: brak autoreport.sh"; fi
 fi
 cp -R "$R/Users/Shared/rdna3-reports" "$o/" 2>/dev/null
-cp "$R"/Library/Logs/DiagnosticReports/*.ips "$o/" 2>/dev/null
+cp "$R"/Library/Logs/DiagnosticReports/*.ips "$R"/Library/Logs/DiagnosticReports/*.shutdownStall "$o/" 2>/dev/null
+# the OpenCore-injected core's IOLog lines do not reach the unified log on bare metal: the
+# kernel message buffer of this boot (msgbuf=1048576) is the only copy of them
+dmesg > "$o/dmesg.txt" 2>&1
 sync
 echo "gotowe: $o"
