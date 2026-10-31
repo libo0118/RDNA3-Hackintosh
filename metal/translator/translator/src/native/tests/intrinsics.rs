@@ -944,6 +944,29 @@ declare void @postfixPrimary_f.MTL_VISIBLE_FN_REF(ptr addrspace(2)) section "air
         "{err}"
     );
     assert!(err.contains("Logical SPIR-V"), "{err}");
+    assert!(err.contains("1 function(s) [postfixPrimary_f]"), "{err}");
+}
+
+#[test]
+fn an_unlisted_visible_stub_is_refused_by_name_not_crashed_on() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @main() {
+entry:
+  tail call void @"ns::act.MTL_VISIBLE_FN_REF"()
+  ret void
+}
+
+declare void @"ns::act.MTL_VISIBLE_FN_REF"() section "air.externally_defined"
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_native_unlisted_visible_ref_{}",
+        std::process::id()
+    ));
+    let err = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp)
+        .expect_err("an unlinked visible stub is refused");
+    assert!(err.contains("unsupported Metal visible function reference"), "{err}");
+    assert!(err.contains("[ns::act]"), "{err}");
 }
 
 const PATCH_CONTROL_POINT_LL: &str = r#"

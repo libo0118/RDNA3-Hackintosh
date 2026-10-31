@@ -87,6 +87,9 @@ static nvmtl_link_fn xlate_link;
 typedef int (*nvmtl_link_rt_fn)(const char *, const char *, const char *const *, const char *const *, size_t,
                                 const char *const *, const char *const *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_link_rt_fn xlate_link_rt;
+/* What the last link on this thread did with each visible function (translator src/visible_stubs.rs). */
+typedef int (*nvmtl_link_report_fn)(uint8_t **, size_t *);
+static nvmtl_link_report_fn xlate_link_report;
 typedef int (*nvmtl_link_ext_fn)(const char *, const char *const *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_link_ext_fn xlate_link_ext;
 typedef int (*nvmtl_lower_mesh_fn)(const char *, const char *, uint8_t **, size_t *, uint8_t **, size_t *, uint32_t *, char *, size_t);
@@ -122,6 +125,8 @@ static int nvmtl_xlate_ready(void) {
         xlate_link = (nvmtl_link_fn)dlsym(h, "nvmtl_link_visible");
         xlate_link_rt = (nvmtl_link_rt_fn)dlsym(h, "nvmtl_link_runtime");
         if (!xlate_link_rt) nvlog("translate: no nvmtl_link_runtime in this translator - visible function tables cannot be linked");
+        xlate_link_report = (nvmtl_link_report_fn)dlsym(h, "nvmtl_link_report");
+        if (!xlate_link_report) nvlog("translate: no nvmtl_link_report in this translator - links are not itemised in the log");
         xlate_link_ext = (nvmtl_link_ext_fn)dlsym(h, "nvmtl_link_externs");
         xlate_lower_mesh = (nvmtl_lower_mesh_fn)dlsym(h, "nvmtl_lower_mesh");
         if (!xlate_lower_mesh) nvlog("translate: no nvmtl_lower_mesh in this translator - mesh pipelines will be refused");
@@ -1914,20 +1919,32 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
             [tc addObject:c];
         }
         if (!xlate_link_rt) { free(syms); free(mls); if (err) *err = nvmtl_link_err(@"this translator has no nvmtl_link_runtime - rebuild with patch_xl_vft_ffi.py"); return nil; }
+        /* Every function the pipeline links goes in as a direct reference (syms/mls = mods), not only the kernel's own
+         * references: a table candidate that calls another visible function resolves it from this list too (N67). */
         size_t nr = 0; for (NSString *s in refs) if (mods[s]) nr++;
-        const char **rs = calloc(nr ? nr : 1, sizeof *rs), **rm = calloc(nr ? nr : 1, sizeof *rm);
         const char **cs = calloc(tc.count ? tc.count : 1, sizeof *cs), **cm = calloc(tc.count ? tc.count : 1, sizeof *cm);
-        size_t j = 0; for (NSString *s in refs) if (mods[s]) { rs[j] = s.UTF8String; rm[j] = [mods[s] UTF8String]; j++; }
+        if (!cs || !cm) { free(cs); free(cm); free(syms); free(mls); if (err) *err = nvmtl_link_err(@"link table allocation failed"); return nil; }
         NSMutableArray *keep = [NSMutableArray arrayWithCapacity:tc.count * 2];
         for (NSUInteger i = 0; i < tc.count; i++) { NVMTLFunction *cf = tc[i]; NSString *cn = nil; NSString *ca = nvmtl_link_candidate_air(cf, &cn);
             [keep addObject:cn ?: @""]; [keep addObject:ca ?: @""];
             cs[i] = [keep[2 * i] UTF8String]; cm[i] = [keep[2 * i + 1] UTF8String]; }
-        nvlog("link: \"%s\" reads a visible function table - %lu table candidate(s), %zu direct reference(s)", fn->_fname.UTF8String, (unsigned long)tc.count, nr);
-        rc = xlate_link_rt(fn->_air.UTF8String, fn->_stage.UTF8String, rs, rm, nr, cs, cm, tc.count, &out, &len, e, sizeof e);
-        free(rs); free(rm); free(cs); free(cm);
+        nvlog("link: \"%s\" reads a visible function table - %lu table candidate(s), %zu direct reference(s) of the kernel, %zu linkable name(s)",
+              fn->_fname.UTF8String, (unsigned long)tc.count, nr, n);
+        rc = xlate_link_rt(fn->_air.UTF8String, fn->_stage.UTF8String, syms, mls, n, cs, cm, tc.count, &out, &len, e, sizeof e);
+        free(cs); free(cm);
     } else
     rc = xlate_link(fn->_air.UTF8String, fn->_stage.UTF8String, syms, mls, n, &out, &len, e, sizeof e);
     free(syms); free(mls);
+    if (xlate_link_report && xlate_free) {
+        /* Every visible function the link met, by name: linked, left unresolved, a table slot, or a stub
+         * the AIR's !air.visible_function_references did not list (MPS AMDConvolution, 2026-10-31). */
+        uint8_t *rp = NULL; size_t rn = 0;
+        if (xlate_link_report(&rp, &rn) == 0 && rp) {
+            nvlog("link: \"%s\" visible functions%s: %.*s", fn->_fname.UTF8String, rc == 0 ? "" : " (link FAILED)",
+                  (int)(rn && rp[rn - 1] == 0 ? rn - 1 : rn), (const char *)rp);
+            xlate_free(rp, rn);
+        }
+    }
     if (rc != 0 || !out) {
         if (err) *err = nvmtl_link_err([NSString stringWithFormat:@"\"%@\": %s", fn->_fname, e[0] ? e : "link failed"]);
         return nil;

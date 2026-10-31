@@ -33,6 +33,9 @@ static inline int nvmtl_log_failure(const char *text)
                     strstr(text, "GPU time queue:") ||
                     /* DRIVER-PLAN N52: the totals of the multisample copy passes (Chess's stencil resolve chain), once per process and every 10 s while they move:
                      * triage proves the chain from them, in a release build too */
-                    strstr(text, "msdl: SUMMARY") || strstr(text, "msupload: SUMMARY"));
+                    strstr(text, "msdl: SUMMARY") || strstr(text, "msupload: SUMMARY") ||
+                    /* DRIVER-PLAN N67: what a pipeline link did with each visible function (linked / unresolved / table slots),
+                     * once per link (nvmtl_link_stage): the Mac report must show it from a release plugin too (a failed one says FAILED) */
+                    strstr(text, "\" visible functions: linked "));
 }
 #endif

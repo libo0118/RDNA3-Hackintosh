@@ -178,7 +178,10 @@ libdrm sources are in `third_party/libdrm`. Programs: `rdna3_drminfo` (UAPI acce
 
 `translator/src/lib.rs` + `main.rs` (CLI `in -> out.spv`), passes in `src/passes/`, reflection in
 `src/reflect/`, SPIR-V in `src/spirv_*`, `mesh_lower.rs`, `fc_specialize.rs`, `air_intrinsics.rs`;
-integration tests `translator/tests/*.rs`. `wrapper/src/*.rs`: the C-callable dylib the plugin loads
+visible functions linked at pipeline creation in `linked_functions.rs` (references, tables, dylib
+externs) and `visible_stubs.rs` (stubs found by suffix, the per-link report the plugin logs as
+`link: "<kernel>" visible functions: ...` via `nvmtl_link_report`); integration tests
+`translator/tests/*.rs` (CI runs only these, not the `src/` unit tests). `wrapper/src/*.rs`: the C-callable dylib the plugin loads
 (`align_guard`, `buffer_addresses`, `linearize`, `table_ubo`, `wide_loads`, `g2_inline`). Built by
 `make -C metal translator`; CI job `translator` (Linux) and `metal` (macOS dylib).
 
