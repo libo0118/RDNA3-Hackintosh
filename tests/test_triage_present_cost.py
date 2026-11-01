@@ -281,11 +281,11 @@ check([x[1] for x in present_rows(txt, "", False)][-2:] == ["drawable", "drawabl
 # (metal/plugin/nvmtl_ws_share.h nvmtl_wss_format, nvmtl_surface_share.h nvmtl_ps_format; the bodies tests/test_ws_share.c and tests/test_surface_share.c check)
 
 
-def shbody(imp=3, skip=700, stale=0, reimp=0, refused=0, war=0, demoted=0, wr=0, inelig=0, off=0, eperm=0, rw=0):
+def shbody(imp=3, skip=700, stale=0, reimp=0, refused=0, war=0, demoted=0, wr=0, inelig=0, off=0, eperm=0, rw=0, pdem=None):
     return ("frames=800 active_s=40 fps_peak=215 passes=800 draws=800 fbf_draws=0 bar_img=0 bar_mem=0 rec_us_avg=1000 rec_us_max=2000 gpu_n=800 gpu_us_avg=900 "
             "gpu_us_max=2000 wait_us_avg=100 ups=0 up_kb=0 up_us_avg=0 membar=0 sh_imp=%d sh_skip=%d sh_stale=%d sh_reimp=%d sh_refused=%d sh_war=%d "
             "sh_demoted=%d sh_wr=%d sh_inelig=%d sh_rw=%d sh_eperm=%d sh_enospc=0 sh_enoent=0 sh_enodev=0 sh_enxio=0 sh_eother=0 sh_off=%d" % (
-                imp, skip, stale, reimp, refused, war, demoted, wr, inelig, rw, eperm, off))
+                imp, skip, stale, reimp, refused, war, demoted, wr, inelig, rw, eperm, off) + ("" if pdem is None else " sh_pdem=%d" % pdem))
 
 
 def prbody(shared=3, enxio=0, stop=0, eperm=0, enoent=0, other=0, nogen=0):
@@ -315,6 +315,17 @@ r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(imp=3, skip=0)) + W % 
 check(r[0][0] == "WARN" and "never sampled without an upload" in r[0][2], "imports never used: %r" % r)
 r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(rw=2)) + W % (2, APP, prbody()))
 check(r[0][0] == "WARN" and "2 WRITABLE import(s)" in r[0][2], "sh_rw: %r" % r)
+# a demoted producer (sh_pdem / the plugin's `producer pid N demoted` line): WARN naming the pid
+PDEM = "2026-10-29 10:00:30.1 Df %s (RDNA3MTLDriver) NVMTL: vk: a3share: producer pid %d demoted after 4 hazards: none of its surfaces is imported read-only any more (the others keep theirs)\n"
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(war=4, demoted=4, pdem=1)) + W % (2, APP, prbody()) + PDEM % ("WindowServer[207:2cd]", 900))
+check(r[0][0] == "WARN" and "1 producer(s) demoted (pid 900)" in r[0][2] and "1 producer(s) demoted after repeated" in r[0][2]
+      and "reused pid stays demoted" in r[0][2], "sh_pdem 1 and the pid line: WARN naming the pid: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(war=4, demoted=4, pdem=2)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "2 producer(s) demoted after" in r[0][2] and "the pid line is not in the log" in r[0][2], "sh_pdem without the pid line: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(pdem=0)) + W % (2, APP, prbody()))
+check(r[0][0] == "INFO" and "0 producer(s) demoted" in r[0][2], "sh_pdem 0 is INFO: %r" % r)
+r = ws_share_rows(PDEM % ("WindowServer[207:2cd]", 77) + PDEM % ("WindowServer[207:2cd]", 78))
+check(len(r) == 1 and r[0][0] == "WARN" and "(pid 77, 78)" in r[0][2], "the pid lines alone (no summary) still WARN: %r" % r)
 # stale samples alone are INFO (a CPU-written surface takes the private path by design)
 r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(stale=5)) + W % (2, APP, prbody()))
 check(r[0][0] == "INFO" and "5 stale (private path)" in r[0][2], "stale is INFO: %r" % r)

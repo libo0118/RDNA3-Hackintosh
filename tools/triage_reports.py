@@ -941,10 +941,13 @@ def n41_lines(path, args=""):
     return n41_rows(sv, log, pl, cd)
 
 
-def a3_share_verdict(log, sv, c):
+def a3_share_verdict(log, sv, c, plugin=""):
     """DRIVER-PLAN N71 (c): WindowServer's read-only imports of applications'
     shared VRAM drawables (debug.rdna3accel_a3share). Prints the verdict;
-    True when it failed (a GPU VM fault inside a read-only shared import)."""
+    True when it failed (a GPU VM fault inside a read-only shared import, or
+    the kext's EPERM line: an accelerator answered a read-only import nobody
+    asked for). plugin: the other processes' plugin log (24/26 members), also
+    searched in log and sv."""
     on = re.search(r"A3 share: (ON|off)", log)
     names = ("recorded", "imported", "stale", "norecord", "ws_record_refused", "record_refused", "fault_off")
     have = any(("a3share_" + n) in c for n in names)
@@ -983,10 +986,26 @@ def a3_share_verdict(log, sv, c):
         print("   INFO %-20s %s" % ("A3 share", text))
     for l in sorted(set(re.findall(r"surfshare: [^\n]*(?:REFUSED|stale)[^\n]*", log)))[:3]:
         print("     " + l[:220])
+    # the opt-in (RD3K_SG_ACCEPT_RO): a kernel EPERM line = an accelerator answered read-only to a caller that did not ask (a bug); an import that
+    # did not ask while applications shared drawables = WindowServer's plugin / libdrm_xnu is older than the kernel, or NVMTL_WS_SHARE=0
+    allt = "\n".join((log or "", sv or "", plugin or ""))
+    unasked = re.findall(r"GEM: IOSurface \d+ plane \d+: the accelerator answered a read-only shared import the caller did not ask for[^\n]*", allt)
+    if unasked:
+        print("   FAIL %-20s an accelerator answered a read-only shared import the caller did not ask for (the kext refused it, EPERM): "
+              "the accelerator shares without the RD3K_SG_ACCEPT_RO bit - %s" % ("A3 share", unasked[0][:200]))
+        failed = True
+    noacc = c.get("a3share_noaccept", 0)
+    noacc_lines = re.findall(r"surfshare: WindowServer's import of surface \d+ plane \d+[^\n]*does not accept a read-only one[^\n]*", allt)
+    noacc_plug = re.findall(r"vk: a3share: read-only imports (?:NOT|not) asked for[^\n]*", allt)
+    if (noacc or noacc_lines or noacc_plug) and v["recorded"]:
+        print("   WARN %-20s WindowServer did not accept read-only imports: an older plugin/libdrm_xnu in WindowServer, or NVMTL_WS_SHARE=0 "
+              "(applications recorded %d share(s); a3share_noaccept %d%s)%s" % (
+                  "A3 share", v["recorded"], noacc, "; the plugin line: " + noacc_plug[0][:140] if noacc_plug else "",
+                  "; " + noacc_lines[0][:200] if noacc_lines else ""))
     return failed
 
 
-def a3_display_verdict(log, sv):
+def a3_display_verdict(log, sv, plugin=""):
     """card run 58: WindowServer's display framebuffers and A3 - kept out
     (the refusal lines), the refusal that never fired (display-size BOs in
     WindowServer, no refusal), or let in and never scanned out. Prints the
@@ -1074,7 +1093,7 @@ def a3_display_verdict(log, sv):
             print("   INFO %-20s WindowServer's inputs kept out of A3: %d refused (card run 58, 2026-10-15d)%s" %
                   ("A3 WindowServer", ws_kept, "; %d import(s) by a process the kernel could not name, refused" %
                    unknown if unknown else ""))
-    failed = a3_share_verdict(log, sv, c) or failed
+    failed = a3_share_verdict(log, sv, c, plugin) or failed
     for h in sorted(a3lines):
         print("     " + a3lines[h][:300])
     for l in sorted(set(re.findall(r"flicker: head \d+: [^\n]*", log)))[-4:]:
@@ -4957,7 +4976,7 @@ def report(path, show_all):
             for l in sorted(set(re.findall(r"item 7: kext surface BOs probe[^\n]*", sv)))[:2]:
                 print("     " + l[:150])
         # card run 58: WindowServer's display framebuffers and A3
-        failed = a3_display_verdict(log, sv) or failed
+        failed = a3_display_verdict(log, sv, (pluginlog or "") + "\n" + (cdlog or "")) or failed
         failed = failed or not same or not up or len(pids) > 2
     # DRIVER-PLAN N41: the VRAM parking and the page-off's wait for WindowServer's GPU
     if "rdna3accel=1" in args or surfvram.strip():

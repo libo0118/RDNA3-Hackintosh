@@ -317,25 +317,31 @@ def ws_frame_rows(plugin_text):
 def ws_share_rows(plugin_text):
     """N71 (c): `ws share` - the producer's share records (pr_* in the applications' `vk: ws frame: SUMMARY`) against WindowServer's read-only
     imports and samples (sh_*). WARN when applications shared but WindowServer imported none, on any R1 hazard (sh_war), on a stopped session
-    (sh_off), a write asked of a read-only alias (sh_wr) or a refused import (sh_refused); INFO otherwise."""
+    (sh_off), a write asked of a read-only alias (sh_wr) or a refused import (sh_refused); INFO otherwise.
+    A producer demoted after 4 hazards (sh_pdem, the plugin's `vk: a3share: producer pid N demoted ...` line naming the pid) is a WARN too:
+    its surfaces take the private path for the rest of WindowServer's session (a pid can be reused: DRIVER-PLAN N71 OPEN)."""
     sums = ws_summaries(plugin_text)
+    dem_pids = sorted(set(int(x) for x in re.findall(r"vk: a3share: producer pid (\d+) demoted after", plugin_text or "")))
     ws = [d for proc, d in sums.items() if proc.startswith("WindowServer") and "sh_imp" in d]
     apps = [(proc, d) for proc, d in sums.items() if not proc.startswith("WindowServer") and "pr_shared" in d]
-    if not ws and not apps:
+    if not ws and not apps and not dem_pids:
         return []
     shared = sum(_num(d, "pr_shared") for _, d in apps)
     pr_bad = dict((k, sum(_num(d, k) for _, d in apps)) for k in ("pr_enxio", "pr_stop", "pr_eperm", "pr_enoent", "pr_other", "pr_nogen"))
     k = lambda key: sum(_num(d, key) for d in ws)
     imp, skip, stale, reimp, ref, war, dem, wr, inel, rw = (k("sh_imp"), k("sh_skip"), k("sh_stale"), k("sh_reimp"), k("sh_refused"),
                                                                k("sh_war"), k("sh_demoted"), k("sh_wr"), k("sh_inelig"), k("sh_rw"))
+    pdem = k("sh_pdem")
     errs = ", ".join("%s %d" % (n.upper(), k("sh_" + n)) for n in ("eperm", "enospc", "enoent", "enodev", "enxio", "eother") if k("sh_" + n))
     off = any(d.get("sh_off") == "1" for d in ws)
     text = ("applications recorded %d share(s) (%s); WindowServer: %d read-only import(s) (%d re-import(s) after a new allocation), %d sample(s) without an upload, "
             "%d stale (private path), %d import(s) not used%s, %d hazard(s) (the producer finished another frame into a drawable while a composite sampled it), "
             "%d surface(s) demoted to the private path, %d write(s) asked of a read-only alias, %d wrapper(s) of a shared surface kept private (a usage that can write), "
-            "%d WRITABLE import(s) where a read-only one was planned (given back)%s" % (
+            "%d WRITABLE import(s) where a read-only one was planned (given back), %d producer(s) demoted%s%s" % (
                 shared, ", ".join("%s %d" % (n[3:], v) for n, v in sorted(pr_bad.items()) if v) or "no failures", imp, reimp, skip, stale, ref,
-                " (" + errs + ")" if errs else "", war, dem, wr, inel, rw, "; shared imports STOPPED for the session" if off else ""))
+                " (" + errs + ")" if errs else "", war, dem, wr, inel, rw, pdem,
+                " (pid %s)" % ", ".join(str(x) for x in dem_pids) if dem_pids else "",
+                "; shared imports STOPPED for the session" if off else ""))
     why = []
     if shared and not imp:
         why.append("applications shared %d drawable(s) but WindowServer imported none read-only (%s)" % (
@@ -345,6 +351,10 @@ def ws_share_rows(plugin_text):
         why.append("WindowServer imported but never sampled without an upload (sh_skip 0): the shared images were not used")
     if war:
         why.append("%d read-after-write hazard(s) (R1): the producer finished the next frame into the drawable while WindowServer sampled it (a fence is the fix, DRIVER-PLAN N71)" % war)
+    if pdem or dem_pids:
+        why.append("%d producer(s) demoted after repeated read-after-write hazards%s: none of their surfaces is sampled read-only for the rest of "
+                   "WindowServer's session, a reused pid stays demoted (performance only; DRIVER-PLAN N71 OPEN)" % (
+                       max(pdem, len(dem_pids)), " (pid " + ", ".join(str(x) for x in dem_pids) + ")" if dem_pids else " (sh_pdem; the pid line is not in the log)"))
     if off:
         why.append("shared imports stopped for the session after the hazards")
     if wr:

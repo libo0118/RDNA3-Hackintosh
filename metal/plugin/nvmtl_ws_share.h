@@ -194,7 +194,8 @@ static inline int nvmtl_wss_hazard(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint
 }
 
 /* ---- the plan at wrapper creation ---- */
-enum { NVMTL_WSS_PLAN_PRIVATE = 0, NVMTL_WSS_PLAN_CACHED, NVMTL_WSS_PLAN_IMPORT, NVMTL_WSS_PLAN_REIMPORT };
+enum { NVMTL_WSS_PLAN_PRIVATE = 0, NVMTL_WSS_PLAN_CACHED, NVMTL_WSS_PLAN_IMPORT, NVMTL_WSS_PLAN_REIMPORT,
+       NVMTL_WSS_PLAN_DEMOTED };   /* nvmtl_wss_plan_demote: the cached backing's producer was demoted */
 enum { NVMTL_WSS_PW_NONE = 0, NVMTL_WSS_PW_NOSHARE, NVMTL_WSS_PW_STALE };   /* why PRIVATE */
 static inline int nvmtl_wss_plan(int have_cached, uint64_t cached_gen, uint64_t producer_gen, int tag_current, int *why)
 {
@@ -206,6 +207,15 @@ static inline int nvmtl_wss_plan(int have_cached, uint64_t cached_gen, uint64_t 
     else p = NVMTL_WSS_PLAN_IMPORT;
     if (why) *why = w;
     return p;
+}
+
+/* ECC review of N71 (c): the producer's demotion (4 hazards) is checked for a NEW import (NVMTLDevice.m, after the kernel names the
+ * producer) and here for the cached read-only backing, whose producer pid sits on its import (rb->_vramBuf.share_pid): a plan that
+ * would reuse it (CACHED) or replace it with another generation of the same surface (REIMPORT) becomes PLAN_DEMOTED, so a demoted
+ * producer's surfaces are not sampled read-only through a cache entry either (IMPORT has no backing, so no pid yet). */
+static inline int nvmtl_wss_plan_demote(int plan, int producer_demoted)
+{
+    return producer_demoted && (plan == NVMTL_WSS_PLAN_CACHED || plan == NVMTL_WSS_PLAN_REIMPORT) ? NVMTL_WSS_PLAN_DEMOTED : plan;
 }
 
 /* ---- what a wrapper creation does about a surface (NVMTLDevice.m nvmtlNewSurfaceTexture) ----
@@ -227,9 +237,11 @@ static inline int nvmtl_wss_wrapper_action(int why, uint64_t pgen)
     return NVMTL_WSS_WA_PRIVATE_INELIG;
 }
 /* the plan's outcome for the image creation: whether it asks for an import (ws_plan) and whether it skips the kernel */
-enum { NVMTL_WSS_PO_NONE = 0, NVMTL_WSS_PO_IMPORT, NVMTL_WSS_PO_STALE_PRIVATE, NVMTL_WSS_PO_PRIVATE };
+enum { NVMTL_WSS_PO_NONE = 0, NVMTL_WSS_PO_IMPORT, NVMTL_WSS_PO_STALE_PRIVATE, NVMTL_WSS_PO_PRIVATE,
+       NVMTL_WSS_PO_DEMOTED_PRIVATE };   /* the producer was demoted: private without asking the kernel, the surface demoted */
 static inline int nvmtl_wss_plan_outcome(int plan, int pw)
 {
+    if (plan == NVMTL_WSS_PLAN_DEMOTED) return NVMTL_WSS_PO_DEMOTED_PRIVATE;
     if (plan == NVMTL_WSS_PLAN_IMPORT || plan == NVMTL_WSS_PLAN_REIMPORT) return NVMTL_WSS_PO_IMPORT;
     return pw == NVMTL_WSS_PW_STALE ? NVMTL_WSS_PO_STALE_PRIVATE : NVMTL_WSS_PO_PRIVATE;
 }

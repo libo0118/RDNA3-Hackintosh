@@ -69,6 +69,19 @@ int main(void)
     check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_REIMPORT, 0), NVMTL_WSS_PO_IMPORT, "plan re-import -> ask for an import");
     check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_PRIVATE, NVMTL_WSS_PW_STALE), NVMTL_WSS_PO_STALE_PRIVATE, "stale -> private, counted");
     check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_PRIVATE, NVMTL_WSS_PW_NOSHARE), NVMTL_WSS_PO_PRIVATE, "no share -> private");
+    /* ECC review: a demoted producer's cached read-only alias is not sampled (the cache entry is dropped, the surface demoted) */
+    check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_CACHED, 1), NVMTL_WSS_PLAN_DEMOTED, "cached backing of a demoted producer: not used");
+    check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_REIMPORT, 1), NVMTL_WSS_PLAN_DEMOTED, "a re-import over the backing of a demoted producer: not asked");
+    check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_CACHED, 0), NVMTL_WSS_PLAN_CACHED, "cached backing of a healthy producer: used");
+    check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_REIMPORT, 0), NVMTL_WSS_PLAN_REIMPORT, "re-import of a healthy producer: asked");
+    check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_IMPORT, 1), NVMTL_WSS_PLAN_IMPORT, "a first import has no pid yet: decided after the kernel names it");
+    check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_PRIVATE, 1), NVMTL_WSS_PLAN_PRIVATE, "a private plan stays private");
+    check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_DEMOTED, NVMTL_WSS_PW_NONE), NVMTL_WSS_PO_DEMOTED_PRIVATE, "demoted plan -> private without the kernel, surface demoted");
+    { nvmtl_wss_state dp; nvmtl_wss_stats dps; memset(&dp, 0, sizeof dp); memset(&dps, 0, sizeof dps);
+      for (unsigned k = 0; k < NVMTL_WSS_PID_HAZARD_MAX; k++) (void)nvmtl_wss_hazard(&dp, &dps, 4000 + k, 88, 1, 2);
+      check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_CACHED, nvmtl_wss_producer_demoted(&dp, 88)), NVMTL_WSS_PLAN_DEMOTED, "end to end: 4 hazards of pid 88, its cached alias is dropped");
+      check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_CACHED, nvmtl_wss_producer_demoted(&dp, 89)), NVMTL_WSS_PLAN_CACHED, "another producer's cached alias stays");
+      check(nvmtl_wss_plan_demote(NVMTL_WSS_PLAN_CACHED, nvmtl_wss_producer_demoted(&dp, 0)), NVMTL_WSS_PLAN_CACHED, "pid 0 (older kernel): never demoted"); }
 
     /* ---- what the image creation does with a successful import ---- */
     check(nvmtl_wss_import_verdict(1, 1), NVMTL_WSS_IV_USE_RO, "planned, read-only: the alias");

@@ -366,6 +366,26 @@ o=$(run r50)
 grep -q 'FAIL A3 share  *.*VM faults 1: a GPU VM fault inside a read-only shared import turned sharing OFF' <<<"$o" || fail "r50: $o"
 o=$(run r51)
 grep -q 'WARN A3 share  *the kernel has the read-only share' <<<"$o" || fail "r51: $o"
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45 r46 r47 r48 r49 r50 r51 r52 r53 r54; do all="$all$(run $r)"; done
+# the opt-in's diagnostics: an import that did not ask (accelerator line / counter / the plugin's line) while applications shared = WARN,
+# the kext's EPERM line (an accelerator answered read-only unasked) = FAIL, nothing shared = quiet
+for r in r55 r56 r57 r58; do mkdir -p "$T/$r"; done
+SHNOACC="RDNA3Accelerator: surfshare: WindowServer's import of surface 2 plane 0 (share record of allocation #77, producer pid 812) does not accept a read-only one (an older plugin / libdrm_xnu, or NVMTL_WS_SHARE=0): refused as before (a3share_noaccept 1)"
+SHEPERM="RDNA3: GEM: IOSurface 2 plane 0: the accelerator answered a read-only shared import the caller did not ask for: refused (EPERM) (1 such)"
+SHPLUG="NVMTL: vk: a3share: read-only imports NOT asked for (libdrm_xnu has no drm_xnu_surface_accept_ro: an older one)"
+SHCNT0="debug.rdna3accel_a3share: 1\\ndebug.rdna3accel_a3share_recorded: 0\\ndebug.rdna3accel_a3share_imported: 0\\ndebug.rdna3accel_a3share_stale: 0\\ndebug.rdna3accel_a3share_norecord: 0\\ndebug.rdna3accel_a3share_ws_record_refused: 0\\ndebug.rdna3accel_a3share_record_refused: 0"
+mk58 r55/rdna3-report-noaccept "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN\\n$SHNOACC" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n== sysctl (card run 58)\\n$SHCNT\\ndebug.rdna3accel_a3share_fault_off: 0\\ndebug.rdna3accel_a3share_noaccept: 5" none
+mk58 r56/rdna3-report-unasked "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN\\n$SHEPERM" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n== sysctl (card run 58)\\n$SHCNT\\ndebug.rdna3accel_a3share_fault_off: 0" none
+mk58 r57/rdna3-report-plugnoask "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$SHPLUG\\n== sysctl (card run 58)\\n$SHCNT\\ndebug.rdna3accel_a3share_fault_off: 0" none
+mk58 r58/rdna3-report-plugnoask0 "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$SHPLUG\\n== sysctl (card run 58)\\n$SHCNT0\\ndebug.rdna3accel_a3share_fault_off: 0" none
+o=$(run r55)
+grep -q 'WARN A3 share  *WindowServer did not accept read-only imports: an older plugin/libdrm_xnu in WindowServer, or NVMTL_WS_SHARE=0 (applications recorded 3 share(s); a3share_noaccept 5' <<<"$o" || fail "r55: $o"
+! grep -q 'FAIL A3 share' <<<"$o" || fail "r55 no FAIL: $o"
+o=$(run r56)
+grep -q 'FAIL A3 share  *an accelerator answered a read-only shared import the caller did not ask for' <<<"$o" || fail "r56: $o"
+o=$(run r57)
+grep -q 'WARN A3 share  *WindowServer did not accept read-only imports.*vk: a3share: read-only imports NOT asked for' <<<"$o" || fail "r57: $o"
+o=$(run r58)
+! grep -q 'did not accept read-only imports' <<<"$o" || fail "r58: nothing shared, no WARN: $o"
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45 r46 r47 r48 r49 r50 r51 r52 r53 r54 r55 r56 r57 r58; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"
