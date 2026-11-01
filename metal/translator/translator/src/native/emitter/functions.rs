@@ -1361,6 +1361,16 @@ impl Emitter {
             &self.ir.preinlined_helper_pointer_loads,
             &self.ir.functions,
         );
+        if !self.field_forwards.is_empty() {
+            crate::notes::push_once(
+                &format!("N76 forward {}", f.name),
+                format!(
+                    "metal2vulkan: kernel {}: {} local pointer field load(s) forwarded to their field's only store before emission (DRIVER-PLAN N76)",
+                    f.name,
+                    self.field_forwards.len()
+                ),
+            );
+        }
         self.record_entry_block_values(&tir, &f.params);
         for (load, stored) in &self.field_forwards {
             self.pointer_forward_values

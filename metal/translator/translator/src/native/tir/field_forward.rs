@@ -20,7 +20,8 @@
 //! order: the field has exactly one pointer store in the function, its value
 //! is a global or a value of the entry block (it dominates every load), and
 //! the variable is used only through constant field addresses of one type
-//! that do not overlap, read and written in place (never stored, merged or
+//! that do not overlap (nor does any integer, vector or aggregate store into
+//! it overlap a pointer field), read and written in place (never stored, merged or
 //! indexed dynamically), or passed whole to a function of the module that
 //! only reads through that parameter (the real kernel hands its capture to
 //! its lambdas, which load fields and never store into them). A load that
@@ -228,6 +229,7 @@ pub(in crate::native) fn local_pointer_field_forwards(
     let mut loads: Vec<(String, String, Vec<u64>)> = Vec::new();
     let mut stores: BTreeMap<(String, Vec<u64>), Vec<TypedValue>> = BTreeMap::new();
     let mut keys: HashMap<String, HashSet<Vec<u64>>> = HashMap::new();
+    let mut scalar_stores: HashMap<String, HashSet<Vec<u64>>> = HashMap::new();
     for inst in insts() {
         let defines_address = inst.result.as_ref().is_some_and(|result| {
             fields.contains_key(result)
@@ -279,6 +281,13 @@ pub(in crate::native) fn local_pointer_field_forwards(
                                 .entry((address.root.clone(), address.key.clone()))
                                 .or_default()
                                 .push(value.clone());
+                        } else {
+                            // An integer, vector or aggregate store: it
+                            // overwrites a pointer field it overlaps.
+                            scalar_stores
+                                .entry(address.root.clone())
+                                .or_default()
+                                .insert(address.key.clone());
                         }
                         continue;
                     }
@@ -347,7 +356,12 @@ pub(in crate::native) fn local_pointer_field_forwards(
             .iter()
             .enumerate()
             .any(|(at, a)| used[at + 1..].iter().any(|b| overlapping(a, b)));
-        if overlap {
+        let overwritten = scalar_stores.get(root).is_some_and(|scalars| {
+            scalars
+                .iter()
+                .any(|scalar| used.iter().any(|key| *key == scalar || overlapping(key, scalar)))
+        });
+        if overlap || overwritten {
             poisoned.insert(root.clone());
         }
     }

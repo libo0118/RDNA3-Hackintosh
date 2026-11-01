@@ -140,6 +140,17 @@ impl Emitter {
                 self.record_pointer_nullness(name.to_string(), nullness);
             }
         }
+        crate::notes::push_once(
+            &format!("N76 uniform {}", self.mixed_storage_function),
+            format!(
+                "metal2vulkan: kernel {}: pointer phi {name} carries one pointer ({}); emitted as an alias of it (DRIVER-PLAN N76)",
+                self.mixed_storage_function,
+                match &source {
+                    LlValue::Local(local) | LlValue::Global(local) => local.as_str(),
+                    _ => "?",
+                }
+            ),
+        );
         self.uniform_pointer_phis.insert(name.to_string(), source);
         Ok(true)
     }

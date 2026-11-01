@@ -28,6 +28,21 @@ pub fn push(note: impl Into<String>) {
     });
 }
 
+/// Records a note the first time `key` is seen in this process (the
+/// primary emitter and the raw-construction retry meet the same decision).
+pub fn push_once(key: &str, note: impl Into<String>) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(key.to_string()))
+        .unwrap_or(true);
+    if first {
+        push(note);
+    }
+}
+
 /// Takes this thread's notes, oldest first; a last line counts the dropped.
 pub fn take() -> Vec<String> {
     NOTES.with(|notes| {

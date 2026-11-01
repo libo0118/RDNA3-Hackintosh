@@ -233,6 +233,30 @@ fn loaded_storages(asm: &str) -> Vec<String> {
         .collect()
 }
 
+fn assert_note(notes: &[String], expected: &str) {
+    assert!(
+        notes.iter().any(|note| note == expected),
+        "missing note {expected:?}; got {notes:?}"
+    );
+}
+
+fn assert_refused(ll: &str, expected: &str) {
+    match translate_sanitized_native(ll, Stage::Kernel, &tmp()) {
+        Ok(_) => panic!("must be refused with {expected:?}"),
+        Err(error) => assert!(
+            error.contains(expected) && !error.contains("undefined id"),
+            "expected {expected:?}; got: {error}"
+        ),
+    }
+}
+
+fn assert_not_demoted(notes: &[String]) {
+    assert!(
+        !notes.iter().any(|note| note.contains("demoted")),
+        "nothing is demoted: {notes:?}"
+    );
+}
+
 /// The note the host logs as `translator note: ...`: the N75 form when the
 /// phi was split from the network, the N72 form when every value was seen
 /// (a forwarded field load is its stored pointer, which may be).
@@ -272,7 +296,11 @@ fn a_loop_over_a_field_load_translates() {
             && !storages.iter().any(|storage| storage == "Private"),
         "the loop must read the Function float only {storages:?}\n{asm}"
     );
-    assert!(notes.is_empty(), "nothing is demoted: {notes:?}");
+    assert_not_demoted(&notes);
+    assert_note(
+        &notes,
+        "metal2vulkan: kernel fl_one: 2 local pointer field load(s) forwarded to their field's only store before emission (DRIVER-PLAN N76)",
+    );
 }
 
 #[test]
@@ -292,7 +320,13 @@ fn a_construct_tree_slot_of_field_loads_translates() {
             && !storages.iter().any(|storage| storage == "Private"),
         "nothing Private is read {storages:?}\n{asm}"
     );
-    assert!(notes.is_empty(), "nothing is demoted: {notes:?}");
+    assert_not_demoted(&notes);
+    assert!(
+        notes.iter().any(|note| note.starts_with(
+            "metal2vulkan: kernel ct_fields: pointer phi %metal2vulkan.ct."
+        ) && note.ends_with("carries one pointer (%acc0); emitted as an alias of it (DRIVER-PLAN N76)")),
+        "the uniform collapse must be noted: {notes:?}"
+    );
 }
 
 #[test]
@@ -417,7 +451,7 @@ fn a_capture_passed_to_a_reading_helper_is_still_forwarded() {
         !loaded_storages(&asm).iter().any(|storage| storage == "Private"),
         "nothing Private is read\n{asm}"
     );
-    assert!(notes.is_empty(), "nothing is demoted: {notes:?}");
+    assert_not_demoted(&notes);
 }
 
 #[test]
@@ -480,9 +514,215 @@ fn a_capture_handed_to_a_multi_block_lambda_is_spliced() {
         !asm.contains("OpFunctionCall"),
         "the lambda must be spliced into the kernel\n{asm}"
     );
-    let expected = "metal2vulkan: kernel ct_lambda: 1 call(s) hand a local struct of pointers to a function that loads them (@lambda(%cap)); splicing them into their callers (DRIVER-PLAN N76)";
+    let expected = "metal2vulkan: kernel ct_lambda: spliced 1 call(s) that hand a local struct of pointers to a function that loads them into their callers (@lambda(%cap)) (DRIVER-PLAN N76)";
     assert!(
         notes.iter().any(|note| note == expected),
         "missing note {expected:?}; got {notes:?}"
     );
 }
+
+// ECC review of e1f1fe8..2f85ae6 (rust-reviewer probes, rewritten here).
+
+/// The head with `extra` after it and a loop that loads `%field` before
+/// storing `%slot` into it again: the first iteration reads what `extra`
+/// left in the field.
+fn overwritten_field_loop(kernel: &str, extra: &str) -> String {
+    format!(
+        r#"{head}{extra}  br label %loop
+loop:
+  %n = phi i32 [ 0, %entry ], [ %n1, %loop ]
+  %acc = phi float [ 0.0, %entry ], [ %acc1, %loop ]
+  %p = load ptr, ptr %field, align 8
+  %isnull = icmp eq ptr %p, null
+  %v = load float, ptr %slot, align 4
+  %w = select i1 %isnull, float 100.0, float %v
+  %acc1 = fadd float %acc, %w
+  store ptr %slot, ptr %field, align 8
+  %n1 = add i32 %n, 1
+  %more = icmp ult i32 %n1, 3
+  br i1 %more, label %loop, label %done
+done:
+  %vi = bitcast float %acc1 to i32
+  store i32 %vi, ptr addrspace(1) %o0
+  ret void
+}}
+{tail}"#,
+        head = head(kernel, "%acc0", "%g0").replace("  store ptr %acc0, ptr %field, align 8\n", ""),
+        tail = tail(kernel)
+    )
+}
+
+#[test]
+fn an_integer_store_over_a_pointer_field_stops_forwarding() {
+    // `store i64 0` is the field's first value (null): forwarding the one
+    // pointer store would fold the null test and make the first iteration
+    // wrong. The load stays unpredicted and the old refusal stands.
+    let ll = overwritten_field_loop("ow_int", "  store i64 0, ptr %field, align 8\n");
+    let _ = notes::take();
+    assert_refused(&ll, "pointer nullness is not tracked for %p");
+    assert!(
+        !notes::take().iter().any(|note| note.contains("forwarded")),
+        "the overwritten field must not be predicted"
+    );
+}
+
+#[test]
+fn an_aggregate_store_over_the_struct_stops_forwarding() {
+    // The whole struct copied in from another one (an aggregate store)
+    // overwrites the pointer field: no prediction for it.
+    let ll = overwritten_field_loop(
+        "ow_agg",
+        "  %other = alloca %Captures, align 8\n  %of = getelementptr inbounds %Captures, ptr %other, i64 0, i32 0\n  store ptr %g0, ptr %of, align 8\n  %whole = load %Captures, ptr %other, align 8\n  store %Captures %whole, ptr %cap, align 8\n",
+    );
+    let _ = notes::take();
+    let _ = translate_sanitized_native(&ll, Stage::Kernel, &tmp());
+    assert!(
+        !notes::take()
+            .iter()
+            .any(|note| note.starts_with("metal2vulkan: kernel ow_agg:") && note.contains("forwarded")),
+        "the overwritten field must not be predicted"
+    );
+}
+
+/// A kernel that stores `%slot` into `%field` and calls `@outer(ptr %cap)`;
+/// `functions` defines `@outer` and what it calls.
+fn calling_kernel(kernel: &str, functions: &str, call: &str) -> String {
+    format!(
+        r#"{head}  store ptr %slot, ptr %field, align 8
+{call}  %vi = bitcast float %r to i32
+  store i32 %vi, ptr addrspace(1) %o0
+  ret void
+}}
+{tail}"#,
+        head = head(kernel, "%acc0", "%g0")
+            .replace("  store ptr %acc0, ptr %field, align 8\n", "")
+            .replacen("define void", &format!("{functions}\ndefine void"), 1),
+        tail = tail(kernel)
+    )
+}
+
+/// `@inner` (two blocks) loads the pointer out of the struct and reads
+/// through it; `@outer` (two blocks) only hands the struct on.
+const NESTED: &str = r#"
+define internal fastcc float @inner(ptr %c) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  br label %read
+read:
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+define internal fastcc float @outer(ptr %c, i1 %k) {
+entry:
+  br i1 %k, label %pass, label %none
+pass:
+  %v = call fastcc float @inner(ptr %c)
+  ret float %v
+none:
+  ret float 1.0
+}
+"#;
+
+#[test]
+fn a_struct_handed_on_through_a_second_function_is_spliced() {
+    // Before: `@outer` never loads the pointer itself, so the call was kept
+    // and `@inner` read the placeholder (a constant, no note, no refusal).
+    let ll = calling_kernel("nest_k", NESTED, "  %r = call fastcc float @outer(ptr %cap, i1 %c)\n");
+    let (asm, notes) = translate(&ll);
+    assert!(!asm.contains("OpFunctionCall"), "both must be spliced\n{asm}");
+    assert!(
+        loaded_storages(&asm).iter().any(|storage| storage == "Function"),
+        "the float behind the field must be read\n{asm}"
+    );
+    assert!(
+        notes.iter().any(|note| note.starts_with(
+            "metal2vulkan: kernel nest_k: spliced 1 call(s) that hand a local struct of pointers"
+        )),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_struct_chosen_by_a_select_is_refused_by_name() {
+    // Two structs, the callee's struct picked by a select: the forwarding
+    // is per variable, so the loaded pointer would be the placeholder.
+    let reader = r#"
+define internal fastcc float @pick(ptr %c) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  br label %read
+read:
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+"#;
+    let ll = calling_kernel(
+        "sel_k",
+        reader,
+        "  %cap2 = alloca %Captures, align 8\n  %f2 = getelementptr inbounds %Captures, ptr %cap2, i64 0, i32 0\n  store ptr %g0, ptr %f2, align 8\n  %which = select i1 %c, ptr %cap, ptr %cap2\n  %r = call fastcc float @pick(ptr %which)\n",
+    );
+    assert_refused(
+        &ll,
+        "loads a pointer out of a local struct of pointers chosen by a select or phi",
+    );
+}
+
+#[test]
+fn a_callee_storing_a_pointer_into_the_struct_is_refused_by_name() {
+    // After a splice the field would have two stores, and the emitter's
+    // forwarding would bind the caller's later load to the callee's store.
+    let writer = r#"
+define internal fastcc float @rebind(ptr %c, ptr %other) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  br label %write
+write:
+  store ptr %other, ptr %cf, align 8
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+"#;
+    let ll = calling_kernel(
+        "rebind_k",
+        writer,
+        "  %r0 = call fastcc float @rebind(ptr %cap, ptr %g0)\n  %p = load ptr, ptr %field, align 8\n  %r = load float, ptr %p, align 4\n",
+    );
+    assert_refused(
+        &ll,
+        "native emitter: @rebind is handed %cap, a local struct holding pointers (in @rebind_k), and stores a pointer into it; not supported (N76)",
+    );
+}
+
+#[test]
+fn a_recursive_callee_is_refused_by_name_without_a_splice_note() {
+    let recursive = r#"
+define internal fastcc float @deep(ptr %c, i32 %d) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  %more = icmp ugt i32 %d, 0
+  br i1 %more, label %again, label %read
+again:
+  %d1 = sub i32 %d, 1
+  %v = call fastcc float @deep(ptr %c, i32 %d1)
+  ret float %v
+read:
+  %w = load float, ptr %cp, align 4
+  ret float %w
+}
+"#;
+    let ll = calling_kernel("rec_k", recursive, "  %r = call fastcc float @deep(ptr %cap, i32 2)\n");
+    let _ = notes::take();
+    assert_refused(
+        &ll,
+        "@deep is handed %cap, a local struct holding pointers (in @rec_k), and hands it on where the translator cannot follow it",
+    );
+    assert!(
+        !notes::take().iter().any(|note| note.contains("spliced")),
+        "no splice happened, so no splice note"
+    );
+}
+

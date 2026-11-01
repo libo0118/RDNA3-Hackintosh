@@ -120,6 +120,28 @@ fn emit_vulkan_spirv_inner(
                 },
             });
         };
+        if failure.error.contains("must be spliced into their callers (N76)") {
+            let mut named = failure
+                .rejected
+                .cursor_call_sites
+                .iter()
+                .map(|(callee, argument)| format!("@{callee}({argument})"))
+                .collect::<Vec<_>>();
+            named.sort();
+            let count = named.len();
+            if count > 4 {
+                named.truncate(4);
+                named.push(format!("+{} more", count - 4));
+            }
+            let kernel = entry_name.unwrap_or("?");
+            crate::notes::push_once(
+                &format!("N76 splice {kernel}"),
+                format!(
+                    "metal2vulkan: kernel {kernel}: spliced {count} call(s) that hand a local struct of pointers to a function that loads them into their callers ({}) (DRIVER-PLAN N76)",
+                    named.join(", ")
+                ),
+            );
+        }
         spliced_calls += failure.rejected.cursor_call_sites.len();
         first_failure.get_or_insert(failure.error);
         if retry_debug {
