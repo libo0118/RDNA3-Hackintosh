@@ -83,7 +83,7 @@ static inline enum rd3_bomap_kind rd3_bomap_classify(const rdna3_bo *bo, uint64_
         return RD3_BOMAP_NO_BO;
     if (bo->userptr)
         return RD3_BOMAP_REFUSE_USERPTR;
-    if ((bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) || (bo->placement & RD_ONCHIP_DOMAINS))
+    if ((bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) || bo->gpu_ro || (bo->placement & RD_ONCHIP_DOMAINS))
         return RD3_BOMAP_REFUSE_NO_CPU;
     if (bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL)
         return rd3_bomap_in_bar(bo->vram_offset, bo->size, doorbell_bar) ? RD3_BOMAP_DOORBELL

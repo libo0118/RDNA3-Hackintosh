@@ -359,6 +359,9 @@ private:
     const OSSymbol *fAccelSsSym = nullptr; /* RD3ACCEL_SS_FN */
     static int    drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane);
     static int    drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane);
+    static int    drmSurfaceShare(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane, uint64_t gen);
+    static void   drmSurfaceFault(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane, uint64_t va,
+                                  int32_t producerPid);
     IOReturn      platformGpuVa(int op, struct RD3KGpuVaRequest *g);
 
     /* Stage 3: display heads the firmware lit (RDNA3Display.cpp) */

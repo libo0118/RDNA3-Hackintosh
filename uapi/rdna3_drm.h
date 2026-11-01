@@ -198,6 +198,16 @@ struct rd_xnu_file_id {
  * accelerator's lock (a page-off may hold it while it waits for a mark) */
 #define RD_XNU_SURFACE_BO_MARK     2
 #define RD_XNU_SURFACE_BO_DIRTY_TRY 3
+/* DRIVER-PLAN N71 (c), SHARE: the caller (an application, never
+ * WindowServer) holds a writable IMPORT of the plane in this file and lets
+ * WindowServer import that allocation READ-ONLY; the generation passed on
+ * is the kernel's own record of the caller's newest import (rdna3_bo
+ * surf_gen), never a user value. -ENOENT: no such import in this file (or
+ * no such surface); -EPERM: refused (WindowServer, or the surface was
+ * re-backed since the import: import again); -ENXIO: sharing is off
+ * (debug.rdna3accel_a3share 0); -ENODEV: an accelerator without it (also
+ * an import it gave no generation); an older kext answers -EINVAL. */
+#define RD_XNU_SURFACE_BO_SHARE    4
 #define RD_XNU_SURFACE_MAX_PLANE   15
 /* how MARK / DIRTY_TRY reach ops.surface_dirty: flags in the plane word, the
  * accelerator's RD3K_SS_PLANE_GPU_MARK / _TRYLOCK (accel/rdna3k_abi.h; the
@@ -212,7 +222,17 @@ struct rd_xnu_surface_bo {
     uint32_t handle;               /* IMPORT: out */
     uint64_t size;                 /* IMPORT: in, the bytes the caller will address (0: any;
                                       -ENOSPC when the VRAM is smaller); out, the BO's size */
+    /* N71 (c), IMPORT out, only when the caller's struct reaches here (a
+     * 24-byte caller gets nothing written past 'size'): */
+    uint32_t out_ver;              /* RD_XNU_SURFACE_BO_OUT_VER (0: an older kext) */
+    uint32_t out_flags;            /* RD_XNU_SURFACE_BO_OUT_* */
+    uint64_t alloc_gen;            /* the accelerator allocation the BO is over (0: unknown) */
 };
+#define RD_XNU_SURFACE_BO_V1_SIZE     24u   /* op .. size: the smallest caller */
+#define RD_XNU_SURFACE_BO_OUT_VER     1u
+/* WindowServer's READ-ONLY import of an application's shared allocation:
+ * no CPU mapping (GEM_MMAP -EPERM), never a writable GPU page */
+#define RD_XNU_SURFACE_BO_OUT_SHARED_RO 0x1u
 
 /* private: what the head on display pipe 'pipe' sends after its OTG
  * (hw/dcn32_txstate.c): the OTG totals and DRR bounds, the pixel-rate / PHY
@@ -272,6 +292,11 @@ typedef struct rdna3_bo {
     uint8_t  userptr_ro;      /* AMDGPU_GEM_USERPTR_READONLY: never mapped writable */
     uint8_t  foreign;         /* RD_NR_XNU_SURFACE_BO: VRAM the accelerator owns; bo_free drops
                                  the OS's hold on it, no VRAM usage is counted */
+    uint8_t  gpu_ro;          /* N71 (c): set by ops.surface_bo for a read-only shared import:
+                                 never mapped writable (GPU or GART), no CPU mapping */
+    uint32_t surf_id, surf_plane;   /* foreign: the IOSurface plane it was imported from */
+    uint64_t surf_gen;        /* foreign: the accelerator allocation's generation (ops.surface_bo; 0 unknown) */
+    int32_t  surf_pid;        /* gpu_ro: the producer that shared it (for the fault's log) */
     uint32_t visit;           /* rdna3_drm_device_for_each_vram_bo: seen in this pass */
     uint64_t user_addr;
     void    *os_map;          /* the OS layer's CPU-mapping object of this BO, a weak link it
@@ -553,6 +578,17 @@ typedef struct rdna3_drm_ops {
      * either (why: 1 = the GTT budget, 2 = the OS's allocation failed), for
      * the OS layer's log; the UAPI counts it in gtt_fallback_fail */
     void  (*gtt_fallback_failed)(void *ctx, uint64_t size, int err, int why);
+    /* (last: positional initializers in the tests end before them)
+     * N71 (c), optional (-ENOSYS when missing). surface_share: the caller
+     * lets WindowServer import allocation 'gen' of the plane read-only (gen:
+     * the caller's own import's surf_gen). surface_fault: a GPU VM fault at
+     * 'va' inside the read-only shared import of the plane (the OS turns
+     * sharing off and logs it; producer_pid from the BO). Both may drop the
+     * OS's lock like surface_bo. ops.surface_bo of a read-only shared
+     * import sets bo->gpu_ro, surf_gen and surf_pid. */
+    int   (*surface_share)(void *ctx, void *file_os, uint32_t surface_id, uint32_t plane, uint64_t gen);
+    void  (*surface_fault)(void *ctx, void *file_os, uint32_t surface_id, uint32_t plane, uint64_t va,
+                           int32_t producer_pid);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -665,6 +701,7 @@ typedef struct rdna3_drm_file {
      * -ECANCELED once VRAM was lost after it */
     uint32_t ctx_vram_lost[RD_MAX_CTX];
     uint32_t id;                       /* RD_NR_XNU_FILE_ID */
+    uint64_t share_fault_seen;         /* N71 (c): the last VM fault address attributed (once each) */
     struct rdna3_drm_file *next_file;  /* rdna3_drm_device.files */
     /* amdgpu_userq_mgr: the file's user queues [RD_MAX_USERQ] (index = id - 1,
      * zalloc'ed with the first one) and whether seq64 is in its VM */

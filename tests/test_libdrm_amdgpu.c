@@ -273,6 +273,39 @@ int main(void)
             CHECK(drm_xnu_surface_mark(0x51, 1) == 0 && lb_surface_mark_count[1] == 2);
             CHECK(drm_xnu_surface_dirty(0x51, 0) == 0 && lb_surface_dirty_count == 4);
         }
+        /* DRIVER-PLAN N71 (c): the import's flags and generation for this thread; the share record
+         * goes to the connection holding the writable import; a read-only import maps nothing */
+        {
+            extern uint32_t lb_surface_share_count, lb_surface_share_gen;
+            struct amdgpu_bo_import_result ro;
+            uint32_t fl = 99;
+            uint64_t gen = 99;
+            void *rp = NULL;
+            int rfd;
+            CHECK(drm_xnu_surface_share(0x51, 0) == -1 && errno == ENOENT);   /* nothing imported yet here */
+            sfd = drm_xnu_surface_fd(0x51, 0, 4096);
+            memset(&imp, 0, sizeof(imp));
+            CHECK(sfd >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)sfd, &imp) == 0);
+            CHECK(drm_xnu_surface_last_import(&fl, &gen) == 0 && fl == 0 && gen == 5);
+            CHECK(drm_xnu_surface_share(0x51, 0) == 0 && lb_surface_share_count == 1 && lb_surface_share_gen == 5);
+            CHECK(drm_xnu_surface_share(0x51, 1) == -1 && errno == ENOENT);   /* another plane: no import */
+            CHECK(drm_xnu_surface_share(0, 0) == -1 && errno == EINVAL);
+            CHECK(drm_xnu_surface_share(0x51, 16) == -1 && errno == EINVAL);
+            rfd = drm_xnu_surface_fd(0x53, 0, 4096);
+            memset(&ro, 0, sizeof(ro));
+            CHECK(rfd >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)rfd, &ro) == 0);
+            CHECK(drm_xnu_surface_last_import(&fl, &gen) == 0 && fl == DRM_XNU_SURFACE_SHARED_RO && gen == 5);
+            CHECK(amdgpu_bo_cpu_map(ro.buf_handle, &rp) != 0);                 /* no CPU mapping of it */
+            CHECK(drm_xnu_surface_share(0x53, 0) == -1 && errno == ENOENT);   /* a read-only import never shares */
+            CHECK(amdgpu_bo_free(ro.buf_handle) == 0);
+            close(rfd);
+            bad = drm_xnu_surface_fd(0x52, 0, 4096);
+            CHECK(bad >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)bad, &ro) != 0);
+            CHECK(drm_xnu_surface_last_import(&fl, &gen) == ENOENT && fl == 0 && gen == 0);
+            close(bad);
+            CHECK(amdgpu_bo_free(imp.buf_handle) == 0);
+            close(sfd);
+        }
     }
     /* malformed surface files: refused, nothing imported, the reason kept */
     {

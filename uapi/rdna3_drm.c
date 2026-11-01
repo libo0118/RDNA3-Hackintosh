@@ -1588,6 +1588,8 @@ static int uf_bo_ok(const rdna3_bo *bo, uint64_t offset)
     return bo && bo->size == 4096 && !bo->userptr && offset <= 4096 - 8 && !(offset & 7);
 }
 
+static void share_fault_attribute(rdna3_drm_file *f);
+
 static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
 {
     rdna3_drm_device *dev = f->dev;
@@ -1625,8 +1627,10 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
         job.bo_count = f->bo_lists[bl].count;
     }
     /* amdgpu_cs_submit: a guilty context never runs again */
-    if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
+    if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY)) {
+        share_fault_attribute(f);   /* N71 (c): a fault in a read-only shared import turns sharing off */
         return -RD_ECANCELED;
+    }
     /* amdgpu_cs_pass1: ctx->generation != the job's generation - a context
      * made before VRAM was lost submits nothing more; a new one does
      * (unless the OS turned that off: rdna3_drm_device_set_vram_lost_cs) */
@@ -2317,8 +2321,59 @@ static uint64_t file_foreign_bytes(const rdna3_drm_file *f)
     return n + (o && o->foreign_bytes > charged_here ? o->foreign_bytes - charged_here : 0);
 }
 
-/* RD_NR_XNU_SURFACE_BO: a handle on an IOSurface's VRAM, or its dirty mark */
-static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
+/* N71 (c), RD_XNU_SURFACE_BO_SHARE: the newest writable import of the plane
+ * in this file (generations only grow): its generation, 0 when none;
+ * *found: such an import exists (its generation may be 0: an accelerator
+ * that gave none, i.e. without the share) */
+static uint64_t surface_share_gen(rdna3_drm_file *f, uint32_t surface_id, uint32_t plane, int *found)
+{
+    uint64_t gen = 0;
+    uint32_t i;
+    *found = 0;
+    for (i = 0; i < RD_MAX_HANDLES; i++) {
+        const rdna3_bo *bo = f->bos[i];
+        if (bo && bo->foreign && !bo->gpu_ro && bo->surf_id == surface_id && bo->surf_plane == plane) {
+            *found = 1;
+            if (bo->surf_gen > gen)
+                gen = bo->surf_gen;
+        }
+    }
+    return gen;
+}
+
+/* N71 (c): a VM fault of this file's VM inside one of its read-only shared
+ * imports goes to the OS once per fault address (it turns sharing off and
+ * logs it). Asked where the faulting client meets the UAPI next: its
+ * refused submission on the guilty VM and its context query. The fault
+ * reporting itself (gmc11_log_vm_fault, markGuilty) names the VA, VMID and
+ * client but not the BO. */
+static void share_fault_attribute(rdna3_drm_file *f)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    uint64_t addr = 0, va;
+    uint32_t status = 0, hub = 0, i, sid = 0, splane = 0;
+    int32_t spid = 0;
+    int hit = 0;
+    if (!ops->vm_fault_info || !ops->surface_fault || !f->vm ||
+        ops->vm_fault_info(ops->ctx, f->vm, &addr, &status, &hub) || !addr || addr == f->share_fault_seen)
+        return;
+    f->share_fault_seen = addr;
+    va = addr & GMC_HOLE_MASK;
+    for (i = 0; i < RD_MAX_VA && !hit; i++) {
+        const rdna3_va *m = &f->vas[i];
+        if (m->handle && m->bo && m->bo->gpu_ro && va >= m->va && va - m->va < m->size) {
+            sid = m->bo->surf_id; splane = m->bo->surf_plane; spid = m->bo->surf_pid;
+            hit = 1;
+        }
+    }
+    if (hit)   /* values only: the OS may drop its lock */
+        ops->surface_fault(ops->ctx, f->os, sid, splane, addr, spid);
+}
+
+/* RD_NR_XNU_SURFACE_BO: a handle on an IOSurface's VRAM, or its dirty mark.
+ * 'size': the bytes the ioctl's buffer holds (the out tail only when it
+ * reaches it: rdna3_drm_ioctl copies back only the caller's bytes) */
+static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s, uint32_t size)
 {
     rdna3_drm_device *dev = f->dev;
     rdna3_bo *bo;
@@ -2340,6 +2395,20 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
             return -RD_ENOSYS;
         return dev->ops.surface_dirty(dev->ops.ctx, f->os, s->surface_id, RD_XNU_SURFACE_PLANE_GPU_MARK | s->plane);
     }
+    if (s->op == RD_XNU_SURFACE_BO_SHARE) {   /* N71 (c): the producer's share record */
+        uint64_t gen;
+        int found;
+        if (!s->surface_id)
+            return -RD_EINVAL;
+        if (!dev->ops.surface_share)
+            return -RD_ENOSYS;
+        gen = surface_share_gen(f, s->surface_id, s->plane, &found);
+        if (!found)
+            return -RD_ENOENT;   /* no writable import of it in this file */
+        if (!gen)
+            return -RD_ENODEV;   /* imported from an accelerator without the share (no generation) */
+        return dev->ops.surface_share(dev->ops.ctx, f->os, s->surface_id, s->plane, gen);
+    }
     if (s->op != RD_XNU_SURFACE_BO_IMPORT || !s->surface_id)
         return -RD_EINVAL;
     if (!dev->ops.surface_bo)
@@ -2359,7 +2428,13 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
     bo->alignment = 4096;
     bo->domains = AMDGPU_GEM_DOMAIN_VRAM;
     bo->placement = AMDGPU_GEM_DOMAIN_VRAM;
-    bo->flags = AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+    /* N71 (c): a read-only shared import (the OS set gpu_ro) is never CPU
+     * mapped and never writable; the others as before */
+    bo->gpu_ro = bo->gpu_ro ? 1 : 0;
+    bo->flags = (bo->gpu_ro || (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS)) ? AMDGPU_GEM_CREATE_NO_CPU_ACCESS
+                                                                       : AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+    bo->surf_id = s->surface_id;
+    bo->surf_plane = s->plane;
     if (!bo->size || (bo->size & 4095) || (bo->vram_offset & 4095) ||
         bo->vram_offset + bo->size > dev->vram_size || bo->vram_offset + bo->size < bo->vram_offset) {
         bo_put(f, bo);   /* the OS's hold goes back through bo_free */
@@ -2385,6 +2460,11 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
     }
     s->handle = handle;
     s->size = bo->size;
+    if (size >= sizeof(*s)) {
+        s->out_ver = RD_XNU_SURFACE_BO_OUT_VER;
+        s->out_flags = bo->gpu_ro ? RD_XNU_SURFACE_BO_OUT_SHARED_RO : 0u;
+        s->alloc_gen = bo->surf_gen;
+    }
     return 0;
 }
 
@@ -2408,7 +2488,7 @@ static int va_map_hw(rdna3_drm_file *f, rdna3_bo *bo, uint64_t va, uint64_t offs
     uint32_t vflags = (uint32_t)flags;
     if (!f->vm || !ops->vm_map || bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL)
         return 0;
-    if (bo->userptr_ro)   /* a read-only userptr is never writable */
+    if (bo->userptr_ro || bo->gpu_ro)   /* a read-only userptr / shared import (N71 (c)) is never writable */
         vflags &= ~(uint32_t)AMDGPU_VM_PAGE_WRITEABLE;
     return ops->vm_map(ops->ctx, f->vm, bo, va, offset, size, vflags);
 }
@@ -2685,6 +2765,8 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
             return -RD_EINVAL;
         if (f->dev->ops.vm_query && f->vm)
             fl = f->dev->ops.vm_query(f->dev->ops.ctx, f->vm) & ~(uint32_t)AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+        if (fl & AMDGPU_CTX_QUERY2_FLAGS_GUILTY)
+            share_fault_attribute(f);   /* N71 (c) */
         if (ctx_vram_lost(f, id))
             fl |= AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
         zero(c, sizeof(*c));
@@ -3362,7 +3444,7 @@ static int mes_userq_map_gtt_bo_to_gart(rdna3_drm_device *dev, rdna3_bo *bo, uin
         return -RD_EINVAL;
     /* GART binds the page writable: never a client's read-only pages (as
      * va_map_hw keeps them read-only; ECC security review) */
-    if (bo->userptr_ro)
+    if (bo->userptr_ro || bo->gpu_ro)
         return -RD_EPERM;
     r = dev->ops.bo_gpu_addr(dev->ops.ctx, bo, mc);
     if (r)
@@ -4535,8 +4617,10 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         return userq_signal_ioctl(f, (struct drm_amdgpu_userq_signal *)data);
     case RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT): NEED(struct drm_amdgpu_userq_wait);
         return userq_wait_ioctl(f, (struct drm_amdgpu_userq_wait *)data);
-    case RD_NR_XNU_SURFACE_BO: NEED(struct rd_xnu_surface_bo);
-        return surface_bo(f, (struct rd_xnu_surface_bo *)data);
+    case RD_NR_XNU_SURFACE_BO:   /* the v1 struct is the minimum; the out tail only when the buffer has it */
+        if (size < RD_XNU_SURFACE_BO_V1_SIZE)
+            return -RD_EINVAL;
+        return surface_bo(f, (struct rd_xnu_surface_bo *)data, size);
     case RD_NR_XNU_FILE_ID: NEED(struct rd_xnu_file_id);
         ((struct rd_xnu_file_id *)data)->id = f->id;
         ((struct rd_xnu_file_id *)data)->pad = 0;
