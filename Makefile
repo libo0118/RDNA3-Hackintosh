@@ -260,7 +260,8 @@ PY_TESTS := test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash
     test_triage_n48 test_triage_bootwatch test_triage_glyphs test_triage_coherence test_triage_attr_ring \
     test_triage_bar test_triage_present_cost test_triage_write_gen test_fb_class test_triage_iop_log \
     test_triage_agdc_n48 test_triage_pairing test_triage_nocard test_kext_kpi_versions test_kmutil_kpi_guard \
-    test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps test_iop_join
+    test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps test_iop_join \
+    test_triage_uclk_pin
 SH_TESTS := test_bisect_step test_bootwatch test_membw_load test_ladder_step test_apps_step test_triage_a3 \
     test_baremetal test_triage_trace test_oc_install test_make_pkg test_coredisplay_prefs test_prune_traces \
     test_triage_tx test_triage_stale_plugin test_triage_latch test_result_checklist test_triage_vram \

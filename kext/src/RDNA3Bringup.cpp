@@ -991,6 +991,12 @@ bool RDNA3Bringup::hwInit()
                 }
             }
         }
+        /* DRIVER-PLAN N74 (rdna3mall 0, the default): UCLK's hard minimum at
+         * the top while two or more heads are lit (dcn32_update_clocks with
+         * p_state_change_support false). Only the PMFW's DAL mailbox, no
+         * DMCUB; after the clone above so its head is counted. */
+        if (!rd3_arg("rdna3mall", 0))
+            fOwner->displayUclkPinInit(fDev);
     }
 
     /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in

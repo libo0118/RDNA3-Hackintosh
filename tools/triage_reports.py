@@ -4977,6 +4977,17 @@ def report(path, show_all):
     for lvl_, name_, text_ in bar_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
         failed = failed or lvl_ == "FAIL"
+    # DRIVER-PLAN N74: the default path's UCLK pin with two heads (tools/triage_uclk_pin.py, ioreg RDNA3,DCNPower)
+    try:
+        from triage_uclk_pin import uclk_pin_rows
+        up_rows_ = uclk_pin_rows(props, log or "")
+    except ImportError:
+        up_rows_ = [("WARN", "UCLK pin (N74)", "tools/triage_uclk_pin.py is missing next to triage_reports.py: RDNA3,DCNPower was NOT read")]
+    except Exception as e_:  # noqa: BLE001
+        up_rows_ = [("WARN", "UCLK pin (N74)", "tools/triage_uclk_pin.py FAILED (%s: %s): the UCLK pin row is missing; the rest ran" % (type(e_).__name__, e_))]
+    for lvl_, name_, text_ in up_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+        failed = failed or lvl_ == "FAIL"
     # DRIVER-PLAN N59: IOP copies of a buffer nothing wrote since it was last shown, and the app survey's frame-order bursts (tools/frame_order.py)
     try:
         from frame_order import report_rows as fo_rows

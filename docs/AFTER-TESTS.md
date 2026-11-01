@@ -822,6 +822,28 @@ at idle, `rdna3_modetest cycle` as in `modeset2`. Then mark `mall` passed.
 | `not updated: the mirror's pipe is not a head` | `rdna3mirror=1` (clone without its own head) | expected; use `rdna3mirror=2` |
 | `not updated (..): no voltage state supports the heads` | DML found no state (bandwidth / prefetch) | the `pstate:` lines; report with the modes |
 
+### Two heads: the UCLK pin of the default path (N74)
+
+Without `rdna3mall` (the default) the core pins UCLK's hard minimum at the
+top level while two or more heads are lit (amdgpu's `dcn32_update_clocks`
+for `p_state_change_support` false: two unsynchronised heads have no
+shared vblank for the PMFW's switch). Lines: `display power: UCLK pin
+(N74): PMFW 0x.., UCLK 4 levels 96..1218 MHz, on ...` at the bring-up,
+then one per decision: `display power: UCLK pinned (two heads,
+unsynchronised, no FPO / SubVP: no shared vblank) at 1218 MHz: hard min
+sent now (<why>, decision n, pins p, releases r, fails f)` or `UCLK
+switching (one head: ...)`; the same text in ioreg `RDNA3,DCNPower`,
+`RDNA3,UclkPinned` 0/1. Switch: boot-arg `rdna3uclkpin=0`, live
+`sudo sysctl -w debug.rdna3_uclk_pin=0|1`. Triage row `UCLK pin (N74)`.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| the secondary's top flashes black while the main display changes, `RDNA3,DCNPower` says `UCLK pinned` | not UCLK after all: check `rdna3_pmctl` that UCLK really stays at 1218 MHz | the `DAL SMU: hard min clock 2` line; if UCLK still moves, the PMFW ignores the DAL minimum: report (A/B with `rdna3_pmctl levels mclk 8`) |
+| flashes and `UCLK switching (...; two heads lit)` | the switch is off (`switched off`) or a head was not counted (blanked by `rdna3dpms`, a clone without its own head) | `debug.rdna3_uclk_pin`; the `display power: UCLK` lines around the mode set |
+| `UCLK pin FAILED (...): SetHardMinByFreq(UCLK, 1218 MHz) ... -> -5 / -62` | the PMFW refused it (-5) or did not confirm it in 2 s (-62, `ReturnHardMinStatus`) | the `uclk pin:` / `DAL SMU` lines; it is tried again at the next decision; report |
+| `UCLK pin (N74) unavailable` | GetSmuVersion or the UCLK levels over the DAL mailbox unanswered at the bring-up | the `uclk pin:` lines; UCLK stays the PMFW's (two heads may flash) |
+| idle power ~20 W higher with two heads | expected while pinned | `rdna3mall=2` (DC's DET split) is amdgpu's way to let it drop with 2x1080p60 (N74 OPEN (a)) |
+
 ### SubVP (`subvp`)
 
 `subvp` = `mall` + `rdna3subvp=1` with one monitor (`rdna3mirror=0`), its

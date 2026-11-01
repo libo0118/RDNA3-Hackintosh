@@ -479,6 +479,85 @@ void dcn32_interdependent_update_lock(rdna3_dev *d, const rdna3_pstate_ctx *ctx,
 /* the name of a RD_DRAM_CHANGE_* (log / report) */
 const char *dcn32_dram_change_name(uint32_t c);
 
+/* ---- DRIVER-PLAN N74: the UCLK hard minimum of the default path (rdna3mall 0) ----
+ *
+ * Bare metal 2026-11-01 (round 3, item 13): with two lit 1920x1080 heads the
+ * secondary's top tenth flashed black whenever the main display changed;
+ * UCLK pinned at its top level (rdna3_pmctl levels mclk 8) made it go away,
+ * UCLK back at 96 MHz brought it back at once. The PMFW switches UCLK when
+ * the arbiter allows it; the switch fits the main head's vblank, not the
+ * secondary's, which is in its first active lines then and underflows.
+ *
+ * What amdgpu does for that configuration (v6.12):
+ *   dml32_CalculateWatermarksMALLUseAndDRAMSpeedChangeSupport counts the
+ *     planes that cannot hide the switch in active (DRAMClockChangeSupportNumber):
+ *     one -> vblank, a second one of unsynchronised timing -> unsupported
+ *     (SynchronizeTimingsFinal false);
+ *   dcn32_full_validate_bw_helper then tries SubVP (dcn32_subvp_in_use) and
+ *     FPO (dcn32_can_support_mclk_switch_using_fw_based_vblank_stretch);
+ *     without either context->bw_ctx.bw.dcn.clk.p_state_change_support is false;
+ *   dcn32_update_clocks: "to disable P-State switching, set UCLK min = max"
+ *     (dcn32_smu_set_hard_min_by_freq(PPCLK_UCLK, the top memclk level)); once
+ *     switching is supported again (p_state_change_support &&
+ *     !prev_p_state_change_support) the hard minimum goes back to the state's
+ *     DRAM clock;
+ *   dcn32_init_clocks / dcn32_get_memclk_states_from_smu read the UCLK levels,
+ *     dcn32_initialize_min_clocks starts with switching supported.
+ *
+ * This path programs none of DC's DETs or watermarks (that is rdna3mall=1/2,
+ * dcn32_power_*), so no plane is credited with an active margin: two or more
+ * lit heads pin UCLK unless their timings are synchronised (never here: this
+ * driver does not port DC's timing synchronisation); FPO and SubVP are not
+ * in this path. One lit head keeps what ran before this change (the PMFW
+ * switches, its vblank hides it); the minimum goes back to the lowest level
+ * (dcn32_initialize_min_clocks' DRAM clock, no DML state here). */
+enum {
+    RD_UCLK_WHY_NONE = 0,   /* no lit head: nothing fetches */
+    RD_UCLK_WHY_ONE,        /* one lit head: its vblank hides the switch */
+    RD_UCLK_WHY_SYNC,       /* the lit heads' timings are synchronised: one shared vblank */
+    RD_UCLK_WHY_UNSYNC,     /* two or more unsynchronised heads, no FPO / SubVP: no shared vblank */
+    RD_UCLK_WHY_OFF,        /* switched off (boot-arg rdna3uclkpin=0 / sysctl debug.rdna3_uclk_pin 0) */
+    RD_UCLK_WHY_COUNT
+};
+
+/* the p-state support decision for 'lit' heads: 1 = UCLK may switch, 0 =
+ * pinned at the top; '*why' an RD_UCLK_WHY_* (may be NULL) */
+int  dcn32_uclk_pin_decide(uint32_t lit, int synchronized, int off, uint32_t *why);
+/* the reason in words (log / RDNA3,DCNPower) */
+const char *dcn32_uclk_pin_why_name(uint32_t why);
+
+typedef struct rdna3_uclk_pin {
+    int      ready;                          /* GetSmuVersion answered, UCLK has DPM levels */
+    uint32_t pmfw;
+    uint32_t n_memclk, memclk_mhz[RD_DCN32_DPM_LEVELS];
+    uint32_t min_mhz, max_mhz;               /* the lowest / the top UCLK level */
+    int      p_state_change_support;         /* clk_mgr_base->clks.p_state_change_support as the PMFW has it */
+    int      resync;                         /* the PMFW's minimum is not known: the next decision is sent */
+    uint32_t hard_min_mhz;                   /* the last minimum sent and taken (0: none, the PMFW's own) */
+    uint32_t why, lit;                       /* the last decision */
+    uint32_t decisions, pins, releases, fails;
+    int      last_err;                       /* of the last message (0 after one that went through) */
+} rdna3_uclk_pin;
+
+/* dcn32_init_clocks' part: GetSmuVersion and the UCLK levels over the DAL
+ * mailbox (read-only messages); switching supported as
+ * dcn32_initialize_min_clocks starts, nothing sent. 'resync' 1: a minimum
+ * this driver sent before may still be in place (a bring-up again after
+ * one), so the first decision is sent whatever it is. RDNA3_ENODEV when the
+ * PMFW does not answer or lists no UCLK level ('ready' 0: nothing is ever
+ * sent). */
+int  dcn32_uclk_pin_init(rdna3_dev *d, rdna3_uclk_pin *u, int resync);
+/* one decision (dcn32_uclk_pin_decide) and dcn32_update_clocks' UCLK half
+ * for it: SetHardMinByFreq(UCLK, top level) when switching stops being
+ * supported, SetHardMinByFreq(UCLK, lowest level) when it is supported
+ * again; nothing when nothing changed (unless 'resync'). '*sent' 1 when a
+ * message went out. A refused message leaves the state as it was and
+ * 'resync' set (the next decision tries again). RDNA3_ENODEV when not
+ * ready, else 0 or the DAL mailbox's error. */
+int  dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int synchronized, int off, int *sent);
+/* the card lost its power (the PMFW started again with its own minimum) */
+void dcn32_uclk_pin_power_lost(rdna3_uclk_pin *u);
+
 #ifdef __cplusplus
 }
 #endif

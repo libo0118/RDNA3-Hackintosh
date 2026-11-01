@@ -637,7 +637,15 @@ rdna3mtl.conf. Backups in EFI/OC: config-before-bt / -btnvram / -ioplatch / -pmc
 ### For the Linux session (round 3 open work)
 
 1. Two-head UCLK p-state (item 13): the secondary's top flashes; amdgpu's p-state decision.
+   Done in DRIVER-PLAN N74 (needs the Mac): with `rdna3mall` 0 the core pins UCLK's hard
+   minimum at 1218 MHz while two heads are lit; check `ioreg -lw0 | grep -E
+   'RDNA3,(DCNPower|UclkPinned)'` reads `UCLK pinned (two heads, ...)` and 1, no flash with
+   `rdna3_pmctl levels mclk 15`; A/B live with `sudo sysctl -w debug.rdna3_uclk_pin=0` / `=1`
+   (boot-arg `rdna3uclkpin=0` turns it off).
 2. `iop_latch` 1 as the default (item 9; the boot-arg carries it on the stick now).
+   Done (DRIVER-PLAN N68): `debug.rdna3accel_iop_latch` defaults to 1, `rdna3ioplatch=0`
+   turns it off; the stick's `rdna3ioplatch=1` may stay or go. The round-2 plan above
+   ("default 0") describes the build of that round.
 3. Geekbench: the `%metal2vulkan.ct.slot.48` loop phi in the function-constant path (item 6).
 4. The game's next cap: WindowServer's CPU upload of every app frame (item 3, N71 (b)/(c)).
 5. N70 keep/drop (item 4).

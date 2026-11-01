@@ -1844,3 +1844,126 @@ int dcn32_power_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn32_power *pw, rdna3
     int r = dcn32_power_prepare(d, dm, pw, ctx), e = dcn32_power_optimize(d, pw, ctx);
     return r ? r : e;
 }
+
+/* ======================================================================
+ * DRIVER-PLAN N74: the UCLK hard minimum of the default path (rdna3mall 0)
+ * ====================================================================== */
+
+int dcn32_uclk_pin_decide(uint32_t lit, int synchronized, int off, uint32_t *why)
+{
+    uint32_t w;
+    int support;
+    if (off) {
+        w = RD_UCLK_WHY_OFF;
+        support = 1;
+    } else if (lit == 0) {
+        w = RD_UCLK_WHY_NONE;   /* no plane: DML has nothing to hide the switch from */
+        support = 1;
+    } else if (lit == 1) {
+        w = RD_UCLK_WHY_ONE;    /* DRAMClockChangeSupportNumber 1: vblank */
+        support = 1;
+    } else if (synchronized) {
+        w = RD_UCLK_WHY_SYNC;   /* SynchronizeTimingsFinal: the planes' vblanks coincide */
+        support = 1;
+    } else {
+        /* DRAMClockChangeSupportNumber 2 (a second unsynchronised plane
+         * without active margin) -> dm_dram_clock_change_unsupported; no
+         * SubVP, no FPO candidate -> p_state_change_support false */
+        w = RD_UCLK_WHY_UNSYNC;
+        support = 0;
+    }
+    if (why)
+        *why = w;
+    return support;
+}
+
+const char *dcn32_uclk_pin_why_name(uint32_t why)
+{
+    static const char *const n[RD_UCLK_WHY_COUNT] = {
+        "no head lit: nothing fetches",
+        "one head: its vblank hides the switch",
+        "the heads' timings synchronised: one shared vblank",
+        "unsynchronised, no FPO / SubVP: no shared vblank",
+        "switched off (rdna3uclkpin=0 / debug.rdna3_uclk_pin 0)",
+    };
+    return why < RD_UCLK_WHY_COUNT ? n[why] : "?";
+}
+
+int dcn32_uclk_pin_init(rdna3_dev *d, rdna3_uclk_pin *u, int resync)
+{
+    uint32_t i, ver = 0;
+    for (i = 0; i < sizeof(*u); i++)
+        ((uint8_t *)u)[i] = 0;
+    /* dcn32_initialize_min_clocks: p-state switching supported at the start */
+    u->p_state_change_support = 1;
+    u->resync = resync ? 1 : 0;
+    /* dcn32_init_clocks: smu_present when GetSmuVersion answers */
+    u->last_err = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &ver);
+    if (u->last_err) {
+        RERR(d, "uclk pin: the PMFW does not answer the DAL mailbox (GetSmuVersion -> %d): UCLK is left to it",
+             u->last_err);
+        return RDNA3_ENODEV;
+    }
+    u->pmfw = ver;
+    /* dcn32_get_memclk_states_from_smu: the UCLK levels (dcn32_init_single_clock) */
+    init_single_clock(d, RD_PPCLK_UCLK, u->memclk_mhz, &u->n_memclk);
+    if (!u->n_memclk || !u->memclk_mhz[0] || !u->memclk_mhz[u->n_memclk - 1]) {
+        u->last_err = RDNA3_ENODEV;
+        RERR(d, "uclk pin: PMFW 0x%08x lists no UCLK DPM level (%u levels, first %u MHz): UCLK is left to it", ver,
+             u->n_memclk, u->memclk_mhz[0]);
+        return RDNA3_ENODEV;
+    }
+    u->min_mhz = u->memclk_mhz[0];
+    u->max_mhz = u->memclk_mhz[u->n_memclk - 1];
+    u->ready = 1;
+    RLOG(d, "uclk pin: PMFW 0x%08x, UCLK %u levels %u..%u MHz%s", ver, u->n_memclk, u->min_mhz, u->max_mhz,
+         u->resync ? ", the minimum sent before may still be in place: the first decision is sent" : "");
+    return RDNA3_OK;
+}
+
+int dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int synchronized, int off, int *sent)
+{
+    uint32_t why = 0, mhz;
+    int support = dcn32_uclk_pin_decide(lit, synchronized, off, &why), r;
+    if (sent)
+        *sent = 0;
+    u->decisions++;
+    u->lit = lit;
+    u->why = why;
+    if (!u->ready)
+        return RDNA3_ENODEV;
+    /* should_update_pstate_support: only a change (or a minimum not known) */
+    if (support == u->p_state_change_support && !u->resync)
+        return RDNA3_OK;
+    /* dcn32_update_clocks: "to disable P-State switching, set UCLK min = max";
+     * switching again: the hard minimum at the state's DRAM clock (the lowest
+     * level: dcn32_initialize_min_clocks') */
+    mhz = support ? u->min_mhz : u->max_mhz;
+    r = dcn32_smu_set_hard_min(d, RD_PPCLK_UCLK, mhz, u->pmfw, NULL);
+    if (sent)
+        *sent = 1;
+    u->last_err = r;
+    if (r) {
+        u->fails++;
+        u->resync = 1;   /* not known what the PMFW holds now: the next decision is sent again */
+        RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) for %u head(s) (%s) -> %d (%u failed): tried again at the "
+             "next decision", mhz, lit, dcn32_uclk_pin_why_name(why), r, u->fails);
+        return r;
+    }
+    u->p_state_change_support = support;
+    u->resync = 0;
+    u->hard_min_mhz = mhz;
+    if (support)
+        u->releases++;
+    else
+        u->pins++;
+    return RDNA3_OK;
+}
+
+void dcn32_uclk_pin_power_lost(rdna3_uclk_pin *u)
+{
+    /* the PMFW's own minimum again: as dcn32_initialize_min_clocks starts */
+    u->p_state_change_support = 1;
+    u->hard_min_mhz = 0;
+    u->resync = 0;
+}

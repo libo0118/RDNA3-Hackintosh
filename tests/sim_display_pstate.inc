@@ -694,3 +694,127 @@ static void test_dc_pstate(rdna3_dev *dev, rdna3_dmub *dm)
     S.dal_dpm_n = 0;
     memset(S.dal_hard_min, 0, sizeof(S.dal_hard_min));
 }
+
+/* DRIVER-PLAN N74 (bare metal 2026-11-01, round 3 item 13): the default
+ * path (rdna3mall 0) programs none of DC's DETs or watermarks; two lit
+ * unsynchronised heads must get UCLK's hard minimum at the top level
+ * (dcn32_update_clocks with p_state_change_support false), one head the
+ * lowest level back. The underflow model says which heads the PMFW's
+ * switch would hit: the GOP's small DETs, the arbiter allowing. */
+static void test_uclk_pin(rdna3_dev *dev)
+{
+    static uint32_t save[MMIO_LEN / 4];
+    static rdna3_uclk_pin u;
+    rdna3_pstate_plane p[2];
+    sp_head heads[2];
+    uint32_t why = 99, msgs;
+    int sent = 9, k;
+
+    memcpy(save, S.reg, sizeof(save));
+    memset(&SP, 0, sizeof(SP));
+    memset(S.dal_hard_min, 0, sizeof(S.dal_hard_min));
+    S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;   /* the PMFW's idle state */
+
+    /* the decision alone */
+    CHECK(dcn32_uclk_pin_decide(0, 0, 0, &why) == 1 && why == RD_UCLK_WHY_NONE);
+    CHECK(dcn32_uclk_pin_decide(1, 0, 0, &why) == 1 && why == RD_UCLK_WHY_ONE);
+    CHECK(dcn32_uclk_pin_decide(2, 0, 0, &why) == 0 && why == RD_UCLK_WHY_UNSYNC);
+    CHECK(dcn32_uclk_pin_decide(3, 0, 0, &why) == 0 && why == RD_UCLK_WHY_UNSYNC);
+    CHECK(dcn32_uclk_pin_decide(2, 1, 0, &why) == 1 && why == RD_UCLK_WHY_SYNC);
+    CHECK(dcn32_uclk_pin_decide(2, 0, 1, &why) == 1 && why == RD_UCLK_WHY_OFF);
+    CHECK(dcn32_uclk_pin_decide(2, 0, 0, NULL) == 0);
+    for (why = 0; why < RD_UCLK_WHY_COUNT; why++)
+        CHECK(strcmp(dcn32_uclk_pin_why_name(why), "?") != 0);
+    CHECK(strcmp(dcn32_uclk_pin_why_name(RD_UCLK_WHY_COUNT), "?") == 0);
+
+    /* no UCLK levels (the PMFW does not list them): never ready, nothing sent */
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_init(dev, &u, 0) == RDNA3_ENODEV && !u.ready);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_ENODEV && sent == 0 &&
+          S.dal_hard_min[RD_PPCLK_UCLK] == 0 && u.decisions == 1 && u.why == RD_UCLK_WHY_UNSYNC);
+
+    /* the RX 7800 XT's UCLK levels */
+    SP.on = 1;
+    SP.uclk[0] = 96; SP.uclk[1] = 456; SP.uclk[2] = 772; SP.uclk[3] = 1218;
+    S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_init(dev, &u, 0) == RDNA3_OK && u.ready && u.pmfw == 0x00505c00 && u.n_memclk == 4 &&
+          u.min_mhz == 96 && u.max_mhz == 1218 && u.p_state_change_support && !u.resync);
+    /* the init only reads: no minimum sent */
+    CHECK(S.dal_hard_min[RD_PPCLK_UCLK] == 0 && S.dal_msgs > msgs);
+
+    /* two lit 1080p60 heads as the GOP / the clone left them: one DET
+     * segment each, the set A UCLK watermark 0 (every pipe allows) */
+    sp_plane(&p[0], 0, 148500, 1920, 1080, 2200, 1125, 4, 5);
+    sp_plane(&p[1], 1, 148500, 1920, 1080, 2200, 1125, 4, 5);
+    p[0].det_kb = p[1].det_kb = 64;
+    for (k = 0; k < 2; k++) {
+        sp_head_regs(&p[k]);
+        sp_head_of(&heads[k], &p[k]);
+        S.reg[SP_HUBP(regHUBP0_DCHUBP_VMPG_CONFIG, k)] = 0;
+    }
+    S.reg[DCN_B2 + regDCHUBBUB_ARB_UCLK_PSTATE_CHANGE_WATERMARK_A] = 0;
+    S.reg[DCN_B2 + regDCHUBBUB_ARB_DRAM_STATE_CNTL] = 0;
+
+    /* one head: switching supported, as before: nothing sent */
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 0 && S.dal_msgs == msgs &&
+          S.dal_hard_min[RD_PPCLK_UCLK] == 0 && u.why == RD_UCLK_WHY_ONE);
+    /* the second head lit: the PMFW's switch would hit both */
+    CHECK(sp_underflow_risk(heads, 2, 400) == 2);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1);
+    CHECK(S.dal_hard_min[RD_PPCLK_UCLK] == 1218 && !u.p_state_change_support && u.hard_min_mhz == 1218 &&
+          u.pins == 1 && u.releases == 0 && u.fails == 0 && u.why == RD_UCLK_WHY_UNSYNC && u.lit == 2);
+    CHECK(sp_underflow_risk(heads, 2, 400) == 0);
+    /* the same again (a mode set on one of them): nothing new */
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 0 && S.dal_msgs == msgs);
+    /* back to one head: the lowest level as the minimum again */
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1);
+    CHECK(S.dal_hard_min[RD_PPCLK_UCLK] == 96 && u.p_state_change_support && u.releases == 1 && u.hard_min_mhz == 96);
+    /* synchronised heads, or switched off: not pinned */
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 1, 0, &sent) == RDNA3_OK && sent == 0 && u.why == RD_UCLK_WHY_SYNC);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 1, &sent) == RDNA3_OK && sent == 0 && u.why == RD_UCLK_WHY_OFF &&
+          S.dal_hard_min[RD_PPCLK_UCLK] == 96);
+    /* pinned, then switched off live: released */
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 1, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 96 &&
+          u.releases == 2);
+
+    /* the PMFW refuses SetHardMinByFreq: the state stays, the next decision tries again */
+    S.dal_refuse = RD_DALSMC_MSG_SetHardMinByFreq;
+    S.dal_refused = 0;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_EIO && sent == 1 && S.dal_refused == 1);
+    CHECK(u.p_state_change_support && u.resync && u.fails == 1 && u.last_err == RDNA3_EIO && u.pins == 2);
+    S.dal_refuse = 0;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 &&
+          S.dal_hard_min[RD_PPCLK_UCLK] == 1218 && !u.resync && u.last_err == 0 && u.pins == 3);
+    /* a refused release: tried again too, even with the same decision */
+    S.dal_refuse = RD_DALSMC_MSG_SetHardMinByFreq;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_EIO && !u.p_state_change_support && u.resync);
+    S.dal_refuse = 0;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1 &&
+          S.dal_hard_min[RD_PPCLK_UCLK] == 96 && u.p_state_change_support);
+
+    /* pinned, then the card lost its power: the PMFW's own minimum; the next
+     * two-head decision pins again */
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+    dcn32_uclk_pin_power_lost(&u);
+    S.dal_hard_min[RD_PPCLK_UCLK] = 0;
+    CHECK(u.p_state_change_support && u.hard_min_mhz == 0);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+
+    /* a bring-up again after a pin (resync): the first decision is sent,
+     * even one head's release */
+    CHECK(dcn32_uclk_pin_init(dev, &u, 1) == RDNA3_OK && u.resync && u.p_state_change_support);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 96 &&
+          !u.resync);
+    CHECK(dcn32_uclk_pin_init(dev, &u, 1) == RDNA3_OK);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+    printf("sim_navi32: N74 UCLK pin: two heads -> hard min %u MHz, one head -> %u MHz\n", u.max_mhz, u.min_mhz);
+
+    memcpy(S.reg, save, sizeof(save));
+    SP.on = 0;
+    S.dal_refuse = 0;
+    memset(S.dal_hard_min, 0, sizeof(S.dal_hard_min));
+}

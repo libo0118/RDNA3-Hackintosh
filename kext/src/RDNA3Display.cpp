@@ -812,6 +812,7 @@ void RDNA3Accel::displayShutdown()
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
 {
     displayPowerFree();   /* item O: SubVP / CAB off while the DMCUB runs */
+    displayUclkPinStop();   /* N74: no DAL message until the next bring-up */
     fMirrorDm = nullptr;
     fDisplayDm = nullptr;
     if (fHotplugCall)
@@ -910,6 +911,7 @@ void RDNA3Accel::displayFree()
 {
     displayIrqFree();   /* N42: the bring-up (its interrupt handler) is gone by now */
     displayPowerFree();
+    displayUclkPinFree();   /* N74 */
     /* the HPD work first: a displayHotplugWork already queued reaches
      * fHp through hotplugKick (PR #2 review) */
     if (fHotplugCall) {
