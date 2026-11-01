@@ -394,6 +394,15 @@ static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb, NSSet **deferred) {
     nvmtl_ws_mark_ready(self, -1, nil);   // N41: no pending mark outlives the command buffer (errors included)
     _wsMarks = nil; _wsCommitDirty = nil;
     if (!error) {
+        if (_presentations.count) {   /* N73: the present latency and, per surface, when it left (its return is timed by the nextDrawable hook) */
+            const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+            nvmtl_dl_pres(&g_dl, _dlCommitNs, now);
+            if (g_dl_trace) {
+                os_unfair_lock_lock(&g_dl_lock);
+                for (NVMTLTexture *t in _presentRoots) if (t->_surf) nvmtl_dl_present(&g_dl, (uint32_t)IOSurfaceGetID(t->_surf), now);
+                os_unfair_lock_unlock(&g_dl_lock);
+            }
+        }
         for (dispatch_block_t action in _presentations) action();
     } else if (_presentRoots.count) {   /* N69: the copy-outs of these drawables were deferred to this buffer, which failed */
         static _Atomic unsigned long long nf;
@@ -665,6 +674,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (_committed) return;
         [self nvmtlReserveQueue];
         _committed = YES;
+        if (_nPresent) _dlCommitNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);   /* N73: commit -> present */
         if (!__atomic_load_n(&_rep, __ATOMIC_ACQUIRE)) __atomic_store_n(&_rep, nvmtl_ep_enter(), __ATOMIC_RELEASE);
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];

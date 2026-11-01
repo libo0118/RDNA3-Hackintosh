@@ -1304,8 +1304,8 @@ static void bpark_free(nvk_buffer *b)
 {
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->map && pvkUnmapMemory) pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem);
-    if (b->bar1) g_bar1_bytes -= b->alloc;
-    pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
+    if (b->bar1) __atomic_fetch_sub(&g_bar1_bytes, (b->alloc), __ATOMIC_RELAXED);
+    pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); __atomic_fetch_sub(&g_alloc_bytes, (b->alloc), __ATOMIC_RELAXED);
     memset(b, 0, sizeof *b);
 }
 static int bpark_take(size_t size, int host_visible, nvk_buffer *out)
@@ -1408,7 +1408,7 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
         return -1;
     }
     out->buf = b; out->mem = m; out->size = size; out->alloc = mr.size; out->sparse = 1; out->sysmem = sys;
-    g_alloc_bytes += mr.size; g_buf_made++; g_res3_made++;
+    __atomic_fetch_add(&g_alloc_bytes, (mr.size), __ATOMIC_RELAXED); g_buf_made++; g_res3_made++;
     if (!sys) nvmtl_vk_budget_charge(mr.size);
     else { g_res3_madesys++; g_buf_vram_refused++;
            nvlog("vk: private buffer of %zu bytes REFUSED VRAM (our soft gate) -> system memory under a stable address (res3): %llu MB free, "
@@ -1464,7 +1464,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
         VkResult r2 = r1 == VK_SUCCESS ? pvkMapMemory(g_dev, bm, 0, VK_WHOLE_SIZE, 0, &bp) : r1;
         VkResult r3 = r2 == VK_SUCCESS ? pvkBindBufferMemory(g_dev, out->buf, bm, 0) : r2;
         if (r3 == VK_SUCCESS) {
-            out->mem = bm; out->map = bp; out->alloc = mr.size; out->bar1 = 1; g_alloc_bytes += mr.size; g_bar1_bytes += mr.size; g_buf_made++;
+            out->mem = bm; out->map = bp; out->alloc = mr.size; out->bar1 = 1; __atomic_fetch_add(&g_alloc_bytes, (mr.size), __ATOMIC_RELAXED); __atomic_fetch_add(&g_bar1_bytes, (mr.size), __ATOMIC_RELAXED); g_buf_made++;
             { static int said; if (!said++) nvlog("vk: shared buffer of %zu bytes placed in VRAM through BAR1 (type %d)", size, bt); }
             return 0; }
         if (bp) pvkUnmapMemory(g_dev, bm);
@@ -1501,7 +1501,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
         nvlog("vk: vkMapMemory -> %d with %llu buffers live (%llu made, %llu gone), %zu bytes allocated, memory type %d", mr_,
               (unsigned long long)(g_buf_made - g_buf_gone), (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, g_alloc_bytes, mt);
         return -1; } }
-    g_alloc_bytes += mr.size;
+    __atomic_fetch_add(&g_alloc_bytes, (mr.size), __ATOMIC_RELAXED);
     g_buf_made++;
     if ((g_buf_made & 0xFFF) == 0) nvlog("buffer census: %llu made, %llu gone, %llu live, %zu bytes allocated; pool %llu blocks, %llu pooled live, %llu bytes in ranges",
         (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), g_alloc_bytes,
@@ -1575,7 +1575,7 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
         pvkFreeMemory(g_dev, (VkDeviceMemory)out->mem, NULL); pvkDestroyBuffer(g_dev, (VkBuffer)out->buf, NULL);
         out->buf = NULL; out->mem = NULL; return -1; }
     out->map = ptr; out->alloc = size; out->imported = 1;
-    g_alloc_bytes += size; g_buf_made++;
+    __atomic_fetch_add(&g_alloc_bytes, (size), __ATOMIC_RELAXED); g_buf_made++;
     { static int said; if (!said++) nvlog("vk: imported the caller's pages as device memory — %zu bytes at %p, memory type %d", size, ptr, mt); }
     return 0;
 }
@@ -1920,9 +1920,9 @@ static void nvmtl_commit_image(nvk_image *image)
 {
     if (image->mem && !image->placed) {
         uint64_t aligned = (image->alloc + 65535ull) & ~65535ull;
-        g_alloc_bytes += image->alloc;
-        if (image->sysmem) { g_sys_bytes += image->alloc; g_sys_align += aligned; }
-        else { g_vram_bytes += image->alloc; g_img_align += aligned; }
+        __atomic_fetch_add(&g_alloc_bytes, (image->alloc), __ATOMIC_RELAXED);
+        if (image->sysmem) { __atomic_fetch_add(&g_sys_bytes, (image->alloc), __ATOMIC_RELAXED); __atomic_fetch_add(&g_sys_align, (aligned), __ATOMIC_RELAXED); }
+        else { __atomic_fetch_add(&g_vram_bytes, (image->alloc), __ATOMIC_RELAXED); __atomic_fetch_add(&g_img_align, (aligned), __ATOMIC_RELAXED); }
     }
     g_img_made++;
     nvmtl_vk_image_census();
@@ -6247,8 +6247,8 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->pool) pool_buffer_release(b);
     if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }
-    if (b->bar1) g_bar1_bytes -= b->alloc;
-    if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc; }
+    if (b->bar1) __atomic_fetch_sub(&g_bar1_bytes, (b->alloc), __ATOMIC_RELAXED);
+    if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); __atomic_fetch_sub(&g_alloc_bytes, (b->alloc), __ATOMIC_RELAXED); }
     memset(b, 0, sizeof *b);
 }
 
@@ -6280,7 +6280,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
     g_img_gone++;
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
-    if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
+    if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); __atomic_fetch_sub(&g_alloc_bytes, (i->alloc), __ATOMIC_RELAXED); if (i->sysmem) { __atomic_fetch_sub(&g_sys_bytes, (i->alloc), __ATOMIC_RELAXED); __atomic_fetch_sub(&g_sys_align, ((i->alloc + 65535ull) & ~65535ull), __ATOMIC_RELAXED); } else { __atomic_fetch_sub(&g_vram_bytes, (i->alloc), __ATOMIC_RELAXED); __atomic_fetch_sub(&g_img_align, ((i->alloc + 65535ull) & ~65535ull), __ATOMIC_RELAXED); }    }
     memset(i, 0, sizeof *i);
 }
 
@@ -6321,11 +6321,11 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     if (pvkCreateImageView(g_dev, &vci, NULL, &view) != VK_SUCCESS) { pvkFreeMemory(g_dev, mem, NULL); pvkDestroyImage(g_dev, img, NULL); return -1; }
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
-    if (i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
+    if (i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); __atomic_fetch_sub(&g_alloc_bytes, (i->alloc), __ATOMIC_RELAXED); if (i->sysmem) { __atomic_fetch_sub(&g_sys_bytes, (i->alloc), __ATOMIC_RELAXED); __atomic_fetch_sub(&g_sys_align, ((i->alloc + 65535ull) & ~65535ull), __ATOMIC_RELAXED); } else { __atomic_fetch_sub(&g_vram_bytes, (i->alloc), __ATOMIC_RELAXED); __atomic_fetch_sub(&g_img_align, ((i->alloc + 65535ull) & ~65535ull), __ATOMIC_RELAXED); }    }
     uint64_t aligned = (mr.size + 65535ull) & ~65535ull;
-    g_alloc_bytes += mr.size;
-    if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res1_off++; g_res1_off_b += i->alloc; }
-    else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res1_on++; g_res1_on_b += mr.size; }
+    __atomic_fetch_add(&g_alloc_bytes, (mr.size), __ATOMIC_RELAXED);
+    if (to_sysmem) { __atomic_fetch_add(&g_sys_bytes, (mr.size), __ATOMIC_RELAXED); __atomic_fetch_add(&g_sys_align, (aligned), __ATOMIC_RELAXED); g_res1_off++; g_res1_off_b += i->alloc; }
+    else { __atomic_fetch_add(&g_vram_bytes, (mr.size), __ATOMIC_RELAXED); __atomic_fetch_add(&g_img_align, (aligned), __ATOMIC_RELAXED); nvmtl_vk_budget_charge(mr.size); g_res1_on++; g_res1_on_b += mr.size; }
     i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     return 0;
 }
@@ -6345,7 +6345,7 @@ void nvmtl_vk_image_free_backing(nvk_image *o)
     if (g_state != 1 || !o || !o->img) return;
     if (o->view) pvkDestroyImageView(g_dev, (VkImageView)o->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)o->img, NULL);
-    if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); g_alloc_bytes -= o->alloc; if (o->sysmem) { g_sys_bytes -= o->alloc; g_sys_align -= (o->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= o->alloc; g_img_align -= (o->alloc + 65535ull) & ~65535ull; }    }
+    if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); __atomic_fetch_sub(&g_alloc_bytes, (o->alloc), __ATOMIC_RELAXED); if (o->sysmem) { __atomic_fetch_sub(&g_sys_bytes, (o->alloc), __ATOMIC_RELAXED); __atomic_fetch_sub(&g_sys_align, ((o->alloc + 65535ull) & ~65535ull), __ATOMIC_RELAXED); } else { __atomic_fetch_sub(&g_vram_bytes, (o->alloc), __ATOMIC_RELAXED); __atomic_fetch_sub(&g_img_align, ((o->alloc + 65535ull) & ~65535ull), __ATOMIC_RELAXED); }    }
     memset(o, 0, sizeof *o);
 }
 static __thread nvk_cmdbuf t_mig_cb; static __thread nvk_cmdbuf *t_mig_batch; static __thread unsigned t_mig_n;
@@ -6422,9 +6422,9 @@ int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_o
     }
     *old_out = *i;
     { uint64_t aligned = (mr.size + 65535ull) & ~65535ull;
-      g_alloc_bytes += mr.size;
-      if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res2_off++; g_res2_off_b += i->alloc; }
-      else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res2_on++; g_res2_on_b += mr.size; } }
+      __atomic_fetch_add(&g_alloc_bytes, (mr.size), __ATOMIC_RELAXED);
+      if (to_sysmem) { __atomic_fetch_add(&g_sys_bytes, (mr.size), __ATOMIC_RELAXED); __atomic_fetch_add(&g_sys_align, (aligned), __ATOMIC_RELAXED); g_res2_off++; g_res2_off_b += i->alloc; }
+      else { __atomic_fetch_add(&g_vram_bytes, (mr.size), __ATOMIC_RELAXED); __atomic_fetch_add(&g_img_align, (aligned), __ATOMIC_RELAXED); nvmtl_vk_budget_charge(mr.size); g_res2_on++; g_res2_on_b += mr.size; } }
     i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = (uint32_t)was;
     return 0;
 fail:
@@ -6470,7 +6470,7 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
         return -1;
     }
     pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
-    g_alloc_bytes -= b->alloc; g_alloc_bytes += mr.size;
+    __atomic_fetch_sub(&g_alloc_bytes, (b->alloc), __ATOMIC_RELAXED); __atomic_fetch_add(&g_alloc_bytes, (mr.size), __ATOMIC_RELAXED);
     if (to_sysmem) { g_res3_off++; g_res3_off_b += b->alloc; }
     else { nvmtl_vk_budget_charge(mr.size); g_res3_on++; g_res3_on_b += mr.size; }
     b->mem = nm; b->alloc = mr.size; b->sysmem = to_sysmem ? 1 : 0;
@@ -8122,14 +8122,14 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
         VkResult mapped = pvkMapMemory(g_dev, mem, 0, VK_WHOLE_SIZE, 0, &out->map);
         if (mapped != VK_SUCCESS) { pvkFreeMemory(g_dev, mem, NULL); memset(out, 0, sizeof *out); return -1; }
     }
-    g_alloc_bytes += size;
+    __atomic_fetch_add(&g_alloc_bytes, (size), __ATOMIC_RELAXED);
     return 0;
 }
 void nvmtl_vk_heap_destroy(nvk_heap *h)
 {
     if (g_state != 1 || !h || !h->mem) return;
     if (h->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)h->mem); h->map = NULL; }
-    pvkFreeMemory(g_dev, (VkDeviceMemory)h->mem, NULL); g_alloc_bytes -= h->size;
+    pvkFreeMemory(g_dev, (VkDeviceMemory)h->mem, NULL); __atomic_fetch_sub(&g_alloc_bytes, (h->size), __ATOMIC_RELAXED);
     memset(h, 0, sizeof *h);
 }
 static int placed_ok(const VkMemoryRequirements *mr, const nvk_heap *heap, size_t offset, const char *what)
@@ -8356,7 +8356,7 @@ static int vpool_heap_create(size_t size, nvk_heap *out)
         nvlog("buffer pool: VRAM block REFUSED (alloc %d, map %d) at %zu BAR bytes - small Shared buffers take system RAM for this process", r1, r2, g_bar1_bytes);
         return -1; }
     out->mem = bm; out->map = bp; out->size = size; out->memtype = (uint32_t)bt; out->host_visible = 1;
-    g_alloc_bytes += size; g_bar1_bytes += size;
+    __atomic_fetch_add(&g_alloc_bytes, (size), __ATOMIC_RELAXED); __atomic_fetch_add(&g_bar1_bytes, (size), __ATOMIC_RELAXED);
     return 0;
 }
 static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
@@ -8403,7 +8403,7 @@ static void pool_buffer_release(nvk_buffer *b)
             pool_block **pp = head; while (*pp && *pp != blk) pp = &(*pp)->next;
             if (*pp) { *pp = blk->next; const size_t hs = blk->heap.size; const int v = blk->vram;
                 nvmtl_vk_heap_destroy(&blk->heap); free(blk->fr); free(blk); g_pool_blocks--;
-                if (v) { g_vpool_blocks--; g_bar1_bytes -= hs; } }
+                if (v) { g_vpool_blocks--; __atomic_fetch_sub(&g_bar1_bytes, (hs), __ATOMIC_RELAXED); } }
         }
     }
     pthread_mutex_unlock(&g_pool_lock);

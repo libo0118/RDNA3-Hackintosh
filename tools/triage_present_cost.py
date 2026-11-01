@@ -26,6 +26,7 @@ Sources:
     iop_latch_rows(counters) -> [(LEVEL, 'IOP timing' | 'IOP latch', text)]
     python3 tools/triage_present_cost.py SYSCTL_DUMP [PLUGIN_LOG]   (prints the rows; the Pi session's sysctl.txt)
     ws_frame_rows(plugin_text) -> [(LEVEL, 'ws frame', text)]
+    drawable_rows(plugin_text) -> [(LEVEL, 'drawable', text)]   (N73: nextDrawable wait, present latency, WindowServer's surface textures)
 """
 import re
 
@@ -310,8 +311,97 @@ def ws_frame_rows(plugin_text):
     return out
 
 
+DL_WAIT_PCT = 30.0   # an app in nextDrawable more than this share of its wall is held by the drawables' way back (N73)
+DL_THRASH = 0.5      # WindowServer with the keep ring on: fewer reuses than this share of its IOSurface textures = the ring misses
+DL_THRASH_MIN = 100  # ... counted from this many textures on
+
+
+def dl_lines(plugin_text):
+    """{'Proc[pid]': [{key: value}, ...]} every `vk: drawable: SUMMARY` per process in log order (DRIVER-PLAN N73)"""
+    out = {}
+    for m in re.finditer(r"([A-Za-z][\w .-]*?)\[(\d+):[0-9a-f]+\].*?NVMTL: vk: drawable: SUMMARY (.*)$", plugin_text or "", re.M):
+        name = re.sub(r"^(Df|Db|Dc|I|In|E|Er|Ef|F|Fa|A|De|Default|Info|Debug|Error|Fault)\s+", "", m.group(1).strip())
+        out.setdefault("%s[%s]" % (name, m.group(2)), []).append(dict(kv.split("=", 1) for kv in m.group(3).split() if "=" in kv))
+    return out
+
+
+def dl_summaries(plugin_text):
+    """{'Proc[pid]': {key: value}} from the newest `vk: drawable: SUMMARY` per process"""
+    return {k: v[-1] for k, v in dl_lines(plugin_text).items()}
+
+
+def _dl_interval_pct(prev, d):
+    """the nextDrawable share of the interval between two SUMMARY lines (next_ms / wall_ms), None when it cannot be taken"""
+    if not prev or "next_ms" not in d or "wall_ms" not in d or "next_ms" not in prev or "wall_ms" not in prev:
+        return None
+    dw = _num(d, "wall_ms") - _num(prev, "wall_ms")
+    return 100.0 * (_num(d, "next_ms") - _num(prev, "next_ms")) / dw if dw > 0 else None
+
+
+def drawable_rows(plugin_text):
+    """N73: `drawable: nextDrawable P % of the wall ... commit -> present ... away ... | surface textures ...` per process"""
+    lines = dl_lines(plugin_text)
+    if not lines:
+        if re.search(r"NVMTL: vk: present cost: SUMMARY", plugin_text or ""):
+            return [("INFO", "drawable", "no `vk: drawable: SUMMARY` line although the plugin logs present-cost summaries: a plugin before "
+                     "DRIVER-PLAN N73 (the apps' nextDrawable wait and WindowServer's IOSurface images are UNKNOWN)")]
+        return []
+    out = []
+    for proc, seq in sorted(lines.items(), key=lambda kv: (not kv[0].startswith("WindowServer"), kv[0])):
+        d = seq[-1]
+        ws = proc.startswith("WindowServer")
+        nn, an, sn, sa, pn = _num(d, "next_n"), _num(d, "away_n"), _num(d, "st_new"), _num(d, "st_alias"), _num(d, "pres_n")
+        bad_pct = False
+        try:
+            pct = float(d.get("next_pct", "0"))
+        except ValueError:
+            pct, bad_pct = 0.0, True
+        ipct = _dl_interval_pct(seq[-2] if len(seq) > 1 else None, d)
+        ms = lambda k: _num(d, k) / 1000.0  # noqa: E731
+        parts, warn = [], []
+        if nn:
+            parts.append("nextDrawable %.1f %% of the wall%s (%d call(s), avg %.2f ms, longest %.2f ms, %d over 1 ms, %d nil)" % (
+                pct, (", %.1f %% in the last interval" % ipct) if ipct is not None else "", nn, ms("next_us_avg"), ms("next_us_max"),
+                _num(d, "next_slow"), _num(d, "next_nil")))
+        elif pn and not ws:
+            if d.get("trace") == "1":
+                parts.append("nextDrawable hooked but never called (the app presents another way)")
+            else:
+                parts.append("nextDrawable NOT timed (trace=0: NVMTL_DRAWABLE_TRACE=0, or -[CAMetalLayer nextDrawable] was never found: the "
+                             "`drawable (N73):` lines)")
+                warn.append("the app presents but its nextDrawable wait is UNKNOWN")
+        if bad_pct:
+            warn.append("next_pct %r could not be read" % d.get("next_pct"))
+        if pn:
+            parts.append("commit -> present avg %.2f ms (longest %.2f, %d present(s))" % (ms("pres_us_avg"), ms("pres_us_max"), pn))
+        if an or _num(d, "away_unknown"):
+            parts.append("present -> back from nextDrawable avg %.2f ms (longest %.2f, %d timed, %d unknown)" % (
+                ms("away_us_avg"), ms("away_us_max"), an, _num(d, "away_unknown")))
+        keep = d.get("keep", "0")
+        if sn or sa:
+            parts.append("IOSurface textures: %d new image(s) (avg %.3f ms to make), %d wrapper(s) reused a live image, wrapper life avg %.2f ms "
+                         "(longest %.2f, %d); keep ring %s (%d kept, %d let go)" % (
+                             sn, ms("st_new_us_avg"), sa, ms("st_life_us_avg"), ms("st_life_us_max"), _num(d, "st_life_n"),
+                             keep if keep != "0" else "OFF", _num(d, "st_kept"), _num(d, "st_evict")))
+            if ws and keep != "0" and sn + sa >= DL_THRASH_MIN and sa < DL_THRASH * (sn + sa):
+                warn.append("the keep ring misses: only %d of %d IOSurface textures reused an image (more surfaces in rotation than the "
+                            "%s images it keeps, or they age out; NVMTL_SURFTEX_KEEP)" % (sa, sn + sa, keep))
+        if not parts and not warn:
+            continue
+        text = "%s: %s" % (proc, "; ".join(parts))
+        wait = ipct if ipct is not None else pct
+        if nn >= 100 and wait > DL_WAIT_PCT:
+            warn.append("the app waits for its drawables over %.0f %% of the time - the cap is the drawables' way back "
+                        "(compare commit -> present, ours in the app, with present -> back, WindowServer's hold; WindowServer's own row "
+                        "says what its frames cost)" % DL_WAIT_PCT)
+        if warn:
+            text += ": " + "; ".join(warn)
+        out.append(("WARN" if warn else "INFO", "drawable", text))
+    return out
+
+
 def present_rows(plugin_text, surfvram, iop_on=True):
-    return _present_rows(plugin_text, surfvram, iop_on) + ws_frame_rows(plugin_text)
+    return _present_rows(plugin_text, surfvram, iop_on) + ws_frame_rows(plugin_text) + drawable_rows(plugin_text)
 
 
 def _present_rows(plugin_text, surfvram, iop_on=True):

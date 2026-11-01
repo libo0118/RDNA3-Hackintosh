@@ -300,6 +300,17 @@ typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_p
 /* N61: the IOSurface's own pages imported as a GPU buffer (the root texture only), where the plane's rows land in it, how
  * many copy-outs the texture had, and why it is never copied by the GPU (_soDead, _soWhy: NVMTL_SO_WHY_*) */
 @interface NVMTLTexture () { @public nvk_buffer _soBuf; uintptr_t _soBase; size_t _soOff; uint32_t _soRow, _soOuts; int _soWhy; BOOL _soDead; BOOL _soDrawable; /* N69: this root texture was handed to a present call */ } @end
+/* DRIVER-PLAN N73 (nvmtl_drawable_life.h): a drawable's way back to the app. _dlCommitNs: when the command buffer was committed
+ * (CLOCK_MONOTONIC_RAW); _dlBornNs: when an IOSurface texture wrapper was made (its life is counted at dealloc). g_dl's
+ * per-surface table is under g_dl_lock; its counters are atomics. */
+#include <os/lock.h>
+#include "nvmtl_drawable_life.h"
+@interface NVMTLCommandBuffer () { @public uint64_t _dlCommitNs; } @end
+@interface NVMTLTexture () { @public uint64_t _dlBornNs; } @end
+static nvmtl_dl_stats g_dl;
+static os_unfair_lock g_dl_lock = OS_UNFAIR_LOCK_INIT;
+static unsigned g_dl_keep;   /* the keep ring's size (NVMTL_SURFTEX_KEEP), set once by nvmtl_dl_keep_size() */
+static int g_dl_trace;       /* the nextDrawable hook is installed */
 static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, NSUInteger off, NSUInteger len);
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared);
 @interface NVMTLIndirectCommandBuffer () { @public uint32_t _purge; } @end

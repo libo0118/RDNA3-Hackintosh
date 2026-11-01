@@ -45,7 +45,7 @@ s = plugin_summaries(text)
 check(list(s) == ["WindowServer[207]"] and s["WindowServer[207]"]["outs"] == "30", "newest SUMMARY per process: %r" % s)
 r = present_rows(text, SV, True)
 names = [n for _l, n, _t in r]
-check(names == ["IOP copy", "present cost", "ws frame"], "rows: %r" % names)
+check(names == ["IOP copy", "present cost", "ws frame", "drawable"], "rows: %r" % names)
 check(r[2][0] == "INFO" and "before DRIVER-PLAN N64" in r[2][2], "no ws frame line from an older plugin: %r" % (r[2],))
 check(r[0][0] == "INFO" and "1000 IOP copies (path CPU), avg 4.00 ms; CPU path: 1000 copies, avg 4.00 ms (2073 MB/s, 1000 of them 8 bytes per access), longest 9.00 ms" in r[0][2]
       and "head 0: 600, avg 4.00 ms, gates avg 0.50 ms" in r[0][2] and "SDMA path" not in r[0][2], "IOP copy row: %r" % (r[0],))
@@ -233,6 +233,49 @@ check(any(x[0] == "WARN" and "iop_stale_wait_ms is MISSING" in x[2] for x in t),
 t = rows_of(OK.replace("iop_ok: 1000", "iop_ok: 1500"), "IOP timing")
 check(any(x[0] == "WARN" and "1000 transactions timed but 1500 presented" in x[2] for x in t), "S6 txn < ok: %r" % t)
 check(not [x for x in rows_of(OK, "IOP timing") if x[0] == "WARN"], "the even run has no IOP timing WARN")
+
+# N73: `vk: drawable: SUMMARY` (metal/plugin/nvmtl_drawable_life.h nvmtl_dl_format, the body tests/test_drawable_life.c checks)
+DL = "2026-11-01 10:00:%02d.1 Df %s[%d:2cd] (RDNA3MTLDriver) NVMTL: vk: drawable: SUMMARY %s\n"
+
+
+def dlbody(next_n=2300, pct="55.3", keep=0, st_new=0, st_alias=0, trace=1):
+    return ("next_n=%d next_us_avg=2400 next_us_max=9100 next_slow=1500 next_nil=0 next_pct=%s pres_n=2300 pres_us_avg=2100 "
+            "pres_us_max=7000 away_n=2290 away_us_avg=11800 away_us_max=30000 away_unknown=3 st_new=%d st_new_us_avg=450 "
+            "st_alias=%d st_kept=0 st_evict=0 st_life_n=0 st_life_us_avg=0 st_life_us_max=0 keep=%d trace=%d"
+            % (next_n, pct, st_new, st_alias, keep, trace))
+
+
+from triage_present_cost import drawable_rows, dl_summaries  # noqa: E402
+txt = (DL % (1, "horizon-client", 900, dlbody(next_n=10)) + DL % (11, "horizon-client", 900, dlbody())
+       + DL % (11, "WindowServer", 207, dlbody(next_n=0, pct="0.0", keep=8, st_new=6, st_alias=2400, trace=0)))
+check(dl_summaries(txt)["horizon-client[900]"]["next_n"] == "2300", "drawable: the newest SUMMARY per process")
+r = drawable_rows(txt)
+check([x[1] for x in r] == ["drawable", "drawable"] and r[0][2].startswith("WindowServer[207]"), "drawable rows, WindowServer first: %r" % r)
+check(r[0][0] == "INFO" and "6 new image(s)" in r[0][2] and "2400 wrapper(s) reused" in r[0][2] and "keep ring 8" in r[0][2]
+      and "of the wall" not in r[0][2], "WindowServer: the surface textures: %r" % (r[0],))
+check(r[1][0] == "WARN" and "nextDrawable 55.3 % of the wall" in r[1][2] and "commit -> present avg 2.10 ms" in r[1][2]
+      and "present -> back from nextDrawable avg 11.80 ms" in r[1][2] and "drawables' way back" in r[1][2], "the game waits: %r" % (r[1],))
+r = drawable_rows(DL % (1, "Safari", 5, dlbody(next_n=300, pct="4.0", st_new=3, st_alias=0)))
+check(r[0][0] == "INFO" and "keep ring OFF" in r[0][2], "an app that does not wait is INFO: %r" % r)
+check(drawable_rows("") == [], "no drawable line: no row")
+r = drawable_rows(P % (1, body(3, 3, 0, 9000)))
+check(len(r) == 1 and r[0][0] == "INFO" and "before DRIVER-PLAN N73" in r[0][2], "a plugin before N73: said, %r" % r)
+r = drawable_rows(DL % (1, "horizon-client", 900, dlbody(next_n=0, pct="0.0", trace=0)))
+check(r[0][0] == "WARN" and "nextDrawable NOT timed" in r[0][2] and "UNKNOWN" in r[0][2], "presents without a timed nextDrawable: %r" % r)
+r = drawable_rows(DL % (1, "horizon-client", 900, dlbody(next_n=0, pct="0.0", trace=1)))
+check(r[0][0] == "INFO" and "hooked but never called" in r[0][2], "hooked, never called: %r" % r)
+r = drawable_rows(DL % (1, "horizon-client", 900, dlbody(next_n=10, pct="x")))
+check(r[0][0] == "WARN" and "could not be read" in r[0][2], "an unreadable next_pct: %r" % r)
+r = drawable_rows(DL % (1, "WindowServer", 207, dlbody(next_n=0, pct="0.0", keep=8, st_new=900, st_alias=100, trace=0)))
+check(r[0][0] == "WARN" and "the keep ring misses: only 100 of 1000" in r[0][2], "ring thrash: %r" % r)
+r = drawable_rows(DL % (1, "WindowServer", 207, dlbody(next_n=0, pct="0.0", keep=0, st_new=900, st_alias=100, trace=0)))
+check(r[0][0] == "INFO", "no thrash WARN with the ring off: %r" % r)
+# the interval's share from next_ms / wall_ms of the last two lines: 10 % overall, 80 % lately
+two = (DL % (1, "horizon-client", 900, dlbody(pct="10.0") + " next_ms=1000 wall_ms=10000")
+       + DL % (11, "horizon-client", 900, dlbody(pct="10.0") + " next_ms=9000 wall_ms=20000"))
+r = drawable_rows(two)
+check(r[0][0] == "WARN" and "80.0 % in the last interval" in r[0][2], "the interval share decides: %r" % r)
+check([x[1] for x in present_rows(txt, "", False)][-2:] == ["drawable", "drawable"], "present_rows carries the drawable rows")
 
 if FAILS:
     sys.exit("test_triage_present_cost: %d FAILED" % len(FAILS))

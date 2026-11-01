@@ -14,6 +14,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>   /* N73: CAMetalDrawable for the nextDrawable hook (NVMTLObjects.m imports it too) */
 #import <objc/message.h>
 #import <mach/mach.h>
 #include <stdio.h>
@@ -178,6 +179,7 @@ static void nvmtl_alloc_failed(const char *what) {
 #import "NVMTLTrace.m"
 static void nvmtl_ud_managed_created(void);   /* DRIVER-PLAN N50: the undeclared-write detector counts the managed buffers it could watch */
 static void nvmtl_summary_timer_arm(void);   /* the shared 10 s timer of the plugin's SUMMARY lines */
+static void nvmtl_dl_hook_install(void);   /* N73, below */
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -499,6 +501,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
     nvmtl_gpu_time_queue_open(self, port);
     nvlog("MTLIOAccelDevice's initWithAcceleratorPort: -> %p", (__bridge void *)self);
     nvmtl_summary_timer_arm();
+    nvmtl_dl_hook_install();   /* N73: the nextDrawable wait (apps), the keep ring's size (every process) */
     gNVMTLMainDevice = self;
     nvmtl_install_hw_resource_pools(self);
     [self nvmtlProbeGPUPass];
@@ -875,14 +878,142 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
 }
 
+/* DRIVER-PLAN N73: the keep ring. WindowServer wraps a client's IOSurface in a new texture every frame
+ * (MetalCompositeDetachedIOSurface, round 2 finding 10) and lets it go after the frame; the cache below holds its image only
+ * weakly, so with a layer's 2-3 drawables rotating, every frame made a new private image (vkCreateImage + its memory + a view)
+ * and freed the one before, on WindowServer's thread, in the time an app's drawable waits for WindowServer to release it.
+ * The ring keeps the last NVMTL_SURFTEX_KEEP images made (or reused) alive, so the next wrapper of the same surface is an alias
+ * of it (the path two live wrappers of one surface always took) and only the upload (the seed moved) is left. The bound is a
+ * COUNT of images of any size (8 x 4K BGRA ~ 265 MB). An image unused for 2 s goes at the next texture made; when none is made,
+ * the 10 s summary timer lets it go (up to ~12 s). Evicted images are released by the next newTextureWithDescriptor:iosurface:
+ * after its device lock (WindowServer's thread), the timer only when WindowServer made no texture since (the idle fallback).
+ * Default 8 in WindowServer, 0 elsewhere; NVMTL_SURFTEX_KEEP=0 (rdna3mtl.conf) is the old behaviour. */
+static NSMutableArray *g_stkeep_tex;   /* NVMTLTexture, the ring; g_stkeep_t: when each was last made / reused */
+static NSMutableArray *g_stkeep_gone;  /* evicted, released by nvmtl_keep_drain outside every lock */
+static uint64_t g_stkeep_t[NVMTL_KEEP_MAX];
+static os_unfair_lock g_stkeep_lock = OS_UNFAIR_LOCK_INIT;
+static void nvmtl_dl_atexit(void);   /* NVMTLObjects.m */
+static unsigned nvmtl_dl_keep_size(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NVMTL_SURFTEX_KEEP"), *me = getprogname();
+        g_dl_keep = nvmtl_keep_size(e, me && !strcmp(me, "WindowServer"));
+        atexit(nvmtl_dl_atexit);
+        nvlog("drawable (N73): IOSurface texture images %s (NVMTL_SURFTEX_KEEP=%s, %u images of any size at most, let go %llu ms after their last use "
+              "at the next texture made, else by the 10 s timer); `vk: drawable: SUMMARY` st_*",
+              g_dl_keep ? "are KEPT after their last wrapper, so the next wrapper of the surface reuses the image" : "go with their last wrapper, as before",
+              e ? e : "unset", g_dl_keep, (unsigned long long)(NVMTL_KEEP_AGE_NS / 1000000ull));
+    });
+    return g_dl_keep;
+}
+/* caller holds g_stkeep_lock: move the entries that have to go to g_stkeep_gone. cap: the ring's size when one is about to be
+ * added, else (a touch) more than it holds, so only the aged ones go. */
+static void nvmtl_keep_evict_locked(unsigned cap, uint64_t now) {
+    for (;;) {
+        const int v = nvmtl_keep_victim(g_stkeep_t, (unsigned)g_stkeep_tex.count, cap, now);
+        if (v < 0) return;
+        if (!g_stkeep_gone) g_stkeep_gone = [NSMutableArray new];
+        [g_stkeep_gone addObject:g_stkeep_tex[(NSUInteger)v]];
+        [g_stkeep_tex removeObjectAtIndex:(NSUInteger)v];
+        memmove(&g_stkeep_t[v], &g_stkeep_t[v + 1], (g_stkeep_tex.count - (NSUInteger)v) * sizeof g_stkeep_t[0]);
+        __atomic_fetch_add(&g_dl.st_evict, 1, __ATOMIC_RELAXED);
+    }
+}
+/* release what was evicted, outside every lock (the images' dealloc frees Vulkan objects) */
+static _Atomic int g_stkeep_made;   /* a texture was made since the timer's last look (the timer then leaves the drain to it) */
+static void nvmtl_keep_drain(void) {
+    os_unfair_lock_lock(&g_stkeep_lock);
+    NSMutableArray *gone = g_stkeep_gone; g_stkeep_gone = nil;
+    os_unfair_lock_unlock(&g_stkeep_lock);
+    gone = nil;
+}
+/* keep (or touch) t, under the device's lock: the entries that have to go are only moved aside here */
+static void nvmtl_keep_put(NVMTLTexture *t, uint64_t now) {
+    const unsigned cap = nvmtl_dl_keep_size();
+    if (!cap || !t) return;
+    atomic_store(&g_stkeep_made, 1);
+    os_unfair_lock_lock(&g_stkeep_lock);
+    if (!g_stkeep_tex) g_stkeep_tex = [NSMutableArray new];
+    const NSUInteger at = [g_stkeep_tex indexOfObjectIdenticalTo:t];
+    if (at != NSNotFound) { g_stkeep_t[at] = now; nvmtl_keep_evict_locked(NVMTL_KEEP_MAX + 1, now); }
+    else {
+        nvmtl_keep_evict_locked(cap, now);
+        g_stkeep_t[g_stkeep_tex.count] = now;
+        [g_stkeep_tex addObject:t];
+        __atomic_fetch_add(&g_dl.st_kept, 1, __ATOMIC_RELAXED);
+    }
+    os_unfair_lock_unlock(&g_stkeep_lock);
+}
+/* the summary timer (the idle fallback): entries unused for over 2 s go; released here only when no texture was made since the
+ * last tick (else the next newTextureWithDescriptor:iosurface: releases them on its own thread) */
+static void nvmtl_keep_prune(uint64_t now) {
+    if (!g_dl_keep) return;
+    os_unfair_lock_lock(&g_stkeep_lock);
+    nvmtl_keep_evict_locked(NVMTL_KEEP_MAX + 1, now);
+    os_unfair_lock_unlock(&g_stkeep_lock);
+    if (!atomic_exchange(&g_stkeep_made, 0)) nvmtl_keep_drain();
+}
+/* N73: -[CAMetalLayer nextDrawable] timed in the app (the wait for a drawable WindowServer gives back), and which surface came
+ * back, joined with its present (NVMTLEventSync.m) into `away`. NVMTL_DRAWABLE_TRACE=0 leaves the method alone; never in
+ * WindowServer. The original implementation is called unchanged. Tried at the device's start and again at each IOSurface
+ * texture made (CAMetalLayer makes its drawables' textures there) while QuartzCore's class is not loaded yet. */
+static IMP g_dl_next_orig;
+static _Atomic int g_dl_hook_state;   /* 0 not decided, 1 decided (installed, switched off or never) */
+static os_unfair_lock g_dl_hook_lock = OS_UNFAIR_LOCK_INIT;
+static void nvmtl_dl_hook_install(void) {
+    if (atomic_load(&g_dl_hook_state)) return;
+    (void)nvmtl_dl_keep_size();   /* the knob line and the atexit summary in every process with a device */
+    os_unfair_lock_lock(&g_dl_hook_lock);
+    if (atomic_load(&g_dl_hook_state)) { os_unfair_lock_unlock(&g_dl_hook_lock); return; }
+    static unsigned tries;
+    const char *e = getenv("NVMTL_DRAWABLE_TRACE"), *me = getprogname();
+    Class c = nil; Method m = NULL;
+    if ((e && e[0] == '0') || (me && !strcmp(me, "WindowServer"))) {
+        nvlog("drawable (N73): nextDrawable NOT timed (%s)", e && e[0] == '0' ? "NVMTL_DRAWABLE_TRACE=0" : "WindowServer");
+        atomic_store(&g_dl_hook_state, 1);
+    } else if (!(c = NSClassFromString(@"CAMetalLayer")) || !(m = class_getInstanceMethod(c, @selector(nextDrawable)))) {
+        if (++tries == 1 || tries == 64) nvlog("drawable (N73): no -[CAMetalLayer nextDrawable] yet (QuartzCore not loaded, try %u%s) - the nextDrawable wait "
+                                               "is NOT measured until it is (next_n stays 0, trace=0)", tries, tries == 64 ? ", the last" : "; tried again at each IOSurface texture");
+        if (tries >= 64) atomic_store(&g_dl_hook_state, 1);
+    } else {
+        IMP orig = method_getImplementation(m);
+        IMP mine = imp_implementationWithBlock(^id(id layer) {
+            const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+            id d = ((id (*)(id, SEL))g_dl_next_orig)(layer, @selector(nextDrawable));
+            const uint64_t t1 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+            nvmtl_dl_next(&g_dl, t0, t1, d != nil);
+            uint32_t sid = 0;
+            if (d && [d respondsToSelector:@selector(texture)]) {
+                id tx = [(id<CAMetalDrawable>)d texture];
+                if ([tx isKindOfClass:[NVMTLTexture class]]) {
+                    NVMTLTexture *r = ((NVMTLTexture *)tx)->_parent ? ((NVMTLTexture *)tx)->_parent : (NVMTLTexture *)tx;
+                    if (r->_surf) sid = (uint32_t)IOSurfaceGetID(r->_surf);
+                }
+            }
+            if (d) { os_unfair_lock_lock(&g_dl_lock); (void)nvmtl_dl_back(&g_dl, sid, t1, NULL); os_unfair_lock_unlock(&g_dl_lock); }
+            return d;
+        });
+        g_dl_next_orig = orig;
+        method_setImplementation(m, mine);
+        g_dl_trace = 1;
+        atomic_store(&g_dl_hook_state, 1);
+        nvlog("drawable (N73): -[CAMetalLayer nextDrawable] is timed (NVMTL_DRAWABLE_TRACE=%s%s; `vk: drawable: SUMMARY` next_* / pres_* / away_*)",
+              e ? e : "unset", tries ? ", installed late" : "");
+    }
+    os_unfair_lock_unlock(&g_dl_hook_lock);
+}
 static char nvmtl_surface_cache_key;
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surf plane:(NSUInteger)plane {
+    id<MTLTexture> made = nil;
     @synchronized(self) {
         NSMapTable *cache = objc_getAssociatedObject(self, &nvmtl_surface_cache_key);
         if (!cache) { cache = [NSMapTable strongToWeakObjectsMapTable];
             objc_setAssociatedObject(self, &nvmtl_surface_cache_key, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-        return [self nvmtlNewSurfaceTexture:d surface:surf plane:plane cache:cache];
+        made = [self nvmtlNewSurfaceTexture:d surface:surf plane:plane cache:cache];
     }
+    nvmtl_keep_drain();        /* N73: the images the keep ring let go, released after the device's lock, on this thread */
+    nvmtl_dl_hook_install();   /* N73: a no-op once decided; CAMetalLayer makes its drawables' textures here */
+    return made;
 }
 - (id<MTLTexture>)nvmtlNewSurfaceTexture:(MTLTextureDescriptor *)d surface:(IOSurfaceRef)surf plane:(NSUInteger)plane cache:(NSMapTable *)cache {
     if (nvmtl_vk_init()) return nil;
@@ -906,11 +1037,16 @@ static char nvmtl_surface_cache_key;
         if (alias) {
             alias->_viewParent = nil; alias->_usage = d.usage; alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
             nvmtl_texture_desc_swizzle(alias, d);
+            const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);   /* N73 */
+            alias->_dlBornNs = now; nvmtl_dl_st_alias(&g_dl); nvmtl_keep_put(backing, now);
             return alias;
         }
     }
+    const uint64_t dlT0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);   /* N73: what a new image costs */
     if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex)) {
         nvlog("newTextureWithDescriptor:iosurface:plane: image create FAILED (%zux%zu)", w, h); return nil; }
+    const uint64_t dlT1 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    if (surf) { nvmtl_dl_st_new(&g_dl, dlT1 - dlT0); t->_dlBornNs = dlT1; }
     t->_q = nvmtl_device_queue();
     t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; }
     t->_plane = plane;
@@ -919,7 +1055,7 @@ static char nvmtl_surface_cache_key;
     t->_usage = d.usage;
     nvmtl_texture_desc_swizzle(t, d);
     nvmtl_tr_map(t, g_tr_why);
-    if (key && !t->_vramOn) [cache setObject:t forKey:key];
+    if (key && !t->_vramOn) { [cache setObject:t forKey:key]; nvmtl_keep_put(t, dlT1); }   /* N73: the keep ring (NVMTL_SURFTEX_KEEP) */
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
           (void *)surf, (unsigned long)plane, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat);
     return t; }
