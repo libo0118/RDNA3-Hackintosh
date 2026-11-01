@@ -442,3 +442,47 @@ fn a_capture_passed_to_a_writing_helper_is_not_forwarded() {
         ),
     }
 }
+
+/// A two-block helper (the ordinary leaf inliner keeps it a call) that
+/// loads the Function pointer out of the capture it is handed and
+/// accumulates through it, as the real kernel's lambdas do.
+const LAMBDA: &str = r#"
+define internal fastcc zeroext i1 @lambda(ptr %c, float %x) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  %pos = fcmp ogt float %x, 0.0
+  br i1 %pos, label %add, label %skip
+add:
+  %old = load float, ptr %cp, align 4
+  %new = fadd float %old, %x
+  store float %new, ptr %cp, align 4
+  br label %skip
+skip:
+  ret i1 %pos
+}
+"#;
+
+#[test]
+fn a_capture_handed_to_a_multi_block_lambda_is_spliced() {
+    // Before the splice: "store through %cp, an unmodeled pointer
+    // placeholder that addresses nothing" (the callee read the placeholder
+    // the caller's store left in memory).
+    let ll = construct_tree("ct_lambda", "%acc0", "%g0", "  %l2 = load ptr, ptr %field, align 8")
+        .replacen("define void", &format!("{LAMBDA}\ndefine void"), 1)
+        .replacen(
+            "  %vi = bitcast float %new to i32\n",
+            "  %took = call fastcc zeroext i1 @lambda(ptr %cap, float %v)\n  %vi = bitcast float %new to i32\n",
+            1,
+        );
+    let (asm, notes) = translate(&ll);
+    assert!(
+        !asm.contains("OpFunctionCall"),
+        "the lambda must be spliced into the kernel\n{asm}"
+    );
+    let expected = "metal2vulkan: kernel ct_lambda: 1 call(s) hand a local struct of pointers to a function that loads them (@lambda(%cap)); splicing them into their callers (DRIVER-PLAN N76)";
+    assert!(
+        notes.iter().any(|note| note == expected),
+        "missing note {expected:?}; got {notes:?}"
+    );
+}

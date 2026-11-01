@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 mod air_struct_offsets;
 mod body;
+mod capture_calls;
 mod control;
 pub(super) mod functions;
 mod helpers;
@@ -2623,6 +2624,27 @@ impl Emitter {
             })
             .map(|function| function.name.clone())
             .collect::<Vec<_>>();
+        // N76: a call handing a local struct of pointers to a function that
+        // loads them cannot be emitted; refuse every such site up front, as
+        // cursor call sites, so the retry splices them all at once.
+        let pointer_struct_sites = capture_calls::pointer_struct_call_sites(&functions);
+        if !pointer_struct_sites.is_empty() {
+            let named = pointer_struct_sites
+                .iter()
+                .take(4)
+                .map(|(callee, argument)| format!("@{callee}({argument})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = pointer_struct_sites.len();
+            crate::notes::push(format!(
+                "metal2vulkan: kernel {}: {count} call(s) hand a local struct of pointers to a function that loads them ({named}); splicing them into their callers (DRIVER-PLAN N76)",
+                entry_name.as_deref().unwrap_or("?")
+            ));
+            self.cursor_call_sites.extend(pointer_struct_sites);
+            return Err(self.emission_failure(format!(
+                "native emitter: {count} call(s) pass a local struct of pointers to a function that loads them ({named}); they must be spliced into their callers (N76)"
+            )));
+        }
         for f in raw_cursor_callees_after_callers(&self.ir, functions) {
             attempt!(self.emit_function(&f));
         }
