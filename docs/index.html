@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation index - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / docs</div>
+  <h1>Documentation index</h1>
+  <p class="muted">Every document of the project with one line each. Open the HTML files in a browser from a local checkout; the Markdown ones are being converted.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#start">Start here</a></li><li><a href="#stages">Stages</a></li><li><a href="#testing">Testing</a></li><li><a href="#install">Installing and bare metal</a></li><li><a href="#reference">Reference</a></li></ol></nav>
+<div class="note">Rules for agents live in <code>CLAUDE.md</code> and <code>CLAUDE_SUBAGENT.md</code> in the repository root (Markdown on purpose). A new document is written as HTML from <a href="doc-template.html">doc-template.html</a> and added to this table.</div>
+<h2 id="start">Start here</h2>
+<table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
+<tr><td><a href="OVERVIEW.html">Project overview</a><br><code>OVERVIEW.html</code></td><td><span class="badge ok">HTML</span></td><td>What the project is, the repository layout, quick start, install and the project rules.</td></tr>
+<tr><td><a href="status/STATUS.html">Porting status</a><br><code>status/STATUS.html</code></td><td><span class="badge ok">HTML</span></td><td>Generated status of the amdgpu port: works / ported / to do per block, treemap, item lists (tools/progress.py).</td></tr>
+<tr><td><a href="HANDOFF.html">Session handoff</a><br><code>HANDOFF.html</code></td><td><span class="badge ok">HTML</span></td><td>The state of the work, what the last session learned and left to do.</td></tr>
+<tr><td><a href="ROADMAP.html">Plan (roadmap)</a><br><code>ROADMAP.html</code></td><td><span class="badge ok">HTML</span></td><td>The staged plan 0-8 with the state of each stage and the order of work for stages 1-2.</td></tr>
+<tr><td><a href="DRIVER-PLAN.md">Driver plan</a><br><code>DRIVER-PLAN.md</code></td><td><span class="badge warn">Markdown</span></td><td>What a finished driver needs: what exists, what is open (Markdown, converts later).</td></tr>
+<tr><td><a href="PLAN-NEXT.html">Plan: what is left</a><br><code>PLAN-NEXT.html</code></td><td><span class="badge ok">HTML</span></td><td>The log of the 2026-10-10 night: items done, open findings, the order for the next sessions.</td></tr>
+</tbody></table>
+<h2 id="stages">Stages</h2>
+<table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
+<tr><td><a href="STAGE0.html">Stage 0: test setup</a><br><code>STAGE0.html</code></td><td><span class="badge ok">HTML</span></td><td>Preparing the test setup: second display card, SIP, boot-args, debugging, NullMoth contact.</td></tr>
+<tr><td><a href="STAGE1.html">Stage 1: the kext</a><br><code>STAGE1.html</code></td><td><span class="badge ok">HTML</span></td><td>The kext that recognises the card, the rdna3lvl levels, loading, what to check after boot.</td></tr>
+<tr><td><a href="STAGE2.html">Stage 2: bring-up</a><br><code>STAGE2.html</code></td><td><span class="badge ok">HTML</span></td><td>PSP, SMU, GMC, IH, SDMA, GFX: what is done, running on hardware, hangs and resets, decisions.</td></tr>
+<tr><td><a href="STAGE3.html">Stage 3: display</a><br><code>STAGE3.html</code></td><td><span class="badge ok">HTML</span></td><td>DCN 3.2: GOP takeover, AUX/HPD/EDID, VBIOS tables, DMCUB, mode set, DSC / FEC / MST.</td></tr>
+<tr><td><a href="STAGE4.html">Stage 4: UAPI</a><br><code>STAGE4.html</code></td><td><span class="badge ok">HTML</span></td><td>The amdgpu UAPI over IOKit: ioctl status, enumeration mode, tests.</td></tr>
+<tr><td><a href="STAGE5.html">Stage 5: Vulkan</a><br><code>STAGE5.html</code></td><td><span class="badge ok">HTML</span></td><td>RADV on macOS with the amdgpu winsys unchanged: patches, vulkaninfo, rdna3_vktest.</td></tr>
+<tr><td><a href="STAGE6.html">Stage 6: Metal</a><br><code>STAGE6.html</code></td><td><span class="badge ok">HTML</span></td><td>The Metal plugin and AIR to SPIR-V translator from NullMoth, adapted to AMD.</td></tr>
+<tr><td><a href="STAGE7.html">Stage 7: integration</a><br><code>STAGE7.html</code></td><td><span class="badge ok">HTML</span></td><td>The IOAcceleratorFamily2 accelerator, its gates and its interface to RDNA3Accel.</td></tr>
+</tbody></table>
+<h2 id="testing">Testing</h2>
+<table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
+<tr><td><a href="TESTING-VM.html">Test in a VM</a><br><code>TESTING-VM.html</code></td><td><span class="badge ok">HTML</span></td><td>Linux host with the card as its only GPU, macOS in a VM with passthrough (tools/vm/rdna3vm).</td></tr>
+<tr><td><a href="TESTING-HW.html">Hardware test ladder</a><br><code>TESTING-HW.html</code></td><td><span class="badge ok">HTML</span></td><td>The step-by-step test procedure on a hackintosh.</td></tr>
+<tr><td><a href="AFTER-TESTS.md">After the tests</a><br><code>AFTER-TESTS.md</code></td><td><span class="badge warn">Markdown</span></td><td>Agent playbook for acting on hardware-test reports (Markdown, converts later).</td></tr>
+</tbody></table>
+<h2 id="install">Installing and bare metal</h2>
+<table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
+<tr><td><a href="INSTALL-OPENCORE.html">Install on a Hackintosh</a><br><code>INSTALL-OPENCORE.html</code></td><td><span class="badge ok">HTML</span></td><td>Installing the driver for real use with OpenCore: settings, boot-args, the way back.</td></tr>
+<tr><td><a href="BAREMETAL.html">macOS 26 on the real PC</a><br><code>BAREMETAL.html</code></td><td><span class="badge ok">HTML</span></td><td>The OpenCore installer USB and the dual boot with Linux on the owner's PC.</td></tr>
+<tr><td><a href="BAREMETAL-REMOTE.html">Bare-metal test from a second session</a><br><code>BAREMETAL-REMOTE.html</code></td><td><span class="badge ok">HTML</span></td><td>Testing the bare-metal Mac from a Raspberry Pi session over SSH.</td></tr>
+</tbody></table>
+<h2 id="reference">Reference</h2>
+<table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
+<tr><td><a href="CODEMAP.md">Code map</a><br><code>CODEMAP.md</code></td><td><span class="badge warn">Markdown</span></td><td>Directories, key files and functions, where the logs and counters live (Markdown, converts later).</td></tr>
+<tr><td><a href="FIRMWARE.html">AMD firmware</a><br><code>FIRMWARE.html</code></td><td><span class="badge ok">HTML</span></td><td>The microcode files Navi 32 needs, where they come from, the licence.</td></tr>
+<tr><td><a href="NULLMOTH-ANALYSIS.html">NullMoth analysis</a><br><code>NULLMOTH-ANALYSIS.html</code></td><td><span class="badge ok">HTML</span></td><td>Analysis of the NullMoth NVIDIA driver and what it means for RDNA3, with the upstream updates.</td></tr>
+<tr><td><a href="doc-template.html">Document template</a><br><code>doc-template.html</code></td><td><span class="badge ok">HTML</span></td><td>The style and header layout every HTML document copies (CLAUDE.md, Documentation format).</td></tr>
+</tbody></table>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

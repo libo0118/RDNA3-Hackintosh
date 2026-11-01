@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan: what is left, where and how (2026-10-10) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Plan: what is left, where and how (2026-10-10)</div>
+  <h1>Plan: what is left, where and how (2026-10-10)</h1>
+  <p class="muted">The log of what was done and left on 2026-10-10 (the roadmap to a finished driver is DRIVER-PLAN.md).</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#status-after-the-night-of-2026-10-10-simulator-only-nothing-card-tested">Status after the night of 2026-10-10 (simulator only, nothing card-tested)</a></li><li><a href="#a-open-findings-from-the-card-first">A. Open findings from the card (first)</a></li><li><a href="#b-display-our-own-mode-setting-light-the-second-monitor-big">B. Display: our own mode setting (light the second monitor) [big]</a></li><li><a href="#c-gpu-core-follow-ups">C. GPU core follow-ups</a></li><li><a href="#d-acceleration-path-step-10">D. Acceleration path (step 10)</a></li><li><a href="#e-tooling-and-docs-cheap-keep-current">E. Tooling and docs (cheap, keep current)</a></li><li><a href="#order-for-the-next-sessions">Order for the next sessions</a></li></ol></nav>
+<div class="note">
+<p>The roadmap to a finished driver, and the order from here on, is
+<a href="DRIVER-PLAN.md">DRIVER-PLAN.md</a>. This file is the log of what was done.</p>
+</div>
+<p>Starting point: commit <code>1b38786</code> on <code>stage1-kext</code>. Ladder steps 0-8 passed
+on the card in the VM (<code>docs/status/hw-verified.txt</code>). Step 9 runs (our
+framebuffer takes over the GOP head at 1920x1080, hardware cursor, EDID of
+both monitors over the DDC) but macOS still names the monitor &quot;Unknown&quot;.</p>
+<p>Rules unchanged: port named amdgpu functions (MIT), reproduce the hardware
+behaviour in <code>tests/sim_navi32.c</code> first, <code>make test</code> before every push,
+commits with <code>[skip ci]</code>, one manual <code>build.yml</code> run (<code>full: &quot;false&quot;</code>) per
+batch, only when a card test needs the build.</p>
+<p>Legend: <strong>[sim]</strong> can be finished and verified in the simulator now;
+<strong>[card]</strong> needs a run on the card to confirm; <strong>[big]</strong> several sessions.</p>
+<h2 id="status-after-the-night-of-2026-10-10-simulator-only-nothing-card-tested">Status after the night of 2026-10-10 (simulator only, nothing card-tested)</h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Commit</th>
+<th>What the card has to show</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A2 head -&gt; connector</td>
+<td><code>2440cea</code></td>
+<td><code>RDNA3,Head0,Route</code> names the lit connector</td>
+</tr>
+<tr>
+<td>A4 refresh read-back</td>
+<td><code>264dce3</code></td>
+<td><code>display: head 0 ... refresh</code> near 60 Hz</td>
+</tr>
+<tr>
+<td>A3 DMCUB windows logged</td>
+<td><code>c9f4315</code></td>
+<td>the three <code>DMUB state</code> lines (step 5b)</td>
+</tr>
+<tr>
+<td>E1/E2 triage + docs</td>
+<td><code>7d95ce8</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td>B1-B4 clone onto a 2nd TMDS monitor</td>
+<td><code>bf056d5</code></td>
+<td>step 9b (<code>rdna3dmub=1 rdna3mirror=1</code>), needs 5b</td>
+</tr>
+<tr>
+<td>B7 HPD interrupts</td>
+<td><code>ab2665b</code></td>
+<td>unplug/plug: <code>display: HPDn ...</code> (with <code>rdna3msi=1</code>)</td>
+</tr>
+<tr>
+<td>C1 MES scheduler, C2 teardown order</td>
+<td><code>98702fd</code></td>
+<td>step 8c (<code>rdna3mes=1</code>): <code>RDNA3,MESResult = 0</code></td>
+</tr>
+<tr>
+<td>CI fix (MES test state across the two sim runs)</td>
+<td><code>d9adaa7</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td>B6 extended desktop on the clone</td>
+<td><code>cb15c8b</code></td>
+<td>step 9c (<code>rdna3mirror=2</code>): two displays in System Settings</td>
+</tr>
+<tr>
+<td>D2 PRIME + fence fds</td>
+<td><code>e5e2b21</code></td>
+<td>- (host tests)</td>
+</tr>
+<tr>
+<td>A1 EDID fetched at framebuffer start</td>
+<td><code>ba761b9</code></td>
+<td>step 9: monitor name instead of &quot;Unknown&quot;</td>
+</tr>
+<tr>
+<td>clone check (frame counter + OTG CRC)</td>
+<td><code>a54bc5b</code></td>
+<td><code>RDNA3,MirrorCheck</code> running, same CRC</td>
+</tr>
+<tr>
+<td>PerformanceStatistics from the SMU</td>
+<td><code>c3db924</code></td>
+<td><code>ioreg</code> shows temperature, fan, clocks</td>
+</tr>
+<tr>
+<td><code>rdna3vm queue</code>, <code>package/oc_install.sh</code></td>
+<td><code>3127016</code>, <code>8786936</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td>B5 subset: DCN clock read-back, DAL mailbox</td>
+<td><code>e8f4261</code></td>
+<td><code>RDNA3,DCNClocks</code>; step 9b log <code>DAL SMU: 2 display(s)</code></td>
+</tr>
+<tr>
+<td><code>rdna3vm step 8c / 9b / 9c</code></td>
+<td><code>3f743e5</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td>RLC/CP power status in the PM trend</td>
+<td><code>4187e5d</code></td>
+<td>step 8: <code>PM: RLC_STAT ... GPM_STAT (pwr clk ls)</code> lines</td>
+</tr>
+<tr>
+<td>accelerator build id, step 10 triage</td>
+<td><code>9b5b663</code></td>
+<td>step 10: <code>accelerator build</code> PASS, <code>IOGraphicsAccelerator2::start -&gt; 1</code></td>
+</tr>
+<tr>
+<td>RADV on the host (<code>tools/radv_host.sh</code>), patches 0001/0005/0006, <code>rdna3_vktest</code></td>
+<td><code>a6e2019</code>..<code>9ae7106</code></td>
+<td>step 8 with <code>prepare --radv</code>: <code>ALL PASSED</code> in the report</td>
+</tr>
+<tr>
+<td>Linux reference dump (<code>tools/linux/card_dump.sh</code>, <code>dump_summary.py</code>)</td>
+<td><code>dfcc46e</code>, <code>83bab28</code></td>
+<td>- (run on the Linux host)</td>
+</tr>
+</tbody>
+</table>
+<p>Still open: A1 (monitor name), A3 (DMCUB on the card), B5 (bandwidth /
+watermarks for real modesets), B6 (one framebuffer per head, mode
+change: step 9c), C3, C4, D.</p>
+<h2 id="a-open-findings-from-the-card-first">A. Open findings from the card (first)</h2>
+<ol>
+<li><strong>macOS monitor name (&quot;Unknown&quot;)</strong> [card] - <code>fb/rdna3-fb.cpp</code>.
+<code>1b38786</code> logs what IOGraphics asks (HLDDC sense, <code>hasDDCConnect</code>) and
+what the core answers (<code>displayEdid</code>), and retries the EDID fetch. Next
+run decides between: IOGraphics never asks (then set
+<code>kConnectionSupportsHLDDCSense</code> from <code>start()</code>, publish <code>IODisplayEDID</code>
+on the <code>IODisplayConnect</code> ourselves, or answer <code>getDDCBlock</code> with the
+right block numbering) and the core refusing (fix <code>displayEdid</code>).</li>
+<li><strong>Head -&gt; connector routing</strong> [sim] - <code>hw/dcn32.c</code>, <code>kext/src/RDNA3Display.cpp</code>.
+Today head 0 takes &quot;the EDID that contains its mode&quot;. Port the read-back
+amdgpu uses for seamless boot: <code>optc1_get_otg_active_size</code> /
+<code>dcn10_get_dig_frontend</code> (<code>DIG_FE_CNTL.DIG_SOURCE_SELECT</code> = OTG),
+<code>dcn10_get_dig_mode</code>, <code>DIG_BE_CNTL.DIG_FE_SOURCE_SELECT</code>, and the
+transmitter (UNIPHY A-G) -&gt; VBIOS path -&gt; DDC line. Publish
+<code>RDNA3,Head&lt;n&gt;,Connector</code>. Simulator: GOP state with OTG1 -&gt; DIG2 -&gt;
+UNIPHYB.</li>
+<li><strong>DMCUB (step 5b)</strong> [card] - <code>hw/dmub32.c</code>. CW0/CW1 are zero when we
+start the PSP-loaded DMCUB. Pending test <code>rdna3lvl=5 rdna3dmub=1 rdna3pm=0</code>. If still zero: compare with <code>dm_dmub_hw_init</code> +
+<code>dmub_srv_hw_init</code> for <code>DMUB_WINDOW_0_INST_CONST</code> when
+<code>load_type == PSP</code> (amdgpu passes the inst_const region anyway and
+programs CW0 itself only when <code>!psp_loaded</code>?) - re-read
+<code>dmub_dcn32_backdoor_load</code> vs <code>dmub_dcn32_setup_windows</code>, try the
+backdoor load (<code>rdna3dmub=2</code>) as the fallback already in the code.</li>
+<li><strong>Refresh rate read-back</strong> [sim] - one run printed 63.741 Hz for a
+1080p60 head. <code>optc1_get_hw_timing</code> + DCCG <code>OTG_PIXEL_RATE</code>/DTO read:
+check <code>dcn32_head_refresh</code> against <code>dccg32_get_pixel_rate_div</code>
+(<code>OTG_PIXEL_RATE_DIV</code>, <code>DTBCLK</code> vs <code>DPREFCLK</code>).</li>
+</ol>
+<h2 id="b-display-our-own-mode-setting-light-the-second-monitor-big">B. Display: our own mode setting (light the second monitor) [big]</h2>
+<p>Goal: HDMI/TMDS SST on DCN 3.2 (both monitors here are TMDS; DP later),
+second head, mode change from macOS. Plan B of the old plan: a mini-DC,
+not the whole <code>amd/display/dc</code>.</p>
+<p>B1. <strong>Register read-back and model</strong> [sim] - generate DIG FE/BE, HDMI
+stream encoder, DCCG (<code>OTG_PIXEL_RATE_CNTL</code>, <code>DPPCLK_DTO</code>,
+<code>PHYASYMCLK</code>), OPP/MPC (<code>MPCC_*</code>, <code>OPP_PIPE_CONTROL</code>) headers with
+<code>tools/gen_regs.py</code>; simulator gets a DCN pipe model (HUBP -&gt; DPP -&gt;
+MPC -&gt; OPP -&gt; OTG -&gt; DIG -&gt; PHY) that knows what &quot;lit&quot; means.
+B2. <strong>Timing + scanout on a free pipe</strong> [sim] - <code>optc1_program_timing</code>
+(done in <code>dcn32_mode.c</code> as values) applied: <code>optc32_enable_crtc</code>,
+<code>optc1_program_global_sync</code>, <code>hubp2_program_surface_config</code> /
+<code>hubp1_program_pixel_format</code>, <code>dpp</code> bypass, MPCC tree for one plane,
+<code>opp_program_fmt</code> (8 bpc, no dither). Same order as
+<code>dcn20_enable_stream_timing</code> + <code>dcn20_program_pipe</code>.
+B3. <strong>Pixel clock</strong> [sim] - DCN 3.2 drives the OTG pixel rate through
+DCCG DTO (<code>dccg32_set_dtbclk_dto</code> / <code>dccg2_set_dpp_clk</code>), the PHY
+symbol clock through the VBIOS <code>SetPixelClock</code> (v7) - run it with our
+ATOM interpreter (<code>hw/atom.c</code>), or through DMCUB
+(<code>dmub_cmd</code> <code>SET_PIXEL_CLOCK</code>) once 5b works.
+B4. <strong>Encoder + transmitter</strong> [sim, card] - <code>DIGxEncoderControl</code> (v5,
+<code>ENCODER_CMD_STREAM_SETUP</code> HDMI) and <code>DIG1TransmitterControl</code> (v1.7,
+<code>TRANSMITTER_CONTROL_ENABLE</code>) through the ATOM interpreter (amdgpu's
+<code>bios_parser2</code> command tables), <code>enc32_stream_encoder_hdmi_set_stream_attribute</code>
+(AVI infoframe off at first), <code>dcn32_unblank_stream</code>.
+B5. <strong>Bandwidth</strong> [sim] - minimum: request DISPCLK/DPPCLK from the SMU
+(<code>smu_v13_0_set_hard_min_clk</code>), fixed watermarks/DLG from a 1080p60
+table (DML later); <code>dcn32_prepare_bandwidth</code> subset.
+B6. <strong>Framebuffer</strong> [card] - <code>RDNA3Framebuffer</code>: one instance per head,
+<code>getDisplayModeCount</code>/<code>getDisplayModes</code> from the EDID's usable modes,
+<code>setDisplayMode</code> -&gt; core modeset call (<code>RD3K_DISPLAY_FN_MODESET</code>),
+<code>IOFBConnectInterrupt</code> on HPD.
+B7. <strong>HPD interrupts</strong> [sim] - DCN HPD IH sources (<code>DC_HPD1_INT</code>..),
+<code>dce110_hpd_irq</code> enable/ack, re-probe EDID on change, notify the fb.</p>
+<p>Ladder: new step <strong>9b</strong> = second monitor lit by us, <strong>9c</strong> = mode change.</p>
+<h2 id="c-gpu-core-follow-ups">C. GPU core follow-ups</h2>
+<p>C1. <strong>MES scheduler pipe</strong> [sim] - <code>mes_v11_0_hw_init</code>: map the MES ring
+(pipe 0) through the KIQ, <code>SET_HW_RESOURCES</code>, <code>QUERY_SCHED_STATUS</code>;
+<code>enable_legacy_queue_map</code> when the MES firmware &gt;= 0x47 (log the
+version from <code>CP_MES_GP3_LO</code>). Needed for user queues and queue resets.
+C2. <strong>Teardown/reset on MES KIQ</strong> [sim] - soft reset re-runs
+<code>mes_v11_0_kiq_hw_init</code>; check <code>gfx11_mec_stop</code> order (KGQ unmap,
+KCQ unmap, MES disable) against <code>gfx_v11_0_hw_fini</code>.
+C3. <strong>SDMA soft reset, more KCQs, GFX pipe 1</strong> [sim] - small.
+C4. <strong>Clock gating / GFXOFF</strong> [card] - only after display is stable.</p>
+<h2 id="d-acceleration-path-step-10">D. Acceleration path (step 10)</h2>
+<p>D1. <strong>Step 10 smoke test</strong> [card] - <code>rdna3accel=1</code>: the accelerator
+attaches, WindowServer still composes; collect <code>ioreg -l</code> of
+<code>IOAccelerator</code>, <code>IOSurface</code> usage.
+D2. <strong>PRIME / IOSurface sharing</strong> [sim] - BO export/import between the
+accelerator and libdrm_xnu (<code>AMDGPU_GEM_OP</code>, dma-buf-like handles).
+D3. <strong>Metal plugin</strong> [big] - after D1.</p>
+<h2 id="e-tooling-and-docs-cheap-keep-current">E. Tooling and docs (cheap, keep current)</h2>
+<p>E1. <code>tools/triage_reports.py</code>: step 9 checks (<code>RDNA3FB</code> EDID line,
+<code>EDIDSource</code>, <code>Head0EdidMode</code>), the serial-log interleaving (read
+<code>20-log-rdna3.txt</code> first).
+E2. <code>docs/TESTING-VM.md</code> / <code>TESTING-HW.md</code>: step 9 expectations (monitor
+name, DDC EDID), steps 9b/9c.
+E3. <code>docs/AFTER-TESTS.md</code> rows for every new symptom.</p>
+<h2 id="order-for-the-next-sessions">Order for the next sessions</h2>
+<p>A2 -&gt; A4 -&gt; E1/E2 -&gt; B1 -&gt; B2 -&gt; B3 -&gt; B4 -&gt; B7 -&gt; C1 -&gt; C2, with A1/A3
+whenever a card report arrives. Each item: simulator test, <code>make test</code>,
+<code>tools/progress.py</code>, commit <code>[skip ci]</code>, Notion card updated.</p>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

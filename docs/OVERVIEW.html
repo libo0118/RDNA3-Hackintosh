@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project overview - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Project overview</div>
+  <h1>Project overview</h1>
+  <p class="muted">What the project is, what is in the repository, how to build, test and install it, and the project rules.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#status">Status</a></li><li><a href="#what-is-in-the-repo">What is in the repo</a></li><li><a href="#quick-start">Quick start</a></li><li><a href="#install">Install</a></li><li><a href="#project-rules">Project rules</a></li><li><a href="#license">License</a></li></ol></nav>
+<p>An open-source macOS driver (x86_64, Hackintosh) for AMD RDNA3 cards,
+starting with the <strong>Radeon RX 7800 XT (Navi 32, PCI <code>1002:747E</code>)</strong>.</p>
+<h2 id="status">Status</h2>
+<p>The generated, per-block status with charts and item lists is <a href="status/STATUS.html">STATUS</a>;
+what was done and what is left is in <a href="HANDOFF.html">HANDOFF</a> and <a href="DRIVER-PLAN.md">DRIVER-PLAN</a>; the stage by stage
+plan is <a href="ROADMAP.html">ROADMAP</a>.</p>
+<p><a href="status/STATUS.html"><img alt="amdgpu port" src="status/badge-amdgpu.svg"></a> <a href="status/STATUS.html"><img alt="amdgpu UAPI" src="status/badge-uapi.svg"></a></p>
+<p><a href="status/STATUS.html"><img alt="progress map" src="status/progress.svg" style="max-width:100%;height:auto"></a></p>
+<p>Legend: green works (ported and verified on the card), yellow ported (checked only in the simulator and CI), gray not ported.
+&quot;Ported&quot; includes &quot;works&quot; (e.g. 30% works + 20% unverified = 50% ported).
+* amdgpu kernel functions: percentage of the functions in the amdgpu source files the project ports from
+(listed in <a href="../tools/progress/sources.txt">tools/progress/sources.txt</a>, Linux v6.12), not of all of amdgpu;
+the total grows as files are added. Both measures leave out what does not apply - not on the RX 7800 XT,
+or of no use on macOS - with the reason for each
+(<a href="../tools/progress/not-applicable.txt">tools/progress/not-applicable.txt</a>). A block turns green when the ladder steps that exercise it passed on
+the card (<a href="status/hw-verified.txt">docs/status/hw-verified.txt</a>). Per-function lists:
+<a href="status/STATUS.html">status/STATUS.html</a>.</p>
+<h2 id="what-is-in-the-repo">What is in the repo</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kext/</code></td>
+<td><code>RDNA3Accel.kext</code>: PCI matching, BAR5 (MMIO) mapping, safe reads, reading and decoding the IP discovery table from VRAM</td>
+</tr>
+<tr>
+<td><code>common/amd_discovery.[ch]</code></td>
+<td>Portable parser for the <em>IP discovery</em> table (C99, no libc, checks all bounds). The same code runs in the kext and on the host</td>
+</tr>
+<tr>
+<td><code>tests/</code></td>
+<td>Parser unit tests and mutation fuzzing under ASan/UBSan</td>
+</tr>
+<tr>
+<td><code>tools/amd_discovery_dump.c</code></td>
+<td>Host-side discovery blob decoder: IP versions, register bases, required firmware files</td>
+</tr>
+<tr>
+<td><code>tools/linux/</code></td>
+<td>Dump of reference data from the same card under Linux/amdgpu</td>
+</tr>
+<tr>
+<td><code>tools/macos/</code></td>
+<td>Extracts the discovery blob published by the kext from <code>ioreg</code></td>
+</tr>
+<tr>
+<td><code>hw/</code></td>
+<td>Portable bring-up (PSP 13.0.x, SMU 13.0.x, registers, VRAM), tested on the <code>tests/sim_navi32.c</code> simulator</td>
+</tr>
+<tr>
+<td><code>uapi/</code></td>
+<td>OS-independent Linux amdgpu UAPI (used by the kext and the tests)</td>
+</tr>
+<tr>
+<td><code>userspace/</code></td>
+<td><code>libdrm_xnu</code> (libdrm core over IOKit) + libdrm_amdgpu build; <code>mesa/</code> = RADV build on macOS and patches</td>
+</tr>
+<tr>
+<td><code>metal/</code></td>
+<td>Metal plugin and AIR→SPIR-V translator from NullMoth, adapted to AMD</td>
+</tr>
+<tr>
+<td><code>package/</code></td>
+<td>Installer: <code>.pkg</code>/tarball (<code>make_pkg.sh</code>), firmware download, OpenCore helper and snippet, uninstall</td>
+</tr>
+<tr>
+<td><code>third_party/</code></td>
+<td>AMD/DRM headers (MIT) and libdrm_amdgpu (MIT)</td>
+</tr>
+<tr>
+<td><code>docs/</code></td>
+<td>Plan, test bench setup, test instructions, firmware licenses, <a href="NULLMOTH-ANALYSIS.html">analysis of the NullMoth driver (NVIDIA)</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="quick-start">Quick start</h2>
+<p>On any system (Linux/macOS):</p>
+<pre><code class="language-sh">make test     # parser tests + fuzzing (ASan/UBSan)
+make tools    # build/host/amd_discovery_dump
+</code></pre>
+<p>On a Mac with Xcode (the kext is built only there):</p>
+<pre><code class="language-sh">make kext     # -&gt; build/RDNA3Accel.kext (x86_64)
+</code></pre>
+<p>CI (Forgejo Actions at https://forgejo.voten.me, self-hosted macOS and Linux runners) builds the kext and attaches it as an artifact.</p>
+<p><strong>Test on Linux with this card as the only one (macOS in a VM, passthrough):</strong>
+<a href="TESTING-VM.html">docs/TESTING-VM.html</a>, i.e. a single script <code>tools/vm/rdna3vm</code>, step by step.
+Test on a hackintosh: <a href="TESTING-HW.html">docs/TESTING-HW.html</a>.
+What to do with the test reports: <a href="AFTER-TESTS.md">docs/AFTER-TESTS.md</a>.</p>
+<p>Loading the kext on the test machine and the safety levels (<code>rdna3lvl=</code>)
+are described in <a href="STAGE1.html">docs/STAGE1.html</a>. Read
+<a href="STAGE0.html">docs/STAGE0.html</a> first: <strong>do not test without a second card for display.</strong></p>
+<h2 id="install">Install</h2>
+<p>On a bare-metal Hackintosh (macOS 15, OpenCore): the installer package
+(CI artifact <code>RDNA3-pkg</code>, or <code>package/make_pkg.sh</code> on a Mac) puts the kexts in
+<code>/Library/Extensions</code> and downloads the AMD firmware from linux-firmware; no
+boot-args are needed (default profile). OpenCore settings, opt-in boot-args and
+the way back: <a href="INSTALL-OPENCORE.html">docs/INSTALL-OPENCORE.html</a>. Testing
+and reports without the VM:
+<a href="TESTING-HW.html#bare-metal-with-the-installer-no-vm-harness">docs/TESTING-HW.html</a>.</p>
+<h2 id="project-rules">Project rules</h2>
+<ul>
+<li><strong>amdgpu (Linux) is the source of truth</strong> for the hardware. Every register in the code has
+a reference to the amdgpu header file it comes from. amdgpu is
+MIT-licensed, so the port is license-compatible.</li>
+<li><strong>Read-only first.</strong> Each stage adds writes to the hardware only once
+the reads match the Linux reference (<code>tools/linux/</code>).</li>
+<li><strong>Data from the hardware is untrusted.</strong> Parsers check bounds and are fuzzed;
+a bad blob must not crash the kernel.</li>
+<li><strong>AMD firmware does not go into the repo.</strong> See <a href="FIRMWARE.html">docs/FIRMWARE.html</a>.</li>
+</ul>
+<h2 id="license">License</h2>
+<p>MIT, see <a href="../LICENSE">LICENSE</a>. AMD firmware has its own license (<code>LICENSE.amdgpu</code>
+from linux-firmware) and is not distributed here.</p>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

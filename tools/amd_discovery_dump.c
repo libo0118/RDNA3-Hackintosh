@@ -3,7 +3,7 @@
  *
  * Get a real blob from a Linux box with the card on amdgpu:
  *     sudo cat /sys/kernel/debug/dri/<N>/amdgpu_discovery > navi32.bin
- * or from our kext (Stage 1) via `ioreg`, see docs/STAGE1.md.
+ * or from our kext (Stage 1) via `ioreg`, see docs/STAGE1.html.
  *
  * Usage: amd_discovery_dump <file>
  *

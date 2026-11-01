@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 4: kernel–user interface (amdgpu UAPI) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 4: kernel–user interface (amdgpu UAPI)</div>
+  <h1>Stage 4: kernel–user interface (amdgpu UAPI)</h1>
+  <p class="muted">Stage 4: the kernel-user interface, the Linux amdgpu UAPI over IOKit - ioctl status, enumeration mode, tests and what to check on hardware.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#ioctl-status">ioctl status</a></li><li><a href="#enumeration-mode-rdna3enum1">Enumeration mode (rdna3enum=1)</a></li><li><a href="#tests">Tests</a></li><li><a href="#to-check-on-hardware">To check on hardware</a></li></ol></nav>
+<p>The kext has no ABI of its own: it implements the <strong>Linux amdgpu UAPI</strong> (structures
+from <code>amdgpu_drm.h</code>/<code>drm.h</code>), and userspace calls it exactly as it does on Linux.</p>
+<figure><svg viewBox="0 0 480 297" role="img" aria-label="Stage 4 ioctl path" style="width:100%;max-width:480px"><rect x="10" y="10" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="32" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RADV / libdrm_amdgpu (unchanged)</text><line x1="36" y1="46" x2="36" y2="71" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah2)"/><text x="48" y="59" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">drmIoctl / mmap</text><rect x="10" y="72" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="94" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">libdrm.dylib = xf86drm_xnu.c + drm_xnu.c</text><text x="240.0" y="110" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">userspace/libdrm_xnu</text><line x1="36" y1="123" x2="36" y2="162" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah2)"/><text x="48" y="136" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">IOConnectCallMethod(sel 0: nr, payload) /</text><text x="48" y="150" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">IOConnectMapMemory64</text><rect x="10" y="163" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="185" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3UserClient -&gt; RDNA3Accel::drmIoctl</text><text x="240.0" y="201" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">kext/src</text><line x1="36" y1="214" x2="36" y2="235" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah2)"/><rect x="10" y="236" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="258" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">uapi/rdna3_drm.c</text><text x="240.0" y="274" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">OS-independent, tested on the host</text><defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs></svg><figcaption>The ioctl path from RADV to the portable UAPI code.</figcaption></figure>
+<details><summary>Text version of the diagram</summary>
+<pre><code>RADV / libdrm_amdgpu (unchanged)
+   │  drmIoctl / mmap
+libdrm.dylib = xf86drm_xnu.c + drm_xnu.c      (userspace/libdrm_xnu)
+   │  IOConnectCallMethod(sel 0: nr, payload) / IOConnectMapMemory64
+RDNA3UserClient → RDNA3Accel::drmIoctl         (kext/src)
+   │
+uapi/rdna3_drm.c  (OS-independent, tested on the host)
+</code></pre>
+</details>
+<h2 id="ioctl-status">ioctl status</h2>
+<table>
+<thead>
+<tr>
+<th>ioctl</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DRM_IOCTL_VERSION</code>, <code>GET_CAP</code>, <code>SET_CLIENT_CAP</code></td>
+<td><span class="badge ok">done</span> (<code>amdgpu</code> 3.61)</td>
+</tr>
+<tr>
+<td><code>GEM_CLOSE</code></td>
+<td><span class="badge ok">done</span></td>
+</tr>
+<tr>
+<td><code>SYNCOBJ_CREATE/DESTROY/RESET/SIGNAL/WAIT/TIMELINE_*/QUERY</code></td>
+<td><span class="badge ok">done</span> a syncobj carries the CS fence and signals once the GPU passes it</td>
+</tr>
+<tr>
+<td><code>SYNCOBJ_TRANSFER</code></td>
+<td><span class="badge ok">done</span> copy of the fence/point (snapshot; syncobjs are per file)</td>
+</tr>
+<tr>
+<td><code>SYNCOBJ_HANDLE_TO_FD/FD_TO_HANDLE</code></td>
+<td><span class="badge ok">done</span> in <code>libdrm_xnu</code> (<code>drm_xnu.c</code>): the kext has no descriptors. <strong>sync_file</strong> = an unlinked temporary file holding the fence by value (<code>ip, ring, seq</code> or &quot;signaled&quot;), read/written through the private <code>RD_NR_XNU_SYNCOBJ_FENCE</code> (0xF0). It works across processes (fork, SCM_RIGHTS, XPC). The kext only accepts a fence that was actually submitted (<code>seq ≤ last_seq</code>), so a forged file cannot force a wait until the timeout and a GPU reset. <strong>opaque</strong> = an fd for <code>/dev/null</code> in the process table, same handle (within the process only). Test: <code>test_uapi</code> (GET/SET, rejection), <code>test_libdrm_amdgpu</code> (second connection + child after <code>fork()</code>)</td>
+</tr>
+<tr>
+<td><code>PRIME_*</code></td>
+<td><span class="badge muted">not started</span> <code>-ENOSYS</code> (needs IOSurface/export, Stage 7)</td>
+</tr>
+<tr>
+<td><code>AMDGPU_GEM_CREATE</code></td>
+<td><span class="badge ok">done</span> GTT: <code>IOBufferMemoryDescriptor</code>; VRAM: a heap in VRAM (from 512 MiB), mappable through BAR0</td>
+</tr>
+<tr>
+<td><code>AMDGPU_GEM_MMAP</code> + <code>mmap</code></td>
+<td><span class="badge ok">done</span> through <code>clientMemoryForType</code></td>
+</tr>
+<tr>
+<td><code>AMDGPU_GEM_VA</code></td>
+<td><span class="badge ok">done</span> MAP/UNMAP/CLEAR/REPLACE; on <code>rdna3lvl&gt;=6</code> it writes real page tables (<code>hw/gpuvm.c</code>), a mapping holds a BO reference, <code>GEM_CLOSE</code> removes mappings like amdgpu</td>
+</tr>
+<tr>
+<td><code>AMDGPU_GEM_METADATA/OP/WAIT_IDLE</code>, <code>AMDGPU_VM</code>, <code>AMDGPU_CTX</code></td>
+<td><span class="badge ok">done</span></td>
+</tr>
+<tr>
+<td><code>AMDGPU_INFO</code></td>
+<td><span class="badge ok">done</span> ACCEL_WORKING, DEV_INFO (from the GC discovery table), HW_IP_INFO/COUNT, FW_VERSION, VRAM_GTT, MEMORY, *_USAGE, READ_MMR_REG (soc21 allow list), MAX_IBS, VIDEO_CAPS, SENSOR (from SMU metrics: clocks, temperature, load, power, VDDGFX, pstate), GPUVM_FAULT (the client's last VM page fault)</td>
+</tr>
+<tr>
+<td><code>AMDGPU_CS</code></td>
+<td><span class="badge ok">done</span> chunks IB / DEPENDENCIES / SYNCOBJ_IN/OUT / TIMELINE / BO_HANDLES; the DMA ring is real from <code>rdna3lvl=7</code> (SDMA0, IB in the file's VMID), GFX/COMPUTE are only advertised (<code>rdna3enum</code>)</td>
+</tr>
+<tr>
+<td><code>WAIT_CS</code>, <code>WAIT_FENCES</code>, <code>FENCE_TO_HANDLE</code> (syncobj), <code>BO_LIST</code></td>
+<td><span class="badge ok">done</span> real SDMA fences; deadline as CLOCK_MONOTONIC (<code>mach_continuous_time</code>), 10 s limit</td>
+</tr>
+<tr>
+<td><code>GEM_USERPTR</code></td>
+<td><span class="badge ok">done</span> <code>IOMemoryDescriptor::withAddressRange</code> over the client task, <code>prepare()</code> for the BO's lifetime, pages through <code>IODMACommand</code>; no <code>mmap</code> (<code>-EPERM</code> like amdgpu); <code>amdgpu_create_bo_from_user_mem</code> in the loopback test</td>
+</tr>
+<tr>
+<td>(all)</td>
+<td>errno in Linux numbering from the UAPI; <code>drm_xnu</code> translates to macOS (<code>ETIME</code> 62→92, <code>ENOSYS</code> 38→78, <code>EOPNOTSUPP</code> 95→102), because RADV compares against the host's <code>-ETIME</code>/<code>-ECANCELED</code></td>
+</tr>
+<tr>
+<td><code>AMDGPU_CTX_OP_QUERY_STATE/STATE2</code></td>
+<td><span class="badge ok">done</span> RESET / VRAMLOST / GUILTY from resets and page faults (<code>vm_query</code>), guilty → <code>CS</code> = <code>-ECANCELED</code></td>
+</tr>
+<tr>
+<td>Video IPs (<code>rdna3vcn=1</code>)</td>
+<td><span class="badge ok">done</span> VCN 4.0 + JPEG 4.0 (<code>hw/vcn40.c</code>): <code>HW_IP_INFO</code> / <code>HW_IP_COUNT</code> for <code>VCN_DEC</code> (no ring on VCN 4: the unified ring is <code>VCN_ENC</code>'s, count 2), <code>VCN_ENC</code> (one ring, count 2), <code>VCN_JPEG</code> (one ring) as amdgpu_kms.c; <code>VIDEO_CAPS</code> decode / encode from soc21_query_video_codecs; <code>CS</code> to <code>VCN_ENC</code> (a context's entity is pinned to one instance like amdgpu_ctx_init_entity, VCN1 first; <code>vcn_v4_0_ring_patch_cs_in_place</code> moves AV1 encode and non-H264/HEVC/VP9 decode sessions to VCN0) and <code>VCN_JPEG</code> (the IB is checked by <code>jpeg_v2_dec_ring_parse_cs</code> and a kernel copy runs). Without the boot-arg the video IPs answer as before (no rings, zero caps). <code>rdna3vcn=2</code> (item I): the same rings with VCN dynamic power gating as amdgpu runs it on this card (DPG SRAM image through the PSP, <code>=3</code> through the LMA); VCN / JPEG are suspended (VCPU BOs copied to system memory) and resumed across a system sleep and a GPU reset</td>
+</tr>
+<tr>
+<td><code>AMDGPU_CS</code> chunk <code>FENCE</code> (user fence)</td>
+<td><span class="badge ok">done</span> like <code>amdgpu_cs_p1_user_fence</code>: a single-page BO, not userptr, offset ≤ 4088 (and 8-byte aligned). The ring writes the 64-bit job number just before the ring fence (<code>amdgpu_ib_schedule</code>): SDMA with two FENCE packets, GFX/compute with <code>RELEASE_MEM</code> DATA_SEL 2. Address in VMID0: VRAM = MC address, GTT = one of 64 GART slots below the transfer window (remapped only once its last job has passed). The BO is held by a reference until the fence passes (<code>uf_pending</code>, released at the next CS / when the file is closed), so a <code>GEM_CLOSE</code> in the meantime does not free pages the GPU is writing to</td>
+</tr>
+<tr>
+<td>BOs in <code>GDS</code> / <code>GWS</code> / <code>OA</code></td>
+<td><span class="badge ok">done</span> on-chip ranges (<code>gfx_v11_0_set_gds_init</code>: 4 KiB GDS, 64 GWS, 16 OA), size and alignment in units; <code>NO_CPU_ACCESS</code> (<code>mmap</code> = <code>-EPERM</code>), no <code>GEM_VA</code>, <code>VM_ALWAYS_VALID</code> = <code>-EINVAL</code>. <code>INFO_GDS_CONFIG</code> as in amdgpu 6.12. A job gets the partitions from the BO list (chunk <code>BO_HANDLES</code> or <code>bo_list_handle</code>, not both); the kext switches them from the ring (<code>gfx_v11_0_ring_emit_gds_switch</code>) only when the VMID has a different one; always after a reset. <code>gfx_v11_0_init_gds_vmid</code> at GC start. Current Mesa does not use GDS on GFX11; this is for UAPI compatibility</td>
+</tr>
+<tr>
+<td><code>BO_LIST</code></td>
+<td><span class="badge ok">done</span> CREATE/UPDATE/DESTROY; everything is resident anyway, so a list only holds references to its own GDS/GWS/OA BOs (up to 256 lists per file); unknown BO = <code>-ENOENT</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="enumeration-mode-rdna3enum1">Enumeration mode (<code>rdna3enum=1</code>)</h2>
+<p><code>libdrm_amdgpu</code> refuses to initialize when <code>ACCEL_WORKING == 0</code>. The boot-arg
+<code>rdna3enum=1</code> reports <code>accel_working</code> and one GFX/COMPUTE/DMA ring each, so
+<code>vulkaninfo</code> and the memory allocation paths work before Stage 2. Every <code>CS</code>
+still returns <code>-ENODEV</code>.</p>
+<h2 id="tests">Tests</h2>
+<ul>
+<li><code>tests/test_uapi.c</code>: ioctls at the structure level.</li>
+<li><code>tests/test_libdrm_amdgpu.c</code>: <strong>unmodified libdrm_amdgpu</strong> through
+<code>drm_xnu</code> with the loopback backend (UAPI in the same process). Covers
+<code>amdgpu_device_initialize</code> (with its <code>F_DUPFD</code>), <code>amdgpu_query_gpu_info</code>,
+BO + mmap + write/read, VA, contexts, syncobj, closing the original
+fd as RADV does.</li>
+<li><code>tests/test_libdrm_amdgpu.c</code> also submits a <strong>CS through unmodified libdrm_amdgpu</strong>
+(<code>amdgpu_cs_submit_raw2</code> + <code>amdgpu_cs_query_fence_status</code>) to the loopback
+backend's software SDMA, which interprets WRITE/COPY/FILL/FENCE packets.</li>
+<li>On a Mac: <code>build/userspace/rdna3_drminfo</code> (kext at <code>rdna3lvl&gt;=2</code>);
+<code>rdna3_drminfo --dma-test</code> (<code>rdna3lvl=7</code>) submits an SDMA IB with a BO in VRAM and
+checks what the GPU wrote: the first job from userspace on the card.</li>
+</ul>
+<h2 id="to-check-on-hardware">To check on hardware</h2>
+<ul>
+<li><code>RDNA3,GBAddrConfig</code> in ioreg (<code>rdna3lvl&gt;=3</code>): the fallback value <code>0x545</code>
+is only a placeholder; RADV computes texture swizzle from it.</li>
+<li>CU/RB harvesting: from <code>rdna3lvl=3</code> the kext reads the masks like
+<code>gfx_v11_0_get_cu_info</code>/<code>setup_rb</code> (<code>CC/GC_USER_SA_UNIT_DISABLE</code>,
+<code>CC/GC_USER_RB_BACKEND_DISABLE</code>, <code>CC/GC_USER_SHADER_ARRAY_CONFIG</code> on the SE/SA
+selected through <code>GRBM_GFX_INDEX</code>) and uses them to replace the default &quot;all
+active&quot; in <code>DEV_INFO</code> (<code>RDNA3,ActiveCUs</code>, <code>RDNA3,ActiveRBMask</code>). The RX 7800 XT
+should show 60 CUs; any other number means it must be compared with Linux.</li>
+</ul>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

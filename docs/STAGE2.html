@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 2: hardware bring-up - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 2: hardware bring-up</div>
+  <h1>Stage 2: hardware bring-up</h1>
+  <p class="muted">Stage 2: hardware bring-up (PSP, SMU, GMC, IH, SDMA, GFX), how to run it on the card, resets and page faults, decisions and risks.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#what-is-done">What is done</a></li><li><a href="#running-on-hardware">Running on hardware</a></li><li><a href="#hangs-reset-page-faults">Hangs, reset, page faults</a></li><li><a href="#decisions-and-risks-to-check-on-hardware">Decisions and risks (to check on hardware)</a></li><li><a href="#next-order-as-in-amdgpu_device_ip_init">Next (order as in amdgpu_device_ip_init)</a></li></ol></nav>
+<p>Status: **PSP + firmware + SMU + GMC (GART, MMHUB 3.0.0, GFXHUB 3.0.3)</p>
+<ul>
+<li>IH 6.0 + SDMA 6.0 written and tested in the simulator**; GFX/MES
+not yet.</li>
+</ul>
+<h2 id="what-is-done">What is done</h2>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>File</th>
+<th>amdgpu counterpart</th>
+<th>Test</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Registers from IP discovery, MMIO + SMN, HDP flush</td>
+<td><code>hw/rdna3_hw.c</code></td>
+<td><code>amdgpu_discovery_reg_base_init</code>, <code>amdgpu_device_rreg</code>, <code>nbio_v4_3</code>, <code>amdgpu_hdp_generic_flush</code></td>
+<td><code>tests/sim_navi32.c</code></td>
+</tr>
+<tr>
+<td>FB location (VRAM MC address)</td>
+<td><code>hw/rdna3_hw.c</code></td>
+<td><code>gfxhub_v3_0_3_get_fb_location</code></td>
+<td>sim</td>
+</tr>
+<tr>
+<td>Firmware: SOS split, LOAD_IP_FW plan</td>
+<td><code>common/amd_fw.c</code></td>
+<td><code>psp_init_sos_microcode</code>, <code>amdgpu_ucode_init_single_fw</code></td>
+<td><code>tests/test_fw.c</code> + real files from linux-firmware in CI</td>
+</tr>
+<tr>
+<td>PSP 13.0.7: bootloader (KDB/SPL/SYS/SOS), KM ring, TOC/TMR, LOAD_IP_FW (29 ucode), RLC autoload</td>
+<td><code>hw/psp13.c</code></td>
+<td><code>psp_v13_0.c</code>, <code>amdgpu_psp.c</code></td>
+<td>sim (synthetic and real firmware)</td>
+</tr>
+<tr>
+<td>SMU 13.0.7: mailbox, TestMessage/GetSmuVersion/GetDriverIfVersion</td>
+<td><code>hw/smu13.c</code></td>
+<td><code>smu_cmn.c</code></td>
+<td>sim</td>
+</tr>
+<tr>
+<td>VBIOS through the SMUIO ROM window, ATOM tables (firmwareinfo, smu_info, smc_dpm_info, vram_usagebyfirmware)</td>
+<td><code>hw/vbios.c</code></td>
+<td><code>amdgpu_bios.c</code>, <code>atom.c</code>, <code>amdgpu_atomfirmware.c</code></td>
+<td>sim (synthetic image)</td>
+</tr>
+<tr>
+<td>Robustness: state dump (GRBM/CP/SDMA), killing VMID waves (<code>SQ_CMD</code>), GFX soft reset (<code>GRBM_SOFT_RESET</code> + cp_resume), mode-1 reset through the PMFW debug mailbox + bring-up again from level 4, VM fault from IH (address, VMID, L2 status) → &quot;guilty&quot; context, <code>AMDGPU_CTX_OP_QUERY_STATE2</code> flags, <code>-ECANCELED</code></td>
+<td><code>hw/gfx11.c</code>, <code>hw/gmc11.c</code>, <code>hw/smu13.c</code>, <code>kext/src/RDNA3Bringup.cpp</code></td>
+<td><code>gfx_v11_0_soft_reset</code>, <code>gfx_v10_0_ring_soft_recovery</code>, <code>smu_v13_0_7_mode1_reset</code>, <code>gmc_v11_0_process_interrupt</code>, <code>amdgpu_job_timedout</code>, <code>amdgpu_ctx_query2</code></td>
+<td>sim (CP hang, IB fault, mode-1)</td>
+</tr>
+<tr>
+<td>SMU 13.0.7 PM: driver/tool tables in VRAM, combo PPTable from PMFW + BoardTable from VBIOS, <code>TransferTableDram2Smu</code>, <code>RunDcBtc</code>, <code>SetAllowedFeaturesMask</code>, <code>OverridePcieParameters</code>, <code>EnableAllSmuFeatures</code>, DPM tables, PPT limit, workload, metrics (<code>SMU_TABLE_SMU_METRICS</code>)</td>
+<td><code>hw/smu13.c</code></td>
+<td><code>amdgpu_smu.c</code> (<code>smu_smc_hw_setup</code>), <code>smu_v13_0.c</code>, <code>smu_v13_0_7_ppt.c</code></td>
+<td>sim (PMFW model: tables, features, DPM levels)</td>
+</tr>
+<tr>
+<td>Startup in the kext (thread, firmware from Resources)</td>
+<td><code>kext/src/RDNA3Bringup.cpp</code></td>
+<td><code>amdgpu_device_init</code> (part)</td>
+<td>CI build</td>
+</tr>
+</tbody>
+</table>
+<h2 id="running-on-hardware">Running on hardware</h2>
+<ol>
+<li>
+<p>Build the kext and add the firmware (it does not go into git, see <code>docs/FIRMWARE.html</code>):</p>
+<pre><code class="language-sh">make kext
+make -C kext firmware FW_DIR=/path/to/linux-firmware/amdgpu
+</code></pre>
+</li>
+<li>
+<p>boot-args: <code>rdna3lvl=4</code> (PSP + firmware), <code>rdna3lvl=5</code> (+ SMU; by default
+<code>rdna3pm=1</code> reads the VBIOS and starts PMFW power management — a
+&quot;safe&quot; set without memory/fabric/DCN DPM, because without Display Core nobody tells
+PMFW when a p-state switch will not break scanout; <code>rdna3pm=0</code>
+keeps the boot clocks, <code>rdna3pm=2</code> the full amdgpu set,
+<code>rdna3pmmask=&lt;hex&gt;</code> an explicit feature mask; results: <code>RDNA3,PM</code>,
+<code>RDNA3,PMResult</code>, <code>RDNA3,PMFeaturesRunning</code>, <code>RDNA3,PMGfxClkMaxMHz</code>,
+<code>RDNA3,PMPowerLimitW</code>, <code>RDNA3,VBIOSPartNumber</code>, and after bring-up the metrics
+<code>RDNA3,PMGfxClkMHz</code>, <code>RDNA3,PMTempHotspotC</code>, <code>RDNA3,PMPowerW</code>,
+<code>RDNA3,PMFanRPM</code>) or
+<code>rdna3lvl=6</code> (+ GMC: GART in VRAM, MMHUB, TLB flush; <code>RDNA3,GMCResult</code>;</p>
+<ul>
+<li>IH 6.0 ring, <code>RDNA3,IHResult</code>, <code>RDNA3,IHEarlyIVs</code>) or <code>rdna3lvl=7</code>
+(+ SDMA0: ring, ring test, 64 KiB VRAM→VRAM copy checked by the CPU;
+<code>RDNA3,SDMAResult</code>, <code>RDNA3,SDMACopyMismatches</code>). <strong>Level 7 is the first
+one where the GPU executes commands by itself.</strong> <code>rdna3lvl=8</code> adds GFX 11:
+RLC autoload check, RS64 start addresses, GFXHUB, golden registers,
+SH_MEM, CSB + SRM, GFX0 ring with clear state and a <code>SCRATCH_REG0</code> test
+(<code>RDNA3,GFXResult</code>). From level 6 on the kext maps BAR2 and enables the doorbell
+aperture (<code>RDNA3,Doorbells</code>); then SDMA0 and GFX0 write wptr through the
+doorbell, and at level 8 KIQ (MEC1 pipe 1) and the first
+compute queue KCQ0 (pipe 0), mapped with <code>MAP_QUEUES</code>, start (<code>RDNA3,KIQResult</code>,
+<code>RDNA3,KCQResult</code>; CS on <code>AMDGPU_HW_IP_COMPUTE</code>). <code>rdna3doorbell=0</code>
+keeps the wptr registers and skips compute. <code>rdna3msi=1</code> (from level 6) registers the card's MSI
+in IOKit: the IH ring is drained from the interrupt, and waiting on a fence
+sleeps until the handler wakes it (5 ms margin for a lost interrupt).
+Level 7 checks the first trap interrupt from SDMA (<code>RDNA3,MSIVerified</code>);
+if it does not arrive within 200 ms, the driver falls back to polling. Counters:
+<code>RDNA3,IRQs</code>, <code>RDNA3,IRQIVs</code>, <code>RDNA3,IRQFenceGFX</code>, <code>RDNA3,IRQFenceSDMA</code>.</li>
+</ul>
+</li>
+<li>
+<p>Results in the IORegistry (<code>ioreg -l -r -c RDNA3Accel</code>): <code>RDNA3,Stage2</code>,
+<code>RDNA3,PSPResult</code>, <code>RDNA3,SOSVersion</code>, <code>RDNA3,SMUVersion</code>, <code>RDNA3,FBStartMC</code>.
+Log: <code>log show --last boot --predicate 'eventMessage CONTAINS &quot;RDNA3:&quot;'</code>.</p>
+</li>
+</ol>
+<p>Expected on the RX 7800 XT: <code>sOS running, version 0x00330024</code> (depending on
+the linux-firmware version), 29× <code>LOAD_IP_FW ... ok</code>, <code>RLC autoload started</code>,
+<code>SMU: PMFW 82.97.0</code> (or similar).</p>
+<h2 id="hangs-reset-page-faults">Hangs, reset, page faults</h2>
+<p><code>fenceWait</code> gives each fence 10 s. After that (<code>amdgpu_job_timedout</code>):
+a state dump to the log (<code>GFX timeout: GRBM_STATUS ...</code>), the VM of the last job on that
+ring becomes &quot;guilty&quot; (its <code>CS</code> calls end with <code>-ECANCELED</code>, <code>AMDGPU_CTX_OP_QUERY_STATE2</code>
+returns <code>GUILTY|RESET</code>), <code>SQ_CMD</code> kills that VMID's waves and waits 100 ms for the
+fence. If that does not help: the fences of all rings are completed, GFX
+goes through a soft reset (<code>gfx_v11_0_soft_reset</code> + ring 0, KIQ, KCQ from scratch),
+a hung SDMA gets its own soft reset (<code>sdma_v6_0_soft_reset</code>: FREEZE,
+HALT + TH1_RESET, <code>GRBM_SOFT_RESET.SDMA0</code>, queue from scratch on the same
+ring, pending fences treated as done, VM of the last IB guilty), and
+if that fails too — a mode-1 reset through PMFW and
+<code>hwInit()</code> from level 4 (PSP, firmware, SMU, GMC, IH, SDMA, GFX). The VM page
+tables stay (VRAM survives mode-1; the <code>RDN3</code> check word verifies this,
+otherwise clients get <code>VRAMLOST</code>). GPUVM page faults (VMC/GFX client,
+source 0) are decoded from the IV (<code>gmc11_decode_vm_fault</code>: hub, VMID, address,
+<code>L2_PROTECTION_FAULT_STATUS</code>) and also mark the VM as guilty. Counters in the
+IORegistry: <code>RDNA3,VMFaults</code>, <code>RDNA3,LastFaultAddr</code>, <code>RDNA3,SoftRecoveries</code>,
+<code>RDNA3,Resets</code>, <code>RDNA3,SDMAResets</code>, <code>RDNA3,GPUResets</code>, <code>RDNA3,VRAMLost</code>.</p>
+<p>Waiting on a fence does not hold the global DRM lock: <code>drmFenceWait</code> releases
+it while sleeping (other clients keep running), and recovery after 10 s is done
+under the lock and only once. The UAPI does not keep pointers across that window (fences
+by value, syncobj looked up again), and closing a file waits for
+its in-flight ioctls.</p>
+<h2 id="decisions-and-risks-to-check-on-hardware">Decisions and risks (to check on hardware)</h2>
+<ul>
+<li><strong>All PSP buffers in VRAM</strong> (written through BAR0 + HDP flush). amdgpu
+supports this (<code>debug_use_vram_fw_buf</code>), so PSP starts without GART.</li>
+<li><strong>Allocation window 16 MiB–512 MiB of VRAM</strong>, in the part visible through BAR0.
+We skip the first 16 MiB (pre-OS framebuffer), and the top of VRAM too (discovery,
+IFWI reservations). amdgpu reads the exact reservations from the ATOM tables
+(<code>vram_usagebyfirmware</code>); <code>vbios_fw_vram_reservation()</code> already reads them,
+the allocator does not use them yet.</li>
+<li><strong>PM without Display Core</strong>: amdgpu enables UCLK/FCLK/DCN DPM, because its DC
+programs the watermarks and tells PMFW (through DMCUB) when the p-state may
+switch. We leave the GOP scanout untouched, so by default these
+features are disabled (<code>RD_SMU_FEATURES_SAFE</code>), and GFXOFF never — nobody
+sends <code>AllowGfxOff</code>. The full set (<code>rdna3pm=2</code>) is a test at your own risk:
+possible flicker/underflow of the picture.</li>
+<li><strong>No long DRAM training</strong> (<code>psp_v13_0_memory_training</code>). IFWI trains
+memory at power-on. If memory errors show up, this is the first
+suspect.</li>
+<li><strong>SPL loads the KDB bytes</strong>: this is what <code>psp_v13_0_bootloader_load_spl</code> does in Linux.
+Kept 1:1.</li>
+<li><strong>sOS takes &gt;20 ms to start</strong>: Linux waits 20 ms and only then watches for a change in
+C2PMSG_81. The simulator models this with a virtual clock.</li>
+<li><strong>MES1 (KIQ)</strong>: we load it if the file is present. amdgpu for GC 11 may
+skip it depending on <code>enable_mes_kiq</code>.</li>
+</ul>
+<h2 id="next-order-as-in-amdgpu_device_ip_init">Next (order as in <code>amdgpu_device_ip_init</code>)</h2>
+<ol>
+<li><span class="badge ok">done</span> <strong>GMC 11 / MMHUB 3.0.0 / GFXHUB 3.0.3</strong>: GART in VRAM, VMID0 and
+contexts 1–15, TLB flush (MMHUB with a semaphore and private invalidation).
+<span class="badge ok">done</span> Per-VM page tables (<code>hw/gpuvm.c</code>): PDB2→PDB1→PDB0→PTB in VRAM from a
+16 MiB pool, VMID 1–15 per open DRM file, <code>GEM_VA</code> writes PTEs (VRAM: physical
+VRAM address, GTT: system pages + SNOOPED), TLB flush after every
+change. Works from <code>rdna3lvl=6</code>; below that, mappings are only recorded.</li>
+<li><span class="badge warn">in progress</span> <strong>IH 6.0</strong> (<code>hw/ih60.c</code>): ring 0 in VRAM, wptr writeback, IV decoding,
+overflow handling; polled or with MSI (<code>rdna3msi=1</code>,
+<code>RPTR_REARM</code>, GFX EOP / SDMA trap fences → <code>ih60_iv_fence</code>). Remaining:
+ring 1 (page faults), rptr doorbell, VM fault → killing the context.</li>
+<li><span class="badge warn">in progress</span> <strong>GFX 11</strong> (<code>hw/gfx11.c</code>): GFX0 ring through the <code>CP_RB0_*</code> registers (like
+amdgpu with <code>amdgpu_mes=0</code>), clear state, ring test, jobs in the
+<code>amdgpu_ib_schedule</code> order (VM flush, ACQUIRE_MEM, HDP, frames, fence); KIQ and
+KCQ0 on MEC (MQD in VRAM, <code>kiq_init_register</code>, <code>SET_RESOURCES</code> +
+<code>MAP_QUEUES</code>, <code>UNMAP_QUEUES</code> on close); CS on
+<code>AMDGPU_HW_IP_GFX</code>/<code>COMPUTE</code> from <code>rdna3lvl=8</code>. Remaining: MES, more
+compute queues, priorities.</li>
+<li><span class="badge warn">in progress</span> <strong>SDMA 6.0</strong> (<code>hw/sdma60.c</code>): QUEUE0 ring in VRAM, ring test, copy,
+fill, fence, IB (<code>INDIRECT</code>), TRAP after fence with MSI; wptr through the
+doorbell (<code>S2A_DOORBELL_ENTRY_2</code> through RSMU) or register. Remaining: SDMA1.</li>
+<li>Then <code>AMDGPU_CS</code> in <code>uapi/</code> gets a real implementation, and the
+<code>rdna3enum=1</code> mode is no longer needed.</li>
+</ol>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 5: Vulkan (RADV on macOS) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 5: Vulkan (RADV on macOS)</div>
+  <h1>Stage 5: Vulkan (RADV on macOS)</h1>
+  <p class="muted">Stage 5: Vulkan, building Mesa RADV on macOS with the amdgpu winsys unchanged; patches, vulkaninfo without a card, rdna3_vktest.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#patches">Patches</a></li><li><a href="#vulkaninfo-without-a-card">vulkaninfo without a card</a></li><li><a href="#radv-on-a-linux-host-no-gpu-no-ci">RADV on a Linux host (no GPU, no CI)</a></li><li><a href="#rdna3_vktest">rdna3_vktest</a></li><li><a href="#next">Next</a></li></ol></nav>
+<p>We build Mesa's RADV on macOS <strong>with the amdgpu winsys unchanged</strong>:
+<code>libdrm_amdgpu</code> (the original, <code>third_party/libdrm</code>) + our libdrm core
+(<code>userspace/libdrm_xnu</code>), which talks to the kext instead of <code>/dev/dri</code>.</p>
+<pre><code class="language-sh">userspace/mesa/build_radv.sh build/mesa     # on a Mac with Xcode, meson, ninja, glslang, mako
+# output: build/mesa/install/lib/libvulkan_radeon.dylib + radeon_icd.x86_64.json
+</code></pre>
+<p><code>build_radv.sh</code> pins a Mesa commit (<code>MESA_COMMIT</code>, GitHub mirror),
+applies <code>userspace/mesa/patches/*.patch</code> and builds with
+<code>-Dvulkan-drivers=amd -Dllvm=disabled</code> (ACO, no LLVM). The CI job <code>radv-macos</code>
+(self-hosted macOS runner) does the same; its error summary is the port's task list.</p>
+<h2 id="patches">Patches</h2>
+<table>
+<thead>
+<tr>
+<th>Patch</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0001-radv-open-render-node-through-drm_xnu</code></td>
+<td>RADV opens and closes the render node through <code>drm_xnu</code> instead of <code>open(2)</code> (physical device, its ac_drm device, and the winsys at <code>vkCreateDevice</code>), and does not <code>stat</code> it (no <code>/dev/dri</code> on macOS)</td>
+</tr>
+<tr>
+<td><code>0002-addrlib-apple-branches-are-for-the-kernel-driver</code></td>
+<td>the <code>__APPLE__</code> branches in addrlib are for Apple's kernel driver (NDA header, <code>__umoddi3</code>, <code>IOPanic</code>); we do not want them in userspace</td>
+</tr>
+<tr>
+<td><code>0003-radv-darwin-weak-entrypoints-via-dynamic-lookup</code></td>
+<td>weak, undefined <code>wsi_*</code> symbols and optional entrypoints: ld64 on macOS requires <code>-undefined dynamic_lookup</code></td>
+</tr>
+<tr>
+<td><code>0004-darwin-use-libdrm_xnu-as-libdrm</code></td>
+<td>on macOS <code>dep_libdrm</code> = our libdrm: <code>HAVE_LIBDRM</code>, <code>vk_drm_syncobj.c</code>, <code>u_sync_provider.c</code> and <code>wsi_common_drm.c</code> build as on Linux (without this, <code>vk_drm_syncobj_*</code> did not exist and dlopen would fail)</td>
+</tr>
+<tr>
+<td><code>0005-os_drm-ioctls-through-libdrm-on-drm_xnu</code></td>
+<td><code>util/os_drm.h</code> (used by <code>ac_linux_drm.c</code> for every amdgpu query, CS, BO and VA call) calls <code>ioctl(2)</code> on the fd directly, bypassing libdrm; a drm_xnu fd is no kernel file, so RADV failed <code>ac_drm_query_gpu_info</code> and found no device (found with <code>tools/radv_host.sh</code>). On drm_xnu it goes through <code>drmIoctl</code></td>
+</tr>
+<tr>
+<td><code>0006-radv-bo-cpu-maps-through-drm_xnu</code></td>
+<td>RADV maps BOs with <code>mmap(2)</code> on the DRM fd after <code>GEM_MMAP</code> (not through libdrm), so <code>vkMapMemory</code> failed on drm_xnu; maps and unmaps go through <code>drm_xnu_mmap</code> / <code>drm_xnu_munmap</code> (placed maps at a fixed address are refused there)</td>
+</tr>
+</tbody>
+</table>
+<p><code>libvulkan_radeon.dylib</code> builds and links in CI. After linking, the script
+reads <code>nm -m</code>: a &quot;dynamically looked up&quot; symbol has no owner. Weak ones
+(<code>weak.txt</code>) get NULL at load time (optional entrypoints); non-weak ones
+(<code>missing.txt</code>) would make dlopen fail, so this list must be
+empty. SPIRV-Tools are disabled (<code>-Dspirv-tools=disabled</code>): they are only for
+debug dumps, and their symbols were not making it into the link.</p>
+<h2 id="vulkaninfo-without-a-card">vulkaninfo without a card</h2>
+<p>After building RADV, the <code>radv-macos</code> job swaps <code>libdrm.2.dylib</code> for
+<code>libdrm_loopback.dylib</code> (<code>make -C userspace loopback</code>: the same libdrm core on
+<code>uapi/rdna3_drm.c</code> in-process, loopback backend with software SDMA) and runs
+<code>vulkaninfo --summary</code> (when the runner has a Vulkan loader, e.g. the LunarG
+SDK) and <code>rdna3_vktest --loopback</code>. This is an end-to-end UAPI test
+without the kext: <code>radv_physical_device</code> queries everything it needs
+(DEV_INFO, HW_IP_INFO, FW_VERSION, MEMORY, SENSOR, GPUVM_FAULT, syncobj).
+The log is in the artifact <code>radv-macos-logs/vulkaninfo.log</code>.</p>
+<h2 id="radv-on-a-linux-host-no-gpu-no-ci">RADV on a Linux host (no GPU, no CI)</h2>
+<p><code>tools/radv_host.sh</code> builds the same Mesa commit with the same patches on
+Linux against libdrm_xnu with the loopback backend (<code>-DRADV_DRM_XNU</code> takes
+the patches' macOS branches: render node through <code>drm_xnu</code>, no <code>/dev/dri</code>
+inode to <code>stat</code>). It then runs <code>userspace/rdna3_vktest --loopback</code>: instance,
+physical device, device creation, and fill + copy on the transfer queue
+(the loopback executes SDMA only). Everything RADV asks of the UAPI at
+startup is exercised here first.</p>
+<p>First result (2026-10-10): with patches 0001 (all three opens), 0005 and
+0006, RADV enumerates &quot;AMD Radeon RX 7800 XT (RADV NAVI32)&quot;, creates the
+device (general, compute, transfer, sparse families) and the SDMA fill +
+copy on the transfer queue verifies through libdrm_amdgpu -&gt; drm_xnu -&gt;
+uapi/. Before them, each of these failed in turn: no physical device
+(<code>ac_drm_query_gpu_info</code>), <code>vkCreateDevice</code>, <code>vkMapMemory</code> - all three
+would have failed on the card the same way.</p>
+<p>The loopback cannot run shaders, so with <code>RDNA3_LB_GFX_NOP=1</code> (rdna3_vktest
+<code>--loopback</code> sets it) GFX and compute jobs are accepted and fenced without
+running; their PM4 framing is still walked (every packet inside its IB,
+every chained <code>INDIRECT_BUFFER</code> on mapped VA). Result: all six submits
+(general, compute, transfer x 64 KiB / 256 B) pass; the transfer queue's
+data is verified. <code>RDNA3_LB_TRACE=1</code> prints packet counts per job.</p>
+<h2 id="rdna3_vktest">rdna3_vktest</h2>
+<p><code>userspace/rdna3_vktest.c</code> loads the ICD directly (the VM has no Vulkan
+loader): device creation, then per queue family a 64 KiB fill + copy
+(RADV's compute meta shaders on the general/compute queues: a real
+ACO-compiled dispatch) and a 256-byte one (CP DMA), checked on the CPU. The
+<code>radv-macos</code> CI job builds it next to RADV; <code>rdna3vm prepare --radv</code> puts
+both in the VM bundle and the report runs it from step 8 on.</p>
+<p>In the macOS VM (2026-10-10, <code>tools/vm/macos/build_radv.sh</code>, no card):
+RADV builds with 0 missing symbols and <code>rdna3_vktest --loopback</code> passes
+8/8 there too, interop included. On Linux RADV on the real card the same
+test passes 8/8 (tools/linux/card_dump.sh).</p>
+<h2 id="next">Next</h2>
+<ol>
+<li><code>rdna3_vktest</code> on the card (step 8 with RADV in the VM bundle).</li>
+<li>WSI: macOS has no KMS; images for display go through IOSurface,
+and the Metal plugin (Stage 6) owns presentation.</li>
+<li>Synchronization: <code>vk_drm_syncobj</code> on our syncobjs; real fences
+will come together with CS (Stage 2 → rings).</li>
+<li>Compute tests (CTS <code>dEQP-VK.compute.*</code>) after the first working CS.</li>
+</ol>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>
