@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 1: kext that recognizes the card - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 1: kext that recognizes the card</div>
+  <h1>Stage 1: kext that recognizes the card</h1>
+  <p class="muted">Stage 1: the kext that recognises the card, its safety levels (rdna3lvl), what to check after boot and how to compare with Linux.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#building">Building</a></li><li><a href="#loading">Loading</a></li><li><a href="#what-to-check-after-boot">What to check after boot</a><ol><li><a href="#comparison-with-linux-stage-completion-criterion">Comparison with Linux (stage completion criterion)</a></li></ol></li><li><a href="#when-something-goes-wrong">When something goes wrong</a></li><li><a href="#offset-sources">Offset sources</a></li></ol></nav>
+<p><code>RDNA3Accel.kext</code> matches <code>1002:747E</code> (Navi 32) and step by step reads
+more and more from the hardware. You enable each level separately with the <code>rdna3lvl=</code> boot-arg,
+so if one of them hangs the system, you know exactly which one.</p>
+<table>
+<thead>
+<tr>
+<th><code>rdna3lvl</code></th>
+<th>What it does</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code> (default)</td>
+<td>PCI matching, reads config space (ID, revision, PCIe link, power state). Does not touch the BARs</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>+ checks that the card is in D0, enables memory decoding, maps <strong>BAR5 (MMIO)</strong>, waits (max 2 s) for the PSP firmware to report ready (<code>MP0_SMN_C2PMSG_33</code> bit 31), reads the VRAM size (<code>RCC_CONFIG_MEMSIZE</code>)</td>
+<td>low: these are exactly the first reads amdgpu does</td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td>+ reads 10 KiB of the IP discovery table from the end of VRAM through the <code>MM_INDEX</code>/<code>MM_DATA</code> window, verifies checksums, decodes it and publishes it in the IORegistry</td>
+<td>low: the only writes are <code>MM_INDEX</code>/<code>MM_INDEX_HI</code></td>
+</tr>
+<tr>
+<td><code>3</code></td>
+<td>+ reads <code>GRBM_STATUS</code> from the GC block at the address from discovery</td>
+<td>low, first register addressed through discovery</td>
+</tr>
+</tbody>
+</table>
+<p><code>-rdna3off</code> disables the kext completely (probe fails).</p>
+<p>The kext <strong>never</strong> enables bus mastering (no DMA) and does not load firmware.</p>
+<h2 id="building">Building</h2>
+<pre><code class="language-sh">make kext            # on a Mac; output: build/RDNA3Accel.kext
+make -C kext check   # plutil, kmod_info and metaclass symbols, kextlibs
+</code></pre>
+<h2 id="loading">Loading</h2>
+<p>Recommended: injection through OpenCore (works regardless of the kext security
+in Sequoia):</p>
+<ol>
+<li>Copy <code>RDNA3Accel.kext</code> to <code>EFI/OC/Kexts/</code>.</li>
+<li>In <code>config.plist &gt; Kernel &gt; Add</code> add an entry:
+<code>BundlePath = RDNA3Accel.kext</code>, <code>ExecutablePath = Contents/MacOS/RDNA3Accel</code>,
+<code>PlistPath = Contents/Info.plist</code>, <code>Enabled = true</code>, <code>Arch = x86_64</code>,
+<code>MinKernel = 24.0.0</code> (Sequoia).</li>
+<li>Keep a second entry in the OpenCore picker / a second EFI copy with <code>Enabled = false</code>
+as a way out.</li>
+</ol>
+<p>Alternatively, with SIP disabled: <code>sudo kmutil load -p build/RDNA3Accel.kext</code>.</p>
+<p>Injection through OpenCore only works as long as the kext links only against IOPCIFamily.
+From Stage 3 on (IOFramebuffer, IOAccelerator) the kexts must load from the Auxiliary Kernel
+Collection (<code>/Library/Extensions</code> + <code>kmutil</code>), because IOGraphicsFamily and IOAcceleratorFamily2
+exist only in Apple's kernel collections. NullMoth does it this way, see <a href="NULLMOTH-ANALYSIS.html">NULLMOTH-ANALYSIS</a>.</p>
+<h2 id="what-to-check-after-boot">What to check after boot</h2>
+<pre><code class="language-sh">log show --last boot --predicate 'eventMessage CONTAINS &quot;RDNA3:&quot;'
+ioreg -l -w0 -r -c RDNA3Accel
+tools/macos/ioreg_discovery.sh          # (rdna3lvl&gt;=2) save + decode the blob
+</code></pre>
+<p>Expected at <code>rdna3lvl=2</code> for the RX 7800 XT:</p>
+<ul>
+<li><code>RDNA3,VRAMSizeMB = 16384</code></li>
+<li><code>IP discovery ... : ok</code></li>
+<li>in the table: GC <strong>11.0.3</strong>, along with MP0/MP1 (PSP/SMU), SDMA, DMU (DCN), VCN, NBIF.
+Compare the exact versions with Linux; <code>amd_discovery_dump</code> also hints which
+firmware files will be needed in stage 2.</li>
+</ul>
+<h3 id="comparison-with-linux-stage-completion-criterion">Comparison with Linux (stage completion criterion)</h3>
+<pre><code class="language-sh"># Linux, same card:
+sudo tools/linux/dump_amdgpu_reference.sh ref/
+build/host/amd_discovery_dump ref/discovery.bin &gt; linux.txt
+# macOS:
+tools/macos/ioreg_discovery.sh mac.bin &amp;&amp; build/host/amd_discovery_dump mac.bin &gt; mac.txt
+diff linux.txt mac.txt     # expected: no differences
+</code></pre>
+<h2 id="when-something-goes-wrong">When something goes wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>kext does not load, no logs</td>
+<td>another driver won the match (fake-ID in OpenCore?) or wrong <code>Arch</code>/<code>MinKernel</code></td>
+</tr>
+<tr>
+<td><code>device not in D0</code></td>
+<td>card put to sleep by firmware; add it to <code>DeviceProperties</code> with <code>built-in</code>, check the ASPM/ASPM L1 settings in the BIOS</td>
+</tr>
+<tr>
+<td><code>MMIO reads all-ones</code></td>
+<td>BAR5 not assigned (enable Above 4G), card in D3cold, or wrong slot</td>
+</tr>
+<tr>
+<td><code>IFWI NOT ready</code></td>
+<td>the card was not initialized by firmware; check that it works under Linux/Windows</td>
+</tr>
+<tr>
+<td><code>RCC_CONFIG_MEMSIZE = 0</code></td>
+<td>VRAM not trained; discovery table in system memory (unusual for a dGPU)</td>
+</tr>
+<tr>
+<td><code>no discovery signature</code></td>
+<td>different VRAM layout than we assume; compare <code>DRIVER_SCRATCH_0..2</code> with Linux</td>
+</tr>
+<tr>
+<td>hang at <code>rdna3lvl=N</code></td>
+<td>stay at <code>N-1</code>, file an issue with the log from the previous level</td>
+</tr>
+</tbody>
+</table>
+<h2 id="offset-sources">Offset sources</h2>
+<p>All constants in <code>kext/src/RDNA3Regs.h</code> and <code>common/amd_discovery.*</code> were
+checked against Linux (master branch, October 2026):
+<code>amdgpu_discovery.c</code>, <code>include/discovery.h</code>, <code>include/soc15_hw_ip.h</code>,
+<code>asic_reg/gc/gc_11_0_3_offset.h</code>, <code>asic_reg/nbio/nbio_4_3_0_offset.h</code>,
+<code>amdgpu_device.c</code> (BAR5 = MMIO), <code>amdgpu_device_mm_access()</code> (the
+<code>MM_INDEX</code>/<code>MM_DATA</code> sequence).</p>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

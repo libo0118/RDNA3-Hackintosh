@@ -30,7 +30,7 @@
  * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect
  * VRAM read window, which is what amdgpu does as its very first access).
  * Levels 4+ program the GPU (PSP, firmware) - test them with SSH access
- * (docs/STAGE3.md). Bus mastering stays off below level 6: PSP and the
+ * (docs/STAGE3.html). Bus mastering stays off below level 6: PSP and the
  * firmware buffers all live in VRAM; level 6 turns it on once GPUVM can
  * translate, so GTT BOs (RDNA3Gtt, IODMACommand) are reachable.
  *

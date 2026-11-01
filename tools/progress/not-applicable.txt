@@ -6,7 +6,7 @@
 # ported still counts.
 #
 # One rule per line: a regex matching the whole name, two or more spaces,
-# then the reason shown in docs/status/STATUS.md.
+# then the reason shown in docs/status/STATUS.html.
 
 # ---- not on this card
 .*(ecc|poison|bad_mem|bad_page).*  ECC / RAS: the card's GDDR6 has no ECC

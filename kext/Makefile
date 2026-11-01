@@ -1,7 +1,7 @@
 # Builds RDNA3Accel.kext on macOS with the Xcode command line tools.
 #   make                 -> build/RDNA3Accel.kext
 #   make check           -> kextlibs / plist sanity (does not load anything)
-# Loading on the test machine: see docs/STAGE1.md.
+# Loading on the test machine: see docs/STAGE1.html.
 
 KEXT     := RDNA3Accel
 VERSION  := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Info.plist 2>/dev/null || echo 0.1.0)

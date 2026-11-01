@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 0: preparing the test setup - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 0: preparing the test setup</div>
+  <h1>Stage 0: preparing the test setup</h1>
+  <p class="muted">How to prepare the test setup before anything is loaded on the RX 7800 XT: a second display card, SIP, boot-args, debugging, and the NullMoth collaboration.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#1-collaboration-instead-of-writing-everything-from-scratch">1. Collaboration instead of writing everything from scratch</a></li><li><a href="#2-hardware">2. Hardware</a></li><li><a href="#3-system-and-debugging">3. System and debugging</a></li><li><a href="#4-build-tools">4. Build tools</a></li><li><a href="#5-checklist-before-the-first-kext-load">5. Checklist before the first kext load</a></li></ol></nav>
+<p>Before you load anything on the 7800 XT, build a setup where a driver bug
+does not leave you without a screen and without logs.</p>
+<h2 id="1-collaboration-instead-of-writing-everything-from-scratch">1. Collaboration instead of writing everything from scratch</h2>
+<p>The NVIDIA project is the <strong>NullMoth NVIDIA Driver</strong>:
+<a href="https://github.com/nullmoth/nvidia-macos-driver">https://github.com/nullmoth/nvidia-macos-driver</a> (v1.1.0, Sequoia 15.7/15.8,
+RTX 5060). Full analysis: <a href="NULLMOTH-ANALYSIS.html">NULLMOTH-ANALYSIS.html</a>. Key points:</p>
+<ul>
+<li>Their Metal plugin loads the Vulkan driver through <code>dlopen()</code> and mostly uses
+standard Vulkan, so <strong>it may work on top of RADV once the NVK hooks are disabled</strong>.</li>
+<li>The AIR→SPIR-V translator is LGPL and can be used unchanged.</li>
+<li>Kernel↔userspace is done by <strong>emulating Linux ioctls on IOKit</strong>. For us this
+means: the kext implements the amdgpu UAPI, and RADV works with the existing winsys.</li>
+<li>The plugin and the kexts are under <strong>PolyForm Noncommercial</strong>, so they must not
+be pasted into our MIT repo without the author's permission.</li>
+</ul>
+<p>To do by hand (needs your account): join the NullMoth Discord (the link is not
+in the README; it is mentioned in the bug reporting section of app 1401)
+and write to the author. Template:</p>
+<div class="note">
+<p>Hi, I am writing an open macOS driver for RDNA3 (RX 7800 XT):
+https://github.com/voten641/rdna3-hackintosh. The kext already recognizes the card and reads
+the IP discovery table. I plan to do what you did: a kext that emulates the Linux UAPI
+(amdgpu in my case) through IOConnectCallMethod, with Mesa's RADV on top. Your
+Metal plugin loads the ICD through dlopen, so it could work on top of RADV.</p>
+<ol>
+<li>Would you consider a &quot;generic Vulkan&quot; mode for the plugin (NVK hooks optional)?</li>
+<li>Is a license possible that allows combining the plugin with MIT code, or
+a shared, neutral part of the plugin?</li>
+<li>What minimal set of Vulkan features does the plugin require? I will check them
+on RADV under Linux beforehand.</li>
+</ol>
+<p>I will gladly contribute fixes back to the plugin and the translator.</p>
+</div>
+<h2 id="2-hardware">2. Hardware</h2>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Card</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Display</td>
+<td>natively supported (e.g. RX 6600 / RX 580)</td>
+<td>macOS has a working picture regardless of our kext</td>
+</tr>
+<tr>
+<td>Test</td>
+<td>RX 7800 XT</td>
+<td>no monitors connected at the start of stages 1–2</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>In BIOS/UEFI set the display card as primary (primary PCIe slot / &quot;Primary
+Display&quot;), enable <em>Above 4G decoding</em>. ReBAR can stay enabled, but the kext in
+stage 1 does not use BAR0.</li>
+<li><strong>Do not</strong> spoof the 7800 XT as another device-id in OpenCore <code>DeviceProperties</code>
+and do not load WhateverGreen fake-IDs for it, because then Apple's driver
+matches it instead of ours.</li>
+<li>Ideally also have a Linux disk in the same computer: amdgpu on the same
+card is the reference we compare every read against
+(<code>tools/linux/dump_amdgpu_reference.sh</code>).</li>
+</ul>
+<h2 id="3-system-and-debugging">3. System and debugging</h2>
+<ul>
+<li>
+<p><strong>macOS Sequoia 15.x</strong> (like the NVIDIA project). Write down the exact build (<code>sw_vers</code>),
+because the Kernel Debug Kit must match it exactly.</p>
+</li>
+<li>
+<p><strong>SIP disabled</strong>: in OpenCore <code>NVRAM &gt; Add &gt; 7C436110-AB2A-4BBB-A880-FE41995C9F82 &gt; csr-active-config = EF0F0000</code> (0xFEF) and <code>SecureBootModel = Disabled</code>.</p>
+</li>
+<li>
+<p><strong>boot-args</strong> during development:</p>
+<pre><code>-v keepsyms=1 debug=0x144 rdna3lvl=0
+</code></pre>
+<p><code>debug=0x144</code> = NMI from the power button (0x4) + ARP for the KDP debugger (0x40) +
+panic log on screen (0x100). <code>keepsyms=1</code> gives symbols in backtraces.</p>
+</li>
+<li>
+<p><strong>Kernel Debug Kit</strong> for exactly this build from developer.apple.com: kernel
+symbols for LLDB (<code>lldb /Library/Developer/KDKs/&lt;KDK&gt;/System/Library/Kernels/kernel</code>).</p>
+</li>
+<li>
+<p><strong>LLDB over the network (KDP) and panic dumps (netdump)</strong>:</p>
+<pre><code>debug=0x144 kdp_match_name=en0                      # LLDB: kdp-remote &lt;IP&gt;
+debug=0x144 kdp_match_name=en0 _panicd_ip=&lt;IP&gt;      # core dump to kdumpd
+</code></pre>
+<p>Note: KDP only works with network cards whose Apple driver supports
+polling mode. Popular hackintosh drivers (Realtek, Intel kexts from
+community repositories) usually <strong>do not work</strong> with KDP. Check this at the very
+start; the alternative is a USB-Ethernet adapter supported by Apple or a
+PCIe Intel I210/I225 with the Apple driver.</p>
+</li>
+<li>
+<p>Logs without a debugger: <code>log show --last boot --predicate 'sender == &quot;RDNA3Accel&quot;'</code>
+or <code>sudo dmesg | grep RDNA3</code>.</p>
+</li>
+</ul>
+<h2 id="4-build-tools">4. Build tools</h2>
+<ul>
+<li>A Mac with Xcode (full Xcode, not just the CLT, so that <code>Kernel.framework</code> is in the SDK).</li>
+<li>We build the kext with <code>make kext</code>; CI does the same on the self-hosted macOS runner, so the artifact
+from GitHub Actions is also fine for testing.</li>
+<li>Linux is enough for work on portable code (<code>common/</code>, tests, tools).</li>
+</ul>
+<h2 id="5-checklist-before-the-first-kext-load">5. Checklist before the first kext load</h2>
+<ul>
+<li><input type="checkbox" disabled> The second card shows a picture, 7800 XT has no monitor</li>
+<li><input type="checkbox" disabled> <code>ioreg -l | grep -i 747e</code> shows the 7800 XT PCI device without a driver</li>
+<li><input type="checkbox" disabled> SIP disabled (<code>csrutil status</code>)</li>
+<li><input type="checkbox" disabled> boot-args as above, the OpenCore picker can boot a second configuration
+<strong>without</strong> the kext (rescue)</li>
+<li><input type="checkbox" disabled> Reference dump from Linux done (<code>tools/linux/dump_amdgpu_reference.sh</code>)</li>
+</ul>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

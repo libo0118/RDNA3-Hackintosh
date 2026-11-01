@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 3: display (DCN 3.2) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 3: display (DCN 3.2)</div>
+  <h1>Stage 3: display (DCN 3.2)</h1>
+  <p class="muted">Stage 3: display on DCN 3.2 - taking over the GOP mode, DP AUX/HPD/EDID, VBIOS tables, DMCUB, mode calculations, DP SST mode set, DSC/FEC/MST and the limits.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#parts">Parts</a></li><li><a href="#gates">Gates</a></li><li><a href="#tests-with-a-single-card-no-igpu">Tests with a single card (no iGPU)</a></li><li><a href="#dp-aux-hpd-edid-first-step-of-display-core">DP AUX, HPD, EDID (first step of Display Core)</a></li><li><a href="#vbios-object-table-and-atombios-interpreter-step-2">VBIOS object table and AtomBIOS interpreter (step 2)</a></li><li><a href="#dmcub-step-3">DMCUB (step 3)</a></li><li><a href="#mode-calculations-step-4a">Mode calculations (step 4a)</a></li><li><a href="#displayport-sst-mode-set-step-5">DisplayPort SST mode set (step 5)</a></li><li><a href="#dsc-fec-and-dp-mst-step-6">DSC, FEC and DP MST (step 6)</a></li><li><a href="#limitations-to-do">Limitations (to do)</a></li></ol></nav>
+<p>A full port of Display Core from amdgpu (modesetting, link training, DMCUB) is over
+100k lines. The first step is much smaller: <strong>we take over the mode that
+the VBIOS / UEFI GOP set</strong>. The card already displays a picture from a linear buffer in VRAM;
+the driver only reads where that buffer is and what the timing looks like, and then
+switches (flips) the display to other buffers in VRAM that the
+accelerator prepared. The link, clocks and OPP/MPC routing stay as the firmware left them.</p>
+<figure><svg viewBox="0 0 480 403" role="img" aria-label="Stage 3 display stack" style="width:100%;max-width:480px"><rect x="10" y="10" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="32" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">WindowServer / RDNA3Accelerator</text><text x="240.0" y="48" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">surface flips</text><line x1="36" y1="61" x2="36" y2="82" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah1)"/><rect x="10" y="83" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="105" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Framebuffer.kext</text><text x="240.0" y="121" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">fb/, IOFramebuffer, from NVRMFB</text><line x1="36" y1="134" x2="36" y2="155" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah1)"/><rect x="10" y="156" width="460" height="69" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="178" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Accel.kext: rdna3DisplayInfo / Flip /</text><text x="240.0" y="196" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">Status / Crc</text><text x="240.0" y="212" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">kext/src/RDNA3Display.cpp</text><line x1="36" y1="225" x2="36" y2="250" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah1)"/><text x="48" y="238" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">read + flip</text><rect x="10" y="251" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="273" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">hw/dcn32.c (MIT)</text><line x1="36" y1="287" x2="36" y2="308" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah1)"/><rect x="10" y="309" width="460" height="84" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="331" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">DCN 3.2: HUBP (address, pitch, format) -&gt;</text><text x="240.0" y="349" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">OTG (timing) -&gt; monitor</text><text x="240.0" y="365" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">GOP / VBIOS set the mode; frame counter and CRC read</text><text x="240.0" y="380" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">back</text><defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs></svg><figcaption>The display path from WindowServer down to the hardware, top to bottom.</figcaption></figure>
+<details><summary>Text version of the diagram</summary>
+<pre><code>GOP / VBIOS ──▶ DCN 3.2: HUBP (address, pitch, format) ─▶ OTG (timing) ─▶ monitor
+                    ▲  read + flip                         ▲ frame counter, CRC
+          hw/dcn32.c (MIT) ◀── RDNA3Accel.kext: rdna3DisplayInfo/Flip/Status/Crc
+                                     ▲  (kext/src/RDNA3Display.cpp)
+                         RDNA3Framebuffer.kext (fb/, IOFramebuffer, from NVRMFB)
+                                     ▲
+                    WindowServer / RDNA3Accelerator (surface flips)
+</code></pre>
+</details>
+<h2 id="parts">Parts</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hw/dcn32.c</code></td>
+<td>256×256 ARGB hardware cursor (HUBP + DPP, like <code>hubp2_cursor_set_*</code> / <code>dpp2_set_cursor_attributes</code>); finds lit heads (HUBP not blanked, OTG enabled), reads format, tiling, DCC, viewport, pitch, MC address, OTG timing (like <code>optc1_get_hw_timing</code>); flip (<code>hubp2_program_surface_flip_and_addr</code>, pitch change under <code>SURFACE_UPDATE_LOCK</code>), flip pending, frame counter, line, vblank, OTG CRC</td>
+</tr>
+<tr>
+<td><code>kext/src/RDNA3Display.cpp</code></td>
+<td>at <code>rdna3lvl&gt;=2</code> reads the heads (<strong>read only</strong>), measures the refresh rate from the frame counter, answers framebuffer calls; the VRAM allocators start above the GOP buffer (4K = 32 MiB)</td>
+</tr>
+<tr>
+<td><code>fb/rdna3-fb.cpp</code></td>
+<td><code>RDNA3Framebuffer</code>: one mode (the one from firmware), BAR0 aperture, VBL from the OTG frame counter, flips for the accelerator; without the core or without a usable head it works as a plain framebuffer on the bootloader console buffer (<code>PE_Video</code>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="gates">Gates</h2>
+<table>
+<thead>
+<tr>
+<th>Boot-arg</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>no <code>rdna3fb=1</code></td>
+<td><code>RDNA3Framebuffer</code> does not start; Apple's IONDRVFramebuffer drives the screen</td>
+</tr>
+<tr>
+<td><code>rdna3fb=1</code></td>
+<td>our framebuffer takes the <code>IOFramebuffer</code> category (score 30000 &gt; 20000 IONDRV); if <code>start()</code> fails, IOKit falls back to IONDRV</td>
+</tr>
+<tr>
+<td><code>rdna3lvl=2</code> (or higher)</td>
+<td>the core knows the heads: DCN mode (flips, real VBL) instead of console mode</td>
+</tr>
+<tr>
+<td><code>rdna3cursor=0</code></td>
+<td>software cursor instead of the DCN hardware cursor</td>
+</tr>
+<tr>
+<td><code>-rdna3off</code></td>
+<td>disables everything</td>
+</tr>
+</tbody>
+</table>
+<p>Writes to DCN registers happen only on a flip or when CRC is enabled,
+that is, only once the accelerator starts displaying its own surfaces.</p>
+<h2 id="tests-with-a-single-card-no-igpu">Tests with a single card (no iGPU)</h2>
+<p>macOS without a driver for the 7800 XT boots on the GOP buffer (IONDRVFramebuffer):
+no acceleration, one resolution, one monitor. That is enough.</p>
+<ol>
+<li>BIOS: CSM disabled (pure UEFI GOP). With Resizable BAR on, set
+<code>ResizeAppleGpuBars = 10</code> (1 GiB) or <code>8</code> in OpenCore, or turn it off: macOS
+takes no BAR above 1 GiB (DRIVER-PLAN N62). <strong>Do not</strong> block
+<code>IONDRVSupport</code> in this stage.</li>
+<li>In macOS enable Remote Login (SSH) and connect from another device.</li>
+<li>Install the kexts (<code>package/install.sh</code>), but <strong>do the first tests by
+loading them manually</strong>, not at boot: a hard reset fixes a hang.</li>
+<li>Order:
+<ol>
+<li><code>rdna3lvl=2</code>: reads only. <code>ioreg -l -w0 | grep RDNA3</code> should show
+<code>RDNA3,DisplayHeads</code>, <code>RDNA3,DisplayReserveEnd</code>; in the log
+<code>display: head 0 …x… pitch … usable</code>.</li>
+<li><code>rdna3lvl=2 rdna3fb=1</code>: our framebuffer instead of IONDRV. Expected:
+the desktop looks the same, in the log <code>RDNA3-fb: DCN mode: …</code>. If the screen
+goes dark: SSH and logs, then reboot without <code>rdna3fb=1</code>.</li>
+<li>Only then the accelerator (<code>rdna3accel=1</code>, Stage 7) and flips.</li>
+</ol>
+</li>
+<li>Logs: <code>log show --last 10m --predicate 'eventMessage CONTAINS &quot;RDNA3&quot;'</code>.</li>
+</ol>
+<h2 id="dp-aux-hpd-edid-first-step-of-display-core">DP AUX, HPD, EDID (first step of Display Core)</h2>
+<p><code>hw/dcaux.c</code> (port of <code>dce_aux.c</code>: arbiter, <code>AUX_SW_DATA</code> FIFO, <code>AUX_SW_GO</code>,
+status, reply) provides native DPCD read/write, I2C-over-AUX and EDID
+(128 B + extensions, E-DDC segment), <code>dcaux_hpd_sense</code> reads
+<code>DC_HPD_INT_STATUS.DC_HPD_SENSE</code>. The AUX engine ↔ connector ↔ OTG assignment
+is in the VBIOS object table (not parsed yet), so the kext probes
+all 5 engines at startup (<code>RDNA3,Connectors</code>,
+<code>RDNA3,Connector&lt;n&gt;,{AUX,HPD,DPCD,EDID,Monitor,Modes}</code>), and <code>hw/edid.c</code>
+extracts from the EDID the name, the detailed modes (DTD, including CTA-861), the standard
+and the established ones. <code>RDNA3Framebuffer</code> answers <code>hasDDCConnect</code>/<code>getDDCBlock</code>
+(<code>rdna3DisplayEdid</code>: head 0 = first connected sink with an EDID), so
+macOS builds <code>IODisplayEDID</code> and shows the monitor name. Modesetting from these
+modes still needs: an ATOM interpreter (the <code>TransmitterControl</code>,
+<code>SetPixelClock</code> tables), DP link training and OTG/HUBP programming for the new mode.</p>
+<h2 id="vbios-object-table-and-atombios-interpreter-step-2">VBIOS object table and AtomBIOS interpreter (step 2)</h2>
+<p><code>vbios_display_paths</code> (port of <code>bios_parser2</code>: <code>get_bios_object</code>,
+<code>get_hpd_record</code>, <code>get_gpio_i2c_info</code>) reads <code>displayobjectinfo</code> v1.4/v1.5
+and <code>gpio_pin_lut</code>: connector (DP/HDMI/USB-C), encoder (UNIPHY A..G), DDC line
+(= AUX engine), HPD pin, encoder capabilities (HBR3, UHBR, MST) and link
+limit. The kext publishes <code>RDNA3,DisplayPath&lt;n&gt;</code> and labels the AUX connectors with their type.
+Which OTG drives a path is not in the VBIOS: Display Core assigns pipes
+at modeset.</p>
+<p><code>hw/atom.c</code> is a port of <code>atom.c</code> from amdgpu: all 126 opcodes, IIO methods,
+FB window (scratch), nested <code>CALLTABLE</code> (limit 32), loop detection
+(20 s of requested delays) plus an opcode budget. Unlike Linux, it does not
+allocate memory (workspace from a pool in the context) and checks the image bounds
+on every bytecode read. The kext creates a context and publishes the versions of the
+<code>DIGxEncoderControl</code>, <code>DIG1TransmitterControl</code>, <code>SetPixelClock</code>,
+<code>EnableDispPowerGating</code>, <code>SetDCEClock</code> tables (<code>RDNA3,AtomCommandTables</code>), but
+does not execute anything yet. The simulator has a mini bytecode assembler and tests
+every opcode group, IIO, FB, loop abort, out-of-image access and
+recursion.</p>
+<p>Note: on DCN 3.2 Linux does not execute these tables in the driver
+(<code>dcn32 debug.dmub_command_table = true</code>). <code>command_table2</code> sends them to
+DMCUB as <code>DMUB_CMD__VBIOS</code> commands, and the DMCUB firmware executes them from a copy
+of the VBIOS in the CW3 window. So the interpreter is a fallback path and a
+diagnostic tool, and the main path is DMCUB (below).</p>
+<h2 id="dmcub-step-3">DMCUB (step 3)</h2>
+<p><code>hw/dmub32.c</code> is a port of <code>dmub_srv.c</code> + <code>dmub_dcn32.c</code> and
+<code>dm_dmub_sw_init</code>/<code>dm_dmub_hw_init</code>:</p>
+<ul>
+<li>reads the <code>dcmub_firmware_header_v1_0</code> header and the
+<code>dmub_fw_meta</code> metadata block (behind the 256- or 512-byte PSP footer), lays out 12 windows
+(inst const, stack, BSS, VBIOS, mailbox, trace, FW state, scratch, IB,
+shared state, LSDMA, cursor offload) in VRAM, with alignment as in Linux;</li>
+<li>reset: <code>GPINT STOP_FW</code> to the running firmware (left by the
+VBIOS), waiting for <code>0xDEADDEAD</code> in SCRATCH7 and <code>PWAIT_MODE</code>, soft reset,
+disabling the CW2-CW7 windows, clearing the mailboxes;</li>
+<li>the instruction image is loaded by PSP (already in the <code>LOAD_IP_FW</code> plan), so CW0/CW1
+stay PSP's; the backdoor path (copying the image to CW0 with the physical
+FB address) is there too;</li>
+<li>windows CW3 (VBIOS), CW4 (inbox1 + outbox1), CW5 + region 5 (trace /
+outbox0), CW6 (FW state), boot options, <code>reset_release</code>, waiting for
+<code>DAL_FW | MAILBOX_RDY</code>;</li>
+<li>inbox1 ring (64-byte commands, wrap, full ring, reading the reply from the
+slot), <code>QUERY_FEATURE_CAPS</code> as the first exchange, <code>DMUB_CMD__VBIOS</code>
+with <code>DIG1TransmitterControl</code> v1.7.</li>
+</ul>
+<p>In the kext this is level 5 behind the <code>rdna3dmub=1</code> flag (off by default, because
+DMCUB drives the display brought up by GOP and the reset must first be
+checked on the card). Result: <code>RDNA3,DMUB</code>, <code>RDNA3,DMUBResult</code>,
+<code>RDNA3,DMUBVersion</code>, <code>RDNA3,DMUBBootStatus</code>, <code>RDNA3,DMUBCaps</code>.
+The simulator models the firmware: it checks the windows, the VBIOS copy and the mailbox before
+reporting ready, answers STOP_FW, executes commands from the ring;
+the tests cover the real <code>dcn_3_2_1_dmcub.bin</code> (version 0x07003300).</p>
+<h2 id="mode-calculations-step-4a">Mode calculations (step 4a)</h2>
+<p><code>hw/dcn32_mode.c</code> computes what can be checked without the card: OTG field values
+for a mode from the EDID exactly like <code>optc1_program_timing</code> (with the front porch
+correction), DP 8b/10b link bandwidth from the rate code and the lane count (with
+a 0.5 % margin for downspread), a mode filter (no detailed timing,
+interlace, link too slow at 24 bpp, conservative single-pipe limits without
+ODM) and detection of which EDID mode the GOP drives. The simulator checks that
+the values computed for the 1440p mode from the EDID are exactly the ones the GOP has in the
+OTG. The kext publishes <code>RDNA3,Head0EdidMode</code> and <code>RDNA3,Connector&lt;n&gt;,ModesUsable</code>,
+and the log describes each mode with the reason it was rejected.</p>
+<h2 id="displayport-sst-mode-set-step-5">DisplayPort SST mode set (step 5)</h2>
+<p><code>hw/dcn32_dp.c</code> ports the DP SST / 8b/10b part of Display Core so a DP head
+can be re-timed by the driver, as the TMDS heads already are
+(<code>hw/dcn32_modeset.c</code>): <code>retrieve_link_cap</code> (subset) with
+<code>dp_retrieve_lttpr_cap</code> and <code>wake_up_aux_channel</code>, <code>dp_get_max_link_cap</code>
+(sink caps, the VBIOS encoder caps, an LTTPR's limits),
+<code>link_decide_link_settings</code> / <code>decide_dp_link_settings</code> over
+<code>dp_link_bandwidth_kbps</code> and <code>dc_bandwidth_in_kbps_from_timing</code>,
+<code>decide_fallback_link_setting</code>, <code>dp_verify_link_cap_with_retries</code>,
+<code>perform_link_training_with_retries</code>, <code>dp_perform_link_training</code>,
+<code>dp_perform_8b_10b_link_training</code> with its clock recovery and channel
+equalization sequences (TPS1, then TPS2/3/4 as sink and encoder allow),
+<code>perform_post_lt_adj_req_sequence</code>, <code>dp_transition_to_video_idle</code>. The
+hardware side is the DCN 3.2 one of DC: the DIO link hwss, the dcn10 link
+encoder (training pattern registers, <code>enc1_configure_encoder</code>, and the VBIOS
+TransmitterControl ENABLE / DISABLE / SETUP_VSEMPH, sent to the DMCUB as for
+TMDS), the stream encoder (<code>enc1_stream_encoder_dp_set_stream_attribute</code>
+MSA, <code>enc1_stream_encoder_dp_blank</code>, <code>enc32_stream_encoder_dp_unblank</code> M/N
+and FIFOs) and <code>dcn31_program_pix_clk</code>'s DP branch (the DP DTO from
+DPREFCLK). The mode set takes the link down as <code>link_set_dpms_off</code> does,
+programs the timing, verifies the link cap once, and brings the link up as
+<code>link_set_dpms_on</code>; a training that fails puts the old timing back.</p>
+<p>Not ported: UHBR / 128b/132b (HPO encoder, DTBCLK), non-transparent LTTPR
+training (an LTTPR is put in transparent mode), eDP, the source OUI write
+(FEC, DSC and MST: step 6 below). The stream encoder keeps the pixels per cycle the GOP
+chose (DC's <code>enable_dp_dig_pixel_rate_div_policy</code> would choose two on DCN
+3.2), and the DCCG pixel rate divider stays as the GOP set it.</p>
+<p>Gate: <code>rdna3dplink=1</code> (default off, not in the default profile) with
+<code>rdna3modeset=1</code>; step <code>dplink</code> of the ladder. The simulator has a DP sink
+with a link layer: it locks clock recovery after a set number of
+voltage-swing requests, channel EQ after pre-emphasis requests, and fails
+clock recovery at HBR3 to exercise the fallback.</p>
+<h2 id="dsc-fec-and-dp-mst-step-6">DSC, FEC and DP MST (step 6)</h2>
+<p>On top of the DP SST mode set, two optional parts, each behind its own
+boot-arg and both needing <code>rdna3dplink=1</code>:</p>
+<p><strong>FEC and DSC</strong> (<code>rdna3dsc=1</code>, ladder step <code>dsc</code>). <code>hw/dcn32_dsc.c</code> ports
+DC's DSC policy (<code>dc_dsc_parse_dsc_dpcd</code>, <code>dc_dsc_compute_config</code>,
+<code>setup_dsc_config</code>, <code>decide_dsc_target_bpp_x16</code>, <code>dsc2_get_enc_caps</code>,
+<code>dc_dsc_compute_bandwidth_range</code>), the PPS (<code>dsc2_get_packed_pps</code>:
+<code>dscc_compute_dsc_parameters</code>, <code>calc_rc_params</code> with DC's QP tables,
+<code>drm_dsc_compute_rc_parameters</code>, <code>drm_dsc_pps_payload_pack</code>; DC's floating
+point rate control is computed on exact rationals, equal to DC's double
+results for every bpp) and the hardware (<code>dsc2_set_config</code> /
+<code>dsc_write_to_registers</code>, <code>dsc2_enable</code> / <code>_disable</code> / <code>_disconnect</code>,
+<code>dcn32_dsc_pg_control</code> for DOMAIN16..19, <code>optc3_set_dsc_config</code>,
+<code>enc32_dp_set_dsc_config</code>, <code>enc3_dp_set_dsc_pps_info_packet</code> through VPG
+generic packets 11..14). <code>hw/dcn32_dp.c</code> reads the sink's FEC and DSC caps
+(DPCD 0x090, 0x060..0x06f, branch 0x0a0..0x0a2), follows
+<code>dp_should_enable_fec</code> (FEC ready before the training, FEC on after it, 97 %
+link efficiency), <code>apply_dsc_policy_for_stream</code> (DSC when the mode does not
+fit the link uncompressed) and <code>link_set_dsc_enable</code> / <code>dp_set_dsc_on_rx</code> /
+<code>link_set_dsc_pps_packet</code> in <code>link_set_dpms_on</code> / <code>_off</code>. One DSC engine per
+stream (the pipe's own, <code>dcn20_acquire_dsc</code>); DCN 3.2 has no DSCCLK DTO
+(DSCCLK = DISPCLK / 3). Not ported: ODM combine (modes wider than 4096, so
+no 8K), DSC over MST, YCbCr 4:2:2 / 4:2:0 DSC, eDP DSC.</p>
+<p><strong>MST</strong> (<code>rdna3mst=1</code>, ladder step <code>mst</code>). <code>hw/dp_mst.c</code> ports the DRM MST
+helper parts a single stream needs: the sideband message layer (header CRC4,
+body CRC8, 48-byte chunks to DOWN_REQ, replies polled through the ESI
+registers), LINK_ADDRESS, ENUM_PATH_RESOURCES, CLEAR_PAYLOAD_ID_TABLE,
+ALLOCATE_PAYLOAD, REMOTE_DPCD_READ and REMOTE_I2C_READ (the sinks' EDIDs),
+the VC payload ID table (DPCD 0x1c0..0x1c2, 0x2c0), the ACT check, PBN and
+time slots (<code>drm_dp_calc_pbn_mode</code>, <code>drm_dp_atomic_find_time_slots</code>).
+<code>hw/dcn32_dp_mst.c</code> is the DC side: <code>allocate_mst_payload</code> /
+<code>deallocate_mst_payload</code>, the stream allocation table and the DIG's
+DP_MSE_SAT rows with the ACT trigger, DP_MSE_RATE (<code>slot X.Y</code>), DIG_MODE 5
+and TransmitterControl in DP MST mode. The kext takes an SST head with an
+MST capable sink over at the next mode switch: MST on, the topology probed,
+every sink's EDID read (<code>RDNA3,Head&lt;n&gt;,MSTPorts</code>), the head's stream sent
+to one sink (<code>rdna3mstport=N</code>, else the first); the modes offered are then
+that sink's. When the first MST stream does not run, the head goes back to
+SST. Not ported: more than one stream (a second head on the same link
+needs a second DIG front end on the same back end, a second payload and
+SAT row, and a pipe the clone path brings up for it), UP requests
+(connection status notifications: the topology is read once), DSC over MST,
+128b/132b MST.</p>
+<p>The simulator models a DSC + FEC sink (the PPS the source sends is checked
+against an independent double precision reference for 3840x2160@144 10 bpc
+on HBR3 x4, 7680x4320@60 and a 12 bpp 1080p config against the VESA
+values) and an MST hub with two sinks (synthetic EDIDs), which checks
+every sideband CRC, answers the messages, keeps the payload table and
+applies it at the ACT only when the source's SAT rows match it.</p>
+<h2 id="limitations-to-do">Limitations (to do)</h2>
+<ul>
+<li>one head (head 0), one mode; no EDID (DCN AUX/I2C), no change of
+resolution or refresh rate, no gamma;</li>
+<li>VBLANK interrupts from IH (now polling the frame counter);</li>
+<li>full DC (modesetting) later, a separate large stage.</li>
+</ul>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

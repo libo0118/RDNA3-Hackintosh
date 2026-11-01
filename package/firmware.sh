@@ -1,5 +1,5 @@
 #!/bin/sh
-# firmware.sh - the AMD microcode RDNA3Accel loads (docs/FIRMWARE.md). The
+# firmware.sh - the AMD microcode RDNA3Accel loads (docs/FIRMWARE.html). The
 # project does not ship it: this script downloads it from linux-firmware
 # (a pinned tag, SHA-256 checked) or copies it from a local linux-firmware
 # checkout, into /Library/Application Support/RDNA3/firmware, where the kext
@@ -81,7 +81,7 @@ place() {
     done
     chmod 755 "$DEST"; chmod 644 "$DEST"/* 2>/dev/null
     if [ "$(id -u)" = 0 ] && [ "$(uname -s)" = Darwin ]; then chown -R root:wheel "$DEST"; fi
-    [ -f "$DEST/LICENSE.amdgpu" ] || say "NOTE: no LICENSE.amdgpu next to the files (its terms: docs/FIRMWARE.md)"
+    [ -f "$DEST/LICENSE.amdgpu" ] || say "NOTE: no LICENSE.amdgpu next to the files (its terms: docs/FIRMWARE.html)"
     say "$NF files in $DEST"
 }
 

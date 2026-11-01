@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analysis: the NullMoth NVIDIA driver and what it means for RDNA3 - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Analysis: the NullMoth NVIDIA driver and what it means for RDNA3</div>
+  <h1>Analysis: the NullMoth NVIDIA driver and what it means for RDNA3</h1>
+  <p class="muted">Analysis of the NullMoth NVIDIA driver for macOS: its architecture, what carries over to RDNA3, the licences and the upstream updates since our import.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#nullmoth-architecture">NullMoth architecture</a></li><li><a href="#key-technical-findings">Key technical findings</a><ol><li><a href="#1-the-metal-plugin-loads-any-vulkan-driver">1. The Metal plugin loads any Vulkan driver</a></li><li><a href="#2-kerneluserspace-emulating-linux-ioctls-through-iokit">2. Kernel↔userspace: emulating Linux ioctls through IOKit</a></li><li><a href="#3-how-metal-finds-the-plugin">3. How Metal finds the plugin</a></li><li><a href="#4-lessons-from-opencore-and-kext-loading-sequoia">4. Lessons from OpenCore and kext loading (Sequoia)</a></li><li><a href="#5-where-amd-is-harder-than-nvidia">5. Where AMD is harder than NVIDIA</a></li></ol></li><li><a href="#licenses-what-is-allowed">Licenses: what is allowed</a></li><li><a href="#proposed-questions-for-the-author-nullmoth-discord">Proposed questions for the author (NullMoth Discord)</a></li><li><a href="#update-2026-10-13-upstream-since-our-import-b9a5a2b--cd8e2bb">Update 2026-10-13: upstream since our import (b9a5a2b → cd8e2bb)</a><ol><li><a href="#1-applegraphicsdevicecontrol-kextsnvrmagdc---we-have-none">1. AppleGraphicsDeviceControl (kexts/NVRMAGDC) - we have none</a></li><li><a href="#2-accelerator-fixes-to-port-accel">2. Accelerator fixes to port (accel/)</a></li><li><a href="#3-framebuffer-behaviour-to-adopt-fb">3. Framebuffer behaviour to adopt (fb/)</a></li><li><a href="#4-metal-plugin-and-translator-metal">4. Metal plugin and translator (metal/)</a></li><li><a href="#5-upstreams-own-amd-path-gpu-port">5. Upstream&#x27;s own AMD path (gpu-port/)</a></li></ol></li><li><a href="#update-2026-10-23-upstream-75e2e28-against-our-present-path-driver-plan-n38">Update 2026-10-23: upstream 75e2e28 against our present path (DRIVER-PLAN N38)</a></li></ol></nav>
+<p>Source: <a href="https://github.com/nullmoth/nvidia-macos-driver">https://github.com/nullmoth/nvidia-macos-driver</a> (commit <code>b9a5a2b</code>,
+8.10.2026, version 1.1.0). This document describes the architecture in our own words.
+<strong>We do not copy code from there</strong>: see “Licenses” below.</p>
+<h2 id="nullmoth-architecture">NullMoth architecture</h2>
+<figure><svg viewBox="0 0 480 361" role="img" aria-label="NullMoth stack" style="width:100%;max-width:480px"><rect x="10" y="10" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="32" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">Metal app</text><line x1="36" y1="46" x2="36" y2="67" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah7)"/><rect x="10" y="68" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="90" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">NVMTLDriver.bundle</text><line x1="36" y1="104" x2="36" y2="125" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah7)"/><rect x="10" y="126" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="148" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">translator</text><text x="240.0" y="164" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">AIR -&gt; SPIR-V</text><line x1="36" y1="177" x2="36" y2="198" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah7)"/><rect x="10" y="199" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="221" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">NVK (Mesa)</text><line x1="36" y1="235" x2="36" y2="256" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah7)"/><rect x="10" y="257" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="279" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">kexts</text><line x1="36" y1="293" x2="36" y2="314" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah7)"/><rect x="10" y="315" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="337" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">GPU</text><defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs></svg><figcaption>NullMoth&#x27;s stack from an application to the GPU.</figcaption></figure>
+<details><summary>Text version of the diagram</summary>
+<pre><code>Metal app ─► NVMTLDriver.bundle ─► translator (AIR → SPIR-V) ─► NVK (Mesa) ─► kexts ─► GPU
+</code></pre>
+</details>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Their implementation</th>
+<th>License</th>
+<th>Our counterpart</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Metal plugin</td>
+<td><code>plugin/</code> (Obj-C, ~7k lines in <code>nvmtl_vk.c</code> alone) implements <code>MTLDevice</code> etc. on top of Vulkan</td>
+<td>PolyForm Noncommercial 1.0.0</td>
+<td>to be agreed with the author (see below)</td>
+</tr>
+<tr>
+<td>Shader translator</td>
+<td><code>translator/</code> (Rust, based on metal2vulkan): Apple AIR → SPIR-V</td>
+<td>LGPL-3.0-or-later</td>
+<td>the same, unchanged: SPIR-V is vendor-independent</td>
+</tr>
+<tr>
+<td>Vulkan</td>
+<td>NVK from Mesa + patch <code>nvk/nvk-macos.patch</code> (~12k lines)</td>
+<td>MIT (Mesa)</td>
+<td><strong>RADV</strong> from Mesa + our patch</td>
+</tr>
+<tr>
+<td>Kernel</td>
+<td>port of the NVIDIA r610 open modules with an OS layer <code>os-xnu*.cpp</code></td>
+<td>PolyForm NC / MIT+GPL (NVIDIA)</td>
+<td>amdgpu port + <code>linux_compat/</code> (Stage 2)</td>
+</tr>
+<tr>
+<td>Framebuffer</td>
+<td><code>NVRMFB.kext</code> (<code>IOFramebuffer</code> on top of NVKMS)</td>
+<td>PolyForm NC</td>
+<td>DCN 3.2.1 + <code>IOFramebuffer</code> (Stage 3)</td>
+</tr>
+<tr>
+<td>Accelerator</td>
+<td><code>NVAccel</code> (<code>IOAccelerator</code>, IOAcceleratorFamily2)</td>
+<td>PolyForm NC</td>
+<td>Stage 4/7</td>
+</tr>
+<tr>
+<td>Display policy</td>
+<td><code>NVRMAGDC.kext</code> (AppleGraphicsDeviceControl)</td>
+<td>PolyForm NC</td>
+<td>Stage 7</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-technical-findings">Key technical findings</h2>
+<h3 id="1-the-metal-plugin-loads-any-vulkan-driver">1. The Metal plugin loads any Vulkan driver</h3>
+<p><code>nvmtl_vk.c</code> opens the ICD through <code>dlopen()</code> (path from <code>NVMTL_ICD_LIB</code> or
+<code>nvk_icd.json</code>) and calls <code>vk_icdGetInstanceProcAddr</code>. The core uses
+standard Vulkan: <code>VK_KHR_external_memory_fd</code>, <code>VK_EXT_image_drm_format_modifier</code>,
+<code>VK_EXT_mutable_descriptor_type</code>, <code>VK_EXT_memory_budget</code>, ray query, mesh shaders.
+RADV supports all of this on RDNA3.</p>
+<p>There are, however, parts tied to NVK: hooks into NVK (the “SASS
+dispatch” fast path, <code>nvk_blend_state</code>), workarounds for NVK limitations, and <code>NVIDIAShared.bundle</code>
+(NVVM). These have to be disabled or replaced for RADV.</p>
+<h3 id="2-kerneluserspace-emulating-linux-ioctls-through-iokit">2. Kernel↔userspace: emulating Linux ioctls through IOKit</h3>
+<p>This is the most important idea to adopt. NVK did not get a new backend: the existing
+<code>nvkmd/nvrm</code> backend (from the Haiku port) calls <code>ioctl()</code> exactly as on Linux,
+and a thin layer <code>nvrm_xnu.c</code> turns that into IOKit:</p>
+<table>
+<thead>
+<tr>
+<th>Linux</th>
+<th>macOS (NullMoth)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>open(&quot;/dev/nvidia0&quot;)</code></td>
+<td><code>IOServiceOpen()</code> on the kext's service; a <code>/dev/null</code> descriptor is returned as the “fd”, and fd↔<code>io_connect_t</code> is kept in a table</td>
+</tr>
+<tr>
+<td><code>ioctl(fd, cmd, arg)</code></td>
+<td><code>IOConnectCallMethod(conn, SEL_ESC, {cmd}, arg, size → arg)</code></td>
+</tr>
+<tr>
+<td><code>mmap(fd, …)</code></td>
+<td><code>IOConnectMapMemory64()</code></td>
+</tr>
+<tr>
+<td>waiting for events</td>
+<td>a separate selector with a timeout</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Consequence for us:</strong> Stage 4 should not invent its own ABI. The kext implements
+the <strong>Linux amdgpu UAPI</strong> (<code>include/uapi/drm/amdgpu_drm.h</code>, MIT):
+<code>DRM_IOCTL_AMDGPU_INFO</code>, <code>GEM_CREATE</code>, <code>GEM_MMAP</code>, <code>GEM_VA</code>, <code>CTX</code>, <code>CS</code>,
+<code>WAIT_CS</code>, <code>BO_LIST</code>, <code>SYNCOBJ_*</code>. Then RADV with the existing amdgpu winsys
+works almost unchanged; we only replace the system call layer.</p>
+<p>In Mesa, all RADV ioctls go through a single layer (<code>src/amd/common/ac_linux_drm.c</code>,
+<code>ac_drm_*</code>, added for virtio native context). <em>I could not confirm this from this
+environment (the proxy blocks gitlab.freedesktop.org); check in current Mesa.</em> If that is the case,
+the RADV patch is limited to this file + WSI/IOSurface.</p>
+<h3 id="3-how-metal-finds-the-plugin">3. How Metal finds the plugin</h3>
+<p>The <code>IOAccelerator</code> service publishes in the IORegistry <code>MetalPluginName</code>
+(path to the bundle in <code>/Library/GPUBundles/</code>), <code>MetalPluginClassName</code>
+(the <code>MTLDevice</code> class) and <code>IOGLBundleName = AppleMetalOpenGLRenderer</code> (OpenGL on top of
+Metal). For us it is analogous: <code>RDNA3MTLDriver.bundle</code> + our own <code>IOAccelerator</code>.</p>
+<h3 id="4-lessons-from-opencore-and-kext-loading-sequoia">4. Lessons from OpenCore and kext loading (Sequoia)</h3>
+<ul>
+<li>Display kexts link against IOGraphicsFamily / IOAcceleratorFamily2, which exist
+only in Apple's kernel collections, so <strong>from Stage 3 on the kexts must load from the Auxiliary
+Kernel Collection</strong> (<code>/Library/Extensions</code> + <code>kmutil</code>), not through OpenCore
+injection. Our Stage 1 kext (IOPCIFamily only) can still be injected.</li>
+<li><code>csr-active-config = 430A0000</code> (0x0A43) tested with unsigned kexts.</li>
+<li><code>Kernel &gt; Block: com.apple.iokit.IONDRVSupport (Exclude)</code>, otherwise the firmware
+framebuffer takes display index 0.</li>
+<li><code>amfi_get_out_of_my_way=0x1 amfi=0x80</code>, so that WindowServer loads an unsigned bundle.</li>
+<li>The macOS installer needs the opposite BAR settings (small BAR, no IONDRV block).</li>
+<li>They have an emergency boot-arg <code>-nvoff</code> and an EFI tool that sets it. We have <code>-rdna3off</code>.</li>
+</ul>
+<h3 id="5-where-amd-is-harder-than-nvidia">5. Where AMD is harder than NVIDIA</h3>
+<p>NVIDIA (Turing+) has <strong>GSP</strong>: firmware on the card does most of the initialization, and
+the r610 open modules are designed with portability across operating systems in mind
+(<code>os-interface</code>). amdgpu has no such layer: initialization (PSP, SMU, GMC, IH,
+GFX/MES) happens in the host driver and is written for Linux APIs (DRM, TTM,
+<code>dma_fence</code>). Our Stage 2 is therefore larger than their equivalent.</p>
+<h2 id="licenses-what-is-allowed">Licenses: what is allowed</h2>
+<table>
+<thead>
+<tr>
+<th>NullMoth component</th>
+<th>License</th>
+<th>Can we use it in an MIT repo?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>translator/</code></td>
+<td>LGPL-3.0+</td>
+<td><strong>yes</strong>, as a separate dynamic library (LGPL requirements: sources + ability to replace it)</td>
+</tr>
+<tr>
+<td><code>nvk/</code> (patch for Mesa)</td>
+<td>MIT</td>
+<td>yes, as a model for the RADV patch</td>
+</tr>
+<tr>
+<td><code>plugin/</code>, <code>kexts/</code>, <code>build/</code>, <code>package/</code></td>
+<td>PolyForm Noncommercial 1.0.0</td>
+<td><strong>no</strong> in an MIT repo. Possible: (a) the author's consent to a different license for the shared part, (b) a separate module under PolyForm NC, which would make the whole thing noncommercial, (c) a shared, neutral plugin project run together</td>
+</tr>
+</tbody>
+</table>
+<p>The amdgpu code (MIT) and our kext stay MIT regardless of the choice.</p>
+<h2 id="proposed-questions-for-the-author-nullmoth-discord">Proposed questions for the author (NullMoth Discord)</h2>
+<ol>
+<li>Could the plugin (<code>plugin/</code>) have a “generic Vulkan” mode in which the NVK hooks are
+optional, so that it can run on top of RADV?</li>
+<li>Would you agree to a license that allows combining the plugin with MIT code, or to
+splitting out a shared vendor-neutral part?</li>
+<li>What is the minimal set of Vulkan extensions / features the plugin requires
+(so we can check it early on RADV under Linux)?</li>
+<li>Which IOAccelerator/IOSurface behaviors that WindowServer expects were
+the hardest to reproduce?</li>
+</ol>
+<h2 id="update-2026-10-13-upstream-since-our-import-b9a5a2b--cd8e2bb">Update 2026-10-13: upstream since our import (<code>b9a5a2b</code> → <code>cd8e2bb</code>)</h2>
+<p><code>accel/</code>, <code>fb/</code> and <code>metal/</code> were imported from <code>b9a5a2b</code>; upstream has 217
+commits since. What matters for the open RDNA3 problems (card runs 37-40):</p>
+<h3 id="1-applegraphicsdevicecontrol-kextsnvrmagdc---we-have-none">1. AppleGraphicsDeviceControl (<code>kexts/NVRMAGDC</code>) - we have none</h3>
+<p>Upstream arms the display in this order (<code>NVRM.cpp</code>, auto-go):
+<code>debug.nvaccelfb=1</code> → <code>=4</code> → <code>debug.nvrmfb_agdc_k5=1</code> + <code>debug.nvrmfb_agdc=1</code>
+→ <code>debug.nvaccel_iop=1</code> (→ zero-copy flip 60 s later; <strong>outdated 2026-10-23</strong>:
+upstream <code>75e2e28</code> flips right after the release, the 60 s sleep is gone,
+<code>NVRM.cpp</code> auto-go). The AGDC object is an
+<code>AppleGraphicsDeviceControl</code> subclass attached to the GPU's PCI device that
+answers IOPresentment's vendor queries:</p>
+<table>
+<thead>
+<tr>
+<th>cmd</th>
+<th>answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1</code></td>
+<td>vendor info: version <code>0x30000</code>, vendor name, PCI vendor id, class 2</td>
+</tr>
+<tr>
+<td><code>0x980</code></td>
+<td>GPU capability: port mask, counts, <code>maxFramebuffers</code>, the PCI device and the framebuffers by <code>IOFBDependentIndex</code></td>
+</tr>
+<tr>
+<td><code>0x921</code> (K5)</td>
+<td><code>kAGDCLinkConfig</code> per framebuffer index: the head's timing (pixel clock, h/v active, blanking, sync), 1 link, RGB 8 bpc, port <code>1 + index</code></td>
+</tr>
+<tr>
+<td><code>0x711</code> (K5)</td>
+<td>extended capability type <code>0x10</code> (plane scaler): source and destination limits = the head's raster</td>
+</tr>
+</tbody>
+</table>
+<p>The framebuffer publishes its timing for it (<code>NVRMTiming</code>: 13 words, tag
+<code>0x4b350001</code>) and <code>IOFBDependentIndex</code>.</p>
+<p>Our card runs show every display-pipe transaction arriving <strong>without a
+plane</strong> (<code>debug.rdna3accel_iop_empty</code> ~1000 per boot, <code>iop_ok</code> 0,
+<code>iop_src_surf</code> 0): WindowServer never hands a composited surface to the
+pipe, frames reach the panel only through the swap path, gamma arrives as
+plane-less transactions the base class refuses (0xe00002c7), and Metal
+layer presents (M4) are never shown. Upstream gets plane-0 surfaces in
+<code>performTransaction</code> once AGDC answers. (<strong>Outdated 2026-10-23</strong>: we have
+the AGDC object now (<code>agdc/</code>), and on the agdc profile transactions still do
+not arrive with us - <code>iop_ok 0</code>, <code>iop_empty 0</code> in 2026-10-17b..18b -:
+WindowServer runs the legacy page-flip mode (<code>init_page_flip: page flip mode is on</code>), so the desktop reaches the panel through <code>submitSwapCopy</code> /
+<code>submitFlipBuffer</code>, which upstream treats as a capped probe.) Plan: an AMD-only AGDC object in
+<code>RDNA3Accelerator</code> (or its own kext), fed by a timing property from
+<code>RDNA3Framebuffer</code>, armed between <code>rdna3accelfb=4</code> and <code>rdna3acceliop=1</code>;
+the report records <code>iop_ok</code> / <code>iop_src_surf</code> / the AGDC counters.</p>
+<h3 id="2-accelerator-fixes-to-port-accel">2. Accelerator fixes to port (<code>accel/</code>)</h3>
+<ul>
+<li><code>c2af33d</code>: a copied frame waits until the IOSurface's newest pixels are
+in system memory (page-off under the family lock, bounded wait) or keeps
+the previous frame, at most 4 in a row per head. Fixed full-screen
+flicker on machines whose frames take the copy path (&quot;windows flicker
+while something moves&quot;, card runs 38-39).</li>
+<li><code>79e1c2f</code>: a pending dirty-surface mark remembers the resource that set
+it; <code>Resource::free</code> drops only its own marks (no stale marks, no device
+cache read during destruction).</li>
+<li><code>249ef8c</code>: only head 0 becomes the accelerator's primary framebuffer.</li>
+</ul>
+<h3 id="3-framebuffer-behaviour-to-adopt-fb">3. Framebuffer behaviour to adopt (<code>fb/</code>)</h3>
+<ul>
+<li><code>08c5bba</code> (issue #110): a known display that is seen disconnected and
+then connected again is relit with a full mode set of the same head; the
+framebuffer stays and IOGraphics is not told. Our hotplug sends a connect
+change instead and the re-created pipe stays black after a replug (run
+40). Candidate: the same relight as an <code>rdna3hotplug</code> mode.</li>
+<li><code>5b0965e</code>: a display connected after boot gets its own framebuffer by
+matching the idle display nub again.</li>
+<li><code>7c7b2a4</code>: only rasters larger than the boot raster are added beyond what
+macOS proposes (smaller ones made the login window black on a high
+refresh monitor).</li>
+<li><code>79e1c2f</code> / <code>531faec</code>: display power requests share one gate; a refused
+wake keeps the sleeping state so the next request retries, and no
+power-on notification follows a failed wake.</li>
+</ul>
+<h3 id="4-metal-plugin-and-translator-metal">4. Metal plugin and translator (<code>metal/</code>)</h3>
+<p>~40 vendor-neutral upstream commits (translator fixes, OpenCL, Blender,
+WebGL in Chromium, the Unity lock-up, surface upload copies, texture
+swizzle, pixel-sampler variants, the surface-writer map lock). The upstream
+diff applies to <code>metal/</code> except <code>NVMTLDevice.m</code> and <code>nvmtl_vk.c</code>, where our
+AMD changes sit; upstream's own vendor switch (<code>37e7c9d</code>, RADV for
+<code>0x1002</code>) replaces most of them.</p>
+<h3 id="5-upstreams-own-amd-path-gpu-port">5. Upstream's own AMD path (<code>gpu-port/</code>)</h3>
+<p><code>NMXGPU.kext</code> runs drm-kmod's amdgpu (display core included) on FreeBSD's
+LinuxKPI over xnu, RADV through libdrm for Darwin, and <code>NMXAccel</code> (this
+accelerator built with <code>-DNMX_ACCEL</code>) as an app-only Metal device with
+frames copied to the DRM framebuffer. Not loaded on hardware yet, one mode,
+no per-output framebuffers. Our port is further on display, power and
+sleep; their tree is a reference to compare amdgpu behaviour against (for
+example VCN power gating) once it runs.</p>
+<h2 id="update-2026-10-23-upstream-75e2e28-against-our-present-path-driver-plan-n38">Update 2026-10-23: upstream <code>75e2e28</code> against our present path (DRIVER-PLAN N38)</h2>
+<p>Compared: their <code>kexts/NVRM/accel/nvrm-accel.cpp</code> (performTransaction,
+the asynchronous flip worker, the flip gate) and
+<code>kexts/NVRMFB/fb/nvrm-fb.cpp</code> (the flip and its latch) with ours. Design
+studied, our own code written (<code>common/rdna3_flip_queue.h</code>, the
+accelerator's present queue, N38):</p>
+<table>
+<thead>
+<tr>
+<th>Their behaviour</th>
+<th>Ours before</th>
+<th>Ours now (N38)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>performTransaction waits up to ~1.25 refresh for the flip in flight (an IOLock woken by the worker), then queues the newest frame for the worker (newest replaces queued)</td>
+<td>50 x <code>IOSleep(1)</code> on WindowServer's thread, then the frame <strong>dropped</strong> while answering &quot;shown&quot;</td>
+<td>queued at once (no wait at all), newest wins, Busy kept</td>
+</tr>
+<tr>
+<td>framebuffer Busy while a flip is in flight = &quot;kept&quot;</td>
+<td>the framebuffer spun up to 20 ms in <code>IODelay</code>, then flipped anyway</td>
+<td><code>RD3K_FLIP_FLAG_NOWAIT</code> answers Busy, the present stays queued</td>
+</tr>
+<tr>
+<td>the transaction completes (<code>signalTransactionInterrupt</code>) after the flip landed; the framebuffer's flip waits for its own latch</td>
+<td>completed after the flip call returned (before the latch)</td>
+<td>completed by the worker at the latch (<code>rdna3FlipLatchWait</code>, woken at the vblank)</td>
+</tr>
+<tr>
+<td>the worker waits for the surface's GPU completion (<code>nvSurfWaitReady</code>, the plugin's pending/ready marks)</td>
+<td>none</td>
+<td>not ported: our plugin sends the dirty mark only after waiting for the GPU, so the mark is the GPU-ready gate (open: N38 (5))</td>
+</tr>
+<tr>
+<td>zero-copy flip only when the plugin wrote the VRAM (<code>fPluginWroteCookie</code> == the allocation's cookie) and it is the newest</td>
+<td>VRAM-newest bit only</td>
+<td>both (<code>rd3_iop_flip_ok</code>, <code>debug.rdna3accel_iop_wrote</code>)</td>
+</tr>
+<tr>
+<td>PerformanceStatistics read-copy-modify-write (their temperature)</td>
+<td>the core published utilization on its own service only</td>
+<td>the accelerator's own, every 250 ms (<code>debug.rdna3accel_perfstats</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>Upstream changes in this area not ported (yet): the plugin's GPU pending /
+ready surface marks and <code>nvSurfWaitReady</code> (N38 (5)); the copy path's &quot;page
+off only VRAM the plugin wrote&quot; rule as a separate check (ours pages off
+only surfaces with a pending dirty mark, which only the plugin sets); the
+parked-allocation restore before a dirty mark (<code>nvAccelRestoreParkedForDirty</code>);
+the framebuffer's late-flip handling (waiting past a period, the stuck limit,
+the present statistics HUD); the accelerator's temperature key; the headless
+check that restores the plugin name without arming; auto-go without the 60 s
+sleep (our boot gates are boot-args).</p>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

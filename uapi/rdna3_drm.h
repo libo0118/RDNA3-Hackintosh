@@ -7,7 +7,7 @@
  * rdna3_drm_ioctl(). Struct layouts are the real ABI from
  * include/uapi/drm/amdgpu_drm.h and drm.h (third_party/amd).
  *
- * Status of each ioctl is tracked in docs/STAGE4.md. Work for the GPU (CS,
+ * Status of each ioctl is tracked in docs/STAGE4.html. Work for the GPU (CS,
  * user queues) goes to the OS layer's rings (rdna3_drm_ops.submit): CS is
  * -ENODEV without one, and a ring the OS has not brought up is -EINVAL (as
  * amdgpu for a ring that is not ready; -ENODEV on an enumeration-only

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 7: system integration (IOAcceleratorFamily2 accelerator) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Stage 7: system integration (IOAcceleratorFamily2 accelerator)</div>
+  <h1>Stage 7: system integration (IOAcceleratorFamily2 accelerator)</h1>
+  <p class="muted">Stage 7: system integration - the IOAcceleratorFamily2 accelerator, its gates and its interface to RDNA3Accel.</p>
+</header>
+<nav class="toc"><strong>Contents</strong><ol><li><a href="#gates-as-in-nullmoth">Gates (as in NullMoth)</a></li><li><a href="#accelerator--rdna3accel-interface">Accelerator ↔ RDNA3Accel interface</a></li><li><a href="#next-steps">Next steps</a></li></ol></nav>
+<p>Metal and WindowServer find the card through an <strong>IOAccelerator</strong>: a service of class
+<code>IOGraphicsAccelerator2</code> with the properties <code>MetalPluginName</code> /
+<code>MetalPluginClassName</code>. It is provided by a separate kext, <code>RDNA3Accelerator.kext</code>
+(<code>accel/</code>), ported from the NullMoth accelerator (see <code>accel/PROVENANCE.md</code>).</p>
+<figure><svg viewBox="0 0 480 322" role="img" aria-label="Stage 7 Metal path" style="width:100%;max-width:480px"><rect x="10" y="10" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="32" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">Metal.framework</text><line x1="36" y1="46" x2="36" y2="71" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah4)"/><text x="48" y="59" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">MetalPluginName</text><rect x="10" y="72" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="94" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">/Library/GPUBundles/RDNA3MTLDriver.bundle</text><text x="240.0" y="110" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">Stage 6</text><line x1="36" y1="123" x2="36" y2="144" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah4)"/><rect x="10" y="145" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="167" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RADV</text><text x="240.0" y="183" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">Stage 5</text><line x1="36" y1="196" x2="36" y2="217" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah4)"/><rect x="10" y="218" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="240" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">libdrm_xnu</text><line x1="36" y1="254" x2="36" y2="275" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah4)"/><rect x="10" y="276" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="298" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3UserClient</text><defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs></svg><figcaption>Metal to the card: the plugin path.</figcaption></figure><figure><svg viewBox="0 0 480 221" role="img" aria-label="Stage 7 accelerator path" style="width:100%;max-width:480px"><rect x="10" y="10" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="32" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">IOAcceleratorFamily2</text><line x1="36" y1="46" x2="36" y2="67" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah5)"/><rect x="10" y="68" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="90" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Accelerator.kext</text><text x="240.0" y="106" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">accel/</text><line x1="36" y1="119" x2="36" y2="144" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah5)"/><text x="48" y="132" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">callPlatformFunction (accel/rdna3k_abi.h)</text><rect x="10" y="145" width="460" height="66" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="167" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Accel.kext</text><text x="240.0" y="183" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">kext/src/RDNA3Platform.cpp: VRAM, device handle, GPU</text><text x="240.0" y="198" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">VA ranges</text><defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs></svg><figcaption>The accelerator calls the platform kext.</figcaption></figure><figure><svg viewBox="0 0 480 191" role="img" aria-label="Stage 7 display path" style="width:100%;max-width:480px"><rect x="10" y="10" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="32" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Accelerator.kext</text><line x1="36" y1="46" x2="36" y2="71" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah6)"/><text x="48" y="59" text-anchor="start" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--mono)">scanout, flip, CRC</text><rect x="10" y="72" width="460" height="51" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="94" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Framebuffer</text><text x="240.0" y="110" text-anchor="middle" font-size="11.5" font-weight="normal" style="fill:var(--muted);font-family:var(--sans)">Stage 3, fb/</text><line x1="36" y1="123" x2="36" y2="144" style="stroke:var(--muted)" stroke-width="1.5" marker-end="url(#ah6)"/><rect x="10" y="145" width="460" height="36" rx="8" style="fill:var(--card);stroke:var(--line)" stroke-width="1.5"/><text x="240.0" y="167" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--fg);font-family:var(--mono)">RDNA3Accel (DCN)</text><defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs></svg><figcaption>The display side.</figcaption></figure>
+<details><summary>Text version of the diagram</summary>
+<pre><code>Metal.framework ── MetalPluginName ──▶ /Library/GPUBundles/RDNA3MTLDriver.bundle (Stage 6)
+      │                                        │ RADV (Stage 5) → libdrm_xnu → RDNA3UserClient
+IOAcceleratorFamily2
+      │
+RDNA3Accelerator.kext (accel/)   ── callPlatformFunction (accel/rdna3k_abi.h) ──▶ RDNA3Accel.kext
+      │  VRAM, device handle, GPU VA ranges                                       (kext/src/RDNA3Platform.cpp)
+      └─ scanout, flip, CRC ──▶ RDNA3Framebuffer (Stage 3, fb/) ──▶ RDNA3Accel (DCN)
+</code></pre>
+</details>
+<pre><code class="language-sh">make -C accel                 # build/RDNA3Accelerator.kext (Sequoia)
+make -C accel NM_TAHOE=1      # vtable layout for macOS 26
+make -C accel check           # checks that no NV* metaclass is left
+</code></pre>
+<h2 id="gates-as-in-nullmoth">Gates (as in NullMoth)</h2>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>accelerator start</td>
+<td>boot-arg <code>rdna3accel=1</code> (without it <code>start()</code> returns false: protection against a boot loop)</td>
+</tr>
+<tr>
+<td>turning everything off</td>
+<td><code>-rdna3off</code></td>
+</tr>
+<tr>
+<td>ordering</td>
+<td>waits up to 30 s for <code>RDNA3Accel</code> to set <code>rdna3-claimed</code> on the IOPCIDevice (it does this after a successful <code>drmInit</code>, i.e. <code>rdna3lvl&gt;=2</code>)</td>
+</tr>
+<tr>
+<td>Metal plugin</td>
+<td><code>MetalPluginName</code> is hidden at start; <code>sudo sysctl -w debug.rdna3accelfb=1</code> restores it (only after the framebuffer is registered)</td>
+</tr>
+<tr>
+<td>display pipe</td>
+<td><code>debug.rdna3accelfb=3</code>, <code>debug.rdna3accel_iop=1</code>, as in NullMoth</td>
+</tr>
+</tbody>
+</table>
+<h2 id="accelerator--rdna3accel-interface">Accelerator ↔ RDNA3Accel interface</h2>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rdna3AllocVram</code> / <code>rdna3FreeVram</code></td>
+<td><span class="badge ok">done</span> the same VRAM heap as GEM, only within the BAR0 range (kva + phys)</td>
+</tr>
+<tr>
+<td><code>rdna3DeviceHandles</code></td>
+<td><span class="badge ok">done</span> device cookie</td>
+</tr>
+<tr>
+<td><code>rdna3GpuVaAlloc</code> / <code>Free</code></td>
+<td><span class="badge ok">done</span> 1 TiB range starting at 64 TiB</td>
+</tr>
+<tr>
+<td><code>rdna3GpuVaMap</code></td>
+<td><span class="badge ok">done</span> the accelerator's own GPUVM context (separate VMID), linear PTEs to VRAM allocations; unmap/free clears the PTEs</td>
+</tr>
+<tr>
+<td><code>rdna3NewAccelClient</code></td>
+<td><span class="badge muted">not started</span> <code>kIOReturnUnsupported</code>; RADV opens <code>RDNA3Accel</code> directly</td>
+</tr>
+<tr>
+<td><code>rdna3ScanoutInfo</code>, <code>rdna3FlipToSurface</code>, <code>rdna3DisplayCrc</code></td>
+<td><span class="badge warn">in progress</span> <code>RDNA3Framebuffer</code> (<a href="STAGE3.html">STAGE3</a>); flip through <code>rdna3DisplayFlip</code> in the core, tested only in the simulator</td>
+</tr>
+<tr>
+<td><code>rdna3SurfPageoff</code></td>
+<td><span class="badge ok">done</span> from <code>rdna3lvl=7</code> SDMA0 through the GART window (16 MiB at the end of GART, like <code>amdgpu_ttm_map_buffer</code>); before that, the CPU through the BAR</td>
+</tr>
+<tr>
+<td><code>rdna3SurfShare</code></td>
+<td><span class="badge muted">not started</span> no equivalent of RM handles shared between clients; RADV shares through GEM</td>
+</tr>
+</tbody>
+</table>
+<h2 id="next-steps">Next steps</h2>
+<ol>
+<li>First hardware test: <code>rdna3lvl=2 rdna3enum=1 rdna3accel=1</code>, second
+card driving a display. Expected: <code>ioreg -c RDNA3Accelerator</code> shows the service,
+log <code>IOGraphicsAccelerator2::start -&gt; 1</code>.</li>
+<li><code>populateAccelConfig</code>: the values (flags, texture limits) come from NVIDIA.
+RDNA3 supports 16384×16384, so the limits fit. The meaning of the other
+<code>IOAccelConfig</code> fields is not documented (Apple does not publish it), and these
+values worked on hardware in NullMoth, so they stay until a test on the
+card shows a difference. The accelerator logs what the family wrote before
+us (<code>cfg+0x..</code>), for comparison.</li>
+<li>Metal plugin in the AMD build: <code>vendorName</code> returns <code>AMD</code>, the device name
+is the part of the RADV name before <code>(RADV</code> (e.g. &quot;AMD Radeon RX 7800 XT
+(RDNA3MTL over AMD Radeon RX 7800 XT (RADV NAVI32))&quot;), and registration of
+the NVDEC/NVENC encoders in VideoToolbox is disabled
+(<code>RDNA3MTL_NV_VIDEO_CODECS 0</code>). The equivalent would be VCN 4.0, which is not
+ported.</li>
+<li><code>RDNA3Framebuffer</code> (Stage 3): without it the display machine has no heads,
+so <code>debug.rdna3accelfb=1</code> has nothing to register and WindowServer does not
+composite on this card.</li>
+</ol>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+</body>
+</html>

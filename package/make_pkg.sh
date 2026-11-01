@@ -2,7 +2,7 @@
 # make_pkg.sh - the installer for a bare-metal Hackintosh: an Installer
 # package (.pkg) and the same files as a tarball with install.sh, built from
 # the CI artifacts or from a local build tree. Firmware is not inside unless
-# --fw is given (docs/FIRMWARE.md): the package's preinstall downloads it.
+# --fw is given (docs/FIRMWARE.html): the package's preinstall downloads it.
 #
 #   package/make_pkg.sh                         from build/ (make kext; make -C fb; make -C accel; ...)
 #   package/make_pkg.sh --from RDNA3Accel-kext.zip [--from RDNA3MTL.zip] [--from radv-macos-logs.zip]
@@ -187,7 +187,7 @@ if [ -n "$FW" ]; then
     sh "$P/firmware.sh" --dest "$A/firmware" --from "$FW"
     [ -f "$A/firmware/LICENSE.amdgpu" ] || { say "no LICENSE.amdgpu next to $FW: it must ship with the files"; exit 1; }
     FW_BUNDLED=1
-    say "NOTE: the firmware is inside: keep this package for your own use (docs/FIRMWARE.md)"
+    say "NOTE: the firmware is inside: keep this package for your own use (docs/FIRMWARE.html)"
 fi
 
 {
@@ -252,7 +252,7 @@ cp "$P/pkg/conclusion.html" "$W/res/"
   echo "The kexts' accelerator and framebuffer and the Metal plugin derive from NullMoth and are"
   echo "licensed under PolyForm Noncommercial 1.0.0 (installed next to this text in"
   echo "/Library/Application Support/RDNA3). AMD firmware: not part of this package unless built"
-  echo "with --fw; downloaded from linux-firmware under LICENSE.amdgpu (docs/FIRMWARE.md)."; } > "$W/res/license.txt"
+  echo "with --fw; downloaded from linux-firmware under LICENSE.amdgpu (docs/FIRMWARE.html)."; } > "$W/res/license.txt"
 render_distribution "$P/pkg/distribution.xml" "$VER" > "$W/distribution.xml"
 productbuild --distribution "$W/distribution.xml" --resources "$W/res" --package-path "$W/pkgs" \
     "$OUT/$NAME.pkg" >/dev/null
