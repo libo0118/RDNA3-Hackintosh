@@ -57,6 +57,10 @@ def kernel_counters(surfvram):
                          r"iop_latch\w*|iop_stale_wait_ms): (-?\d+)\s*$",
                          surfvram or "", re.M):
         out[m.group(1)] = int(m.group(2))
+    # the core's CPU-visible VRAM heap (debug.rdna3_vram: visible_kib=...): the latch's extra buffers against it
+    m = re.search(r"^debug\.rdna3_vram: .*?\bvisible_kib=(\d+)", surfvram or "", re.M)
+    if m:
+        out["vram_visible_kib"] = int(m.group(1))
     return out
 
 
@@ -163,6 +167,8 @@ SAME_WARN, SKIP_WARN = 0.02, 0.05   # N68: of the placed copies, two in one refr
 VBL_PLACED_MIN = 0.9                # N68 K2: fewer copies placed than this share of the head's copies: data missing
 LATCH_FB_WARN = 0.01                # N68: the latched path's frames that took the direct copy
 LATCH_PACED_WARN = 0.05             # N68 (a): with the mailbox on, latched frames still paced by a latch
+LATCH_HEAP_NOTE = 0.10              # N68 (a): the latch's extra buffers over this share of the visible heap: said
+HUBP_UNKNOWN = ("core", "head", "call", "range")   # accel kIopHubpName: why the HUBP's scan address was unreadable
 
 
 def iop_latch_rows(c):
@@ -275,6 +281,23 @@ def iop_latch_rows(c):
     if not on and latched:
         why.append("it reads 0 but %d frame(s) were latched: switched off during the run (the counters mix both "
                    "phases; the `iop latch (N68): ... -> 0` line says when)" % latched)
+    unk = ", ".join("%s %d" % (k, c.get("iop_latch_hubp_unknown_" + k, 0)) for k in HUBP_UNKNOWN
+                    if c.get("iop_latch_hubp_unknown_" + k, 0))
+    if unk:
+        why.append("the HUBP's scan address was UNKNOWN (%s; the `iop latch: ... scan address is UNKNOWN` lines): the "
+                   "buffer choice went by the present queue's record alone" % unk)
+    hw = sum(c.get("iop_latch_hubp_wait_h%d" % h, 0) for h in range(4))
+    if hw:
+        hto = sum(c.get("iop_latch_hubp_wait_to_h%d" % h, 0) for h in range(4))
+        text += "; %d poll(s) of a HUBP flip the queue does not know of (avg %.2f ms, %d still pending after 20 ms)" % (
+            hw, sum(c.get("iop_latch_hubp_wait_us_h%d" % h, 0) for h in range(4)) / 1000.0 / hw, hto)
+        if hto:
+            why.append("%d frame(s) found a flip of unknown target still pending after 20 ms (a blanked head, a stuck "
+                       "HUBP; then the direct copy)" % hto)
+    vis = c.get("vram_visible_kib", 0) * 1024
+    held = c.get("iop_latch_vram_bytes", 0)
+    if vis and held > LATCH_HEAP_NOTE * vis:
+        text += "; the extra buffers hold %.0f %% of the %d MiB visible heap" % (100.0 * held / vis, vis >> 20)
     if c.get("iop_latch_vram_free_failed", 0):
         why.append("%d second buffer(s) the core refused to free (that VRAM stays allocated)" % c["iop_latch_vram_free_failed"])
     if on and not latched and sum(c.get("iop_vbl_n_h%d" % h, 0) for h in heads):

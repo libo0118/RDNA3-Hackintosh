@@ -222,6 +222,16 @@ check(lat[0][0] == "WARN" and "still waited for 400 latch(es)" in lat[0][2], "ma
 lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(MB.replace("iop_latch_mbox: 1", "iop_latch_mbox: 0")))
        if x[1] == "IOP latch"]
 check(lat[0][0] == "INFO" and "mailbox off (rdna3iopmbox=0" in lat[0][2], "mailbox off: %r" % lat)
+# ECC cpp-reviewer of 0a47349: M1 the HUBP unreadable (WARN), L1 HUBP-only polls, L4 the share of the visible heap
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(
+    MB + "debug.rdna3accel_iop_latch_hubp_unknown_call: 5\ndebug.rdna3accel_iop_latch_hubp_wait_h0: 4\n"
+    "debug.rdna3accel_iop_latch_hubp_wait_us_h0: 8000\ndebug.rdna3accel_iop_latch_hubp_wait_to_h0: 0\n"
+    "debug.rdna3_vram: visible_kib=147456 reserve_kib=0\n")) if x[1] == "IOP latch"]
+check(lat[0][0] == "WARN" and "scan address was UNKNOWN (call 5" in lat[0][2] and "4 poll(s) of a HUBP flip" in lat[0][2]
+      and "avg 2.00 ms" in lat[0][2] and "of the 144 MiB visible heap" in lat[0][2], "hubp unknown / polls / heap: %r" % lat)
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(MB + "debug.rdna3_vram: visible_kib=1048576\n"))
+       if x[1] == "IOP latch"]
+check(lat[0][0] == "INFO" and "visible heap" not in lat[0][2], "1 GiB heap: no note: %r" % lat)
 r = triage_present_cost.iop_latch_rows(kernel_counters(N68.replace("debug.rdna3accel_iop_latch: 0\n", "")))
 check(any(x[0] == "WARN" and "misses it" in x[2] for x in r), "iop_latch missing: %r" % r)
 

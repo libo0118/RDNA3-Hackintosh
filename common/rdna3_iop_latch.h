@@ -92,13 +92,18 @@ struct rd3_il_state {
     int queued_lb;   /* the queued present is a frame of this path (one of home / D / E, never programmed) */
 };
 /* the panel reads x now or will: queued, or scanned (the HUBP's address when it is known; else the queue's
- * record and the latched path's own) */
+ * record and the latched path's own). With the HUBP unreadable and no latch of ours on the queue's record (the
+ * boot, a mode set, rd3_fq_moved / rd3_fq_forget after the direct-copy fallback's flip home) home counts as
+ * scanned: the panel is on home or on a surface not ours, and 'last' may be stale (ECC cpp-reviewer of 0a47349, M2:
+ * last still D after a flip home, home was counted free and written while scanned) */
 static inline int rd3_il_in_use(const struct rd3_il_state *s, uint64_t x)
 {
     if (x == s->queued || x == s->inflight)
         return 1;
     if (s->scan_known)
         return x == s->scan;
+    if (!s->shown && x == s->home)
+        return 1;
     return x == s->shown || x == s->last;
 }
 static inline enum rd3_il_pick rd3_il_pick(const struct rd3_il_state *s)
@@ -172,15 +177,6 @@ static inline uint64_t rd3_il_mb_buf(const struct rd3_il_state *s, unsigned i)
 {
     return i == 0 ? s->home : i == 1 ? s->d : i == 2 ? s->e : 0;
 }
-/* rd3_il_in_use for the mailbox: with three buffers 'last' is the one written last (often queued), not the one the
- * panel shows, so with the HUBP unreadable and no latch of ours on the queue's record (the boot, a mode set,
- * another path's flip home) home counts as scanned: the panel is on home or on a surface not ours */
-static inline int rd3_il_mb_in_use(const struct rd3_il_state *s, uint64_t x)
-{
-    if (rd3_il_in_use(s, x))
-        return 1;
-    return !s->scan_known && !s->shown && x == s->home;
-}
 static inline enum rd3_il_mb rd3_il_mb_pick(const struct rd3_il_state *s, unsigned *idx)
 {
     unsigned i, k, start = 0;
@@ -194,7 +190,7 @@ static inline enum rd3_il_mb rd3_il_mb_pick(const struct rd3_il_state *s, unsign
             start = i + 1;
     for (k = 0; k < RD3_IL_NBUF; k++) {
         i = (start + k) % RD3_IL_NBUF;
-        if (!rd3_il_mb_in_use(s, rd3_il_mb_buf(s, i))) {
+        if (!rd3_il_in_use(s, rd3_il_mb_buf(s, i))) {
             *idx = i;
             return RD3_IL_MB_COPY;
         }

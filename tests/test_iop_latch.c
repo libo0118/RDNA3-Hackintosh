@@ -94,6 +94,46 @@ static void test_pick(void)
     CHECK(rd3_il_pick(&s) == RD3_IL_NONE);
 }
 
+/* ECC cpp-reviewer of 0a47349 (M2), the two-buffer scheme: the direct-copy fallback flipped home (rd3AccelIopHome:
+ * rd3_fq_moved - nothing of ours known on the panel, the flip home in flight), that flip latched (rd3_fq_latched:
+ * shown 0), the HUBP is unreadable and the latched path's 'last' is still D. Home is on the panel: never picked */
+static void test_pick_after_home(void)
+{
+    struct rd3_fq q;
+    int had = 0;
+    uint32_t tok = 0, dropped = 0, nt = 0;
+    uint64_t na = 0;
+    struct rd3_il_state s;
+    rd3_fq_init(&q);
+    CHECK(rd3_fq_submit(&q, D, 1, NULL) == RD3_FQ_PROGRAM);
+    (void)rd3_fq_latched(&q, &had, &tok, &na, &nt);
+    CHECK(q.shown == D);
+    (void)rd3_fq_moved(&q, &had, &tok, &dropped);   /* the fallback's flip home */
+    CHECK(q.inflight == RD3_FQ_FOREIGN && q.shown == 0);
+    s = st(q.shown, q.inflight, q.queued, 0, 0, D);
+    CHECK(rd3_il_pick(&s) == RD3_IL_WAIT);
+    (void)rd3_fq_latched(&q, &had, &tok, &na, &nt);   /* the flip home latched */
+    CHECK(q.shown == 0 && !q.inflight);
+    s = st(q.shown, q.inflight, q.queued, 0, 0, D);
+    CHECK(rd3_il_pick(&s) != RD3_IL_HOME);              /* was HOME: a copy into the scanned home */
+    CHECK(rd3_il_pick(&s) == RD3_IL_NONE);              /* home scanned, D maybe (last): the direct copy, counted */
+    /* the same after rd3_fq_forget (a mode change) */
+    rd3_fq_init(&q);
+    (void)rd3_fq_forget(&q, &dropped);
+    s = st(q.shown, q.inflight, q.queued, 0, 0, D);
+    CHECK(rd3_il_pick(&s) != RD3_IL_HOME);
+    /* the HUBP readable again: it says where the panel is */
+    s = st(0, 0, 0, 1, HOME, D);
+    CHECK(rd3_il_pick(&s) == RD3_IL_D);
+    /* the mailbox has the same rule */
+    s = st(0, 0, 0, 0, 0, D);
+    s.e = E;
+    {
+        unsigned i = 9;
+        CHECK(rd3_il_mb_pick(&s, &i) == RD3_IL_MB_COPY && i == 2);
+    }
+}
+
 /* one head over 600 presents: the model HUBP latches every flip at the next vblank, the transaction waits for it;
  * the buffer written is never the one scanned, and the targets alternate */
 static void test_model(void)
@@ -393,6 +433,7 @@ int main(void)
     test_txn();
     test_vbl();
     test_pick();
+    test_pick_after_home();
     test_model();
     test_freeable();
     test_mb_pick();
