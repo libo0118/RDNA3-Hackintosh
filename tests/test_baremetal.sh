@@ -90,6 +90,9 @@ mkdir -p "$D/efi/EFI/BOOT" "$D/efi/EFI/OC/Kexts/X.kext" "$D/recovery"
 echo efi > "$D/efi/EFI/BOOT/BOOTx64.efi"; echo oc > "$D/efi/EFI/OC/OpenCore.efi"
 echo "<plist/>" > "$D/efi/EFI/OC/config.plist"; echo k > "$D/efi/EFI/OC/Kexts/X.kext/exe"
 head -c 21000000 /dev/urandom > "$D/recovery/BaseSystem.dmg"; echo chunks > "$D/recovery/BaseSystem.chunklist"
+# byte 100 is fixed to A: the damaged-copy check below writes X there, which on random data was already X
+# one run in 256 (CI run 122, macOS: "a damaged copy was not caught")
+printf A | dd of="$D/recovery/BaseSystem.dmg" bs=1 seek=100 conv=notrunc status=none
 : > "$D/recovery/.complete"
 STICK=$T/stick
 PROC_MOUNTS=$T/proc_mounts     # the kernel's mount table, a fake (empty unless a test fills it)
