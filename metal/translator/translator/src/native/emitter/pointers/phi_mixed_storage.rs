@@ -20,15 +20,34 @@
 //! are applied to each arm (`emit_mixed_storage_pointer_gep`), loads select on
 //! the loaded values, stores are guarded per arm. The phi is "demoted" from a
 //! pointer to a selection of values; this is logged once per kernel.
+//!
+//! N75 (mixed_network.rs): the phis, GEPs and copies of one Function/Private
+//! network are split together, so a phi may take a member that is emitted
+//! after it (a back edge, the construct tree's `slot.N` / `nextslot.N`):
+//! that edge feeds each arm the member's arm and the selector its selector.
+//! An undef edge is undef on both arms.
 
 use super::*;
 use std::sync::{Mutex, OnceLock};
 
-const ARM_TAG: &str = ".metal2vulkan.mixarm";
+use super::mixed_network::ARM_TAG;
 
 enum MixedArm {
     Modeled,
     Root { id: Word, pointee: LlType },
+}
+
+/// How one incoming edge of a split phi feeds the two arms and the selector.
+enum MixedEdge {
+    /// A value already seen, of one storage.
+    Arm { group: usize, class: MixedArm },
+    /// A value still to come, of one storage (from the network's TIR facts).
+    Forward { group: usize },
+    /// A split pointer (seen, or a forward network member): its own arms
+    /// and selector.
+    Split { arms: [LlValue; 2], cond: Word },
+    /// Undef: undef on both arms.
+    Either,
 }
 
 fn arm_storages() -> [StorageClass; 2] {
@@ -37,7 +56,7 @@ fn arm_storages() -> [StorageClass; 2] {
 
 /// Once per kernel (function name) for the whole process: the primary emitter
 /// and the raw-construction retry both see the same phi.
-fn log_demotion_once(function: &str, phi: &str) {
+fn log_demotion_once(function: &str, phi: &str, loop_carried: bool) {
     static LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let logged = LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
     let first = logged
@@ -45,8 +64,13 @@ fn log_demotion_once(function: &str, phi: &str) {
         .map(|mut set| set.insert(function.to_string()))
         .unwrap_or(true);
     if first {
+        let how = if loop_carried {
+            "; its network is loop-carried (DRIVER-PLAN N72, N75)"
+        } else {
+            " (DRIVER-PLAN N72)"
+        };
         crate::notes::push(format!(
-            "metal2vulkan: kernel {function}: pointer phi {phi} merges Function and Private storage; demoted to a per-storage value select (DRIVER-PLAN N72)"
+            "metal2vulkan: kernel {function}: pointer phi {phi} merges Function and Private storage; demoted to a per-storage value select{how}"
         ));
     }
 }
@@ -55,6 +79,11 @@ impl Emitter {
     /// Splits a Function-vs-Private pointer phi (see the module comment).
     /// Returns Ok(false) when the phi is not of that shape, so the ordinary
     /// paths (and their diagnostics) still run.
+    ///
+    /// A phi of a mixed network (mixed_network.rs, N75) is split even when
+    /// some incoming values are still to come (a back edge): a forward
+    /// member feeds each arm its own arm and the selector its selector, a
+    /// forward value of one storage feeds its arm as it is.
     pub(in crate::native::emitter) fn emit_mixed_storage_pointer_phi(
         &mut self,
         name: &str,
@@ -68,81 +97,172 @@ impl Emitter {
         if *addrspace != 0 || incoming.len() < 2 {
             return Ok(false);
         }
-        // Which arm each edge feeds; None for undef (it may take either arm).
+        let network = self.mixed_storage_network.is_member(name);
         // Classified first, without side effects: a module without a mixed
         // phi must come out exactly as before.
-        let mut groups = Vec::with_capacity(incoming.len());
-        let mut classes = Vec::with_capacity(incoming.len());
+        let mut edges = Vec::with_capacity(incoming.len());
         for (value, _) in incoming {
-            if matches!(value, LlValue::Undef) {
-                groups.push(None);
-                classes.push(None);
-                continue;
-            }
-            let Some((class, storage)) = self.classify_mixed_arm(value)? else {
-                return Ok(false);
-            };
-            let Some(group) = arm_storages().iter().position(|s| *s == storage) else {
-                return Ok(false);
-            };
-            groups.push(Some(group));
-            classes.push(Some((class, storage)));
+            edges.push(match value {
+                LlValue::Undef => MixedEdge::Either,
+                LlValue::Local(local) if self.mixed_storage_pointers.contains(local) => {
+                    if !network {
+                        return Ok(false);
+                    }
+                    let selected = self.selected_pointers.get(local).cloned().ok_or_else(|| {
+                        format!("native emitter: split pointer {local} lost its arms")
+                    })?;
+                    MixedEdge::Split {
+                        arms: [selected.true_value, selected.false_value],
+                        cond: selected.cond,
+                    }
+                }
+                LlValue::Local(local) if network && self.mixed_storage_network.is_member(local) => {
+                    // A member already emitted without its split (it was
+                    // declined): its arms will never exist.
+                    if !self.pointer_not_seen(local) {
+                        return Err(format!(
+                            "native emitter: mixed-storage pointer phi {name} takes member {local}, which was emitted without its split; this network is not supported (N75)"
+                        ));
+                    }
+                    let cond_name = self.mixed_storage_network.cond_name(local).ok_or_else(|| {
+                        format!(
+                            "native emitter: mixed-storage pointer phi {name}: member {local} has no selector phi"
+                        )
+                    })?;
+                    let cond = self.result_id(&cond_name, &LlType::Bool)?;
+                    MixedEdge::Split {
+                        arms: [0, 1].map(|group| {
+                            LlValue::Local(self.mixed_storage_network.arm_name(local, group))
+                        }),
+                        cond,
+                    }
+                }
+                _ => match self.classify_mixed_arm(value)? {
+                    Some((class, storage)) => {
+                        let Some(group) = arm_storages().iter().position(|s| *s == storage) else {
+                            return Ok(false);
+                        };
+                        MixedEdge::Arm { group, class }
+                    }
+                    None => {
+                        let forward = match value {
+                            LlValue::Local(local) if network && self.pointer_not_seen(local) => {
+                                self.mixed_storage_network.pure_storage(local)
+                            }
+                            _ => None,
+                        };
+                        let Some(storage) = forward else {
+                            return Ok(false);
+                        };
+                        let group = arm_storages()
+                            .iter()
+                            .position(|s| *s == storage)
+                            .expect("pure storages are the arm storages");
+                        MixedEdge::Forward { group }
+                    }
+                },
+            });
         }
-        if !(0..2).all(|group| groups.contains(&Some(group))) {
+        let feeds = |group: usize| {
+            edges.iter().any(|edge| match edge {
+                MixedEdge::Arm { group: g, .. } | MixedEdge::Forward { group: g } => *g == group,
+                MixedEdge::Split { .. } => true,
+                MixedEdge::Either => false,
+            })
+        };
+        if !(feeds(0) && feeds(1)) {
             return Ok(false);
         }
         self.refuse_split_pointer_consumers(name)?;
+        if network {
+            self.refuse_multi_root_network(name)?;
+        }
         let mut arm_values = Vec::with_capacity(incoming.len());
-        for (position, ((value, _), class)) in incoming.iter().zip(classes).enumerate() {
-            arm_values.push(match class {
-                Some((MixedArm::Root { id, pointee }, storage)) => {
-                    self.install_mixed_arm_root(name, position, id, storage, pointee)
+        for (position, ((value, _), edge)) in incoming.iter().zip(&mut edges).enumerate() {
+            arm_values.push(match edge {
+                MixedEdge::Arm {
+                    group,
+                    class: MixedArm::Root { id, pointee },
+                } => {
+                    let storage = arm_storages()[*group];
+                    let alias =
+                        self.install_mixed_arm_root(name, position, *id, storage, pointee.clone());
+                    *edge = MixedEdge::Arm {
+                        group: *group,
+                        class: MixedArm::Modeled,
+                    };
+                    alias
                 }
                 _ => value.clone(),
             });
         }
-        let incoming = incoming
-            .iter()
-            .zip(arm_values)
-            .map(|((_, label), value)| (value, label.clone()))
-            .collect::<Vec<_>>();
-        let incoming = incoming.as_slice();
 
         let mut arms = Vec::with_capacity(2);
         let mut pointees = Vec::with_capacity(2);
         for (group, storage) in arm_storages().into_iter().enumerate() {
-            let (template_name, template) = incoming
-                .iter()
-                .zip(&groups)
-                .find_map(|((value, _), g)| match (value, g) {
-                    (LlValue::Local(local), Some(g)) if *g == group => self
-                        .gep_provenance
-                        .get(local)
-                        .cloned()
-                        .map(|p| (local.clone(), p)),
-                    _ => None,
-                })
-                .expect("each arm has a modeled incoming value (checked above)");
-            let pointee = self.pointer_pointees.get(&template_name).cloned();
-            let zero = self.zero_index_provenance(&template).ok_or_else(|| {
-                format!(
-                    "native emitter: mixed-storage pointer phi {name}: {storage:?} arm template {template_name} has no structural zero path"
-                )
-            })?;
+            // The other storage's edges take this arm's root at its zero
+            // path: the template is an own value already seen, or a forward
+            // GEP off a root.
+            let needs_zero = edges.iter().any(|edge| {
+                matches!(edge, MixedEdge::Arm { group: g, .. } | MixedEdge::Forward { group: g } if *g != group)
+            });
+            let own_template =
+                arm_values
+                    .iter()
+                    .zip(&edges)
+                    .find_map(|(value, edge)| match (value, edge) {
+                        (LlValue::Local(local), MixedEdge::Arm { group: g, .. }) if *g == group => {
+                            self.gep_provenance
+                                .get(local)
+                                .cloned()
+                                .map(|p| (p, self.pointer_pointees.get(local).cloned()))
+                        }
+                        _ => None,
+                    });
+            let template = match own_template {
+                Some(template) => Some(template),
+                None if needs_zero => self
+                    .mixed_network_arm_template(name, storage)?
+                    .map(|(p, pointee)| (p, Some(pointee))),
+                None => None,
+            };
+            let pointee = template.as_ref().and_then(|(_, pointee)| pointee.clone());
             let zero_name = format!("{name}{ARM_TAG}{group}.zero");
-            self.gep_provenance.insert(zero_name.clone(), zero);
-            self.pointer_storage.insert(zero_name.clone(), storage);
-            if let Some(pointee) = &pointee {
-                self.pointer_pointees
-                    .insert(zero_name.clone(), pointee.clone());
+            if needs_zero {
+                let Some((template, _)) = template else {
+                    return Err(format!(
+                        "native emitter: mixed-storage pointer phi {name}: {storage:?} arm has no value to take a structural zero path from (N75)"
+                    ));
+                };
+                let zero = self.zero_index_provenance(&template).ok_or_else(|| {
+                    format!(
+                        "native emitter: mixed-storage pointer phi {name}: {storage:?} arm template has no structural zero path"
+                    )
+                })?;
+                self.gep_provenance.insert(zero_name.clone(), zero);
+                self.pointer_storage.insert(zero_name.clone(), storage);
+                if let Some(pointee) = &pointee {
+                    self.pointer_pointees
+                        .insert(zero_name.clone(), pointee.clone());
+                }
             }
             let arm_incoming = incoming
                 .iter()
-                .zip(&groups)
-                .map(|((value, label), g)| match g {
-                    Some(g) if *g == group => (value.clone(), label.clone()),
-                    None if group == 0 => (value.clone(), label.clone()),
-                    _ => (LlValue::Local(zero_name.clone()), label.clone()),
+                .zip(&arm_values)
+                .zip(&edges)
+                .map(|(((_, label), value), edge)| {
+                    let value = match edge {
+                        MixedEdge::Arm { group: g, .. } | MixedEdge::Forward { group: g } => {
+                            if *g == group {
+                                value.clone()
+                            } else {
+                                LlValue::Local(zero_name.clone())
+                            }
+                        }
+                        MixedEdge::Split { arms, .. } => arms[group].clone(),
+                        MixedEdge::Either => LlValue::Undef,
+                    };
+                    (value, label.clone())
                 })
                 .collect::<Vec<_>>();
             let arm_name = format!("{name}{ARM_TAG}{group}");
@@ -152,33 +272,49 @@ impl Emitter {
                         "native emitter: mixed-storage pointer phi {name}: {storage:?} arm failed: {error}"
                     )
                 })?;
+            if needs_zero && self.values.contains_key(&pointer_index_name(&zero_name)) {
+                // The arm phi took a different index domain (e.g. pointer
+                // arithmetic off one of its values) and kept the zero path as
+                // a value still to come; it never is, so its id would dangle.
+                return Err(format!(
+                    "native emitter: mixed-storage pointer phi {name}: {storage:?} arm's index domain cannot take the arm's structural zero path (N75)"
+                ));
+            }
             if !self.values.contains_key(&arm_name)
                 || self.pointer_storage.get(&arm_name) != Some(&storage)
             {
                 return Err(format!(
-                    "native emitter: mixed-storage pointer phi {name}: {storage:?} arm has no index-domain pointer"
+                    "native emitter: mixed-storage pointer phi {name}: {storage:?} arm has no index-domain pointer (storage {:?})",
+                    self.pointer_storage.get(&arm_name)
                 ));
             }
+            let pointee = pointee.or_else(|| self.pointer_pointees.get(&arm_name).cloned());
             arms.push(arm_name);
             pointees.push(pointee);
         }
 
         let bool_ty = self.type_id(&LlType::Bool)?;
-        let cond = self.fresh();
+        let cond = self.result_id(&format!("{name}{ARM_TAG}.cond"), &LlType::Bool)?;
         let mut operands = Vec::with_capacity(incoming.len() * 2);
-        let mut seen: HashMap<Word, bool> = HashMap::new();
-        for ((_, label), group) in incoming.iter().zip(&groups) {
-            let takes_function_arm = group.unwrap_or(0) == 0;
+        let mut seen: HashMap<Word, Word> = HashMap::new();
+        for ((_, label), edge) in incoming.iter().zip(&edges) {
+            let selector = match edge {
+                MixedEdge::Arm { group, .. } | MixedEdge::Forward { group } => {
+                    self.const_bool(*group == 0)?
+                }
+                MixedEdge::Split { cond, .. } => *cond,
+                MixedEdge::Either => self.const_bool(true)?,
+            };
             let label_id = self.label_id(label)?;
-            if let Some(existing) = seen.insert(label_id, takes_function_arm) {
-                if existing != takes_function_arm {
+            if let Some(existing) = seen.insert(label_id, selector) {
+                if existing != selector {
                     return Err(format!(
                         "native emitter: mixed-storage pointer phi {name} has both storages from predecessor {label}"
                     ));
                 }
                 continue;
             }
-            operands.push(Operand::IdRef(self.const_bool(takes_function_arm)?));
+            operands.push(Operand::IdRef(selector));
             operands.push(Operand::IdRef(label_id));
         }
         instructions.push(Self::inst(Op::Phi, Some(bool_ty), Some(cond), operands));
@@ -199,7 +335,10 @@ impl Emitter {
             },
         );
         self.mixed_storage_pointers.insert(name.to_string());
-        log_demotion_once(&self.mixed_storage_function, name);
+        let loop_carried = edges
+            .iter()
+            .any(|edge| matches!(edge, MixedEdge::Split { .. } | MixedEdge::Forward { .. }));
+        log_demotion_once(&self.mixed_storage_function, name, loop_carried);
         Ok(true)
     }
 
@@ -260,6 +399,15 @@ impl Emitter {
         Ok(Some((MixedArm::Root { id, pointee }, storage)))
     }
 
+    /// No pointer fact of this name yet: a value still to be emitted.
+    fn pointer_not_seen(&self, local: &str) -> bool {
+        !self.pointer_storage.contains_key(local)
+            && !self.gep_provenance.contains_key(local)
+            && !self.selected_pointers.contains_key(local)
+            && !self.raw_offsets.contains_key(local)
+            && !self.unmodeled_pointers.contains(local)
+    }
+
     /// A whole root as a GEP of it at index 0, under a synthetic name.
     fn install_mixed_arm_root(
         &mut self,
@@ -291,12 +439,18 @@ impl Emitter {
         LlValue::Local(alias)
     }
 
-    /// A split pointer is a pair of pointers, not a value: a phi or select
-    /// that takes it (a walk over the merged pointer, a nested mixed phi, a
-    /// mixed phi on a back edge) cannot be built from it. Refused here with
-    /// the names, before such a consumer fails later on an undefined id.
+    /// A split pointer is a pair of pointers, not a value: a select that
+    /// takes it, or a phi outside its network (one that also merges a pointer
+    /// of unknown storage), cannot be built from it. Refused here with the
+    /// names, before such a consumer fails later on an undefined id. Phis of
+    /// the same network (a walk over the merged pointer, a loop-carried
+    /// slot) are split with it (N75).
     fn refuse_split_pointer_consumers(&self, name: &str) -> Result<(), String> {
-        if self.pointer_phi_incoming_values.contains(name) {
+        // A phi of the same network takes the split (N75); any other phi
+        // cannot.
+        let network_consumers_only = self.mixed_storage_network.is_member(name)
+            && !self.mixed_storage_network.has_outside_consumer(name);
+        if self.pointer_phi_incoming_values.contains(name) && !network_consumers_only {
             return Err(format!(
                 "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds another pointer phi; nested mixed phis are not supported (N72)"
             ));
@@ -314,6 +468,13 @@ impl Emitter {
         if let Some(select) = selected_by {
             return Err(format!(
                 "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds pointer select {select}; nested mixed phis are not supported (N72)"
+            ));
+        }
+        // The same through a copy of it (a bitcast taken by such a phi or
+        // select).
+        if self.mixed_storage_network.has_outside_consumer(name) {
+            return Err(format!(
+                "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds a pointer phi or select outside its network; nested mixed phis are not supported (N72, N75)"
             ));
         }
         Ok(())

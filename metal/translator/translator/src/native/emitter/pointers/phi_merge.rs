@@ -752,6 +752,11 @@ impl Emitter {
             provenances[position] = Some(provenance);
         }
         let prior_provenance = self.gep_provenance.get(name).cloned();
+        if let Some(prior) = prior_provenance.as_ref() {
+            if prior.root != template.root {
+                self.refuse_reserved_on_foreign_root(name, prior.root)?;
+            }
+        }
         let index_names = if template.indices.len() == 1 {
             vec![pointer_index_name(name)]
         } else {

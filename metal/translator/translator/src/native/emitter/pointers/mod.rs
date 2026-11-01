@@ -1,5 +1,7 @@
 use super::*;
+pub(super) use mixed_network::MixedStorageNetwork;
 mod gep_linearize;
+mod mixed_network;
 mod phi_compare;
 mod phi_merge;
 mod phi_mixed_storage;

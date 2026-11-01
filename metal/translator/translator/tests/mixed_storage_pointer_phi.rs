@@ -171,14 +171,16 @@ fn assert_refused_clearly(ll: &str, consumer: &str) {
 }
 
 #[test]
-fn a_pointer_walk_over_the_merged_pointer_is_refused_by_name() {
-    assert_refused_clearly(
-        &kernel(
-            "",
-            "%slot",
-            GLOBAL_GEP,
-            "%g",
-            "  br label %walk
+fn a_pointer_walk_over_the_merged_pointer_stays_split() {
+    // N72 refused this (a split pointer feeding another phi); with N75 the
+    // walk is a member of the same Function/Private network and is split
+    // the same way, its selector carried around the loop.
+    let asm = assert_split(&kernel(
+        "",
+        "%slot",
+        GLOBAL_GEP,
+        "%g",
+        "  br label %walk
 walk:
   %w = phi ptr [ %p, %merge ], [ %wn, %walk ]
   %n = phi i32 [ 0, %merge ], [ %n1, %walk ]
@@ -188,8 +190,14 @@ walk:
   br i1 %more, label %walk, label %done
 done:
   %v = load float, ptr %w, align 4",
-        ),
-        "%p",
+    ));
+    assert!(
+        !asm.contains("OpPtrAccessChain"),
+        "the walk must stay an index on each arm\n{asm}"
+    );
+    assert!(
+        asm.contains("OpSelectionMerge"),
+        "the load must branch per arm\n{asm}"
     );
 }
 
