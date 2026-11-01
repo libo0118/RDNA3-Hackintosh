@@ -590,7 +590,7 @@ IOReturn RDNA3Accel::accelSurfaceCall(void *arg, void *fileOs, unsigned cmd, boo
 /* ops.surface_bo, fDrmLock held. DRIVER-PLAN N71 (c): asked as RD3KSurfGem v2 (an older accelerator answers
  * RD3K_SS_BAD_VERSION: asked again as v1, which never gives a shared import); a read-only shared import
  * (RD3K_SG_SHARED_RO) becomes a gpu_ro BO: no CPU mapping, never a writable GPU page (uapi surface_bo, va_map_hw) */
-int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane)
+int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane, uint32_t flags)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     RD3KSurfGem g;
@@ -602,6 +602,8 @@ int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t sur
     g.surfaceID = surfaceId;
     g.plane = plane;
     g.status = RD3K_SS_OFF;
+    /* N71 (c), security review: a read-only shared import only when the caller's user space understands one */
+    g.flags = (flags & RD_SURFACE_BO_ACCEPT_RO) ? RD3K_SG_ACCEPT_RO : 0u;
     IOReturn rr = a->accelSurfaceCall(&g, fileOs, RD3K_ESC_SURF_GEM, &svc);
     if (svc && rr == kIOReturnSuccess && g.status == RD3K_SS_BAD_VERSION) {
         static SInt32 gV1;
@@ -629,6 +631,9 @@ int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t sur
     }
     const bool v2 = g.version == RD3K_SURFGEM_VERSION;
     const bool shared = v2 && (g.flags & RD3K_SG_SHARED_RO);
+    if (shared && !(flags & RD_SURFACE_BO_ACCEPT_RO))   /* never: the accelerator shares only when asked; the UAPI refuses it */
+        LOG("GEM: IOSurface %u plane %u: the accelerator answered a read-only shared import the caller did not ask for: "
+            "refused (EPERM)", surfaceId, plane);
     RDNA3VramHandle *h = (RDNA3VramHandle *)g.kapiMemory;
     bo->vram_offset = h->offset;
     bo->size = h->size;

@@ -9,7 +9,7 @@
 #include <stddef.h>
 const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
 typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem;
-                 uint64_t share_gen; int share_ro; } nvk_buffer;   /* N71 (c): the import's allocation generation (0: unknown) and DRM_XNU_SURFACE_SHARED_RO (a read-only alias: never written) */
+                 uint64_t share_gen; int share_ro; int32_t share_pid; } nvk_buffer;   /* N71 (c): the import's allocation generation (0: unknown), DRM_XNU_SURFACE_SHARED_RO (a read-only alias: never written) and its producer's pid (0: unknown) */
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_ws_frame.h"
 #include "nvmtl_surface_share.h"
@@ -370,7 +370,8 @@ extern nvmtl_ps_stats g_ps;
 int nvmtl_vk_a3share_now(void);
 int nvmtl_vk_ws_share_why(uint32_t surfaceID, uint32_t usage, int cpu_write);
 void nvmtl_vk_wss_demote(uint32_t surfaceID, const char *why);
-int nvmtl_vk_wss_hazard(uint32_t surfaceID, uint64_t tag0, uint64_t tag1);   /* nvmtl_wss_tag_key values: seed << 32 | generation */
+int nvmtl_vk_wss_hazard(uint32_t surfaceID, int32_t producerPid, uint64_t tag0, uint64_t tag1);   /* nvmtl_wss_tag_key values: seed << 32 | generation */
+int nvmtl_vk_wss_producer_demoted(int32_t producerPid);   /* its hazards demoted that producer: none of its surfaces is imported read-only */
 int nvmtl_vk_surface_share_after_gpu(uint32_t surfaceID, uint32_t plane, nvmtl_ps_tex *t);   /* NVMTL_PSR_* of the answer, -1 nothing asked */
 int nvmtl_vk_image_create_buffer_alias_ro(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8,
                                           const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);

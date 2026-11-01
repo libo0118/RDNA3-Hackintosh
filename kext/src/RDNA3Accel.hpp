@@ -357,7 +357,7 @@ private:
     IOReturn      accelSurfaceCall(void *arg, void *fileOs, unsigned cmd, bool *svc);
     IOService    *fAccelSvc = nullptr;     /* RDNA3Accelerator, retained once found */
     const OSSymbol *fAccelSsSym = nullptr; /* RD3ACCEL_SS_FN */
-    static int    drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane);
+    static int    drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane, uint32_t flags);
     static int    drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane);
     static int    drmSurfaceShare(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane, uint64_t gen);
     static void   drmSurfaceFault(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane, uint64_t va,

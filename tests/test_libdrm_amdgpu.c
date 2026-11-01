@@ -299,11 +299,21 @@ int main(void)
             CHECK(drm_xnu_surface_share(0x51, 16) == -1 && errno == EINVAL);
             rfd = drm_xnu_surface_fd(0x53, 0, 4096);
             memset(&ro, 0, sizeof(ro));
-            CHECK(rfd >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)rfd, &ro) == 0);
+            /* a process that never said it understands a read-only import gets the old refusal */
+            CHECK(rfd >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)rfd, &ro) != 0);
+            CHECK(drm_xnu_surface_last_import(&fl, &gen) == EPERM);
+            drm_xnu_surface_accept_ro(1);
+            memset(&ro, 0, sizeof(ro));
+            CHECK(amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)rfd, &ro) == 0);
             CHECK(drm_xnu_surface_last_import(&fl, &gen) == 0 && fl == DRM_XNU_SURFACE_SHARED_RO && gen == 5);
+            {
+                int32_t pid = 0;
+                CHECK(drm_xnu_surface_last_import_pid(&pid) == 0 && pid == 4242);
+            }
             CHECK(amdgpu_bo_cpu_map(ro.buf_handle, &rp) != 0);                 /* no CPU mapping of it */
             CHECK(drm_xnu_surface_share(0x53, 0) == -1 && errno == ENOENT);   /* a read-only import never shares */
             CHECK(amdgpu_bo_free(ro.buf_handle) == 0);
+            drm_xnu_surface_accept_ro(0);
             close(rfd);
             bad = drm_xnu_surface_fd(0x52, 0, 4096);
             CHECK(bad >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)bad, &ro) != 0);

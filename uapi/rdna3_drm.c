@@ -2388,7 +2388,7 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s, uint32_t s
     rdna3_drm_device *dev = f->dev;
     rdna3_bo *bo;
     uint32_t handle = 0;
-    int r;
+    int r, accept_ro;
 
     if (s->plane > RD_XNU_SURFACE_MAX_PLANE)   /* IOSurface planes; never handed on to the OS unchecked */
         return -RD_EINVAL;
@@ -2427,10 +2427,18 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s, uint32_t s
     if (!bo)
         return -RD_ENOMEM;
     bo->refcnt = 1;
-    r = dev->ops.surface_bo(dev->ops.ctx, f->os, bo, s->surface_id, s->plane);
+    /* N71 (c): a read-only import only for a caller that said it understands one (the tail's input bit; 0 for
+     * an older caller, whose struct ends before it or whose tail is zero) */
+    accept_ro = size >= sizeof(*s) && (s->out_flags & RD_XNU_SURFACE_BO_IN_ACCEPT_RO) ? 1 : 0;
+    r = dev->ops.surface_bo(dev->ops.ctx, f->os, bo, s->surface_id, s->plane, accept_ro ? RD_SURFACE_BO_ACCEPT_RO : 0u);
     if (r) {
         dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
         return r;
+    }
+    if (bo->gpu_ro && !accept_ro) {   /* the OS gave what the caller cannot handle: the old refusal */
+        bo->foreign = 1;
+        bo_put(f, bo);   /* the OS's hold goes back through bo_free */
+        return -RD_EPERM;
     }
     /* a VRAM BO RADV may map and place in its VA like any other; WindowServer
      * and the display read the same bytes */
@@ -2474,6 +2482,8 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s, uint32_t s
         s->out_ver = RD_XNU_SURFACE_BO_OUT_VER;
         s->out_flags = bo->gpu_ro ? RD_XNU_SURFACE_BO_OUT_SHARED_RO : 0u;
         s->alloc_gen = bo->surf_gen;
+        s->share_pid = bo->gpu_ro ? bo->surf_pid : 0;
+        s->pad1 = 0;
     }
     return 0;
 }

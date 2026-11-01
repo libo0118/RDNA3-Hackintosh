@@ -891,7 +891,12 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             const uint32_t sid = (uint32_t)IOSurfaceGetID(surf);
             if (!nvmtl_vk_surface_vram(sid, 0, row * h, &vb)) {
                 const int iv = nvmtl_wss_import_verdict(vb.share_ro, ws_plan);
-                if (iv == NVMTL_WSS_IV_USE_RO) {
+                if (iv == NVMTL_WSS_IV_USE_RO && nvmtl_vk_wss_producer_demoted(vb.share_pid)) {
+                    /* ECC security review of N71 (c): this producer's hazards demoted it: none of its surfaces is sampled read-only */
+                    nvmtl_vk_buffer_destroy(&vb);
+                    nvmtl_vk_wss_demote(sid, "its producer was demoted (hazards)");
+                    g_tr_why = NVT_WHY_ALIAS_FAILED;
+                } else if (iv == NVMTL_WSS_IV_USE_RO) {
                     /* N71 (c): the kernel gave WindowServer a READ-ONLY import of an application's shared allocation: a sample-only alias, or nothing */
                     if (!nvmtl_vk_image_create_buffer_alias_ro(w, h, vkf, bpp, a8, &vb, 0, row, &t->_i)) {
                         t->_vramBuf = vb; t->_vramRO = YES; t->_roGen = vb.share_gen; g_tr_why = 0;

@@ -75,7 +75,8 @@ struct xnu_prime_handle { uint32_t handle, flags; int32_t fd; };
 #define XNU_SURFBUF_MAGIC "RD3SURF1"
 struct xnu_surfbuf { char magic[8]; uint32_t version, surface_id, plane, pad; uint64_t size; };
 /* RD_NR_XNU_SURFACE_BO; the out tail (N71 (c)) stays 0 from an older kext */
-struct xnu_surface_bo { uint32_t op, surface_id, plane, handle; uint64_t size; uint32_t out_ver, out_flags; uint64_t alloc_gen; };
+struct xnu_surface_bo { uint32_t op, surface_id, plane, handle; uint64_t size; uint32_t out_ver, out_flags; uint64_t alloc_gen;
+                        int32_t share_pid; uint32_t pad1; };
 #define XNU_NR_SURFACE_BO            0xF5   /* RD_NR_XNU_SURFACE_BO */
 static int rd_errno_to_host(int e);
 #define XNU_SURFACE_BO_IMPORT        0
@@ -84,6 +85,7 @@ static int rd_errno_to_host(int e);
 #define XNU_SURFACE_BO_DIRTY_TRY     3
 #define XNU_SURFACE_BO_SHARE         4   /* DRIVER-PLAN N71 (c) */
 #define XNU_SURFACE_BO_OUT_SHARED_RO 0x1u
+#define XNU_SURFACE_BO_IN_ACCEPT_RO  0x80000000u   /* RD_XNU_SURFACE_BO_IN_ACCEPT_RO */
 #define XNU_NR_BO_EXPORT             0xF1   /* RD_NR_XNU_BO_EXPORT */
 #define XNU_NR_BO_IMPORT             0xF2
 #define XNU_DRM_CLOEXEC              02000000   /* Linux O_CLOEXEC, as drm.h DRM_CLOEXEC */
@@ -423,6 +425,22 @@ int drm_xnu_surface_last_error(void)
  * XNU_SURFACE_BO_OUT_*, the allocation generation; 0 from an older kext) */
 static __thread uint32_t g_import_flags;
 static __thread uint64_t g_import_gen;
+static __thread int32_t g_import_pid;
+/* ECC security review of N71 (c): the kernel gives a read-only shared import only to a process whose plugin said
+ * it understands one (an older plugin never calls drm_xnu_surface_accept_ro: refused as before) */
+static int g_accept_ro;
+
+void drm_xnu_surface_accept_ro(int on)
+{
+    __atomic_store_n(&g_accept_ro, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+int drm_xnu_surface_last_import_pid(int32_t *pid)
+{
+    if (pid)
+        *pid = g_surface_err ? 0 : g_import_pid;
+    return g_surface_err;
+}
 
 int drm_xnu_surface_last_import(uint32_t *flags, uint64_t *gen)
 {
@@ -501,6 +519,7 @@ static int surface_fd_to_handle(int ci, int fd, uint32_t *handle)
     int err;
     g_import_flags = 0;
     g_import_gen = 0;
+    g_import_pid = 0;
     if (pread(fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) || memcmp(b.magic, XNU_SURFBUF_MAGIC, 8) ||
         b.version != 1)
         return g_surface_err = EBADF;
@@ -509,14 +528,17 @@ static int surface_fd_to_handle(int ci, int fd, uint32_t *handle)
     s.surface_id = b.surface_id;
     s.plane = b.plane;
     s.size = b.size;
+    if (__atomic_load_n(&g_accept_ro, __ATOMIC_RELAXED))
+        s.out_flags = XNU_SURFACE_BO_IN_ACCEPT_RO;
     err = be()->ioctl(g_conns[ci].conn, XNU_NR_SURFACE_BO, &s, sizeof(s));
     g_surface_err = rd_errno_to_host(err);
     if (err)
         return err;
     *handle = s.handle;
-    if (s.out_ver) {
+    if (s.out_ver) {   /* an older kext leaves the tail as sent: nothing of it is an answer */
         g_import_flags = s.out_flags;
         g_import_gen = s.alloc_gen;
+        g_import_pid = s.out_ver >= 2 ? s.share_pid : 0;
     }
     if (!(g_import_flags & XNU_SURFACE_BO_OUT_SHARED_RO))   /* a read-only import never shares */
         surface_import_note(ci, b.surface_id, b.plane);

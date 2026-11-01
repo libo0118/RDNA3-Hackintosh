@@ -78,9 +78,9 @@ int main(void)
 
     /* ---- the hazard also sees a seed-only move (the CPU copy-out fallback) ---- */
     { nvmtl_wss_state hs; nvmtl_wss_stats ht; memset(&hs, 0, sizeof hs); memset(&ht, 0, sizeof ht);
-      check(nvmtl_wss_hazard(&hs, &ht, 9, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(7, 3)), 0, "same seed and generation: none");
-      check(nvmtl_wss_hazard(&hs, &ht, 9, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(8, 3)) & NVMTL_WSS_H_HAZARD, 1, "the seed moved, the generation did not: a hazard");
-      check(nvmtl_wss_hazard(&hs, &ht, 10, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(7, 4)) & NVMTL_WSS_H_HAZARD, 1, "the generation moved: a hazard");
+      check(nvmtl_wss_hazard(&hs, &ht, 9, 0, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(7, 3)), 0, "same seed and generation: none");
+      check(nvmtl_wss_hazard(&hs, &ht, 9, 0, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(8, 3)) & NVMTL_WSS_H_HAZARD, 1, "the seed moved, the generation did not: a hazard");
+      check(nvmtl_wss_hazard(&hs, &ht, 10, 0, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(7, 4)) & NVMTL_WSS_H_HAZARD, 1, "the generation moved: a hazard");
       check(nvmtl_wss_tag_key(1, 2) != nvmtl_wss_tag_key(2, 1), 1, "(seed, gen) and (gen, seed) differ"); }
 
     /* ---- a sample ---- */
@@ -96,22 +96,51 @@ int main(void)
 
     /* ---- R1: the hazard detector and demotion ---- */
     nvmtl_wss_state st; nvmtl_wss_stats s; memset(&st, 0, sizeof st); memset(&s, 0, sizeof s);
-    check(nvmtl_wss_hazard(&st, &s, 40, 100, 100), 0, "the generation did not move: no hazard");
+    check(nvmtl_wss_hazard(&st, &s, 40, 501, 100, 100), 0, "the generation did not move: no hazard");
     check(s.war == 0 && st.hazards == 0, 1, "no hazard counted");
-    check(nvmtl_wss_hazard(&st, &s, 40, 100, 101), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED, "it moved: hazard, the surface demoted");
+    check(nvmtl_wss_hazard(&st, &s, 40, 501, 100, 101), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED, "it moved: hazard, the surface demoted");
     check(s.war == 1 && s.demoted == 1 && st.hazards == 1, 1, "counted sh_war, sh_demoted");
     check(nvmtl_wss_demoted(&st, 40), 1, "surface 40 is demoted");
     check(nvmtl_wss_demoted(&st, 41), 0, "surface 41 is not");
     check(nvmtl_wss_eligible(1, 0, 1, 0, nvmtl_wss_demoted(&st, 40), R, 0), NVMTL_WSS_DEMOTED, "a demoted surface takes the private path");
-    check(nvmtl_wss_hazard(&st, &s, 40, 101, 102), NVMTL_WSS_H_HAZARD, "the same surface again: a hazard, not demoted twice");
+    check(nvmtl_wss_hazard(&st, &s, 40, 501, 101, 102), NVMTL_WSS_H_HAZARD, "the same surface again: a hazard, not demoted twice");
     check(s.demoted == 1, 1, "sh_demoted counts a surface once");
-    check(nvmtl_wss_hazard(&st, &s, 41, 5, 6), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED, "third hazard");
-    check(st.session_off, 0, "three hazards: not yet");
-    check(nvmtl_wss_hazard(&st, &s, 42, 5, 6), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED | NVMTL_WSS_H_SESSION, "the 4th hazard stops the session");
-    check(st.session_off, 1, "session_off");
-    check(nvmtl_wss_hazard(&st, &s, 43, 5, 6), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED, "later hazards do not say 'session' again");
-    check(nvmtl_wss_eligible(1, 0, 1, st.session_off, 0, R, 0), NVMTL_WSS_SESSION_OFF, "after the 4th every surface is private");
-    check(s.war == 5, 1, "five hazards counted");
+    check(nvmtl_wss_hazard(&st, &s, 41, 501, 5, 6), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED, "third hazard of producer 501");
+    check(nvmtl_wss_producer_demoted(&st, 501), 0, "three hazards: the producer not yet");
+    /* ECC security review: the 4th hazard of ONE producer demotes that producer, not the session */
+    check(nvmtl_wss_hazard(&st, &s, 42, 501, 5, 6), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED | NVMTL_WSS_H_PRODUCER,
+          "the 4th hazard of producer 501 demotes it");
+    check(nvmtl_wss_producer_demoted(&st, 501) && s.pdem == 1 && !st.session_off, 1, "producer 501 demoted, sh_pdem 1, the session on");
+    check(nvmtl_wss_hazard(&st, &s, 43, 501, 5, 6), NVMTL_WSS_H_HAZARD | NVMTL_WSS_H_DEMOTED, "later hazards do not demote it again");
+    check(s.pdem == 1, 1, "sh_pdem counts a producer once");
+    check(nvmtl_wss_producer_demoted(&st, 502), 0, "another producer keeps its share");
+    check(nvmtl_wss_eligible(1, 0, 1, st.session_off, 0, R, 0), NVMTL_WSS_OK, "other producers' surfaces stay eligible");
+    check(nvmtl_wss_producer_demoted(&st, 0), 0, "pid 0 (an older kernel) is never a demoted producer");
+    /* pid 0: counted for the session only */
+    { nvmtl_wss_state z0; nvmtl_wss_stats zs; memset(&z0, 0, sizeof z0); memset(&zs, 0, sizeof zs);
+      for (uint32_t i = 0; i < 8; i++) check(nvmtl_wss_hazard(&z0, &zs, 60 + i, 0, 1, 2) & NVMTL_WSS_H_PRODUCER, 0, "pid 0 demotes no producer");
+      check(z0.npid, 0, "pid 0 takes no producer entry"); }
+    /* the session backstop: NVMTL_WSS_HAZARD_MAX hazards of all producers together */
+    { nvmtl_wss_state bk; nvmtl_wss_stats bks; int said = 0; memset(&bk, 0, sizeof bk); memset(&bks, 0, sizeof bks);
+      for (uint32_t i = 0; i < NVMTL_WSS_HAZARD_MAX - 1; i++) said |= nvmtl_wss_hazard(&bk, &bks, 1000 + i, (int32_t)(2000 + i), 1, 2) & NVMTL_WSS_H_SESSION;
+      check(said == 0 && !bk.session_off, 1, "one short of the backstop: the session on");
+      check(nvmtl_wss_hazard(&bk, &bks, 5000, 7000, 1, 2) & NVMTL_WSS_H_SESSION, NVMTL_WSS_H_SESSION, "the backstop stops the session");
+      check(nvmtl_wss_eligible(1, 0, 1, bk.session_off, 0, R, 0), NVMTL_WSS_SESSION_OFF, "after the backstop every surface is private");
+      check(nvmtl_wss_hazard(&bk, &bks, 5001, 7001, 1, 2) & NVMTL_WSS_H_SESSION, 0, "later hazards do not say 'session' again");
+      check(bk.npid, NVMTL_WSS_PIDS, "the producer table stays at its size");
+      check(bks.pdem, 0, "one hazard each: no producer demoted"); }
+    /* a full producer table forgets a not-demoted producer first: a demoted one stays demoted */
+    { nvmtl_wss_state pt; nvmtl_wss_stats ps; memset(&pt, 0, sizeof pt); memset(&ps, 0, sizeof ps);
+      for (unsigned k = 0; k < NVMTL_WSS_PID_HAZARD_MAX; k++) (void)nvmtl_wss_hazard(&pt, &ps, 3000 + k, 77, 1, 2);
+      check(nvmtl_wss_producer_demoted(&pt, 77), 1, "producer 77 demoted");
+      for (int32_t q = 1; q <= (int32_t)NVMTL_WSS_PIDS * 3; q++) (void)nvmtl_wss_pid_slot(&pt, 100 + q, 1);
+      check(nvmtl_wss_producer_demoted(&pt, 77), 1, "producer 77 still demoted after the table churned"); }
+    /* the demotion log is rate limited per producer: its first 4, then every 64th */
+    { nvmtl_wss_state lg; unsigned due = 0; memset(&lg, 0, sizeof lg);
+      for (unsigned k = 0; k < 128; k++) due += (unsigned)nvmtl_wss_pid_log_due(&lg, 9);
+      check(due, 6, "producer 9: 4 + the 64th and the 128th");
+      check(nvmtl_wss_pid_log_due(&lg, 10), 1, "another producer has its own budget");
+      check(nvmtl_wss_pid_log_due(&lg, 0), 1, "pid 0: always (no entry)"); }
     check(nvmtl_wss_demote(&st, &s, 0), 0, "surface 0 is never demoted");
     /* the table is bounded: the oldest is forgotten, nothing overruns */
     { nvmtl_wss_state big; nvmtl_wss_stats bs; memset(&big, 0, sizeof big); memset(&bs, 0, sizeof bs);
@@ -144,6 +173,8 @@ int main(void)
       nvmtl_wss_format(&z, 1, buf, sizeof buf);
       check(strstr(buf, "sh_imp=3 sh_skip=100 sh_stale=2 sh_reimp=1 sh_refused=2 sh_war=1 sh_demoted=1 sh_wr=4 sh_inelig=6 sh_rw=2 sh_eperm=2 ") == buf, 1, "values");
       check(strstr(buf, "sh_off=1") != NULL, 1, "sh_off=1 after the session stop");
+      z.pdem = 2; nvmtl_wss_format(&z, 1, buf, sizeof buf);
+      check(strstr(buf, " sh_pdem=2") != NULL, 1, "sh_pdem: producers demoted");
       check(nvmtl_wss_format(&z, 0, buf, 0), 0, "no room: nothing"); }
 
     printf("test_ws_share: %s\n", fails ? "FAIL" : "ok");

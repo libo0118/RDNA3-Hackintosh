@@ -75,9 +75,14 @@ static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_
  * is 100 MiB (more than half of the 256 MiB visible VRAM over two imports) */
 static int h_surf_refs[16];
 static uint32_t h_dirty_surface, h_dirty_plane;
-static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+/* N71 (c) security review: the read-only shared surfaces (13, 15) answer the old refusal unless the caller
+ * accepts a read-only import; h_ro_force sets gpu_ro regardless (an OS bug the UAPI must refuse) */
+static int h_ro_force;
+static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane, uint32_t flags)
 {
     (void)c;
+    if ((id == 13 || id == 15) && !(flags & RD_SURFACE_BO_ACCEPT_RO) && !h_ro_force)
+        return -RD_EPERM;
     if ((os != (void *)0x7a5c && os != (void *)0x7a5d) || plane)
         return -RD_ENOENT;
     if (id == 9) {
@@ -1165,10 +1170,23 @@ int main(void)
             CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, ro) == -RD_ENODEV && h_share_id == 0);
             rb->surf_gen = 3;
             /* WindowServer's import of it: read-only - no CPU mapping, never a writable GPU page, no GART bind */
+            /* an older caller (no IN_ACCEPT_RO, a zero tail or a 24-byte struct) gets the old refusal while the
+             * share record exists; an OS that answers read-only anyway is refused by the UAPI (its hold given back) */
             memset(&ro, 0, sizeof(ro));
             ro.op = RD_XNU_SURFACE_BO_IMPORT; ro.surface_id = 13;
-            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == 0 && ro.handle != 0 &&
-                  ro.out_flags == RD_XNU_SURFACE_BO_OUT_SHARED_RO && ro.alloc_gen == 3 && h_surf_refs[7] == 2);
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == -RD_EPERM && h_surf_refs[7] == 1);
+            memset(&v1, 0, sizeof(v1));
+            v1.op = RD_XNU_SURFACE_BO_IMPORT; v1.surface_id = 13;
+            CHECK(rdna3_drm_ioctl(f, RD_NR_XNU_SURFACE_BO, &v1, RD_XNU_SURFACE_BO_V1_SIZE) == -RD_EPERM && h_surf_refs[7] == 1);
+            h_ro_force = 1;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == -RD_EPERM && h_surf_refs[7] == 1 && ro.handle == 0);
+            h_ro_force = 0;
+            /* the new caller: read-only, the producer's pid with it */
+            memset(&ro, 0, sizeof(ro));
+            ro.op = RD_XNU_SURFACE_BO_IMPORT; ro.surface_id = 13; ro.out_flags = RD_XNU_SURFACE_BO_IN_ACCEPT_RO;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == 0 && ro.handle != 0 && ro.out_ver == RD_XNU_SURFACE_BO_OUT_VER &&
+                  ro.out_flags == RD_XNU_SURFACE_BO_OUT_SHARED_RO && ro.alloc_gen == 3 && ro.share_pid == 4242 &&
+                  h_surf_refs[7] == 2);
             rb = rdna3_drm_bo_lookup(f, ro.handle);
             CHECK(rb && rb->gpu_ro && rb->foreign && (rb->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) &&
                   !(rb->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED) && rb->surf_pid == 4242);
@@ -1601,6 +1619,7 @@ int main(void)
                 f->os = (void *)0x7a5c;
                 dev.ops.surface_bo = h_surface_bo;
                 memset(&sro, 0, sizeof(sro)); sro.op = RD_XNU_SURFACE_BO_IMPORT; sro.surface_id = 15;
+                sro.out_flags = RD_XNU_SURFACE_BO_IN_ACCEPT_RO;
                 memset(&srw, 0, sizeof(srw)); srw.op = RD_XNU_SURFACE_BO_IMPORT; srw.surface_id = 14;
                 CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sro) == 0 && sro.out_flags == RD_XNU_SURFACE_BO_OUT_SHARED_RO &&
                       IOCTL(f, RD_NR_XNU_SURFACE_BO, srw) == 0 && srw.out_flags == 0 && sro.size == 4096);

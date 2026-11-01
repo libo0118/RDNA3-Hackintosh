@@ -60,9 +60,11 @@ static int lb_surface_share(void *c, void *os, uint32_t id, uint32_t plane, uint
     lb_surface_share_gen = (uint32_t)gen;
     return 0;
 }
-static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane, uint32_t flags)
 {
     (void)c; (void)os;
+    if (id == LB_SURFACE_RO_ID && !(flags & RD_SURFACE_BO_ACCEPT_RO))
+        return -RD_EPERM;   /* the kernel's old refusal of WindowServer's import */
     if ((id != LB_SURFACE_ID && id != LB_SURFACE_RO_ID && !LB_SURFACE_ALIAS(id)) || plane)
         return -RD_ENOENT;
     bo->surf_gen = LB_SURFACE_GEN;

@@ -4095,6 +4095,9 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
         p->status = RD3K_SS_BAD_VERSION; rd3AccelSurfGemLog(p, "the core kext speaks another version", nullptr, 0);
         return kIOReturnSuccess;
     }
+    /* the caller's user space understands a read-only import (ECC security review: an older WindowServer plugin
+     * would write an alias over one): read before the tail is cleared */
+    const bool acceptRo = v2 && (p->flags & RD3K_SG_ACCEPT_RO);
     if (v2) { p->flags = 0; p->sharePid = 0; p->allocGen = 0; }
     if (!rd3k_ss_plane_ok(p->plane)) {
         p->status = RD3K_SS_NO_CACHE;
@@ -4116,7 +4119,14 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
      * share record first */
     unsigned dispHeads = 0, reason = kA3WhyNone;
     bool shareTry = false;
-    const unsigned pst = rd3AccelA3Policy(surf, task, p->surfaceID, &dispHeads, &reason, v2 && gA3Share, &shareTry);
+    const unsigned pst = rd3AccelA3Policy(surf, task, p->surfaceID, &dispHeads, &reason, acceptRo && gA3Share, &shareTry);
+    if (pst && !shareTry && gA3Share && v2 && !acceptRo && (reason == kA3WhyDisplay || reason == kA3WhyWs)) {
+        static SInt64 gNoAccept;
+        const SInt64 n = OSAddAtomic64(1, &gNoAccept);
+        if (rd3_log_due((uint64_t)n, 4, 1023))
+            ALOG("surfshare: WindowServer's import of surface %u plane %u does not accept a read-only one (an older plugin "
+                 "/ libdrm_xnu): refused as before, no share looked up (%lld such)", p->surfaceID, p->plane, (long long)n + 1);
+    }
     if (pst && !shareTry) {
         const SInt64 n = rd3AccelA3WhyCount(reason);
         p->status = pst;

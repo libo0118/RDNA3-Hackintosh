@@ -531,6 +531,9 @@ struct RD3KSurfShareEsc {
  * shared allocation (N71 (c)): the core must give it no CPU mapping and no
  * writable GPU page */
 #define RD3K_SG_SHARED_RO      0x1u
+/* in (ECC security review of N71 (c)): the core's caller understands a
+ * read-only import; without it WindowServer's import is refused as before */
+#define RD3K_SG_ACCEPT_RO      0x100u
 #define RD3K_VRAM_FN_REF      "rdna3RefVram"
 /* DRIVER-PLAN N41 (security review): the core's reference count of an
  * accelerator allocation (p1 the handle, p2 unsigned int * out): 1 only the
@@ -546,7 +549,7 @@ struct RD3KSurfGem {
     void *kapiMemory;                  /* out: the allocation, referenced */
     unsigned long long bytes;          /* out */
     /* v2 (N71 (c)); a v1 caller's struct ends here (RD3K_SURFGEM_V1_SIZE) */
-    unsigned int flags;                /* out: RD3K_SG_* */
+    unsigned int flags;                /* in: RD3K_SG_ACCEPT_RO; out: RD3K_SG_SHARED_RO */
     int sharePid;                      /* out: SHARED_RO: the producer that recorded the share */
     unsigned long long allocGen;       /* out: the allocation generation the reference is of (never 0) */
 };

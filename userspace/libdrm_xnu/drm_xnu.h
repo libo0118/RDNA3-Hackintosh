@@ -72,6 +72,13 @@ int   drm_xnu_surface_last_error(void);
  * re-backed the surface; 0 from an older kext). Either pointer may be NULL. */
 #define DRM_XNU_SURFACE_SHARED_RO 0x1u
 int   drm_xnu_surface_last_import(uint32_t *flags, uint64_t *gen);
+/* the same import's producer (SHARED_RO: the pid that shared it; 0 unknown
+ * or not shared) */
+int   drm_xnu_surface_last_import_pid(int32_t *pid);
+/* the process understands a READ-ONLY import (never writes, maps or uploads
+ * into one): only then does the kernel give WindowServer one; without the
+ * call (an older plugin) its import is refused as before. */
+void  drm_xnu_surface_accept_ro(int on);
 /* DRIVER-PLAN N71 (c), the producer: after its GPU finished a frame in the
  * surface's VRAM, let WindowServer import that allocation read-only. Goes to
  * the connection this process imported the plane on (writable). 0, or -1:

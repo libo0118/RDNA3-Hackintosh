@@ -6,7 +6,7 @@
  * NVMTLObjects.m and nvmtl_vk.c use it. The rules:
  *
  *  - Eligibility (nvmtl_wss_eligible): only WindowServer, only when nothing switched it off (NVMTL_WS_SHARE=0, the kernel's
- *    debug.rdna3accel_a3share not 1 - live, the session stop after 4 hazards, a surface demoted for its life), and only a texture that can never be written: usage ShaderRead
+ *    debug.rdna3accel_a3share not 1 - live, the session backstop after 64 hazards of all producers, a surface demoted for its life; a producer demoted after 4 of its own), and only a texture that can never be written: usage ShaderRead
  *    (+ PixelFormatView) alone - Unknown (0) may be written, RenderTarget and ShaderWrite are writes, a write-combined CPU
  *    cache mode is a CPU writer. Anything else takes the private path.
  *  - The result of the kernel's import is a VkImage with SAMPLED | TRANSFER_SRC usage only, over a buffer with
@@ -24,7 +24,10 @@
  *    does not demote: the next wrapper's plan sees the stale tag itself and is private while it stays stale.
  *  - R1, read-after-write: the producer's tag (seed, generation) recorded at the composite's commit and compared at its
  *    completion (nvmtl_wss_hazard; the CPU copy-out fallback moves the seed without the generation): a move means the producer finished a NEXT frame into the drawable while WindowServer's samples were
- *    in flight (sh_war); that surface is demoted for its life; NVMTL_WSS_HAZARD_MAX hazards stop shared imports for the session.
+ *    in flight (sh_war); that surface is demoted for its life. Hazards are counted per PRODUCER (the pid the kernel names
+ *    with the read-only import): NVMTL_WSS_PID_HAZARD_MAX of one producer demote that producer (every surface it shares
+ *    takes the private path, sh_pdem), so one application cannot turn sharing off for the others (ECC security review);
+ *    NVMTL_WSS_HAZARD_MAX hazards of all producers together stop shared imports for the session (a backstop).
  *  - R4, any import error: the private path, the surface demoted (so it is asked once), counted per errno.
  */
 #ifndef NVMTL_WS_SHARE_H
@@ -86,6 +89,7 @@ typedef struct {
     uint64_t rw;                                               /* a WRITABLE import where a read-only one was planned (the record is gone, a3ws 1): given back, never used */
     uint64_t inelig;                                           /* wrappers of a shared surface that stayed private: a usage that can write, a CPU writer */
     uint64_t e_perm, e_nospc, e_noent, e_nodev, e_nxio, e_other;   /* refused imports by errno */
+    uint64_t pdem;                                             /* producers demoted (their hazards) */
 } nvmtl_wss_stats;
 #define NVMTL_WSS_INC(s, f) __atomic_fetch_add(&(s)->f, 1, __ATOMIC_RELAXED)
 
@@ -105,13 +109,47 @@ static inline void nvmtl_wss_count_err(nvmtl_wss_stats *s, int err)
 
 /* ---- the demotion state (the caller serialises) ---- */
 #define NVMTL_WSS_DEMOTE_MAX 128u   /* surfaces remembered; the oldest is forgotten when full (it then gets one more chance) */
-#define NVMTL_WSS_HAZARD_MAX 4u
+#define NVMTL_WSS_HAZARD_MAX 64u      /* all producers together: the session backstop */
+#define NVMTL_WSS_PID_HAZARD_MAX 4u   /* one producer: that producer is demoted */
+#define NVMTL_WSS_PIDS 64u            /* producers remembered; a full table forgets a not-demoted one first */
+typedef struct { int32_t pid; unsigned hazards, logs; int demoted; } nvmtl_wss_pid;
 typedef struct {
     uint32_t ids[NVMTL_WSS_DEMOTE_MAX];
     unsigned n, next;
     unsigned hazards;
     int session_off;
+    nvmtl_wss_pid pids[NVMTL_WSS_PIDS];
+    unsigned npid, pnext;
 } nvmtl_wss_state;
+
+/* the producer's entry (pid > 0; NULL for 0, an older kernel that names none); create: make one when missing */
+static inline nvmtl_wss_pid *nvmtl_wss_pid_slot(nvmtl_wss_state *st, int32_t pid, int create)
+{
+    unsigned i, k;
+    if (pid <= 0) return NULL;
+    for (i = 0; i < st->npid; i++) if (st->pids[i].pid == pid) return &st->pids[i];
+    if (!create) return NULL;
+    if (st->npid < NVMTL_WSS_PIDS) k = st->npid++;
+    else {   /* full: the next not-demoted entry in turn, a demoted one only when every entry is */
+        k = st->pnext % NVMTL_WSS_PIDS;
+        for (i = 0; i < NVMTL_WSS_PIDS && st->pids[k].demoted; i++) k = (k + 1) % NVMTL_WSS_PIDS;
+        st->pnext = (k + 1) % NVMTL_WSS_PIDS;
+    }
+    st->pids[k].pid = pid; st->pids[k].hazards = 0; st->pids[k].logs = 0; st->pids[k].demoted = 0;
+    return &st->pids[k];
+}
+static inline int nvmtl_wss_producer_demoted(nvmtl_wss_state *st, int32_t pid)
+{
+    const nvmtl_wss_pid *p = nvmtl_wss_pid_slot(st, pid, 0);
+    return p && p->demoted;
+}
+/* a log line about this producer is due: its first 4, then every 64th (pid 0: always) */
+static inline int nvmtl_wss_pid_log_due(nvmtl_wss_state *st, int32_t pid)
+{
+    nvmtl_wss_pid *p = nvmtl_wss_pid_slot(st, pid, 1);
+    if (!p) return 1;
+    return p->logs++ < 4u || p->logs % 64u == 0;
+}
 
 static inline int nvmtl_wss_demoted(const nvmtl_wss_state *st, uint32_t sid)
 {
@@ -128,20 +166,29 @@ static inline int nvmtl_wss_demote(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint
     return 1;
 }
 
-/* R1: the tag generation at the composite's commit (g0) and at its completion (g1). Returns a bit set:
- * 1 a hazard (g0 != g1: nvmtl_wss_tag_key of the tag's seed and generation; counted sh_war), 2 the surface was newly demoted, 4 this hazard was the one that stops the session. */
+/* R1: the tag generation at the composite's commit (g0) and at its completion (g1); pid: the producer the kernel named with the
+ * import (0 unknown). Returns a bit set: 1 a hazard (g0 != g1: nvmtl_wss_tag_key of the tag's seed and generation; counted sh_war),
+ * 2 the surface was newly demoted, 4 this hazard was the one that stops the session (the backstop), 8 it demoted its producer. */
 #define NVMTL_WSS_H_HAZARD 1
 #define NVMTL_WSS_H_DEMOTED 2
 #define NVMTL_WSS_H_SESSION 4
+#define NVMTL_WSS_H_PRODUCER 8
 static inline uint64_t nvmtl_wss_tag_key(uint32_t seed, uint32_t gen) { return (uint64_t)seed << 32 | gen; }
-static inline int nvmtl_wss_hazard(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint32_t sid, uint64_t g0, uint64_t g1)
+static inline int nvmtl_wss_hazard(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint32_t sid, int32_t pid, uint64_t g0, uint64_t g1)
 {
     int r = 0;
+    nvmtl_wss_pid *p;
     if (g0 == g1) return 0;
     r |= NVMTL_WSS_H_HAZARD;
     NVMTL_WSS_INC(s, war);
     st->hazards++;
     if (nvmtl_wss_demote(st, s, sid)) r |= NVMTL_WSS_H_DEMOTED;
+    p = nvmtl_wss_pid_slot(st, pid, 1);
+    if (p && ++p->hazards >= NVMTL_WSS_PID_HAZARD_MAX && !p->demoted) {
+        p->demoted = 1;
+        NVMTL_WSS_INC(s, pdem);
+        r |= NVMTL_WSS_H_PRODUCER;
+    }
     if (st->hazards >= NVMTL_WSS_HAZARD_MAX && !st->session_off) { st->session_off = 1; r |= NVMTL_WSS_H_SESSION; }
     return r;
 }
@@ -243,9 +290,9 @@ static inline int nvmtl_wss_format(const nvmtl_wss_stats *s, int session_off, ch
 #define W_(x) ((unsigned long long)__atomic_load_n(&s->x, __ATOMIC_RELAXED))
     if (!cap) return 0;
     snprintf(out, cap, "sh_imp=%llu sh_skip=%llu sh_stale=%llu sh_reimp=%llu sh_refused=%llu sh_war=%llu sh_demoted=%llu sh_wr=%llu "
-                       "sh_inelig=%llu sh_rw=%llu sh_eperm=%llu sh_enospc=%llu sh_enoent=%llu sh_enodev=%llu sh_enxio=%llu sh_eother=%llu sh_off=%d",
+                       "sh_inelig=%llu sh_rw=%llu sh_eperm=%llu sh_enospc=%llu sh_enoent=%llu sh_enodev=%llu sh_enxio=%llu sh_eother=%llu sh_off=%d sh_pdem=%llu",
              W_(imp), W_(skip), W_(stale), W_(reimp), W_(refused), W_(war), W_(demoted), W_(wr), W_(inelig), W_(rw),
-             W_(e_perm), W_(e_nospc), W_(e_noent), W_(e_nodev), W_(e_nxio), W_(e_other), session_off ? 1 : 0);
+             W_(e_perm), W_(e_nospc), W_(e_noent), W_(e_nodev), W_(e_nxio), W_(e_other), session_off ? 1 : 0, W_(pdem));
 #undef W_
     return 1;
 }

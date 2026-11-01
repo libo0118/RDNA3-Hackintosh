@@ -1531,7 +1531,8 @@ static void nvmtl_ro_complete(NVMTLCommandBuffer *cb, BOOL failed) {
         for (NVMTLTexture *r in cb->_roSamples) {
             if (!r->_surf) continue;
             NSNumber *g0 = cb->_roGens[@((uint32_t)IOSurfaceGetID(r->_surf))];
-            if (g0) (void)nvmtl_vk_wss_hazard((uint32_t)IOSurfaceGetID(r->_surf), g0.unsignedLongLongValue, nvmtl_vram_tag_key_of(r->_surf, r->_plane));
+            if (g0) (void)nvmtl_vk_wss_hazard((uint32_t)IOSurfaceGetID(r->_surf), r->_vramBuf.share_pid, g0.unsignedLongLongValue,
+                                              nvmtl_vram_tag_key_of(r->_surf, r->_plane));
         }
     cb->_roSamples = nil; cb->_roGens = nil;
 }

@@ -225,11 +225,21 @@ struct rd_xnu_surface_bo {
     /* N71 (c), IMPORT out, only when the caller's struct reaches here (a
      * 24-byte caller gets nothing written past 'size'): */
     uint32_t out_ver;              /* RD_XNU_SURFACE_BO_OUT_VER (0: an older kext) */
-    uint32_t out_flags;            /* RD_XNU_SURFACE_BO_OUT_* */
+    uint32_t out_flags;            /* in: RD_XNU_SURFACE_BO_IN_*; out: RD_XNU_SURFACE_BO_OUT_* */
     uint64_t alloc_gen;            /* the accelerator allocation the BO is over (0: unknown) */
+    int32_t  share_pid;            /* out_ver >= 2, SHARED_RO: the producer that shared it (0: unknown) */
+    uint32_t pad1;
 };
 #define RD_XNU_SURFACE_BO_V1_SIZE     24u   /* op .. size: the smallest caller */
-#define RD_XNU_SURFACE_BO_OUT_VER     1u
+#define RD_XNU_SURFACE_BO_OUT_VER     2u   /* 2: share_pid */
+/* IMPORT in (ECC security review of N71 (c), version skew): the caller
+ * understands a READ-ONLY import (it never writes, maps or uploads into
+ * one). Without it a WindowServer import is refused exactly as before,
+ * whatever share record exists: an older plugin would build a writable
+ * alias, write it, fault and take the desktop down. A 24-byte caller has
+ * it 0 (rdna3_drm_ioctl zero-fills its copy). */
+#define RD_XNU_SURFACE_BO_IN_ACCEPT_RO  0x80000000u
+#define RD_SURFACE_BO_ACCEPT_RO         0x1u   /* ops.surface_bo flags */
 /* WindowServer's READ-ONLY import of an application's shared allocation:
  * no CPU mapping (GEM_MMAP -EPERM), never a writable GPU page */
 #define RD_XNU_SURFACE_BO_OUT_SHARED_RO 0x1u
@@ -563,8 +573,10 @@ typedef struct rdna3_drm_ops {
      * set vram_offset, size (page aligned) and backing (the OS's hold, which
      * bo_free drops). surface_dirty: mark that VRAM newest. Both may drop
      * the OS's lock (the accelerator takes its own first); the UAPI holds
-     * no pointers into the device across the call. 0 / -errno. */
-    int   (*surface_bo)(void *ctx, void *file_os, rdna3_bo *bo, uint32_t surface_id, uint32_t plane);
+     * no pointers into the device across the call. 0 / -errno. flags:
+     * RD_SURFACE_BO_ACCEPT_RO = the caller understands a read-only shared
+     * import (N71 (c)); without it the OS must never set gpu_ro. */
+    int   (*surface_bo)(void *ctx, void *file_os, rdna3_bo *bo, uint32_t surface_id, uint32_t plane, uint32_t flags);
     int   (*surface_dirty)(void *ctx, void *file_os, uint32_t surface_id, uint32_t plane);
     /* optional: a closing file's job still runs after the recovery, so its
      * VM stays (orphaned = 1) until rdna3_drm_device_reap_orphans finds the
