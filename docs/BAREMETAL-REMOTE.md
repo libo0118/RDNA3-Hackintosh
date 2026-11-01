@@ -652,7 +652,8 @@ rdna3mtl.conf. Backups in EFI/OC: config-before-bt / -btnvram / -ioplatch / -pmc
 
 ## Round 4 plan (Linux session, 2026-11-01 evening): build 9db526b
 
-All from the ONE green full `build.yml` run on 9db526b (workflow_dispatch, full):
+All from the ONE green full `build.yml` run 123 on be56ee3 (workflow_dispatch, full;
+the driver and translator code of 9db526b, plus a test fix):
 kexts, core, tarball, `RDNA3MTL`, `radv-macos-logs`. As in round 3: `rm` the old
 plugin before installing, use the repo's `install.sh` / `metal.sh` /
 `metal/rdna3mtl-allow.txt`, reboot after a WindowServer-side change (round 3 item 1:
