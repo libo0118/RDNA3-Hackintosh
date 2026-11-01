@@ -460,8 +460,9 @@ Install the plugin with N73 (CI `full: true`), reboot or log out (WindowServer r
 
 ## Round 3 plan (Linux session, 2026-11-01): build 2a0525d
 
-All from the ONE full `build.yml` run on 2a0525d (kexts unchanged since
-round 2, but take the core, tarball, `RDNA3MTL` and `radv-macos-logs` from
+All from the ONE green full `build.yml` run on 41ca260 or later (run 115 on
+2a0525d failed only a flaky host test, fixed in 41ca260; the driver code is
+the same). Kexts are unchanged since round 2, but take the core, tarball, `RDNA3MTL` and `radv-macos-logs` from
 the same run). Plugin installs: `rm` the old dylib/bundle first, never `cp`
 over a mapped file (round-2 lesson); log out after installing the plugin.
 
