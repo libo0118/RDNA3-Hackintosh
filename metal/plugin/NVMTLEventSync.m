@@ -6,6 +6,7 @@
 
 #include "nvmtl_handoff.h"
 #include "nvmtl_drawable_defer.h"
+#include "nvmtl_gsub_empty.h"
 // DRIVER-PLAN N59: a consumer may take a command buffer's IOSurfaces once it is scheduled (Metal's contract; Apple's kernel
 // orders later accesses after the write). The plugin's writes reach the surface only at the part's publish after the GPU:
 // counted (vk: handoff: SUMMARY), and NVMTL_SCHED_AFTER_PUBLISH=1 holds the scheduled point until that publish.
@@ -448,6 +449,17 @@ static unsigned nvmtl_gsub_cap(void) {
               nvmtl_async_commit_on() && nvmtl_g79_on(NVMTL_G79_SUB) ? "ON" : "off", cap, e ? e : "unset"); }
     return (unsigned)cap;
 }
+static BOOL nvmtl_gsub_last_empty_on(void) {   /* N70 */
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_GSUB_LAST_EMPTY"); on = !(e && e[0] == '0');
+        nvlog("commit: N70 G-SUB an empty LAST part %s (NVMTL_GSUB_LAST_EMPTY=%s)", on ? "is retired by the ahead pass, which goes on to the next buffer" : "stops the ahead pass (later buffers submit + wait in turn)", e ? e : "unset"); }
+    return on;
+}
+static _Atomic unsigned long long gN70Last, gN70StopLast, gN70StopEvfold;
+static void nvmtl_n70_census(_Atomic unsigned long long *c, const char *what) {   /* powers of two, the first one included */
+    const unsigned long long k = atomic_fetch_add(c, 1) + 1;
+    if (!(k & (k - 1))) nvlog("commit: N70 G-SUB %llu %s", k, what);
+}
 static BOOL nvmtl_gsub_ahead_on(void) { return nvmtl_async_commit_on() && nvmtl_g79_on(NVMTL_G79_SUB) && nvmtl_gsub_cap(); }
 static NSMapTable *nvmtl_evfold_submitted;
 static _Atomic unsigned long long gEvFold, gEvFoldEmpty;
@@ -506,7 +518,15 @@ static void nvmtl_gsub_census(void) {
             return NO;
         }
         if (!part->encoders && !part->resources.count && !part->surfaces.count && !part->scratch.count && nvmtl_skip_empty_on()) {
-            if (!nvmtl_evfold_on() || _nextSubmit + 1 >= _parts.count) return NO;
+            /* N70: the LAST part empty too (every buffer that ends with a split has one): retired here, the ahead pass goes on to the next
+             * buffer; refused, the pass stopped at the first buffer and every later one ran submit + fence wait in turn. NVMTL_GSUB_LAST_EMPTY=0 refuses.
+             * Nothing else depends on the part: a buffer's presents run in nvmtlFinishExecution, after nvmtlAdvancePart has walked (and published)
+             * every part, and the N69 drawable copy-outs ride on parts with surfaces (never empty) or dma (held above). */
+            const BOOL last = _nextSubmit + 1 >= _parts.count;
+            const int verdict = nvmtl_gsub_empty_verdict(nvmtl_evfold_on(), last, last ? nvmtl_gsub_last_empty_on() : 1);
+            if (verdict == NVMTL_GSUB_EMPTY_STOP_EVFOLD) { nvmtl_n70_census(&gN70StopEvfold, "ahead pass(es) stopped at an empty part (NVMTL_EVFOLD=0)"); return NO; }
+            if (verdict == NVMTL_GSUB_EMPTY_STOP_LAST) { nvmtl_n70_census(&gN70StopLast, "ahead pass(es) stopped at an empty LAST part (NVMTL_GSUB_LAST_EMPTY=0)"); return NO; }
+            if (verdict == NVMTL_GSUB_EMPTY_RETIRE_LAST) nvmtl_n70_census(&gN70Last, "empty LAST parts retired by the ahead pass (the pass went on to the next buffer)");
             [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
             nvmtl_vk_cmd_abandon(&part->commands);

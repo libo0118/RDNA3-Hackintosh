@@ -140,6 +140,8 @@ $(BUILD)/test_gpu_time_queue: tests/test_gpu_time_queue.c metal/plugin/nvmtl_gpu
 
 $(BUILD)/test_drawable_defer: tests/test_drawable_defer.c metal/plugin/nvmtl_drawable_defer.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_drawable_defer.c
+$(BUILD)/test_gsub_empty: tests/test_gsub_empty.c metal/plugin/nvmtl_gsub_empty.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_gsub_empty.c
 $(BUILD)/test_surface_share: tests/test_surface_share.c metal/plugin/nvmtl_surface_share.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_surface_share.c
 
@@ -249,7 +251,7 @@ TESTJOBS = $(if $(findstring -j,$(MAKEFLAGS)),,-j$(if $(JOBS),$(JOBS),$(NPROC)))
 # the tests without arguments: shell and python tests (the slow ones first, they need no build and run while the
 # binaries compile; make starts the targets in this order), then the binaries
 C_TESTS := test_discovery test_uapi test_range_alloc test_vram_place test_bo_map test_bo_map_race \
-    test_linear_pitch test_gpu_time_queue test_ab_switch test_drawable_defer test_surface_share test_surf_census test_surfin_cache test_ci_refl \
+    test_linear_pitch test_gpu_time_queue test_ab_switch test_drawable_defer test_gsub_empty test_surface_share test_surf_census test_surfin_cache test_ci_refl \
     test_copy_pack test_msupload test_msdl test_spirv_fbfetch test_fbfetch_plan test_agdc_k5 test_agdc_n48 \
     test_bootargs test_a3_display test_gamma_judge test_swap_front test_attr_ring test_bar_window \
     test_flip_latch test_iop_stale test_iop_copy test_iop_latch test_handoff test_present_cost test_ws_frame test_drawable_life test_vbl_irq \
