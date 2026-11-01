@@ -394,6 +394,9 @@ impl Emitter {
         self.vector_word_pointers.clear();
         self.local_pointer_fields.clear();
         self.pointer_forward_values.clear();
+        self.field_forwards.clear();
+        self.entry_block_values.clear();
+        self.uniform_pointer_phis.clear();
         self.raw_memcpy_shadows.clear();
         self.dynamic_pointer_tables.clear();
         self.forward_geps.clear();
@@ -1351,6 +1354,29 @@ impl Emitter {
                 }
             }
         }
+        // Before the network and the storage seeds read the TIR: a forward
+        // phi value that is such a load is its stored pointer (N76).
+        self.field_forwards = crate::native::tir::local_pointer_field_forwards(
+            &tir,
+            &self.ir.preinlined_helper_pointer_loads,
+            &self.ir.functions,
+        );
+        if !self.field_forwards.is_empty() {
+            crate::notes::push_once(
+                &format!("N76 forward {}", f.name),
+                format!(
+                    "metal2vulkan: kernel {}: {} local pointer field load(s) forwarded to their field's only store before emission (DRIVER-PLAN N76)",
+                    f.name,
+                    self.field_forwards.len()
+                ),
+            );
+        }
+        self.record_entry_block_values(&tir, &f.params);
+        for (load, stored) in &self.field_forwards {
+            self.pointer_forward_values
+                .entry(load.clone())
+                .or_insert_with(|| stored.clone());
+        }
         self.collect_mixed_storage_network(&tir);
         if self.bda_device_pointers {
             let seeds = self
@@ -1636,11 +1662,12 @@ impl Emitter {
     ) {
         use crate::native::emitter::pointer_network::analyze_pointer_networks;
 
-        let derived = crate::native::tir::derive_pointer_storage_from(
+        let derived = crate::native::tir::derive_pointer_storage_with_field_forwards(
             tir,
             params,
             &self.ir.types,
             &self.pointer_storage,
+            &self.field_forwards,
         );
         let empty_pointees = HashMap::new();
         for network in analyze_pointer_networks(body_blocks, &empty_pointees) {

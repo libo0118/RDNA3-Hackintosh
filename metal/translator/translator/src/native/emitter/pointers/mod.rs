@@ -6,6 +6,7 @@ mod phi_compare;
 mod phi_merge;
 mod phi_mixed_storage;
 mod phi_provenance;
+mod phi_uniform;
 mod raw_select;
 mod select;
 mod select_gep;

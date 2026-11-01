@@ -635,14 +635,19 @@ fn a_store_through_a_loop_carried_split_pointer_is_guarded_per_arm() {
 
 #[test]
 fn a_phi_that_also_takes_a_loaded_pointer_is_refused() {
-    // `%w` merges a member with a pointer of unknown storage (loaded from
-    // memory): it is outside the network and cannot take the split.
+    // `%w` merges a member with a pointer of unknown storage (loaded from a
+    // field with two stores, which N76 does not forward): it is outside the
+    // network and cannot take the split. (A field with one store is
+    // forwarded and joins the network: tests/local_pointer_field_phi.rs.)
     let ll = carried_merge("outside", "%slot", "%local", "@weights")
         .replacen(
             "  br label %loop\nloop:",
-            "  %pp = alloca ptr, align 8\n  store ptr %slot, ptr %pp, align 8\n  %u = load ptr, ptr %pp, align 8\n  br label %loop\nloop:",
+            "  %pp = alloca ptr, align 8\n  store ptr %slot, ptr %pp, align 8\n  br i1 %c, label %restore, label %reload\nrestore:\n  store ptr %first, ptr %pp, align 8\n  br label %reload\nreload:\n  %u = load ptr, ptr %pp, align 8\n  br label %loop\nloop:",
             1,
         )
+        .replace("[ %slot, %entry ]", "[ %slot, %reload ]")
+        .replace("[ 0, %entry ]", "[ 0, %reload ]")
+        .replace("[ 0.0, %entry ]", "[ 0.0, %reload ]")
         .replace(
             "done:\n",
             "done:\n  br i1 %c, label %pick, label %tail\npick:\n  br label %tail\ntail:\n  %w = phi ptr [ %u, %done ], [ %q, %pick ]\n  %wv = load float, ptr %w, align 4\n  %wi = bitcast float %wv to i32\n  store i32 %wi, ptr addrspace(1) %o0\n",

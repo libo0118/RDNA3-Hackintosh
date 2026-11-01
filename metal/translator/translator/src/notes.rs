@@ -12,6 +12,7 @@ const MAX_KEPT: usize = 64;
 
 thread_local! {
     static NOTES: RefCell<(Vec<String>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+    static SEEN: RefCell<std::collections::HashSet<String>> = RefCell::new(Default::default());
 }
 
 /// Records a note: on stderr (the CLI) and for the host.
@@ -28,8 +29,19 @@ pub fn push(note: impl Into<String>) {
     });
 }
 
+/// Records a note the first time `key` is seen since the host last took
+/// the notes (one translation: the primary emitter and the
+/// raw-construction retry meet the same decision).
+pub fn push_once(key: &str, note: impl Into<String>) {
+    let first = SEEN.with(|seen| seen.borrow_mut().insert(key.to_string()));
+    if first {
+        push(note);
+    }
+}
+
 /// Takes this thread's notes, oldest first; a last line counts the dropped.
 pub fn take() -> Vec<String> {
+    SEEN.with(|seen| seen.borrow_mut().clear());
     NOTES.with(|notes| {
         let (mut kept, dropped) = std::mem::take(&mut *notes.borrow_mut());
         if dropped > 0 {

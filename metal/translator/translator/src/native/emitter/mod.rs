@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 mod air_struct_offsets;
 mod body;
+mod capture_calls;
 mod control;
 pub(super) mod functions;
 mod helpers;
@@ -74,6 +75,13 @@ pub(super) struct Emitter {
     vector_word_pointers: HashMap<String, VectorWordPointer>,
     local_pointer_fields: HashMap<LocalPointerField, TypedValue>,
     pointer_forward_values: HashMap<String, TypedValue>,
+    /// Loads of local pointer fields whose value is fixed before emission
+    /// (tir/field_forward.rs, DRIVER-PLAN N76): load -> stored pointer.
+    field_forwards: HashMap<String, TypedValue>,
+    /// The entry block's values and the parameters (pointers/phi_uniform.rs).
+    entry_block_values: HashSet<String>,
+    /// Pointer phis emitted as an alias of their one pointer (N76).
+    uniform_pointer_phis: HashMap<String, LlValue>,
     raw_memcpy_shadows: HashMap<String, Vec<(u64, Word)>>,
     imageblock_data_scratch: Option<(Word, LlType)>,
     dynamic_pointer_tables: HashMap<String, DynamicPointerTable>,
@@ -389,6 +397,9 @@ impl Emitter {
             vector_word_pointers: HashMap::new(),
             local_pointer_fields: HashMap::new(),
             pointer_forward_values: HashMap::new(),
+            field_forwards: HashMap::new(),
+            entry_block_values: HashSet::new(),
+            uniform_pointer_phis: HashMap::new(),
             raw_memcpy_shadows: HashMap::new(),
             imageblock_data_scratch: None,
             dynamic_pointer_tables: HashMap::new(),
@@ -2613,6 +2624,23 @@ impl Emitter {
             })
             .map(|function| function.name.clone())
             .collect::<Vec<_>>();
+        // N76: a call handing a local struct of pointers to a function that
+        // loads them cannot be emitted; refuse every such site up front, as
+        // cursor call sites, so the retry splices them all at once.
+        let pointer_struct_sites = attempt!(capture_calls::pointer_struct_call_sites(&functions));
+        if !pointer_struct_sites.is_empty() {
+            let named = pointer_struct_sites
+                .iter()
+                .take(4)
+                .map(|(callee, argument)| format!("@{callee}({argument})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = pointer_struct_sites.len();
+            self.cursor_call_sites.extend(pointer_struct_sites);
+            return Err(self.emission_failure(format!(
+                "native emitter: {count} call(s) pass a local struct of pointers to a function that loads them ({named}); they must be spliced into their callers (N76)"
+            )));
+        }
         for f in raw_cursor_callees_after_callers(&self.ir, functions) {
             attempt!(self.emit_function(&f));
         }
