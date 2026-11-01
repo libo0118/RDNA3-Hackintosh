@@ -91,6 +91,26 @@ int main(void)
         CHECK(!rd3_a3_on() && !rd3_a3_ws_on());
     }
 
+    /* N68, bare-metal round 3: the latched IOP copy on by default, with or
+     * without the profile; rdna3ioplatch=0 turns it off */
+    {
+        static const struct test_bootarg iloff[] = { { "rdna3ioplatch", 0 }, { NULL, 0 } };
+        static const struct test_bootarg ilon[] = { { "rdna3ioplatch", 1 }, { NULL, 0 } };
+        static const struct test_bootarg illadder[] = { { "rdna3lvl", 8 }, { "rdna3ioplatch", 0 }, { NULL, 0 } };
+        test_bootargs = none;
+        CHECK(rd3_iop_latch_on());
+        test_bootargs = ladder;
+        CHECK(rd3_iop_latch_on());
+        test_bootargs = noprofile;
+        CHECK(rd3_iop_latch_on());
+        test_bootargs = iloff;
+        CHECK(!rd3_iop_latch_on());
+        test_bootargs = illadder;
+        CHECK(!rd3_iop_latch_on());
+        test_bootargs = ilon;
+        CHECK(rd3_iop_latch_on());
+    }
+
     if (fails) {
         printf("test_bootargs: %d check(s) failed\n", fails);
         return 1;
