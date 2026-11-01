@@ -10,6 +10,10 @@ impl Emitter {
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
         let result_ty = self.resolve_type(phi_ty)?;
+        self.refuse_split_pointer_operand(
+            &format!("pointer phi {name}"),
+            parsed_incoming.iter().map(|(value, _)| value),
+        )?;
         let incoming = if matches!(result_ty, LlType::Ptr(_)) {
             parsed_incoming
                 .into_iter()

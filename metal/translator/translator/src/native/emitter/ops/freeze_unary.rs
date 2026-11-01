@@ -52,6 +52,7 @@ impl Emitter {
         }
         if let Some(selected) = self.selected_pointers.get(src_name).cloned() {
             self.selected_pointers.insert(name.to_string(), selected);
+            self.copy_mixed_storage_marker(src_name, name);
         }
         if let Some(tree) = self.selected_access_trees.get(src_name).cloned() {
             self.selected_access_trees.insert(name.to_string(), tree);

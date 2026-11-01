@@ -443,6 +443,7 @@ impl Emitter {
         if let (LlType::Ptr(_), LlValue::Local(source)) = (&resolved_ty, &argument.value) {
             if let Some(selected) = self.selected_pointers.get(source).cloned() {
                 self.selected_pointers.insert(name.to_string(), selected);
+                self.copy_mixed_storage_marker(source, name);
                 self.direct_param_values.insert(name.to_string());
                 self.param_values.insert(name.to_string());
                 return Ok(());
@@ -1867,6 +1868,7 @@ impl Emitter {
                 }
                 if let Some(selected) = self.selected_pointers.get(src_name).cloned() {
                     self.selected_pointers.insert(name.clone(), selected);
+                    self.copy_mixed_storage_marker(src_name, &name);
                     self.alias_pointer_facts(src_name, &name);
                     return Ok(());
                 }

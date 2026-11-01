@@ -36,6 +36,8 @@ static inline int nvmtl_log_failure(const char *text)
                     strstr(text, "msdl: SUMMARY") || strstr(text, "msupload: SUMMARY") ||
                     /* DRIVER-PLAN N67: what a pipeline link did with each visible function (linked / unresolved / table slots),
                      * once per link (nvmtl_link_stage): the Mac report must show it from a release plugin too (a failed one says FAILED) */
-                    strstr(text, "\" visible functions: linked "));
+                    strstr(text, "\" visible functions: linked ") ||
+                    /* DRIVER-PLAN N72: a translation's notes (a demoted pointer phi, a fallback), logged after each translate */
+                    strstr(text, "translator note: "));
 }
 #endif

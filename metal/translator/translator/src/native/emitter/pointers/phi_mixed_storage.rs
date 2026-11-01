@@ -26,6 +26,11 @@ use std::sync::{Mutex, OnceLock};
 
 const ARM_TAG: &str = ".metal2vulkan.mixarm";
 
+enum MixedArm {
+    Modeled,
+    Root { id: Word, pointee: LlType },
+}
+
 fn arm_storages() -> [StorageClass; 2] {
     [StorageClass::Function, StorageClass::Private]
 }
@@ -40,9 +45,9 @@ fn log_demotion_once(function: &str, phi: &str) {
         .map(|mut set| set.insert(function.to_string()))
         .unwrap_or(true);
     if first {
-        eprintln!(
+        crate::notes::push(format!(
             "metal2vulkan: kernel {function}: pointer phi {phi} merges Function and Private storage; demoted to a per-storage value select (DRIVER-PLAN N72)"
-        );
+        ));
     }
 }
 
@@ -64,22 +69,37 @@ impl Emitter {
             return Ok(false);
         }
         // Which arm each edge feeds; None for undef (it may take either arm).
+        // Classified first, without side effects: a module without a mixed
+        // phi must come out exactly as before.
         let mut groups = Vec::with_capacity(incoming.len());
-        let mut arm_values = Vec::with_capacity(incoming.len());
-        for (position, (value, _)) in incoming.iter().enumerate() {
+        let mut classes = Vec::with_capacity(incoming.len());
+        for (value, _) in incoming {
             if matches!(value, LlValue::Undef) {
                 groups.push(None);
-                arm_values.push(value.clone());
+                classes.push(None);
                 continue;
             }
-            let Some((arm_value, storage)) = self.mixed_arm_value(name, position, value)? else {
+            let Some((class, storage)) = self.classify_mixed_arm(value)? else {
                 return Ok(false);
             };
             let Some(group) = arm_storages().iter().position(|s| *s == storage) else {
                 return Ok(false);
             };
             groups.push(Some(group));
-            arm_values.push(arm_value);
+            classes.push(Some((class, storage)));
+        }
+        if !(0..2).all(|group| groups.contains(&Some(group))) {
+            return Ok(false);
+        }
+        self.refuse_split_pointer_consumers(name)?;
+        let mut arm_values = Vec::with_capacity(incoming.len());
+        for (position, ((value, _), class)) in incoming.iter().zip(classes).enumerate() {
+            arm_values.push(match class {
+                Some((MixedArm::Root { id, pointee }, storage)) => {
+                    self.install_mixed_arm_root(name, position, id, storage, pointee)
+                }
+                _ => value.clone(),
+            });
         }
         let incoming = incoming
             .iter()
@@ -87,9 +107,6 @@ impl Emitter {
             .map(|((_, label), value)| (value, label.clone()))
             .collect::<Vec<_>>();
         let incoming = incoming.as_slice();
-        if !(0..2).all(|group| groups.contains(&Some(group))) {
-            return Ok(false);
-        }
 
         let mut arms = Vec::with_capacity(2);
         let mut pointees = Vec::with_capacity(2);
@@ -186,17 +203,14 @@ impl Emitter {
         Ok(true)
     }
 
-    /// The value an incoming edge contributes to its arm, and the arm's
-    /// storage: a modeled GEP as it is, a whole root (an alloca, an
-    /// address-space-0 global) as a GEP of the root at index 0 under a
-    /// synthetic name. None declines the split (the old paths and their
-    /// diagnostics then run).
-    fn mixed_arm_value(
-        &mut self,
-        phi: &str,
-        position: usize,
+    /// How an incoming edge can feed its arm, and the arm's storage: a
+    /// modeled GEP as it is, a whole root (an alloca, an address-space-0
+    /// global) as a GEP of the root at index 0 (`install_mixed_arm_root`).
+    /// None declines the split (the old paths and their diagnostics run).
+    fn classify_mixed_arm(
+        &self,
         value: &LlValue,
-    ) -> Result<Option<(LlValue, StorageClass)>, String> {
+    ) -> Result<Option<(MixedArm, StorageClass)>, String> {
         let (id, storage, pointee) = match value {
             LlValue::Local(local) => {
                 let Some(storage) = self.pointer_storage.get(local).copied() else {
@@ -210,7 +224,7 @@ impl Emitter {
                     return Ok(None);
                 }
                 if self.gep_provenance.contains_key(local) {
-                    return Ok(Some((value.clone(), storage)));
+                    return Ok(Some((MixedArm::Modeled, storage)));
                 }
                 if !self.mixed_alloca_roots.contains(local) {
                     return Ok(None);
@@ -243,6 +257,18 @@ impl Emitter {
         if super::super::body::type_contains_pointer(&pointee) {
             return Ok(None);
         }
+        Ok(Some((MixedArm::Root { id, pointee }, storage)))
+    }
+
+    /// A whole root as a GEP of it at index 0, under a synthetic name.
+    fn install_mixed_arm_root(
+        &mut self,
+        phi: &str,
+        position: usize,
+        id: Word,
+        storage: StorageClass,
+        pointee: LlType,
+    ) -> LlValue {
         let alias = format!("{phi}{ARM_TAG}.root{position}");
         self.values.insert(alias.clone(), (id, LlType::Ptr(0)));
         self.pointer_storage.insert(alias.clone(), storage);
@@ -262,7 +288,62 @@ impl Emitter {
                 root_is_indexed_container,
             },
         );
-        Ok(Some((LlValue::Local(alias), storage)))
+        LlValue::Local(alias)
+    }
+
+    /// A split pointer is a pair of pointers, not a value: a phi or select
+    /// that takes it (a walk over the merged pointer, a nested mixed phi, a
+    /// mixed phi on a back edge) cannot be built from it. Refused here with
+    /// the names, before such a consumer fails later on an undefined id.
+    fn refuse_split_pointer_consumers(&self, name: &str) -> Result<(), String> {
+        if self.pointer_phi_incoming_values.contains(name) {
+            return Err(format!(
+                "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds another pointer phi; nested mixed phis are not supported (N72)"
+            ));
+        }
+        let selected_by = self
+            .forward_pointer_selects
+            .iter()
+            .filter(|(_, (true_value, false_value))| {
+                [&true_value.value, &false_value.value]
+                    .into_iter()
+                    .any(|value| matches!(value, LlValue::Local(local) if local == name))
+            })
+            .map(|(select, _)| select.as_str())
+            .min();
+        if let Some(select) = selected_by {
+            return Err(format!(
+                "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds pointer select {select}; nested mixed phis are not supported (N72)"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses a phi or select (`consumer`) with a split pointer among its
+    /// operands, naming both.
+    pub(in crate::native::emitter) fn refuse_split_pointer_operand<'a>(
+        &self,
+        consumer: &str,
+        operands: impl IntoIterator<Item = &'a LlValue>,
+    ) -> Result<(), String> {
+        for value in operands {
+            if let LlValue::Local(local) = value {
+                if self.mixed_storage_pointers.contains(local) {
+                    return Err(format!(
+                        "native emitter: {consumer} takes the split mixed-storage pointer {local} (Function vs Private); nested mixed phis are not supported (N72)"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A copy of a split pointer (bitcast, freeze, an inlined parameter) is
+    /// split too: its loads must branch and its GEPs apply per arm.
+    pub(in crate::native::emitter) fn copy_mixed_storage_marker(&mut self, from: &str, to: &str) {
+        if self.mixed_storage_pointers.contains(from) {
+            self.mixed_storage_pointers.insert(to.to_string());
+        }
     }
 
     /// A load through a split pointer: each arm loads in its own branch, so

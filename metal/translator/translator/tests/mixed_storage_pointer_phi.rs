@@ -141,3 +141,68 @@ fn a_store_through_the_merged_pointer_is_guarded_per_arm() {
         "the setup store, one store per arm and the output store\n{asm}"
     );
 }
+
+#[test]
+fn a_copy_of_the_merged_pointer_stays_split() {
+    // ECC review of 4ff5e85: a bitcast copy lost the split and loaded both
+    // arms with an OpSelect (an out-of-bounds read of the unselected root).
+    let asm = assert_split(&kernel(
+        "",
+        "%first",
+        "  %g = getelementptr inbounds [9 x float], ptr @weights, i32 0, i32 0",
+        "%g",
+        "  %s = bitcast ptr %p to ptr\n  %q = getelementptr inbounds float, ptr %s, i32 %i\n  %v = load float, ptr %q, align 4",
+    ));
+    assert!(
+        !asm.contains("OpSelect "),
+        "the load must branch to the selected arm, not read both\n{asm}"
+    );
+    assert!(asm.contains("OpSelectionMerge"), "no branch per arm\n{asm}");
+}
+
+fn assert_refused_clearly(ll: &str, consumer: &str) {
+    match translate_sanitized_native(ll, Stage::Kernel, &tmp()) {
+        Ok(_) => panic!("a consumer of a split pointer must be refused"),
+        Err(error) => assert!(
+            error.contains("nested mixed phis are not supported (N72)") && error.contains(consumer),
+            "the refusal must name {consumer} and N72; got: {error}"
+        ),
+    }
+}
+
+#[test]
+fn a_pointer_walk_over_the_merged_pointer_is_refused_by_name() {
+    assert_refused_clearly(
+        &kernel(
+            "",
+            "%slot",
+            GLOBAL_GEP,
+            "%g",
+            "  br label %walk
+walk:
+  %w = phi ptr [ %p, %merge ], [ %wn, %walk ]
+  %n = phi i32 [ 0, %merge ], [ %n1, %walk ]
+  %wn = getelementptr inbounds float, ptr %w, i32 1
+  %n1 = add i32 %n, 1
+  %more = icmp ult i32 %n1, 2
+  br i1 %more, label %walk, label %done
+done:
+  %v = load float, ptr %w, align 4",
+        ),
+        "%p",
+    );
+}
+
+#[test]
+fn a_select_of_the_merged_pointer_is_refused_by_name() {
+    assert_refused_clearly(
+        &kernel(
+            "",
+            "%slot",
+            GLOBAL_GEP,
+            "%g",
+            "  %s = select i1 %c, ptr %p, ptr %first\n  %v = load float, ptr %s, align 4",
+        ),
+        "%p",
+    );
+}
