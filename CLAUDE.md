@@ -1,7 +1,7 @@
 # Notes for AI agents working in this repository
 
 - **Session agent (the manager), before anything else: read
-  [docs/HANDOFF.md](docs/HANDOFF.md)** — the state of the work, what the last
+  [docs/HANDOFF.html](docs/HANDOFF.html)** — the state of the work, what the last
   session learned and left to do, and the owner's check phrase.
 - macOS driver for AMD RX 7800 XT (Navi 32), ported from Linux amdgpu.
   Working branch: `stage1-kext`.
@@ -28,7 +28,7 @@
 - **When the user sends hardware-test reports** (`rdna3-report-*.tar.gz`,
   `serial-*.log`, `host-*.log`, `*-tests.txt`): follow
   [docs/AFTER-TESTS.md](docs/AFTER-TESTS.md) step by step.
-- Test procedures the user runs: `docs/TESTING-VM.md`, `docs/TESTING-HW.md`.
+- Test procedures the user runs: `docs/TESTING-VM.html`, `docs/TESTING-HW.html`.
 - README status (`docs/status/`): run `python3 tools/progress.py` before every
   commit that changes driver code (CI checks it). A ladder step that passed
   on the card goes into `docs/status/hw-verified.txt`, then regenerate.
