@@ -492,3 +492,77 @@ Also in this round:
    numbers (`pres_us_avg` large -> the app's execution thread, N70 matters).
 
 Write "## Round 3 findings" below and push to Forgejo.
+
+## Round 3 findings (2026-11-01 afternoon, Pi session; build 02b2210, CI run 117)
+
+Installed from run 117 (all jobs green): tarball, RDNA3MTL, radv-macos-logs; the stick's
+`install.sh` / `metal.sh` replaced by the repo's (the stick had the round-1 copies) and
+`metal/rdna3mtl-allow.txt` from the repo (adds `geekbench_avx2`); round-2 files in
+`rdna3/old/`. `install.sh` recreates `/Library/GPUBundles/rdna3mtl` (no conf survives it).
+`debug.rdna3accel_a3ws` 0, `iop_latch` 0, BAR 1 GiB, no rdna3mtl.conf unless said.
+
+1. **Plan correction: logging out does not restart WindowServer on macOS 26.** After log out /
+   log in WindowServer kept its pid (195) and its knobs; an rdna3mtl.conf change for
+   WindowServer needs a reboot (or a WindowServer restart). Apps read the conf at their start.
+2. **N73 A/B (horizon-client in a world, VSync off, 35 s each, the plugin's `fps:` lines).**
+   The owner's observation decided the setup: whenever the Claude app on the Mac redraws
+   (streaming text), the game loses ~100-150 fps; so each side was measured with that app
+   hidden and with it visible.
+
+   | | KEEP=0 | KEEP=8 (default) |
+   |---|---|---|
+   | Claude app hidden | ~390 fps (325-400) | ~398 fps (386-404) |
+   | Claude app visible, redrawing | ~240 fps | ~290 fps |
+   | game next_pct (hidden) | 34.1 | 36.2 |
+   | game away_us_avg (hidden) | 5607 | 5438 |
+   | game pres_us_avg (hidden) | 1670 | 1685 |
+   | CPU WindowServer / game (hidden) | 84 % / 126 % | 89 % / 128 % |
+
+   Keep it: little gain on an empty desktop, ~+50 fps when WindowServer has other windows
+   to draw. WindowServer with KEEP=8: `st_new` ~1 per 1000+ game frames, `st_alias` ~1 per
+   game frame (the ring does what it should). DTrace objc probes on the game cost ~40 % of
+   its fps (228/s under the probe), so the 30 s count is not a clean number.
+3. **What caps the game now: WindowServer's CPU upload of every game frame.** WindowServer's
+   `ws frame: SUMMARY` `ups` / `up_kb` and `surfin` `in_mb`: ~230 uploads/s of a full
+   1920x1080 frame (7-8 MB), ~1.6 GB/s, `in_us_avg` ~860 us. The game's drawables are copied
+   out by the GPU into the IOSurface's host pages (N61) and WindowServer uploads them again
+   (G13 surface-in), because N71 keeps app surfaces private while `a3ws` is 0. The drawable
+   comes back after ~5.5 ms (`away_us_avg`), and the game waits 34-36 % of its wall in
+   nextDrawable. Next cut (DRIVER-PLAN N73 OPEN): share the game's surface with WindowServer
+   in VRAM, or a GPU upload in WindowServer, i.e. N71 (b)/(c).
+4. **N70** (`quick/gsub-last`): `pres_us_avg` ~1.7 ms (commit -> present in the app) against a
+   2.5 ms frame at 400 fps. Not measured with N70 this round; the Linux session decides.
+5. **Desktop with the keep ring:** no stale, foreign, black or torn window content while
+   dragging windows or resizing the game's window. The game drops from ~300-400 to ~130-160
+   fps while its window is dragged or resized and is back at ~400 right after; the owner says
+   the window may refresh slowly and not look smooth during the drag (240 fps video still to do).
+6. **Geekbench 7 GPU (Metal): still fails, N72 did not reach the failing phi.** Twice: after
+   ~270-280 s of linking (`link cache: miss ... 281515 ms`; round 2 was ~300 s, so no 2x),
+   `link FAILED: "depthwiseConv_3x3" ... native emitter: Private pointer phi
+   %metal2vulkan.ct.slot.48 has differing structural sources; raw construction failed:
+   native emitter: pointer merge storage mismatch Function vs Private at Local("%1425")
+   across [Local("%72"), Local("%1425")]`, byte for byte the round-2 text; then the MPS
+   assert (SIGABRT in `MPSLibrary::MPSKey_Compile`). No `translator note` line at all, so
+   `emit_mixed_storage_pointer_phi` (phi_mixed_storage.rs) never demoted it. The failing phi
+   is the translator's own `%metal2vulkan.ct.slot.48` (function-constant slot path, `function
+   constants: re-translate FAILED`), one of its sources is the phi itself (a loop-carried
+   edge, `%1425` across `[%72, %1425]`); the N72 fixtures are plain two-edge LLVM phis. Two
+   more re-translate lines in the same run: `visible function reference to 2 function(s)
+   [postfixPrimary_f, postfixPrimary_4xf] not linked into this module` and the same for 3
+   functions (the linked retry then found them). An `NVMTL_LINK_DUMP` of this build
+   (depthwiseConv_3x3 .kernel.ll / .linked.ll / .fc.txt / .err.txt, mod.*.ll, stitch-00*)
+   is on the Pi in `~/rdna3-bm/r3/gb7/` (Apple MPS IR: evidence only, never committed).
+   No score; the owner's Linux GB7 GPU number is about 145k.
+7. **Mouse wake: the mouse, not the driver.** `pmset displaysleepnow` with the SteelSeries
+   Rival 3 Wireless Gen 2 (2.4 GHz dongle, USB 1038:1872): used a moment before, moving it
+   wakes the displays within ~2 s (`HIDIdleTime` back to 0, `IODisplayWrangler`
+   CurrentPowerState 1 -> 4). After 6 min without input (HIDIdleTime 360 s), 30 s of moving it
+   delivered no event at all (HIDIdleTime kept counting, no USB/HID line in the kernel log);
+   the first click reset HIDIdleTime and the wrangler went 1 -> 4 in the same second. The
+   mouse's own power save drops motion until a click; once an event arrives the card and
+   both displays wake at once, so `fb/rdna3-fb.cpp` / `kIOWindowServerActiveAttribute` is
+   cleared. Asked the owner whether Linux behaves the same after a long idle.
+   Side note: `bluetoothd` restarts its bluetool script every ~32 s (no Bluetooth controller;
+   the owner's Realtek RTL8761BU dongle 0bda:a728 has no driver yet).
+8. **Stick:** `Booter/Quirks/ResizeAppleGpuBars` is 10 in config-metal.plist and
+   config-driver.plist too now (copies `*-before-r3bar.plist` next to them).
