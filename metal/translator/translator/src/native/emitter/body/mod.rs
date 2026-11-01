@@ -204,7 +204,7 @@ fn is_scalar_storage_type(ty: &LlType) -> bool {
     )
 }
 
-fn type_contains_pointer(ty: &LlType) -> bool {
+pub(in crate::native::emitter) fn type_contains_pointer(ty: &LlType) -> bool {
     match ty {
         LlType::Ptr(_) => true,
         LlType::Vector(elem, _) | LlType::Array(elem, _) => type_contains_pointer(elem),

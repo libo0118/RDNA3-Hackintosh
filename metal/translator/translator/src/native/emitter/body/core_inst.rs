@@ -632,6 +632,7 @@ impl Emitter {
             .insert(name.clone(), StorageClass::Function);
         self.pointer_pointees
             .insert(name.clone(), effective_pointee);
+        self.mixed_alloca_roots.insert(name.clone());
         let is_null = self.const_bool(false)?;
         self.record_pointer_nullness(name, is_null);
         Ok(())
@@ -1573,6 +1574,17 @@ impl Emitter {
                 self.emit_raw_store(&object.ty, object_id, &raw, align, instructions)?;
                 return Ok(());
             }
+            if self.mixed_storage_pointers.contains(ptr_name) {
+                let object_id = self.value_id_in(&object.value, &object.ty, instructions)?;
+                let ptr_name = ptr_name.clone();
+                self.emit_mixed_storage_pointer_store(
+                    &ptr_name,
+                    &object.ty,
+                    object_id,
+                    instructions,
+                )?;
+                return Ok(());
+            }
             if let Some(selected) = self.selected_pointers.get(ptr_name).cloned() {
                 let object_id = self.value_id_in(&object.value, &object.ty, instructions)?;
                 self.emit_selected_pointer_direct_store(
@@ -2079,6 +2091,15 @@ impl Emitter {
         let result_type = self.type_id(&result_ty)?;
         let result = self.result_id(&name, &result_ty)?;
         if let LlValue::Local(ptr_name) = &load.ptr.value {
+            if self.emit_mixed_storage_pointer_load(
+                &ptr_name.clone(),
+                result,
+                &result_ty,
+                load.align,
+                instructions,
+            )? {
+                return Ok(());
+            }
             if let Some(tree) = self.selected_access_trees.get(ptr_name).cloned() {
                 self.emit_selected_access_tree_load(
                     result,

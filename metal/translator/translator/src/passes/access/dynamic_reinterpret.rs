@@ -328,6 +328,15 @@ fn dynamic_block_views(
     admits: impl Fn(&Ctx, &DynamicBlockView) -> bool,
 ) -> Vec<DynamicBlockView> {
     let ptr_info = pointer_storage_and_pointee(ctx);
+    // One map for the function instead of a module scan per access chain
+    // (value_result_type): this walk is quadratic otherwise (DRIVER-PLAN N72).
+    let value_types = function_value_types(ctx, entry_idx);
+    let type_of = |value: Word| {
+        value_types
+            .get(&value)
+            .copied()
+            .or_else(|| value_result_type(ctx, value))
+    };
     let mut views = Vec::new();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
@@ -350,13 +359,13 @@ fn dynamic_block_views(
             if const_u32(ctx, *dyn_idx).is_some() {
                 continue;
             }
-            let Some(index_ty) = value_result_type(ctx, *dyn_idx) else {
+            let Some(index_ty) = type_of(*dyn_idx) else {
                 continue;
             };
             if type_def_of(ctx, index_ty).is_none_or(|def| def.class.opcode != Op::TypeInt) {
                 continue;
             }
-            let Some(base_ptr_ty) = value_result_type(ctx, *base) else {
+            let Some(base_ptr_ty) = type_of(*base) else {
                 continue;
             };
             let Some(&(_, base_pointee)) = ptr_info.get(&base_ptr_ty) else {

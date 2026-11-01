@@ -62,7 +62,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_selected_direct_load_arm_value(
+    pub(in crate::native::emitter) fn emit_selected_direct_load_arm_value(
         &mut self,
         value: &LlValue,
         pointer_ty: &LlType,
@@ -166,7 +166,7 @@ impl Emitter {
         ))
     }
 
-    fn emit_guarded(
+    pub(in crate::native::emitter) fn emit_guarded(
         &mut self,
         condition: Word,
         instructions: &mut Vec<Instruction>,
@@ -205,7 +205,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn store_arm_condition(
+    pub(in crate::native::emitter) fn store_arm_condition(
         &mut self,
         condition: Word,
         when_true: bool,

@@ -30,6 +30,9 @@ impl Emitter {
         if self.emit_unmodeled_pointer_phi(&name, &incoming, &result_ty, instructions)? {
             return Ok(());
         }
+        if self.emit_mixed_storage_pointer_phi(&name, &incoming, &result_ty, instructions)? {
+            return Ok(());
+        }
         let mut pointer_meta = self.pointer_merge_meta(
             &incoming.iter().map(|(value, _)| value).collect::<Vec<_>>(),
             &result_ty,

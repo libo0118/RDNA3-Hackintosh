@@ -2,6 +2,7 @@ use super::*;
 mod gep_linearize;
 mod phi_compare;
 mod phi_merge;
+mod phi_mixed_storage;
 mod phi_provenance;
 mod raw_select;
 mod select;
