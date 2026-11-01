@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hardware test: step-by-step ladder - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Hardware test: step-by-step ladder</div>
+  <h1>Hardware test: step-by-step ladder</h1>
+  <p class="muted">The step-by-step ladder for a hackintosh with an RX 7800 XT: the boot-args of each step, what to check, how to report, and the bare-metal run with the installer. For the owner and anyone testing on the real card.</p>
+</header>
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#before-the-first-step">Before the first step</a>
+</li>
+<li><a href="#the-ladder">The ladder</a>
+</li>
+<li><a href="#when-something-goes-wrong">When something goes wrong</a>
+</li>
+<li><a href="#what-cannot-be-checked-without-the-card">What cannot be checked without the card</a>
+</li>
+<li><a href="#bare-metal-with-the-installer-no-vm-harness">Bare metal with the installer (no VM harness)</a>
+</li>
+</ol></nav>
+<p>A single procedure for a hackintosh with an RX 7800 XT. Do you have Linux and this card as
+the only one? The same ladder runs in a virtual machine, automated:
+<a href="TESTING-VM.html">TESTING-VM</a>. Each step adds one
+thing, and after each one you collect a report with a single script. If a step hangs
+the system or turns off the screen, go back to the previous one and send the report from
+it together with a description of the symptom. Module details are in <code>STAGE1</code>–<code>STAGE7</code>.</p>
+<h2 id="before-the-first-step">Before the first step</h2>
+<ol>
+<li>
+<p><strong>A way back.</strong> In OpenCore keep a second entry or a second copy of the EFI in
+which the RDNA3 kexts are disabled. The boot-arg <code>-rdna3off</code> also disables
+everything. Check once that you can edit boot-args in the picker (space,
+then the entry with boot-args, or <code>Cmd+V</code> for verbose mode).</p>
+</li>
+<li>
+<p><strong>Remote access.</strong> System Settings → General → Sharing → Remote
+Login (SSH). When the screen goes dark, you collect the report over SSH from another
+computer.</p>
+</li>
+<li>
+<p><strong>BIOS.</strong> CSM disabled, Above 4G Decoding enabled. With Resizable BAR on,
+set <code>Booter → Quirks → ResizeAppleGpuBars = 10</code> (1 GiB) or <code>8</code> (256 MiB) in
+OpenCore, or turn Resizable BAR off: macOS takes no BAR above 1 GiB, a
+16 GiB BAR0 leaves the kext with no VRAM aperture (DRIVER-PLAN N62,
+docs/INSTALL-OPENCORE.html section 5).</p>
+</li>
+<li>
+<p><strong>Build and install.</strong> On the Mac, in the repository directory:</p>
+<pre><code class="language-sh">make kext &amp;&amp; make -C userspace &amp;&amp; make tools
+make -C accel &amp;&amp; make -C fb          # accelerator and framebuffer (from step 9)
+sudo package/install.sh --fw /path/to/linux-firmware/amdgpu</code></pre>
+<p>Firmware is not in the repository (<code>docs/FIRMWARE.md</code>). The installer
+rebuilds the Auxiliary Kernel Collection; a restart is required.</p>
+<p><strong>Through OpenCore instead (recommended):</strong> kernelmanagerd may refuse
+ad-hoc signed kexts in the Auxiliary KC (&quot;invalid codeful kernel
+extension&quot;, seen in the VM). Then let OpenCore inject them:</p>
+<pre><code class="language-sh">sudo diskutil mount disk0s1                   # your EFI partition (diskutil list)
+sudo package/oc_install.sh --efi /Volumes/EFI --fw /path/to/linux-firmware/amdgpu
+sudo package/oc_install.sh --efi /Volumes/EFI --step 2     # boot-args of a step
+sudo package/oc_install.sh --efi /Volumes/EFI --off        # everything off again (-rdna3off)
+sudo package/oc_install.sh --efi /Volumes/EFI --remove     # our kexts, entries and boot-args out of OpenCore</code></pre>
+<p>It copies the kexts to <code>EFI/OC/Kexts</code>, adds them to <code>Kernel/Add</code>, puts
+the firmware in <code>/Library/Application Support/RDNA3/firmware</code>, and sets
+the step's boot-args in <code>config.plist</code> (yours other than <code>rdna3*</code> stay;
+a backup <code>config.plist.rdna3-&lt;date&gt;</code> is written first). With this route
+skip step 5 below: <code>--step N</code> does it.</p>
+</li>
+<li>
+<p><strong>Set boot-args once per step</strong>, for example:</p>
+<pre><code class="language-sh">sudo nvram boot-args="-v keepsyms=1 rdna3lvl=2"</code></pre>
+<p>Keep your existing boot-args and append the ones from the table.</p>
+</li>
+<li>
+<p><strong>Report after each step</strong> (after the restart, from a normal terminal or SSH):</p>
+<pre><code class="language-sh">tools/macos/collect.sh step3</code></pre>
+<p>The script changes nothing. It creates <code>~/rdna3-report-step3-&lt;date&gt;.tar.gz</code>
+with logs, IORegistry, boot-args and a panic report, if any.</p>
+</li>
+</ol>
+<h2 id="the-ladder">The ladder</h2>
+<figure>
+<svg viewBox="0 0 560 666" width="560" role="img" aria-labelledby="t89371 d89371" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t89371">The ladder at a glance</title>
+<desc id="d89371">Main steps 1 to 12 from top to bottom; each row lists the variants of that step. A chip is coloured by the risk column of the table.</desc>
+<a href="#step-1"><rect x="8" y="8" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:2"/><text x="40" y="30" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">1</text></a><path d="M40 42 V50" style="stroke:var(--muted);stroke-width:2"/><a href="#step-2"><rect x="8" y="50" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:2"/><text x="40" y="72" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">2</text></a><path d="M40 84 V92" style="stroke:var(--muted);stroke-width:2"/><a href="#step-3"><rect x="8" y="92" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:2"/><text x="40" y="114" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">3</text></a><path d="M40 126 V134" style="stroke:var(--muted);stroke-width:2"/><a href="#step-4"><rect x="8" y="134" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="156" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">4</text></a><path d="M40 168 V176" style="stroke:var(--muted);stroke-width:2"/><a href="#step-5"><rect x="8" y="176" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="198" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">5</text></a><path d="M40 210 V218" style="stroke:var(--muted);stroke-width:2"/><a href="#step-5b"><rect x="78" y="179" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="109" y="194" text-anchor="middle" style="fill:var(--fg);font-size:11px">5b</text></a><a href="#step-5c"><rect x="146" y="179" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="177" y="194" text-anchor="middle" style="fill:var(--fg);font-size:11px">5c</text></a><a href="#step-6"><rect x="8" y="218" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="240" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">6</text></a><path d="M40 252 V260" style="stroke:var(--muted);stroke-width:2"/><a href="#step-6b"><rect x="78" y="221" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="109" y="236" text-anchor="middle" style="fill:var(--fg);font-size:11px">6b</text></a><a href="#step-7"><rect x="8" y="260" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="282" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">7</text></a><path d="M40 294 V302" style="stroke:var(--muted);stroke-width:2"/><a href="#step-7b"><rect x="78" y="263" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="109" y="278" text-anchor="middle" style="fill:var(--fg);font-size:11px">7b</text></a><a href="#step-8"><rect x="8" y="302" width="64" height="62" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="338" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">8</text></a><path d="M40 364 V372" style="stroke:var(--muted);stroke-width:2"/><a href="#step-8b"><rect x="78" y="305" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="109" y="320" text-anchor="middle" style="fill:var(--fg);font-size:11px">8b</text></a><a href="#step-8c"><rect x="146" y="305" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="177" y="320" text-anchor="middle" style="fill:var(--fg);font-size:11px">8c</text></a><a href="#step-userq"><rect x="214" y="305" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="245" y="320" text-anchor="middle" style="fill:var(--fg);font-size:11px">userq</text></a><a href="#step-vcn"><rect x="282" y="305" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="313" y="320" text-anchor="middle" style="fill:var(--fg);font-size:11px">vcn</text></a><a href="#step-vcn2"><rect x="350" y="305" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="381" y="320" text-anchor="middle" style="fill:var(--fg);font-size:11px">vcn2</text></a><a href="#step-8g"><rect x="418" y="305" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="449" y="320" text-anchor="middle" style="fill:var(--fg);font-size:11px">8g</text></a><a href="#step-8o"><rect x="78" y="333" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="109" y="348" text-anchor="middle" style="fill:var(--fg);font-size:11px">8o</text></a><a href="#step-8u"><rect x="146" y="333" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="177" y="348" text-anchor="middle" style="fill:var(--fg);font-size:11px">8u</text></a><a href="#step-pmctl"><rect x="214" y="333" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="245" y="348" text-anchor="middle" style="fill:var(--fg);font-size:11px">pmctl</text></a><a href="#step-baco"><rect x="282" y="333" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="313" y="348" text-anchor="middle" style="fill:var(--fg);font-size:11px">baco</text></a><a href="#step-9"><rect x="8" y="372" width="64" height="118" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="436" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">9</text></a><path d="M40 490 V498" style="stroke:var(--muted);stroke-width:2"/><a href="#step-9b"><rect x="78" y="375" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="109" y="390" text-anchor="middle" style="fill:var(--fg);font-size:11px">9b</text></a><a href="#step-9c"><rect x="146" y="375" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="177" y="390" text-anchor="middle" style="fill:var(--fg);font-size:11px">9c</text></a><a href="#step-9cu"><rect x="214" y="375" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="245" y="390" text-anchor="middle" style="fill:var(--fg);font-size:11px">9cu</text></a><a href="#step-9d"><rect x="282" y="375" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="313" y="390" text-anchor="middle" style="fill:var(--fg);font-size:11px">9d</text></a><a href="#step-hotplug"><rect x="350" y="375" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="381" y="390" text-anchor="middle" style="fill:var(--fg);font-size:11px">hotplug</text></a><a href="#step-dplink"><rect x="418" y="375" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="449" y="390" text-anchor="middle" style="fill:var(--fg);font-size:11px">dplink</text></a><a href="#step-dsc"><rect x="78" y="403" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="109" y="418" text-anchor="middle" style="fill:var(--fg);font-size:11px">dsc</text></a><a href="#step-mst"><rect x="146" y="403" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="177" y="418" text-anchor="middle" style="fill:var(--fg);font-size:11px">mst</text></a><a href="#step-uhbr"><rect x="214" y="403" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="245" y="418" text-anchor="middle" style="fill:var(--fg);font-size:11px">uhbr</text></a><a href="#step-odm"><rect x="282" y="403" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="313" y="418" text-anchor="middle" style="fill:var(--fg);font-size:11px">odm</text></a><a href="#step-mall"><rect x="350" y="403" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="381" y="418" text-anchor="middle" style="fill:var(--fg);font-size:11px">mall</text></a><a href="#step-subvp"><rect x="418" y="403" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="449" y="418" text-anchor="middle" style="fill:var(--fg);font-size:11px">subvp</text></a><a href="#step-otg"><rect x="78" y="431" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="109" y="446" text-anchor="middle" style="fill:var(--fg);font-size:11px">otg</text></a><a href="#step-vblirq"><rect x="146" y="431" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="177" y="446" text-anchor="middle" style="fill:var(--fg);font-size:11px">vblirq</text></a><a href="#step-hdmi"><rect x="214" y="431" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="245" y="446" text-anchor="middle" style="fill:var(--fg);font-size:11px">hdmi</text></a><a href="#step-hdmi20"><rect x="282" y="431" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="313" y="446" text-anchor="middle" style="fill:var(--fg);font-size:11px">hdmi20</text></a><a href="#step-dcseq"><rect x="350" y="431" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="381" y="446" text-anchor="middle" style="fill:var(--fg);font-size:11px">dcseq</text></a><a href="#step-audio"><rect x="418" y="431" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="449" y="446" text-anchor="middle" style="fill:var(--fg);font-size:11px">audio</text></a><a href="#step-fmt"><rect x="78" y="459" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="109" y="474" text-anchor="middle" style="fill:var(--fg);font-size:11px">fmt</text></a><a href="#step-cursormall"><rect x="146" y="459" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="177" y="474" text-anchor="middle" style="fill:var(--fg);font-size:11px">cursormall</text></a><a href="#step-dmubreset"><rect x="214" y="459" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="245" y="474" text-anchor="middle" style="fill:var(--fg);font-size:11px">dmubreset</text></a><a href="#step-10"><rect x="8" y="498" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--fail);stroke-width:2"/><text x="40" y="520" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">10</text></a><path d="M40 532 V540" style="stroke:var(--muted);stroke-width:2"/><a href="#step-10s"><rect x="78" y="501" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="109" y="516" text-anchor="middle" style="fill:var(--fg);font-size:11px">10s</text></a><a href="#step-10a"><rect x="146" y="501" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="177" y="516" text-anchor="middle" style="fill:var(--fg);font-size:11px">10a</text></a><a href="#step-10m"><rect x="214" y="501" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="245" y="516" text-anchor="middle" style="fill:var(--fg);font-size:11px">10m</text></a><a href="#step-big"><rect x="282" y="501" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="313" y="516" text-anchor="middle" style="fill:var(--fg);font-size:11px">big</text></a><a href="#step-accelsdma"><rect x="350" y="501" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--ok)"/><text x="381" y="516" text-anchor="middle" style="fill:var(--fg);font-size:11px">accelsdma</text></a><a href="#step-cts"><rect x="418" y="501" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="449" y="516" text-anchor="middle" style="fill:var(--fg);font-size:11px">cts</text></a><a href="#step-11"><rect x="8" y="540" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:2"/><text x="40" y="562" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">11</text></a><path d="M40 574 V582" style="stroke:var(--muted);stroke-width:2"/><a href="#step-12"><rect x="8" y="582" width="64" height="34" rx="8" style="fill:var(--card);stroke:var(--fail);stroke-width:2"/><text x="40" y="604" text-anchor="middle" style="fill:var(--fg);font-weight:700;font-size:14px">12</text></a><rect x="8" y="624" width="64" height="34" rx="8" style="fill:none;stroke:var(--muted);stroke-dasharray:4 3"/><text x="40" y="645" text-anchor="middle" style="fill:var(--muted);font-size:12px">other</text><a href="#step-sleep"><rect x="78" y="627" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="109" y="642" text-anchor="middle" style="fill:var(--fg);font-size:11px">sleep</text></a><a href="#step-vcnsleep"><rect x="146" y="627" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--fail)"/><text x="177" y="642" text-anchor="middle" style="fill:var(--fg);font-size:11px">vcnsleep</text></a><a href="#step-amdgpu"><rect x="214" y="627" width="62" height="22" rx="11" style="fill:var(--card);stroke:var(--warn)"/><text x="245" y="642" text-anchor="middle" style="fill:var(--fg);font-size:11px">amdgpu</text></a></svg>
+<figcaption>The ladder at a glance: main steps 1-12 on the left, the variants of each step to the right. Click a step to jump to its row.</figcaption>
+</figure>
+<p class="muted">Colour = the risk column of the table: <span class="badge ok">low</span> <span class="badge warn">medium / screen</span> <span class="badge fail">high</span> (a step whose risk text only warns about the screen is amber).</p><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Boot-args (append)</th>
+<th>What it does</th>
+<th>Check (<code>11-ioreg-props.txt</code>, <code>20-log-rdna3.txt</code>)</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr id="step-1">
+<td>1</td>
+<td><code>rdna3lvl=1</code></td>
+<td>maps BAR5, waits for PSP, reads the VRAM size</td>
+<td><code>RDNA3,VRAMSizeMB</code> = Linux's <code>mem_info_vram_total</code> (16368 on the RX 7800 XT), no <code>MMIO reads all-ones</code></td>
+<td><span class="badge ok">low</span></td>
+</tr>
+<tr id="step-2">
+<td>2</td>
+<td><code>rdna3lvl=2</code></td>
+<td>IP discovery table, reading DCN heads, VBIOS, display paths, DP AUX/EDID</td>
+<td><code>IP discovery ... ok</code>, GC 11.0.3; <code>RDNA3,DisplayHeads = 1</code>; <code>RDNA3,DisplayPath0</code> (e.g. <code>DP-1 UNIPHYA DDC1 HPD1</code>); <code>RDNA3,Connector0,Monitor</code> = monitor name; <code>RDNA3,Head0EdidMode</code>; <code>RDNA3,AtomCommandTables</code></td>
+<td><span class="badge ok">low</span>: writes only to read windows and AUX registers</td>
+</tr>
+<tr id="step-3">
+<td>3</td>
+<td><code>rdna3lvl=3</code></td>
+<td>first GC register from discovery</td>
+<td><code>GRBM_STATUS</code>, <code>RDNA3,GBAddrConfig</code>, <code>RDNA3,ActiveCUs = 60</code></td>
+<td><span class="badge ok">low</span></td>
+</tr>
+<tr id="step-4">
+<td>4</td>
+<td><code>rdna3lvl=4</code></td>
+<td>PSP: bootloader, sOS, TMR, loading all firmware</td>
+<td><code>RDNA3,Stage2 = PSP up, firmware loaded</code>, <code>sOS running</code>, 29× <code>LOAD_IP_FW ... ok</code>, <code>RLC autoload started</code></td>
+<td><span class="badge warn">medium</span>: first writes to PSP</td>
+</tr>
+<tr id="step-5">
+<td>5</td>
+<td><code>rdna3lvl=5</code></td>
+<td>SMU: PMFW, VBIOS, PPTable, safe features, metrics</td>
+<td><code>RDNA3,SMUVersion</code>, <code>RDNA3,PM</code>, <code>RDNA3,PMFeaturesRunning</code>, <code>RDNA3,PMTempHotspotC</code>, <code>RDNA3,PMFanRPM</code></td>
+<td><span class="badge warn">medium</span>: clocks and fan</td>
+</tr>
+<tr id="step-5b">
+<td>5b</td>
+<td><code>rdna3lvl=5 rdna3dmub=1</code></td>
+<td>DMCUB: stopping the firmware started by the VBIOS, windows, restart, command mailbox</td>
+<td><code>RDNA3,DMUB = running, mailbox up</code>, <code>RDNA3,DMUBVersion = 0x07003300</code> (or close), <code>RDNA3,DMUBBootStatus</code> with bits 0 and 1</td>
+<td><span class="badge warn">display</span> <strong>the screen may flicker or go dark</strong>; then SSH, report, step without <code>rdna3dmub</code></td>
+</tr>
+<tr id="step-6">
+<td>6</td>
+<td><code>rdna3lvl=6</code></td>
+<td>GMC (GART, MMHUB), IH ring, doorbells</td>
+<td><code>RDNA3,GMCResult = 0</code>, <code>RDNA3,IHResult = 0</code>, <code>RDNA3,Doorbells</code></td>
+<td><span class="badge warn">medium</span></td>
+</tr>
+<tr id="step-6b">
+<td>6b</td>
+<td><code>rdna3lvl=6 rdna3msi=1</code></td>
+<td>MSI interrupts instead of polling</td>
+<td><code>RDNA3,IRQs</code> increases</td>
+<td><span class="badge ok">low</span></td>
+</tr>
+<tr id="step-7">
+<td>7</td>
+<td><code>rdna3lvl=7 rdna3msi=1</code></td>
+<td>SDMA0: ring test, 64 KiB VRAM→VRAM copy</td>
+<td><code>RDNA3,SDMAResult = 0</code>, <code>RDNA3,SDMACopyMismatches = 0</code>, <code>RDNA3,MSIVerified = 1</code></td>
+<td><span class="badge warn">medium</span>: <strong>first commands executed by the GPU</strong></td>
+</tr>
+<tr id="step-7b">
+<td>7b</td>
+<td>same as 7</td>
+<td>from a terminal: <code>build/userspace/rdna3_drminfo --dma-test</code></td>
+<td><code>DMA job results verified (WRITE_LINEAR + CONST_FILL)</code></td>
+<td><span class="badge warn">medium</span></td>
+</tr>
+<tr id="step-8">
+<td>8</td>
+<td><code>rdna3lvl=8 rdna3msi=1</code></td>
+<td>GFX 11: RLC, RS64, GFX ring, KIQ, KCQ</td>
+<td><code>RDNA3,GFXResult = 0</code>, <code>RDNA3,KIQResult = 0</code>, <code>RDNA3,KCQResult = 0</code></td>
+<td><span class="badge warn">medium</span></td>
+</tr>
+<tr id="step-8b">
+<td>8b</td>
+<td>same as 8</td>
+<td><code>build/userspace/rdna3_drminfo --gfx-test</code></td>
+<td><code>GFX job results verified (PM4 WRITE_DATA)</code></td>
+<td><span class="badge warn">medium</span></td>
+</tr>
+<tr id="step-8c">
+<td>8c</td>
+<td>same as 8 + <code>rdna3mes=1</code></td>
+<td>MES scheduler pipe (mes_v11_0_hw_init): mapped by the KIQ, SET_HW_RESOURCES, status query; needed later for user queues and queue resets</td>
+<td><code>RDNA3,MESResult = 0</code>, <code>RDNA3,MESSchedVersion</code> (firmware), log <code>MES: scheduler pipe up</code>; 8b still passes</td>
+<td><span class="badge ok">low</span>: the kernel rings stay on the KIQ</td>
+</tr>
+<tr id="step-userq">
+<td>userq</td>
+<td>same as 8c + <code>rdna3userq=1</code> (only after 8c passed)</td>
+<td>user queues (DRM_AMDGPU_USERQ / _SIGNAL / _WAIT, amdgpu.user_queue=1): MES ADD_QUEUE / REMOVE_QUEUE, doorbell BOs, seq64 fences; then <code>build/userspace/rdna3_drminfo --userq-test</code> runs a compute queue from its own doorbell</td>
+<td><code>RDNA3,UserQueues</code> = the IP mask (7: GFX, compute, SDMA; 0 means the firmware is too old: ME 2390, PFP 2530, MEC 2600, MES 120, SDMA 25), log <code>user queue: ADD_QUEUE ... : 0</code>, <code>USERQ TEST: PASSED</code>; 8b still passes</td>
+<td><span class="badge ok">low</span>: off by default, kernel VMs keep VMIDs 1-7</td>
+</tr>
+<tr id="step-vcn">
+<td>vcn</td>
+<td>same as 8 + <code>rdna3vcn=1</code> (<code>rdna3vm step vcn</code>)</td>
+<td>VCN 4.0 + JPEG 4.0 (<code>hw/vcn40.c</code>, ported from vcn_v4_0.c / jpeg_v4_0.c): the PSP also loads <code>vcn_4_0_0.bin</code> for VCN1, both instances start (PowerUpVcn, static power gating off, VCPU boot from the TMR image, unified ring with the fw_shared handshake), ring tests, the IB tests (encode session create/close, decode create/destroy message), the JPEG ring and its IB test; then <code>rdna3_drminfo --vcn-test</code> reads HW_IP_INFO / VIDEO_CAPS and runs a job on each video ring from a client VM; 1 s idle gates the block again (PowerDownVcn)</td>
+<td><code>RDNA3,VCN = VCN0 VCN1 JPEG up</code>, <code>RDNA3,VCNResult = 0</code>, <code>RDNA3,VCN0IBTest = 0</code>, <code>RDNA3,VCN1IBTest = 0</code>, <code>RDNA3,JPEGResult = 0</code>, <code>RDNA3,VCNFirmware = 0x09118022</code> (ENC 1.24 DEC 9), log <code>VCN0: unified ring ... ring test passed</code>, <code>VCN TEST: PASSED</code>, later <code>RDNA3,VCNGated = 1</code>; DMA/GFX tests still pass</td>
+<td><span class="badge warn">medium</span>: first VCN and JPEG register writes; a VCPU that does not boot costs ~10 s per instance and leaves the rings off</td>
+</tr>
+<tr id="step-vcn2">
+<td>vcn2</td>
+<td>same as 8 + <code>rdna3vcn=2</code> (<code>rdna3vm step vcn2</code>)</td>
+<td>step vcn with dynamic power gating as amdgpu runs it on this card (<code>vcn40_start_dpg_mode</code>, from vcn_v4_0_start_dpg_mode): per instance UVD_POWER_STATUS goes to DPG mode, the register image (VCPU clock, LMI, MPC, cache windows, master interrupt) is written into the DPG SRAM buffer and loaded by the PSP (<code>LOAD_IP_FW</code> GFX_FW_TYPE_VCN0_RAM / VCN1_RAM), then the unified ring with the fw_shared handshake; the idle gate is <code>vcn_v4_0_stop_dpg_mode</code> (PG mode off, then PowerDownVcn); every new job loads the SRAM image again. <code>rdna3vcn=3</code> (by hand) does the same through UVD_DPG_LMA_CTL/DATA without the PSP</td>
+<td>as step vcn, plus <code>RDNA3,VCNPowerGating = DPG, SRAM through the PSP</code>, <code>RDNA3,VCNDPGStarts</code> &gt;= 2, <code>RDNA3,VCNSRAMUploads</code> = <code>VCNDPGStarts</code>, <code>RDNA3,VCNSRAMUploadErrors = 0</code>, no <code>PSP: LOAD_IP_FW type 49/50 ... FAILED</code> line</td>
+<td><span class="badge warn">medium</span>: the PSP may refuse the SRAM image (then try <code>rdna3vcn=3</code>); a VCPU that does not boot leaves the rings off</td>
+</tr>
+<tr id="step-8g">
+<td>8g</td>
+<td>same as 8 + <code>rdna3cg=1</code> (default since run 8)</td>
+<td>GFX clock gating (gfx_v11_0_update_gfx_clock_gating: CGCG, CGLS, MGCG, repeater FGCG, in RLC safe mode) so the GFX clocks stop when idle</td>
+<td><code>RDNA3,GfxCGResult = 0</code>; the <code>PM:</code> log lines: activity well below 100 %, gfxclk and power down at idle (step 8: ~200 W, 2.7 GHz); DMA/GFX tests still pass</td>
+<td><span class="badge ok">low</span>: an idle GFX that does not wake up would fail the GFX test</td>
+</tr>
+<tr id="step-8o">
+<td>8o</td>
+<td>same as 8 + <code>rdna3gfxoff=1</code></td>
+<td>GFXOFF (amdgpu_gfx_off_ctrl: AllowGfxOff 100 ms after the last DRM ioctl, DisallowGfxOff before the next): the GFX powers off when idle</td>
+<td><code>RDNA3,GfxOffResult = 0</code>, log <code>GFXOFF: AllowGfxOff -&gt; 0</code> and <code>PM: GFX is off</code>; the <code>PM:</code> lines below step 8g's ~75 W; DMA/GFX tests still pass</td>
+<td><span class="badge warn">medium</span>: a GC register touched while the GFX is off hangs the access</td>
+</tr>
+<tr id="step-8u">
+<td>8u</td>
+<td>same as 8 + <code>rdna3pm=2</code></td>
+<td>UCLK/FCLK not pinned at the top: the PMFW runs memory/fabric DPM as under Linux (idle there: UCLK 96 MHz, FCLK 601 MHz, ~12 W with both monitors)</td>
+<td><code>PM:</code> lines: uclk below 1218 MHz and fewer watts than step 8; no <code>UCLK pinned</code> line; the <code>rdna3 memory load</code> section (DRIVER-PLAN N43): under the 10 s fill/copy load <code>pp_dpm_mclk</code> leaves level 0 (456 / 772 / 1218 MHz, <code>umc</code> activity high), 4 s after it UCLK is back at 96 MHz</td>
+<td><span class="badge warn">medium</span>: a memory clock switch under the GOP scanout can flicker or blank the screen for a frame</td>
+</tr>
+<tr id="step-pmctl">
+<td>pmctl</td>
+<td>same as 8u + <code>rdna3pmctl=2</code></td>
+<td>power management from userspace (<code>build/userspace/rdna3_pmctl</code>, RDNA3Accel selector 1): fan mode and speed (smu_v13_0_set_fan_control_mode / _set_fan_speed_pwm), power limit (smu_v13_0_0_set_power_limit), overdrive table (smu_v13_0_0_od_edit_dpm_table: GFXCLK/UCLK limits, voltage offset, fan curve, zero RPM), power profiles (activity monitor table), pp_dpm clock levels, DF C-states; <code>rdna3_pmctl selftest</code> sets each once and back</td>
+<td><code>PMCTL: ALL PASSED</code>, <code>RDNA3,PMODResult = 0</code>, <code>RDNA3,PMPowerLimitMinW/MaxW</code> and <code>RDNA3,PMOD*</code> published, log <code>PM control: op ...</code> lines; the DMA/GFX tests still pass</td>
+<td><span class="badge warn">medium</span>: the fan stops following the temperature for ~4 s (manual PWM 50 %), the power limit goes 10 W down and back, GFXCLK max 100 MHz down and back</td>
+</tr>
+<tr id="step-baco">
+<td>baco</td>
+<td><code>rdna3lvl=8 rdna3msi=1 rdna3pm=2 rdna3pmctl=1 rdna3baco=1</code> (only after pmctl passed)</td>
+<td><code>rdna3_pmctl baco-cycle</code>: BACO enter + exit through the PMFW (smu_v13_0_baco_enter / _exit), then levels 4-8 again as after a mode-1 reset</td>
+<td><code>BACO: cycle done</code>, <code>RDNA3,PMBACOResult = 0</code>, <code>RDNA3,PMBACOCycles = 1</code>, log <code>BACO cycle #1 done, rings back up</code>; the DMA/GFX tests after it pass</td>
+<td><span class="badge fail">high</span>: the chip powers off; a failed exit needs a reboot (the display goes dark during the cycle)</td>
+</tr>
+<tr id="step-9">
+<td>9</td>
+<td>same as 8 + <code>rdna3fb=1</code></td>
+<td>our framebuffer instead of IONDRV on the GOP mode (the monitor the GOP lit; a second one stays dark until 9b)</td>
+<td>desktop unchanged at the GOP resolution, <code>RDNA3-fb: started</code>, <code>RDNA3FB: head 0 EDID ... bytes from connector AUXn</code> in <code>20-log-rdna3.txt</code> (the serial log interleaves lines), <code>RDNA3,Head0,Route</code> names the connector, the monitor name in System Settings → Displays</td>
+<td><span class="badge warn">display</span> <strong>the screen may go dark</strong></td>
+</tr>
+<tr id="step-5c">
+<td>5c</td>
+<td><code>rdna3lvl=5 rdna3dmub=3</code></td>
+<td>attach to the DMCUB the GOP left running (its inbox, no reset, the PSP does not load DMCUB): the way around 5b</td>
+<td><code>RDNA3,DMUB = attached, mailbox up</code>, log <code>DMUB attach: the GOP's firmware ... behind CWn</code></td>
+<td><span class="badge ok">low</span></td>
+</tr>
+<tr id="step-9b">
+<td>9b</td>
+<td>same as 9 + <code>rdna3dmub=1 rdna3mirror=1</code> (only after 5b passed; with 5c instead: <code>rdna3dmub=3</code>, <code>rdna3vm step 9b3</code>)</td>
+<td>the second TMDS monitor shows the boot head's picture: a free pipe gets a copy of the lit one, pixel clock / encoder / transmitter through the DMCUB (<code>hw/dcn32_clone.c</code>)</td>
+<td><code>RDNA3,Mirror</code> names the connector, pipe and OTG; <code>RDNA3,MirrorResult = 0</code>; the log line <code>clone: pipe N lit</code>; both monitors show the desktop</td>
+<td><span class="badge warn">display</span> <strong>either screen may go dark</strong></td>
+</tr>
+<tr id="step-9c">
+<td>9c</td>
+<td>same as 9b but <code>rdna3mirror=2</code></td>
+<td>extended desktop: the cloned head gets its own framebuffer (RDNA3DisplayHead nub) and surface</td>
+<td>two displays in System Settings → Displays, <code>RDNA3-fb: head 1: own surface ...</code>, <code>RDNA3,ExtendHead = 1</code></td>
+<td><span class="badge warn">display</span> <strong>either screen may go dark</strong></td>
+</tr>
+<tr id="step-9cu">
+<td>9cu</td>
+<td>same as 9c + <code>rdna3pm=2</code></td>
+<td>extended desktop with UCLK/FCLK DPM free (the clone forces the DCN p-state allow)</td>
+<td>as 9c, plus lower <code>PM:</code> watts; <strong>watch both screens for flicker</strong></td>
+<td><span class="badge warn">display</span> either screen may flicker or go dark</td>
+</tr>
+<tr id="step-9d">
+<td>9d</td>
+<td>9b or 9c, then unplug and replug the second monitor's cable (needs <code>rdna3msi=1</code>)</td>
+<td>the clone follows the cable through the HPD interrupt</td>
+<td>log <code>the cloned monitor is gone: switching its pipe off</code>, then <code>mirror: ...</code> again on replug</td>
+<td><span class="badge warn">medium</span></td>
+</tr>
+<tr id="step-hotplug">
+<td>hotplug</td>
+<td>the <code>metal</code> step + <code>rdna3hotplug=1</code> (<code>rdna3vm step hotplug</code>); <strong>stay at the machine</strong>: when the progress window says <code>unplug and replug the second monitor now</code>, pull the second monitor's cable, wait ~10 s, put it back</td>
+<td>hotplug after boot (<code>kext/src/RDNA3Hotplug.cpp</code>, <code>hw/dchpd.c</code>): the HPD toggle filter as amdgpu's <code>program_hpd_filter</code> sets it, a 500 ms poll of <code>DC_HPD_SENSE_DELAYED</code> (a change counts after two equal looks), the EDID read again, the second monitor's pipe taken down and lit again with its cable, the framebuffer's connect change to IOGraphics</td>
+<td>the report's <code>hotplug window</code> lines: <code>RDNA3,HPDState</code> with the pin going <code>0</code> then <code>1</code>; log <code>hotplug: HPDn disconnected ... take the second monitor's pipe down</code>, then <code>HPDn connected ... TMDS sink with EDID: light the second monitor</code> and <code>second monitor lit</code>; <code>RDNA3,HotplugClonesOff</code> = <code>RDNA3,HotplugClonesLit</code> = 1; macOS drops the second display and brings it back; the <code>look hotplug</code> pictures show both pipes lit</td>
+<td><span class="badge warn">medium</span>: the second screen may stay dark, WindowServer may restart when its display goes</td>
+</tr>
+<tr id="step-dplink">
+<td>dplink</td>
+<td>the <code>modeset</code> step + <code>rdna3dplink=1</code> (<code>rdna3vm step dplink</code>); <strong>needs a monitor on native DisplayPort</strong> (no DP-to-HDMI/DVI adaptor or cable) that the GOP lights at boot</td>
+<td>the driver's own DP SST mode set (<code>hw/dcn32_dp.c</code>, ported from DC's link training): the sink's DPCD caps, the link cap verified once by training at the sink's maximum with fallback (<code>dp_verify_link_cap</code>), the smallest link setting for the mode, 8b/10b clock recovery and channel equalization through the DMCUB's TransmitterControl (ENABLE, SETUP_VSEMPH), the DP DTO as pixel clock, MSA, M/N, unblank</td>
+<td>log <code>dp: AUX n: DPCD 1.x, sink ...</code>, <code>dp: link training HBR2x4 pass VS=.., PE=..</code>, <code>dp: AUX n: verified link cap ...</code>, <code>dp: DIG f -&gt; UNIPHY b: WxH ... trained</code>; ioreg <code>RDNA3,Head&lt;n&gt;,DPLink</code> (verified and running link, last result 0 = pass); <code>rdna3_modetest</code> switches the DP monitor and back like the TMDS ones</td>
+<td><span class="badge fail">high</span>: the DP monitor may show &quot;no signal&quot; until the old mode is back (a failed training puts the old timing back and trains again)</td>
+</tr>
+<tr id="step-dsc">
+<td>dsc</td>
+<td>the <code>dplink</code> step + <code>rdna3dsc=1</code> (<code>rdna3vm step dsc</code>); <strong>needs a native DP monitor that decodes DSC</strong> (DSC in its specs, usually 4K 144 Hz or 5K/6K monitors)</td>
+<td>FEC and DSC on the DP link (<code>hw/dcn32_dsc.c</code>, DC's <code>dc_dsc_compute_config</code> / <code>dsc2_get_packed_pps</code> / <code>link_set_dsc_enable</code>): FEC on a FEC capable monitor, a mode the link cannot carry uncompressed offered and set with DSC (the pipe's DSC engine ungated, the PPS sent every frame, DSC on in the monitor)</td>
+<td>log <code>dp: AUX n: FEC yes, DSC yes ...</code>, <code>modeset: head n: WxH needs DSC: ...</code>, <code>dsc: DSC n: ... slices, .. bpp</code>, <code>dp: UNIPHY n: FEC enabled (active 1)</code>; ioreg <code>RDNA3,Head&lt;n&gt;,DSC</code>; <code>rdna3_modetest</code> sets the DSC mode and back with the picture right</td>
+<td><span class="badge fail">high</span>: the DP monitor may show &quot;no signal&quot; or a garbled picture until the old mode is back</td>
+</tr>
+<tr id="step-mst">
+<td>mst</td>
+<td>the <code>dplink</code> step + <code>rdna3mst=1</code> (<code>rdna3vm step mst</code>; <code>rdna3mstport=N</code> for another port); <strong>needs an MST hub (or a daisy-chain DP monitor) on the card's DP output, with a monitor behind it lit by the GOP at boot</strong></td>
+<td>DP MST (<code>hw/dp_mst.c</code>, <code>hw/dcn32_dp_mst.c</code>: DRM's sideband messages and payload table, DC's <code>allocate_mst_payload</code>): at the first mode switch the hub goes MST, its topology and every monitor's EDID are read, the head's stream goes to one monitor as an MST stream (VC payload, ACT, DP_MSE_RATE); back to SST when that does not run</td>
+<td>log <code>mst: AUX n: MST on</code>, <code>mst: link address reply ..: n ports</code>, <code>mst: port n: EDID .. bytes</code>, <code>dp: MST allocate: 1 stream(s): VCP 1, n slots</code>, <code>dp: DIG f -&gt; UNIPHY b (MST): ... trained</code>; ioreg <code>RDNA3,Head&lt;n&gt;,MSTPorts</code>, <code>RDNA3,Head&lt;n&gt;,MST</code> (ACT 1); after the first switch <code>rdna3_modetest list</code> shows the hub monitor's modes</td>
+<td><span class="badge fail">high</span>: the monitor behind the hub goes black at the takeover and may stay black until the step puts SST back</td>
+</tr>
+<tr id="step-uhbr">
+<td>uhbr</td>
+<td>the <code>dplink</code> step with <code>modeset2</code>'s clocks + <code>rdna3uhbr=1</code> (<code>rdna3vm step uhbr</code>); <strong>needs a DP 2.1 (UHBR) monitor on a DP80 (UHBR20) or DP54 (UHBR13.5) certified cable straight into the card's DP output, lit by the GOP at boot, and a mode above HBR3 x4 in its EDID</strong> (e.g. 4K 240 Hz, 5K/8K)</td>
+<td>DP 2.1 UHBR SST (<code>hw/dcn32_hpo.c</code>, the 128b/132b part of <code>hw/dcn32_dp.c</code>): the UHBR rates from the VBIOS encoder caps, the sink (DPCD 0x2215), the cable id and LTTPRs; the link cap verified with DC's 128b/132b training (TPS1, channel EQ with the TX FFE presets, CDS) and the max-bandwidth fallback; a mode above HBR3 x4 set through the HPO stream and link encoders: DTBCLK raised (SetHardMinByFreq), the DTBCLK DTO, DPSTREAMCLK / SYMCLK32, the SST payload (VC 1, ACT) and the VC rate</td>
+<td>log <code>dp: AUX n: 128b/132b: rates 07 (UHBR20), cable id ..</code>, <code>DAL SMU: DTBCLK .. reference .. kHz</code>, <code>dp: link training UHBR10x4 pass</code>, <code>dp: HPO 0 -&gt; UNIPHY b: ... on UHBR.. x4: trained</code>, <code>dp: 128b/132b SST payload: n time slots, ..., ACT handled</code>; ioreg <code>RDNA3,Head&lt;n&gt;,UHBR</code></td>
+<td><span class="badge fail">high</span>: the monitor may stay black until the step puts the old (8b/10b) mode back</td>
+</tr>
+<tr id="step-odm">
+<td>odm</td>
+<td>the <code>uhbr</code> step + <code>rdna3dsc=1 rdna3odm=1</code> (<code>rdna3vm step odm</code>); <strong>needs an 8K (7680x4320) monitor, or a mode whose pixel rate is above what one pipe's DISPCLK reaches, on native DP</strong> (a DSC monitor for 8K over DP 1.4; UHBR helps)</td>
+<td>ODM combine 2:1 (<code>hw/dcn32_odm.c</code>, DC's <code>dcn32_update_odm</code>, <code>optc32_set_odm_combine</code> / <code>_bypass</code>, <code>dml32_CalculateODMMode</code>): a free pipe gets the right half of the picture (viewport, recout, OPP, MPC tree, DET split), the OTG reads two OPPs, the DSC slices are split over both pipes' DSC engines</td>
+<td>log <code>modeset: head n: WxH on ..., ODM 2:1</code>, <code>odm: OTG o: pipe p / OPP .. + pipe q ...</code>, <code>odm: pipe p + q on OTG o: slices ..</code>, <code>dp: DSC .. 2 ODM segment(s)</code>; ioreg <code>RDNA3,Head&lt;n&gt;,ODM</code>; <code>rdna3_modetest</code> sets the 8K mode and back</td>
+<td><span class="badge fail">high</span>: the monitor may show half a picture or stay black until the old mode is back</td>
+</tr>
+<tr id="step-mall">
+<td>mall</td>
+<td>the <code>modeset2</code> step + <code>rdna3dpms=1 rdna3mall=1</code> (<code>rdna3vm step mall</code>); the two monitors as in <code>big2</code></td>
+<td>DC's display power (<code>hw/dcn32_pstate.c</code>, item O): at the bring-up the watermark range table goes to the PMFW (<code>dcn32_notify_wm_ranges</code>, TransferTableDram2Smu), the DPM levels and the voltage states are read; after the init, each mode set, display sleep / wake and the mirror lighting DC's DML decision runs on the lit heads (<code>dcn32_internal_validate_bw</code> subset: the lowest voltage state whose UCLK switch the heads hide, the four watermark sets, FCLK switching) and is programmed in DC's order (<code>dcn32_prepare_bandwidth</code>, MALL_SEL, <code>dcn20_optimize_bandwidth</code>: UCLK / FCLK hard minimums, SetFclkSwitchAllow, deep sleep DCFCLK); a second without flips turns the idle CAB on (DMCUB <code>CAB_FOR_SS</code>)</td>
+<td>log <code>display power: init 0: PMFW .., n states, UCLK 96..1218 MHz ...</code>, <code>pstate: state s: UCLK switches (vactive ...)</code>, <code>display power: mode set: state s, UCLK switching at .. MHz (vactive), FCLK switching, ...</code>; ioreg <code>RDNA3,DCNPowerInit</code>, <code>RDNA3,DCNPower</code>, <code>RDNA3,Head&lt;n&gt;,PState</code> (active margin &gt; 0 us); <code>PM:</code> lines: uclk at the low level and fewer watts than <code>big2</code> at idle; no flicker, <code>rdna3_drminfo --scanout</code> without HUBP underflow; <code>rdna3_modetest cycle</code> as in <code>modeset2</code></td>
+<td><span class="badge warn">medium</span>: a wrong watermark shows as flicker or a black line at a UCLK switch; the next mode switch or a restart takes it back</td>
+</tr>
+<tr id="step-subvp">
+<td>subvp</td>
+<td>the <code>mall</code> step + <code>rdna3subvp=1</code> with <strong>one monitor</strong> (<code>rdna3mirror=0</code>, <code>rdna3vm step subvp</code>); <strong>needs a monitor with a mode that cannot hide the UCLK switch: 3840x2160, 3440x1440, 2560x1440 or 1920x1080 at 120-175 Hz</strong> (or a 4K60 one whose DET is too small), set with <code>rdna3_modetest</code></td>
+<td>SubVP (<code>hw/dcn32_subvp.c</code>): DC's SubVP decision (<code>dcn32_assign_subvp_pipe</code>, phantom timing, static schedulability, only on a lower UCLK), a phantom pipe brought up on a free pipe (DP DTO, its OTG enabled and disabled again, HUBP blanked, MALL_SEL 1, DET 0), FORCE_ONE_ROW_FOR_FRAME on the main, the DMCUB's <code>HANDLE_SUBVP_CMD</code> under its HW lock; the main's flips give the firmware the new address</td>
+<td>log <code>subvp: phantom of pipe p (OTG o, WxH) on pipe q: n lines ...</code>, <code>subvp: on, 1 phantom(s), 2 DMCUB lock commands: 0</code>, <code>display power: mode set: state s, UCLK switching at .. MHz (vactive + SubVP) ..., SubVP 1</code>; ioreg <code>RDNA3,Head&lt;n&gt;,PState</code> (<code>SubVP main</code>); at the high-refresh mode: no flicker, no underflow, UCLK at a low level in the <code>PM:</code> lines; the switch back turns the phantom off (<code>subvp: phantom pipe q off</code>, <code>subvp: off (was on)</code>)</td>
+<td><span class="badge fail">high</span>: a wrong phantom or schedule shows as a torn or flickering picture at every UCLK switch until the mode changes</td>
+</tr>
+<tr id="step-otg">
+<td>otg</td>
+<td>the <code>9c</code> step + <code>rdna3otg=1</code> (<code>rdna3vm step otg</code>)</td>
+<td>DC's timing generator functions (<code>hw/dcn32_otg.c</code>: optc1/2/3/32) on every head the GOP lit, at display start: scan position and nominal line, active size, <code>optc1_wait_for_state</code> (vblank, then active), the vertical interrupt 0 aimed at the middle of the picture and its status latched (its registers put back), the OPTC underflow, double buffering and ODM segments; reads only apart from the interrupt position</td>
+<td>ioreg <code>RDNA3,Head&lt;n&gt;,OTGCheck</code> = <code>0: WxH (head WxH), counter moving, vblank 1 vactive 1, vline0 line L latched (read L..L+2), underflow 0, db pending 0, ODM 1</code>; log <code>display: head n OTG o check ...</code> and <code>otg o: ...</code></td>
+<td><span class="badge ok">low</span>: a wrong read changes nothing on screen</td>
+</tr>
+<tr id="step-vblirq">
+<td>vblirq</td>
+<td>the <code>play</code> step + <code>rdna3vblirq=1</code> (<code>rdna3vm step vblirq</code>), then <code>vblirq-off</code> (<code>rdna3vblirq=0</code>) for the A/B</td>
+<td>DRIVER-PLAN N42: the DCN vblank (OTG VSTARTUP) and flip (HUBP) interrupts through the IH (<code>hw/dcirq.c</code>, <code>kext/src/RDNA3DisplayIrq.cpp</code>): IOGraphics' VBL from the vblank interrupt (a HIGH ONCE thread call), the accelerator's present queue completed at flip done by the pflip interrupt, the OTG poll as the fallback</td>
+<td>log <code>display irq: head 0 (OTG n, HUBP n): the framebuffer registered for 0x3, enabled 0x3</code>, no <code>interrupt storm</code>, few or no <code>VBL: head n: no vblank interrupt for</code> lines; triage <code>fb N40, vblank irq</code> and <code>N42, display irq</code> INFO with the counts growing with the frames, <code>flip done from the pflip interrupt: N of M latch(es)</code>; the desktop at least as smooth as with <code>vblirq-off</code></td>
+<td><span class="badge ok">low</span>: the poll stays as the fallback; a storm is cut</td>
+</tr>
+<tr id="step-hdmi">
+<td>hdmi</td>
+<td>the <code>modeset</code> step + <code>rdna3hdmi=1</code> (<code>rdna3vm step hdmi</code>); a monitor on HDMI (or DVI) that the GOP lights</td>
+<td>DC's HDMI stream around each TMDS mode set (<code>hw/dcn32_hdmi.c</code>): <code>link_set_dpms_off</code>'s AV mute (two frames), SCDC back to HDMI 1.4 rates, info packets off and <code>enc1_reset_hdmi_stream_attribute</code>; after the VBIOS STREAM_SETUP <code>enc32_stream_encoder_hdmi_set_stream_attribute</code> (HDMI_CONTROL, GC / NULL packets, audio info frame line, AV mute off), <code>write_scdc_data</code> / <code>read_scdc_data</code> around the transmitter, the AVI infoframe (and an HDMI VIC vendor infoframe) through the VPG (<code>enc3_stream_encoder_update_hdmi_info_packets</code>); a DVI head gets <code>enc32_stream_encoder_dvi_set_stream_attribute</code></td>
+<td>log <code>display: head n HDMI: sink HDMI, SCDC s, LTE scramble l, max TMDS M MHz, HDMI 6G g, a audio modes</code>, <code>modeset: head n: HDMI_CONTROL 0x..., SCDC TMDS_CONFIG ...</code>; ioreg <code>RDNA3,Head&lt;n&gt;,HDMI</code> (<code>HDMI_CONTROL 0x....0019</code>: bit 0 keepout, bit 3 no extra null, bit 4 packet gen; bit 1 too with an LTE-scrambling sink; <code>SCDC ... (0)</code> on an HDMI 2.0 sink, <code>(-n)</code> NACK on an HDMI 1.4 one); the picture after every <code>rdna3_modetest</code> switch as in <code>modeset</code> (no overscan, right colours)</td>
+<td><span class="badge warn">medium</span>: a wrong infoframe can make the monitor show the picture over/underscanned or in wrong colours until the next switch</td>
+</tr>
+<tr id="step-hdmi20">
+<td>hdmi20</td>
+<td>the <code>modeset2</code> step + <code>rdna3hdmi=3</code> (<code>rdna3vm step hdmi20</code>); <strong>needs a 4K HDMI 2.0 monitor or TV</strong> and a high-speed cable</td>
+<td>modes above a 340 MHz TMDS clock (4K60: 594 MHz) offered when the VBIOS gives the connector the HDMI 6G cap and the EDID allows the rate (<code>dcn10_link_encoder_validate_output_with_stream</code>); the HDMI scrambler and the 1/4 clock channel on, the monitor told through SCDC (TMDS_CONFIG 3), its scrambler status read back</td>
+<td><code>rdna3_modetest list</code> shows 3840x2160 60 Hz; ioreg <code>RDNA3,Head&lt;n&gt;,HDMI</code> = <code>HDMI_CONTROL ...</code> with bits 1 and 2 set, <code>SCDC TMDS_CONFIG 0x03 scrambler 0x01 flags 0x..0f</code>; the 4K60 picture</td>
+<td><span class="badge fail">high</span>: the monitor may show &quot;no signal&quot; until the old mode is back</td>
+</tr>
+<tr id="step-dcseq">
+<td>dcseq</td>
+<td>the <code>modeset2</code> step + <code>rdna3dcseq=1</code> (<code>rdna3vm step dcseq</code>)</td>
+<td>DC's sequence extras of <code>hw/dcn32_hwseq.c</code> around each mode switch: on an HDMI head <code>apply_symclk_on_tx_off_wa</code> (TransmitterControl DISABLE, SetPixelClock at the running clock while the OTG still runs, OTG off, DISABLE again: <code>dcn20_reset_back_end_for_pipe</code>), then after the stream is up <code>dcn32_resync_fifo_dccg_dio</code> (<code>DENTIST_DISPCLK_WDIVIDER</code> rewritten with the RDIVIDER)</td>
+<td>log <code>modeset: head n: DIO FIFO resync (DISPCLK divider 0x..)</code> after every switch; on the HDMI head 6 DMCUB VBIOS commands per switch instead of 4; the switches and pictures as in <code>modeset2</code>, no underflow</td>
+<td><span class="badge ok">low</span>: two extra VBIOS commands while the stream is down, one divider rewrite with the same value</td>
+</tr>
+<tr id="step-audio">
+<td>audio</td>
+<td>the <code>hdmi</code> step + <code>rdna3dplink=1 rdna3audio=1</code> (<code>rdna3vm step audio</code>); a monitor or TV with speakers (or an audio output) on HDMI, or on native DP; for the sound itself macOS needs an HDA driver attached to the card's audio function (1002:ab30 class; AppleHDA / AppleGFXHDA with the usual device-id spoofing)</td>
+<td>DC's display audio around each mode set (<code>hw/dcn32_audio.c</code>): the azalia endpoints counted and initialised once (<code>read_dce_straps</code>, <code>update_num_audio</code>, <code>dce_aud_hw_init</code>), an endpoint per stream (<code>find_first_free_audio</code>), the EDID's audio modes, speakers and monitor name written as the ELD (<code>dce_aud_az_configure</code>), the audio DTO (<code>dce_aud_wall_dto_setup</code>: DTO0 from the pixel clock on HDMI, DTO1 from DPREFCLK on DP), HDMI ACR / audio infoframe through AFMT3, DP audio SDP (or the HPO stream encoder's APG on UHBR), <code>dce_aud_az_enable</code> and the stream's audio unmuted after the switch; <code>rdna3audio=3</code> also sends the PMFW's BACO audio PME message</td>
+<td>log <code>audio: n azalia endpoints, straps 0x.. (HDMI audio native)</code>, <code>display: head n audio: &quot;NAME&quot;, m modes, speakers 0x.., latency v/a ms</code>, per switch <code>display: head n audio: endpoint e, HDMI|DP (DIO)|DP (HPO), on, ...</code>; ioreg <code>RDNA3,Head&lt;n&gt;,Audio</code>; with an HDA driver: System Settings &gt; Sound &gt; Output lists the monitor (its EDID name) and a test sound plays through it</td>
+<td><span class="badge ok">low</span>: only the audio blocks change; the picture switches as in <code>hdmi</code></td>
+</tr>
+<tr id="step-fmt">
+<td>fmt</td>
+<td>the <code>hdmi</code> step + <code>rdna3fmt=1</code> (<code>rdna3vm step fmt</code>; <code>rdna3fmt=3</code> caps 8 bpc, <code>rdna3fmt=5</code> forces YCbCr 4:2:2); a monitor or TV on HDMI whose EDID offers YCbCr and/or deep colour (most TVs, many monitors)</td>
+<td>amdgpu's output format on each HDMI mode set (<code>hw/dcn32_opp.c</code>): the encoding (<code>fill_stream_properties_from_drm_display_mode</code>: YCbCr 4:4:4 when the sink lists it), the bpc (<code>convert_color_depth_from_display_info</code>, <code>adjust_colour_depth_from_display_info</code>: 10 / 12 bpc within the TMDS limit), the output CSC, the OPP formatter (<code>opp1_program_fmt</code>: spatial dither at 8 bpc, truncation at 10 bpc, clamping, pixel encoding, dynamic expansion), the deep colour PHY PLL and its resync, and the DPG blank around the switch (<code>opp2_set_disp_pattern_generator</code>)</td>
+<td>log and ioreg <code>RDNA3,Head&lt;n&gt;,Format</code> = <code>YCbCr 4:4:4 10 bpc, colour space n, sink bpc b formats 0x..</code>; the monitor's own info menu shows YCbCr / 10 bit; the picture after each <code>rdna3_modetest</code> switch has right colours (no pink / green cast, no banding beyond 8 bit's)</td>
+<td><span class="badge warn">medium</span>: a wrong format shows wrong colours until the next switch; the switch back to native restores RGB only through another switch (the format stays amdgpu's)</td>
+</tr>
+<tr id="step-cursormall">
+<td>cursormall</td>
+<td>the <code>9c</code> step + <code>rdna3cursormall=1</code> (<code>rdna3vm step cursormall</code>); move the mouse over both monitors</td>
+<td><code>hubp32_cursor_set_attributes</code>' DCN 3.2 part on top of the hardware cursor: <code>DCHUBP_MALL_CONFIG.USE_MALL_FOR_CURSOR</code> set for the framebuffer's 256 x 256 ARGB cursor (64 KiB &gt; 16 KiB), as Linux sets it</td>
+<td>the look's <code>HUBPn_DCHUBP_MALL_CONFIG</code> bit 2 set on each lit pipe; the pointer drawn and moving on both monitors without garbage</td>
+<td><span class="badge ok">low</span>: a bad MALL read shows as a garbled pointer only</td>
+</tr>
+<tr id="step-dmubreset">
+<td>dmubreset</td>
+<td>the <code>9c</code> step + <code>rdna3dmubreset=1</code> (<code>rdna3vm step dmubreset</code>)</td>
+<td>the DMCUB stopped and reset with amdgpu's exact <code>dmub_dcn32_reset</code> (GPINT STOP_FW, 30 reads for the ack and 30 for the answer, the reset forced either way, <code>MMHUBBUB_SOFT_RESET.DMUIF_SOFT_RESET</code> set and released by <code>dmub_dcn32_reset_release</code>) instead of the sequence step 5b verified (1 s wait, CW2-7 closed, DMUIF untouched); after the boot the DMCUB's diagnostic data (<code>dmub_dcn32_get_diagnostic_data</code>) and its first trace entries are logged</td>
+<td><code>RDNA3,DMUB = running, mailbox up</code>, <code>RDNA3,DMUBAmdReset</code> = 3 (bit 0 STOP_FW acked, bit 1 the firmware answered), log <code>DMUB: amdgpu reset (rdna3dmubreset=1): STOP_FW acked, firmware stopped</code>, <code>DMUB diag (after the amdgpu reset): ...</code>; the second monitor lit and extended as in 9c</td>
+<td><span class="badge warn">medium</span>: a DMCUB that does not come back leaves the second monitor dark (no mode sets, no clone)</td>
+</tr>
+<tr id="step-10">
+<td>10</td>
+<td>same as 9 + <code>rdna3accel=1</code></td>
+<td>IOAcceleratorFamily2 accelerator</td>
+<td><code>ioreg -c RDNA3Accelerator</code>, <code>populateAccelConfig ... what the FAMILY pre-filled</code> in the log</td>
+<td><span class="badge fail">high</span>: WindowServer</td>
+</tr>
+<tr id="step-10s">
+<td>10s</td>
+<td>same as 10 + <code>rdna3accelfb=3 rdna3acceliop=1 rdna3pm=2</code></td>
+<td>the accelerator's display machine gets head 0 and its pipe scans out what WindowServer composites (the sysctls <code>debug.rdna3accelfb=3</code> / <code>debug.rdna3accel_iop=1</code>, set from boot-args when the framebuffer publishes)</td>
+<td>the desktop on head 0, log <code>boot-arg rdna3accelfb=3</code>, <code>iop: ... transaction hooks OPEN</code>, <code>debug.rdna3accel_iop_ok</code> counting</td>
+<td><span class="badge fail">high</span>: WindowServer may hang or show a black desktop</td>
+</tr>
+<tr id="step-10a">
+<td>10a</td>
+<td>same as 10s but <code>rdna3accelfb=4</code></td>
+<td>also the aperture gate: WindowServer gets CPU mappings (getApertureMemoryDescriptor) of the surfaces it composites into</td>
+<td>non-empty <code>SWAP PROBE</code> sums, the desktop on head 0, <code>23-windowserver-crash.txt</code> empty</td>
+<td><span class="badge fail">high</span>: WindowServer crash loop (black screen)</td>
+</tr>
+<tr id="step-10m">
+<td>10m</td>
+<td>9c + 10a: <code>rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2</code></td>
+<td>extended desktop through the accelerator: each head's framebuffer gets its gates when it publishes</td>
+<td>the desktop on both monitors, <code>FRONT SURFACE ... LIVE WRITER</code> for both heads, <code>debug.rdna3accel_iop_ok_h1</code> counting</td>
+<td><span class="badge fail">high</span>: head 1 dark or a WindowServer crash loop</td>
+</tr>
+<tr id="step-big">
+<td>big</td>
+<td><code>rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2</code></td>
+<td>everything at once (one boot instead of ten): DMA/GFX tests, Vulkan, UCLK/FCLK DPM, extended desktop, the desktop composited through the accelerator on both heads</td>
+<td>triage: tests PASS, <code>swap: surface ... -&gt; head 0/1</code>, <code>FLIPPED head 0/1</code>, <code>LIVE WRITER</code>; the desktop on both monitors</td>
+<td><span class="badge fail">high</span>: any of the above</td>
+</tr>
+<tr id="step-accelsdma">
+<td>accelsdma</td>
+<td>step <code>big</code> + <code>rdna3accelsdma=1</code> (also in <code>big4</code>)</td>
+<td>A2: a swap the zero-copy flip cannot take (<code>rdna3acceliop</code> refused, a head without its own surface) is copied onto the scanout by SDMA0 in the core kext (<code>rdna3CopyVram</code>: the HDP flushed, then <code>amdgpu_copy_buffer</code>-style COPY_LINEAR packets per row, one fence) instead of the CPU through the BAR; no 120-frame cap</td>
+<td>log <code>swap copy by SDMA (head n) #1: ... in N us</code> (every 600th again), no <code>swap copy by SDMA refused</code>; triage <code>PASS swap copy by SDMA</code>, or <code>INFO ... no copy was needed</code> when every swap flipped</td>
+<td><span class="badge ok">low</span>: a refused copy falls back to the CPU (three in a row switch SDMA off)</td>
+</tr>
+<tr id="step-cts">
+<td>cts</td>
+<td>step <code>metal</code> + <code>rdna3cts=1</code>, after <code>rdna3vm cts</code> (docs/TESTING-VM.html)</td>
+<td>V2: a subset of the Vulkan CTS (<code>tools/cts/patterns.txt</code>: info, device creation, objects, memory, buffers, images, compute, SSBO layout, synchronization with timeline semaphores, render passes, basic draws, occlusion queries; about 2360 cases) through the Khronos loader and RADV, one <code>deqp-vk</code> run per group with its own time limit</td>
+<td>the report's <code>CTS ...</code> lines and its <code>CTS: pass P, fail F, not supported N of T cases</code>; triage <code>Vulkan CTS</code> with the failing groups and cases</td>
+<td><span class="badge warn">medium</span>: a GPU hang inside a group: its run is killed at the limit, the groups after it may fail on the hung GPU</td>
+</tr>
+<tr id="step-11">
+<td>11</td>
+<td>same as 10</td>
+<td><code>vulkaninfo --summary</code> with RADV from <code>/Library/GPUBundles/rdna3mtl</code></td>
+<td>device <code>AMD Radeon RX 7800 XT (RADV NAVI32)</code></td>
+<td><span class="badge warn">medium</span></td>
+</tr>
+<tr id="step-12">
+<td>12</td>
+<td>same as 10, then <code>sudo sysctl -w debug.rdna3accelfb=1</code></td>
+<td>Metal plugin for the processes <code>rdna3mtl-allow.txt</code> allows (names, and every application in apps mode: <a href="INSTALL-OPENCORE.html#which-apps-get-the-gpu-metal-plugin">INSTALL-OPENCORE</a>)</td>
+<td><code>mtlprobe</code> sees the AMD device</td>
+<td><span class="badge fail">high</span></td>
+</tr>
+<tr id="step-sleep">
+<td>sleep</td>
+<td>step <code>metal</code> + <code>rdna3dpms=2 rdna3resume=1</code></td>
+<td>display sleep takes the link down on every TMDS monitor, and on DP SST ones with <code>rdna3dplink=1</code> (standby, no signal) and back (<code>hw/dcn32_state.c</code>); then <code>pmset relative wake 30; pmset sleepnow</code>: the heads saved and taken down, on the wake a power loss detected (PCI, <code>RCC_CONFIG_MEMSIZE</code>, ASIC_Init flag, PSP sOS) and, if so, the GPU posted and brought up again, the heads restored from the snapshot</td>
+<td><code>RDNA3,Head&lt;n&gt;,State</code> (<code>intact</code> / <code>restored (0), running</code>), <code>RDNA3,Wake</code> (what the wake found), <code>RDNA3,WakeHeadsLost = 0</code>, <code>RDNA3,WakeResumeResult = 1</code> after a power loss; report: <code>SYSTEM SLEEP: slept and woke, every head back</code>, the DMA/GFX tests after the wake pass</td>
+<td><span class="badge fail">high</span>: a monitor may stay dark after the wake; the rings may be dead after a power loss</td>
+</tr>
+<tr id="step-vcnsleep">
+<td>vcnsleep</td>
+<td>step <code>sleep</code> + <code>rdna3vcn=2</code></td>
+<td>step sleep with the video block: <code>--vcn-test</code> before the sleep; on the sleep <code>jpeg_v4_0_suspend</code> + <code>vcn_v4_0_suspend</code> (the VCPU BOs - stack, context, fw_shared - copied to system memory); on the wake <code>vcn_v4_0_resume</code> + <code>jpeg_v4_0_resume</code> (the copy back, the rings started again, VCN before JPEG and after GFX): after a power loss inside the GPU bring-up, otherwise from the wake work; <code>--vcn-test</code> again after the wake</td>
+<td>step sleep's checks, plus <code>RDNA3,VCNSuspends = 1</code>, <code>RDNA3,VCNSuspendResult = 0</code>, <code>RDNA3,VCNResumes = 1</code>, <code>RDNA3,VCNResult = 0</code>, the IB tests 0 after the wake, log <code>VCN: suspended ... saved to system memory</code>, <code>VCN: resume (...): 0</code>; report: <code>VCN TEST: PASSED</code> twice</td>
+<td><span class="badge fail">high</span>, as step sleep</td>
+</tr>
+<tr id="step-amdgpu">
+<td>amdgpu</td>
+<td>no rdna3 boot-arg but <code>rdna3amdgpu=1</code> (<code>rdna3vm step amdgpu</code>): the default profile with amdgpu's own sequence where the verified one differs</td>
+<td>PSP: <code>psp_load_fw</code> order (SETUP_TMR before the PMFW, <code>psp_check_pmfw_centralized_cstate_management</code> false on 13.0.10), ASD, the register list (<code>psp_rl_load</code>), HDCP / DTM TAs, <code>psp_hw_fini</code> at unload; SMU: <code>smu_smc_hw_setup</code> order (<code>smu_v13_0_0_get_allowed_feature_mask</code>, every PCIe level after EnableAllSmuFeatures, <code>smu_v13_0_enable_thermal_alert</code>, <code>DALNotPresent</code> without the display core), AC source, <code>PrepareMp1ForUnload(0x55)</code> at shutdown; GPUVM: <code>amdgpu_vm_pt_clear</code> values, fragments and 2 MiB huge PDEs (<code>amdgpu_vm_ptes_update</code>), GART placed high, per-ring invalidation engines; IH: rings 0 and 1 in system memory through the GART (<code>MC_SNOOP</code>), rptr doorbells, page faults on ring 1; GFX: compute VMIDs 8-15 (<code>gfx_v11_0_init_compute_vmid</code>), graphics VMIDs 1-7; <code>sdma_v6_0_hw_fini</code> at unload and before a reset</td>
+<td><code>RDNA3,AmdgpuExact = 1</code>, <code>RDNA3,PSPResult = 0</code>, log <code>PSP: LOAD_ASD ... -&gt; ok</code>, <code>PSP: LOAD_TA hdcp</code> / <code>dtm</code> ... <code>-&gt; ok</code>, no <code>load RL failed</code>; <code>RDNA3,PMThermalAlert = 1</code>, <code>RDNA3,PMPcieLevels</code> (3 on this card), log <code>PM: rdna3amdgpu=1: ... PCIe levels sent</code>; <code>RDNA3,GARTStartMC = 0x7fff00000000</code>; <code>RDNA3,IHSystemMemory = 1</code>, log <code>IH: ring 0 + 1 in system memory</code>; <code>RDNA3,KCQVmInvEng = 1</code>; the report's DMA/GFX tests, Vulkan and the desktop as in step <code>default</code></td>
+<td><span class="badge warn">medium</span>: a PSP or SMU refusal stops the bring-up at level 4/5 (boot without the boot-arg); the IH in system memory or the huge pages may show up as missing interrupts or VM faults</td>
+</tr>
+</tbody>
+</table>
+<p>Sleep: from level 4 on, without <code>rdna3resume=1</code>, the kext keeps macOS
+from idle sleep (<code>RDNA3,IdleSleepBlocked = 1</code>): without the resume the
+firmware and the GOP's picture are gone after a sleep. Do not put the
+machine to sleep by hand during such tests; <code>rdna3sleep=1</code> lifts the
+block. <code>rdna3resume=1</code> (step <code>sleep</code>, <code>big4</code>) is the suspend and resume:
+the clients' VRAM saved to system memory and the IPs suspended
+(<code>amdgpu_device_suspend</code>) before the sleep, the GPU posted and brought up
+again on the wake, the VRAM and the display state restored; the machine
+then idles to sleep like with any other GPU (see <code>docs/DRIVER-PLAN.md</code>,
+D4, for what is still missing).</p>
+<p>Sensors: once the SMU is up (level 6 and higher) <code>RDNA3Accel</code> publishes
+<code>PerformanceStatistics</code> every 2 s, with the keys AMD's macOS drivers use
+(<code>Temperature(C)</code>, <code>Junction Temperature(C)</code>, <code>Fan Speed(RPM)</code>,
+<code>Core Clock(MHz)</code>, <code>Memory Clock(MHz)</code>, <code>Total Power(W)</code>,
+<code>Device Utilization %</code>). Check with
+<code>ioreg -rc RDNA3Accel -d1 | grep -A9 PerformanceStatistics</code>; the values
+must change under load and the temperature must look plausible (30-90).</p>
+<p>Rule: <strong>do not move on until a step gives the expected values.</strong>
+When a result differs from the table, send the report. That is exactly the
+information that cannot be obtained in the simulator.</p>
+<h2 id="when-something-goes-wrong">When something goes wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>hang at boot on step N</td>
+<td>restart with the boot-args of step N−1 (OpenCore picker) and a report from that boot; describe at which point of the verbose log it stopped</td>
+</tr>
+<tr>
+<td>kernel panic</td>
+<td>after the restart <code>collect.sh</code> attaches the two latest panic reports by itself</td>
+</tr>
+<tr>
+<td>no login window or desktop (WindowServer never reaches the GPU)</td>
+<td>do not stop the VM: the boot watchdog in the report daemon takes its evidence (sample, logs) about 4-5 min after the start and once more a minute later; <code>rdna3vm</code> then stops the VM by itself and the card comes back to Linux (about 6 min in all). Stop it by hand only if nothing happened after 10 min</td>
+</tr>
+<tr>
+<td>black screen, system alive</td>
+<td>SSH, <code>tools/macos/collect.sh screen</code>, then <code>sudo nvram boot-args=&quot;...&quot;</code> without the last flag and <code>sudo reboot</code></td>
+</tr>
+<tr>
+<td>no <code>RDNA3</code> entries at all in the log</td>
+<td>the kext did not load: <code>03-kexts.txt</code> and <code>kmutil showloaded</code>; check that the installer rebuilt the collection and that SIP allows kexts from <code>/Library/Extensions</code></td>
+</tr>
+<tr>
+<td><code>RDNA3,PSPResult</code> other than 0</td>
+<td>firmware is missing from <code>RDNA3Accel.kext/Contents/Resources</code> or it is a different version than expected; send the report</td>
+</tr>
+</tbody>
+</table>
+<h2 id="what-cannot-be-checked-without-the-card">What cannot be checked without the card</h2>
+<p>The simulator models the behaviour from the Linux code, but it does not know how the card
+will really behave. The first test will tell us above all:</p>
+<ul>
+<li>whether PSP accepts our firmware loading order (step 4);</li>
+<li>whether PMFW accepts the BoardTable from the VBIOS and the safe feature set (step 5);</li>
+<li>whether resetting DMCUB under a live GOP image is safe (step 5b);</li>
+<li>whether the GPU executes our SDMA and PM4 packets (steps 7 and 8);</li>
+<li>how IOAcceleratorFamily2 fills <code>IOAccelConfig</code> before us (step 10).</li>
+</ul>
+<p>Further modeset work (DML, pixel clock, DP training) starts after
+steps 2, 5b and 9, because it needs real DCN register values.</p>
+<h2 id="bare-metal-with-the-installer-no-vm-harness">Bare metal with the installer (no VM harness)</h2>
+<p>For a hackintosh where the driver is installed with the <code>.pkg</code> (or the
+tarball's <code>install.sh</code>) instead of a build tree:
+<a href="INSTALL-OPENCORE.html">INSTALL-OPENCORE</a> covers the package, the OpenCore
+settings and the way back. Everything below runs from
+<code>/Library/Application Support/RDNA3</code> (written <code>$R</code> here); nothing needs the
+repository or a Linux host.</p>
+<ol>
+<li>
+<p><strong>Way back first</strong> (<a href="INSTALL-OPENCORE.html#8-the-way-back">INSTALL-OPENCORE §8</a>):
+a USB copy of the EFI with <code>RDNA3Accel.kext</code> disabled and <code>-rdna3off</code>.
+SSH on (Remote Login), so a dark screen still gives a report.</p>
+</li>
+<li>
+<p><strong>Install:</strong> the <code>.pkg</code>, then
+<code>sudo &quot;$R/oc_install.sh&quot; --efi /Volumes/EFI</code> (EFI mounted) for the
+OpenCore entry of the core kext. Check the security settings of
+INSTALL-OPENCORE §4 (<code>csr-active-config</code>, <code>SecureBootModel</code>, <code>amfi=0x80</code>).
+Restart, <strong>Allow</strong> in Privacy &amp; Security if asked, restart again.</p>
+</li>
+<li>
+<p><strong>Boot with the default profile:</strong> no <code>rdna3</code> boot-args at all. Expected:
+the desktop on the RX 7800 XT at the GOP resolution, a second monitor as
+an extended display, <code>ioreg -rc RDNA3Accel -d1 | grep -E 'Stage2|GFXResult|PMFeatures'</code>
+shows the bring-up done.</p>
+</li>
+<li>
+<p><strong>Report</strong> (after the desktop is up, from Terminal or SSH):</p>
+<pre><code class="language-sh">sudo "/Library/Application Support/RDNA3/autoreport.sh" --standalone</code></pre>
+<p>The same tests and report the VM runs after each boot (<code>tools/vm/macos/autoreport.sh</code>):
+scanout pictures, display sleep and wake, scaled mode switches, the DMA
+and GFX tests, Vulkan and Metal when installed, then <code>collect.sh</code>. It
+takes 3 to 8 minutes, a Terminal window shows the progress, and the files
+land in <code>/Users/Shared/rdna3-reports/</code>: <code>rdna3-report-&lt;label&gt;-&lt;date&gt;.tar.gz</code>,
+<code>…-tests.txt</code>, <code>…-scanout*.ppm</code> and the kernel's frame trace streamed
+through the whole run (<code>…-trace-stream.bin</code>, <code>…-drmtrace-stream.bin</code>,
+<code>…-trace-sec.bin</code>, each with a <code>.size</code> file; the archive holds copies as
+<code>36-stream-*.bin</code>; the VM also sends WindowServer's plugin trace after each
+A/B phase as <code>…-plugin-ab1-WindowServer-&lt;pid&gt;.trace</code> and the like). Send
+all of them; they are what
+<a href="AFTER-TESTS.md">AFTER-TESTS</a> expects from the VM.</p>
+<p>The rendering-artefact A/B (DRIVER-PLAN N50) is one command there too, in a Terminal on the Mac that has the card:
+<code>sudo sh &quot;/Library/Application Support/RDNA3/autoreport.sh&quot; --standalone --ladder</code> (about 29 minutes; <code>--ladder-ws</code> adds the two WindowServer
+rungs): Terminal and Chess open and close by themselves with one <code>NVMTL_*</code> switch per rung (right after the baseline <code>attrring</code>, DRIVER-PLAN N57: <code>NVMTL_ATTR_RING_BIG_PAGE=0</code>, RADV's GFX11 attribute ring without SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE), it asks <code>y</code> / <code>n</code> / Enter for each rung's picture,
+and the report (<code>41-ladder.txt</code>, one triage row per rung, an automatic glyph verdict from each rung's hi-res look) says which switch made it right (<a href="AFTER-TESTS.md">AFTER-TESTS</a>, &quot;The whole ladder in one card run&quot;). <code>--ladder-glyphs</code> (about 25 minutes) is the glyph hunt (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...).</p>
+<p>The app survey is the same machinery with the default driver: <code>sudo sh &quot;/Library/Application Support/RDNA3/autoreport.sh&quot; --standalone --apps</code> (VM: <code>rdna3vm step apps</code>, about 25 minutes).
+It opens Chess, Terminal, TextEdit, Calculator, Notes, Safari (a text / CSS page, a canvas animation, a WebGL cube; all made by the run, no network), Preview (a PDF and a JPEG), Maps,
+System Settings (three panes), App Store, Photos, Image Capture, QuickTime Player (a generated movie), Mission Control and Launchpad (Apps on macOS 26) one after another, takes a
+320-wide and a hi-res look of both screens per app (<code>…-scanoutapps-&lt;app&gt;[-&lt;stage&gt;]a|h-pipe&lt;N&gt;.ppm</code>), says whether each ran, crashed or never opened, whether WindowServer survived, and
+quits it. Look at the pictures: the report says an app ran, not that it drew (<a href="AFTER-TESTS.md">AFTER-TESTS</a>, &quot;The app survey&quot;).</p>
+<p>Only the collection, without running any test:
+<code>&quot;$R/tools/macos/collect.sh&quot; &lt;label&gt;</code> (writes <code>~/rdna3-report-&lt;label&gt;-&lt;date&gt;.tar.gz</code>).</p>
+<p><strong>Black screens, windows that do not appear or flash, flicker?</strong> Instead of
+the report run the display bisect from a Terminal on the machine itself:
+<code>sudo &quot;/Library/Application Support/RDNA3/autoreport.sh&quot; --standalone --bisect</code>
+switches every new feature off and back on one at a time, 30 s each, while
+you look at the monitors (a notification, &quot;step N&quot; spoken, N beeps per step);
+press <code>y</code> (looks right), <code>n</code> (broken) or Enter (next) in the Terminal.
+<code>--bisect-plugin</code> does the Metal plugin's switches (WindowServer is
+restarted three times; log in again each time). <code>--bisect-agdc</code> is the
+kernel bisect over the switches that matter when WindowServer runs on the
+GPU (<code>swap_mode</code>, <code>swap_gen</code>, <code>flipbuf_present</code>, <code>swap_stale</code>, <code>iop</code>, <code>a3</code>,
+<code>swap_latch</code>, <code>iop_flip</code>; 13 combinations, not cumulative): use it on a
+machine booted with the <code>agdc</code>
+profile's boot-args, see
+<a href="TESTING-VM.html#display-bisect-on-the-agdc-profile-step-bisect-agdc">TESTING-VM</a>.
+The step list, the
+timetable and the reading of the result are in
+<a href="TESTING-VM.html#display-bisect-step-bisect">TESTING-VM</a>; the same report
+files land in <code>/Users/Shared/rdna3-reports/</code> (<code>…-bisect.txt</code> is new).</p>
+</li>
+<li>
+<p><strong>A ladder step instead of the profile</strong>, when the default profile fails:
+<code>sudo &quot;$R/oc_install.sh&quot; --efi /Volumes/EFI --step 2</code> (any step of the
+table above; <code>--step default</code> goes back to no <code>rdna3</code> boot-args), restart,
+report as in 4. Walk up from the last step that worked.</p>
+</li>
+<li>
+<p><strong>Roll back:</strong> <code>--off</code> (sets <code>-rdna3off</code>), the USB EFI, or from Recovery
+as INSTALL-OPENCORE §8 describes; <code>sudo &quot;$R/uninstall.sh&quot;</code> removes the install
+and, with the EFI mounted, its OpenCore part too (<code>--keep-opencore</code> skips that).</p>
+</li>
+</ol>
+<p>A dark screen with the system alive: SSH in, run step 4 there, then
+<code>--off</code> and restart.</p>
+<footer class="doc">RDNA3-Hackintosh documentation. </footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,1184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Testing on the bare-metal Mac from a second session (Raspberry Pi) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Testing on the bare-metal Mac from a second session (Raspberry Pi)</div>
+  <h1>Testing on the bare-metal Mac from a second session (Raspberry Pi)</h1>
+  <p class="muted">The guide a second Claude session on the owner's Raspberry Pi follows to test the driver on the bare-metal Mac over SSH, and the log of every test round (plan, findings). The Pi session appends the next round at the end.</p>
+</header>
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#reaching-the-mac">Reaching the Mac</a>
+</li>
+<li><a href="#what-is-where-on-the-mac">What is where on the Mac</a>
+</li>
+<li><a href="#installing-a-ci-build-without-linux">Installing a CI build without Linux</a>
+</li>
+<li><a href="#round-1-plan">The first round (build 6f55f46, CI run 91)</a>
+</li>
+<li><a href="#known-open-items-2026-10-31">Known open items (2026-10-31)</a>
+</li>
+<li><a href="#round-1-findings">Round 1 findings (2026-10-31, Pi session, build 6f55f46, CI run 91)</a>
+
+<ol>
+<li><a href="#round-1-findings-config-driver-no-plugin-broken-in-three-ways">config-driver (no plugin): broken in three ways</a></li>
+<li><a href="#round-1-findings-config-metal-rdna3agdc3-the-plugin-works">config-metal (rdna3agdc=3, the plugin): works</a></li>
+<li><a href="#round-1-findings-for-the-linux-session">For the Linux session</a></li>
+<li><a href="#round-1-findings-gpu-checks-on-config-metal-run-91s-userspace-tools-over-ssh">GPU checks on config-metal (run 91's userspace tools, over SSH)</a></li>
+<li><a href="#round-1-findings-smoothness-and-geekbench-7-config-metal-1700-1725">Smoothness and Geekbench 7 (config-metal, 17:00-17:25)</a></li>
+<li><a href="#round-1-findings-the-240-fps-drag-videos-linux-session-2026-10-31">The 240 fps drag videos (Linux session, 2026-10-31)</a></li>
+</ol>
+</li>
+<li><a href="#round-2-plan">Round 2 plan (Linux session, 2026-11-01): build fe04d3c</a>
+</li>
+<li><a href="#round-2-findings">Round 2 findings (2026-10-31 evening, Pi session; build bf2c3fa = fe04d3c + docs, CI run 103)</a>
+</li>
+<li><a href="#round-3-checks-n73">Round 3 checks for N73 (the game's nextDrawable wait; Linux session, 2026-11-01)</a>
+</li>
+<li><a href="#round-3-plan">Round 3 plan (Linux session, 2026-11-01): build 2a0525d</a>
+</li>
+<li><a href="#round-3-findings">Round 3 findings (2026-11-01 afternoon, Pi session; build 02b2210, CI run 117)</a>
+
+<ol>
+<li><a href="#round-3-findings-mac-state-after-round-3">Mac state after round 3</a></li>
+<li><a href="#round-3-findings-for-the-linux-session-round-3-open-work">For the Linux session (round 3 open work)</a></li>
+</ol>
+</li>
+<li><a href="#round-4-plan">Round 4 plan (Linux session, 2026-11-01 evening): build 9db526b</a>
+</li>
+<li><a href="#round-4b-plan">Round 4b plan (Linux session, 2026-11-01 night): N71 (c) and N70, build e400b68 (run 126)</a>
+</li>
+<li><a href="#round-4-findings">Round 4 findings (2026-11-01 evening, Pi session; build e400b68, CI run 126)</a>
+</li>
+<li><a href="#round-4b-findings">Round 4b findings (2026-11-01 night, Pi session; build e400b68, CI run 126)</a>
+
+<ol>
+<li><a href="#round-4b-findings-mac-state-after-round-4">Mac state after round 4</a></li>
+<li><a href="#round-4b-findings-for-the-linux-session-round-4-open-work">For the Linux session (round 4 open work)</a></li>
+</ol>
+</li>
+<li><a href="#how-to-add-the-next-round">How to add the next round</a>
+</li>
+</ol></nav>
+<p>Since 2026-10-31 the driver runs on the owner's real PC (MSI B550-A PRO,
+Ryzen 7 5800X, RX 7800 XT, two 1920x1080 Samsung C24F390 monitors), macOS
+26.7.2 (25G332), SMBIOS MacPro7,1, dual boot with Linux. The main session runs
+on that PC's Linux, so it is offline whenever macOS runs. A second Claude Code
+session on the owner's Raspberry Pi 5 drives the Mac over SSH while it runs,
+so a test round costs a Mac reboot at most, not a trip through Linux.</p>
+<p>Division of work:</p>
+<table>
+<thead>
+<tr>
+<th>Session</th>
+<th>Does</th>
+<th>Does not</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linux (main, on the PC)</td>
+<td>driver code, reviews, CI, the USB stick generator (<code>tools/baremetal/</code>), DRIVER-PLAN</td>
+<td>anything on the running Mac</td>
+</tr>
+<tr>
+<td>Pi</td>
+<td>installs CI builds on the Mac, switches sysctls, restarts WindowServer, collects reports, reads logs live, reports findings</td>
+<td>edit driver code (kext/, fb/, accel/, agdc/, metal/, hw/, uapi/); push to stage1-kext</td>
+</tr>
+</tbody>
+</table>
+<p>The Pi session may commit notes under <code>docs/</code> (e.g. a dated section in this
+file) and push them, after <code>git pull --rebase</code>. Reports never go into git.</p>
+<section id="rounds-at-a-glance">
+<h2>Rounds at a glance</h2>
+<p class="muted">One row per round, newest last. Each plan is written by the Linux session, each findings section by the Pi session.</p>
+<table>
+<thead><tr><th>Round</th><th>When</th><th>Build / CI run</th><th>Plan</th><th>Findings</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>2026-10-31</td><td><code>6f55f46</code> / run 91</td><td><a href="#round-1-plan">plan</a></td><td><a href="#round-1-findings">findings</a></td></tr>
+<tr><td>2</td><td>2026-10-31 evening</td><td>plan <code>fe04d3c</code>; findings <code>bf2c3fa</code> / run 103</td><td><a href="#round-2-plan">plan</a></td><td><a href="#round-2-findings">findings</a></td></tr>
+<tr><td>3</td><td>2026-11-01 afternoon</td><td>plan <code>2a0525d</code>; findings <code>02b2210</code> / run 117</td><td><a href="#round-3-checks-n73">checks for N73</a>, <a href="#round-3-plan">plan</a></td><td><a href="#round-3-findings">findings</a></td></tr>
+<tr><td>4</td><td>2026-11-01 evening</td><td>plan <code>9db526b</code> (run 123 on <code>be56ee3</code>); findings <code>e400b68</code> / run 126</td><td><a href="#round-4-plan">plan</a></td><td><a href="#round-4-findings">findings</a></td></tr>
+<tr><td>4b</td><td>2026-11-01 night</td><td><code>e400b68</code> / run 126</td><td><a href="#round-4b-plan">plan</a></td><td><a href="#round-4b-findings">findings</a></td></tr>
+</tbody>
+</table>
+<figure>
+<svg viewBox="0 0 720 150" width="720" role="img" aria-labelledby="t56371 d56371" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t56371">The test rounds</title>
+<desc id="d56371">Rounds 1 to 4b on the bare-metal Mac: build and CI run of each, all with findings written.</desc>
+<line x1="16" y1="75" x2="704" y2="75" style="stroke:var(--line);stroke-width:3"/><a href="#round-1-findings"><circle cx="70.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="70.0" y1="68" x2="70.0" y2="61" style="stroke:var(--line)"/><text x="70.0" y="33" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">Round 1</text><text x="70.0" y="46" text-anchor="middle" style="fill:var(--muted);font-size:11px">2026-10-31</text><text x="70.0" y="59" text-anchor="middle" style="fill:var(--muted);font-size:11px">6f55f46, run 91</text></a><a href="#round-2-findings"><circle cx="215.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="215.0" y1="82" x2="215.0" y2="89" style="stroke:var(--line)"/><text x="215.0" y="103" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">Round 2</text><text x="215.0" y="116" text-anchor="middle" style="fill:var(--muted);font-size:11px">10-31 evening</text><text x="215.0" y="129" text-anchor="middle" style="fill:var(--muted);font-size:11px">bf2c3fa, run 103</text></a><a href="#round-3-findings"><circle cx="360.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="360.0" y1="68" x2="360.0" y2="61" style="stroke:var(--line)"/><text x="360.0" y="33" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">Round 3</text><text x="360.0" y="46" text-anchor="middle" style="fill:var(--muted);font-size:11px">11-01 afternoon</text><text x="360.0" y="59" text-anchor="middle" style="fill:var(--muted);font-size:11px">02b2210, run 117</text></a><a href="#round-4-findings"><circle cx="505.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="505.0" y1="82" x2="505.0" y2="89" style="stroke:var(--line)"/><text x="505.0" y="103" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">Round 4</text><text x="505.0" y="116" text-anchor="middle" style="fill:var(--muted);font-size:11px">11-01 evening</text><text x="505.0" y="129" text-anchor="middle" style="fill:var(--muted);font-size:11px">e400b68, run 126</text></a><a href="#round-4b-findings"><circle cx="650.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="650.0" y1="68" x2="650.0" y2="61" style="stroke:var(--line)"/><text x="650.0" y="33" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">Round 4b</text><text x="650.0" y="46" text-anchor="middle" style="fill:var(--muted);font-size:11px">11-01 night</text><text x="650.0" y="59" text-anchor="middle" style="fill:var(--muted);font-size:11px">e400b68, run 126</text></a></svg>
+<figcaption>The rounds (not to scale). Click a dot to jump to its findings.</figcaption>
+</figure>
+</section>
+<section id="reaching-the-mac">
+<h2>Reaching the Mac</h2>
+<ul>
+<li>Remote Login is on (System Settings -&gt; General -&gt; Sharing); user <code>shrek</code>,
+the address from the owner. Key: <code>~/.ssh/mac_rdna3</code> on the Pi.</li>
+<li>Many steps need root. Ask the owner once for passwordless sudo for this
+user (<code>sudo visudo -f /etc/sudoers.d/rdna3</code>, line
+<code>shrek ALL=(ALL) NOPASSWD: ALL</code>); never type the owner's password yourself.</li>
+<li>The USB stick's EFI partition (OpenCore) mounts only with sudo:
+<code>sudo diskutil mount disk2s1</code> (check <code>diskutil list</code>: the 61.5 GB EFI
+partition labelled OPENCORE) -&gt; <code>/Volumes/OPENCORE</code>.</li>
+</ul>
+</section>
+<section id="what-is-where-on-the-mac">
+<h2>What is where on the Mac</h2>
+<ul>
+<li>OpenCore (from the stick, not yet on the internal disk):
+<code>/Volumes/OPENCORE/EFI/OC/config.plist</code> is the active config. Copies:
+<code>config-driver.plist</code> (driver, core kext injected by OpenCore, no
+rdna3agdc), <code>config-metal.plist</code> (driver + <code>rdna3agdc=3</code>: WindowServer on
+the Metal plugin), <code>config-installer.plist</code> (no driver),
+<code>config-before-metal.plist</code> (what <code>metal.sh</code> saved). Switching = copy one
+over <code>config.plist</code>, then reboot the Mac.</li>
+<li>The core kext is OpenCore's: <code>/Volumes/OPENCORE/EFI/OC/Kexts/RDNA3Accel.kext</code>.
+The rest is in macOS: <code>/Library/Extensions/RDNA3{Framebuffer,Accelerator,AGDC}.kext</code>
+(and an unused RDNA3Accel copy), the Metal plugin
+<code>/Library/GPUBundles/RDNA3MTLDriver.bundle</code>, RADV and the translator in
+<code>/Library/GPUBundles/rdna3mtl/</code>, scripts and firmware in
+<code>/Library/Application Support/RDNA3/</code>.</li>
+<li>Stick helper scripts (<code>tools/baremetal/stick/</code>, copied by <code>make_usb.sh</code>):
+<code>/Volumes/OPENCORE/rdna3/install.sh</code> (driver from the release tarball:
+the <code>.pkg</code> refused Tahoe before 145ca65), <code>metal.sh</code> (plugin + RADV +
+<code>rdna3agdc=3</code> in config.plist), <code>report.sh</code> (report into
+<code>/Volumes/OPENCORE/rdna3/report-&lt;date&gt;/</code>: 3 h of logs, boot log, dmesg,
+ioreg, kexts, displays, rdna3 sysctls, crash and shutdown-stall reports).
+<code>report.sh</code> does NOT run <code>autoreport --standalone</code> (its display-sleep step
+crashed WindowServer without the plugin, fixed in f0789cb but keep it off
+until the plugin path is proven here).</li>
+</ul>
+</section>
+<section id="installing-a-ci-build-without-linux">
+<h2>Installing a CI build without Linux</h2>
+<p>Artifacts of the Forgejo <code>build.yml</code> run (token <code>FORGEJO_TOKEN</code> in the Pi's
+<code>.env</code>, API <code>https://forgejo.voten.me/api/v1/repos/Voten641/RDNA3-Hackintosh</code>,
+<code>actions/artifacts?name=&lt;name&gt;</code> then <code>actions/artifacts/&lt;id&gt;/zip</code>):
+<code>RDNA3-pkg</code> (the <code>.pkg</code> and the release tarball), <code>RDNA3Accel-kext</code> (all
+kexts incl. the core), <code>RDNA3MTL</code> (plugin + translator, full runs only),
+<code>radv-macos-logs</code> (<code>install/lib/libvulkan_radeon.dylib</code>, full or radv runs).
+Use ONE run's artifacts together: the kexts, the core on the stick, the
+plugin and RADV must come from the same commit (a mix ran on 2026-10-31).</p>
+<ol>
+<li>scp the tarball to the Mac, <code>sudo sh install.sh &lt;tarball&gt;</code> (or put it next
+to <code>/Volumes/OPENCORE/rdna3/install.sh</code>).</li>
+<li>Replace <code>/Volumes/OPENCORE/EFI/OC/Kexts/RDNA3Accel.kext</code> with the
+artifact's (keep the old one under <code>EFI/OC/Kexts-old/</code>).</li>
+<li>Plugin + RADV: put <code>RDNA3MTLDriver.bundle</code>, <code>librdna3mtl_translate.dylib</code>,
+<code>libvulkan_radeon.dylib</code>, <code>rdna3mtl-allow.txt</code> (repo <code>metal/</code>) into
+<code>/Volumes/OPENCORE/rdna3/metal/</code>, <code>sudo sh /Volumes/OPENCORE/rdna3/metal.sh</code>.
+A plugin-only update needs no reboot: log out and in, or
+<code>sudo killall -HUP WindowServer</code> (the owner logs in again).</li>
+<li>New kexts in /Library/Extensions need System Settings -&gt; Privacy &amp;
+Security -&gt; Allow on the screen (the owner), then a reboot.</li>
+</ol>
+<p>Live switches (no reboot), read back with <code>sysctl -a | grep rdna3</code>:
+<code>debug.rdna3accel_swap_gen</code>, <code>debug.rdna3accel_swap_gen_cpu</code>,
+<code>debug.rdna3accel_swap_stale</code>, <code>debug.rdna3accel_swap_mode</code>,
+<code>debug.rdna3accel_flipbuf_present</code>, <code>debug.rdna3accelfb</code> (see
+docs/INSTALL-OPENCORE.html section 7 and DRIVER-PLAN N65).</p>
+</section>
+<section id="round-1-plan">
+<h2>The first round (build 6f55f46, CI run 91)</h2>
+<p>What 124d309 + 6f55f46 changed and what the run must show (DRIVER-PLAN N65,
+docs/AFTER-TESTS.md &quot;Bare metal: two heads, 10-bit surfaces, the framebuffer
+before the core&quot;):</p>
+<ol>
+<li><code>config-driver</code> (no plugin): Terminal text appears while typing (was
+held: <code>swaps_genhold_h0</code> 805/1980); <code>debug.rdna3accel_swap_gen_wsmetal</code>
+0, <code>swaps_gencpu_h&lt;N&gt;</code> counting; no <code>flip ... REFUSED</code>. A/B:
+<code>sudo sysctl debug.rdna3accel_swap_gen_cpu=0</code> must bring the stale text
+back (proves the rule); watch for A/B/A/B flicker (<code>swaps_abab_h&lt;N&gt;</code>).</li>
+<li>Display sleep without the plugin (<code>pmset displaysleepnow</code>, wake with the
+mouse): no WindowServer crash (<code>/Library/Logs/DiagnosticReports</code>),
+<code>vm_pageoff_sys</code> counts, <code>vm_pageoff_sys_fail_*</code> stay 0.</li>
+<li><code>config-metal</code> after <code>metal.sh</code>: the desktop comes up on the plugin (was:
+the boot logo for ever, every transaction 0xe00002c7 because WindowServer
+presents 'l10r' 10-bit surfaces); <code>iop_copy_fmt_l10r</code> == <code>_seen</code>,
+<code>iop_copy_us_h&lt;N&gt;</code> per head (the CPU conversion's real cost), smoothness
+by eye (the owner) and by the frame counters.</li>
+<li>Then the owner's own use: apps, Geekbench 6 Metal (Linux Vulkan baseline
+145267).</li>
+</ol>
+<p>Report to the owner in Polish, briefly: what was tested, what worked, what
+did not, with the counter or log line that shows it. Findings for the Linux
+session go into a dated section at the end of this file (pushed), with the
+report folder's name on the stick (<code>/Volumes/OPENCORE/rdna3/report-*</code>), which
+the Linux session reads from the stick or the Pi.</p>
+</section>
+<section id="known-open-items-2026-10-31">
+<h2>Known open items (2026-10-31)</h2>
+<ul>
+<li>Safe Mode (Shift+Enter in the picker) shows the prohibited sign; the core
+stands down on <code>-x</code> since 7821cae, but the boot itself fails before it.</li>
+<li><code>tools/triage_reports.py</code> reads the VM report tarballs, not the stick
+report's layout: read <code>sysctl.txt</code>, <code>dmesg.txt</code>, <code>rdna3-3h.log</code> directly.</li>
+<li>DCN scanout of 10-bit surfaces (N66) instead of the CPU conversion.</li>
+<li>The CI <code>macos-tests</code> job has failed since run 86 (not investigated yet).</li>
+</ul>
+</section>
+<section id="round-1-findings">
+<h2>Round 1 findings (2026-10-31, Pi session, build 6f55f46, CI run 91)</h2>
+<p>Installed from run 91's artifacts only (tarball via <code>install.sh</code>, the core
+<code>RDNA3Accel.kext</code> on the stick, plugin + translator + RADV via <code>metal.sh</code>).
+Old core kept as <code>EFI/OC/Kexts-old/RDNA3Accel.kext-pre6f55f46-*</code>. Reports on
+the stick: <code>rdna3/report-20261031-162542</code> (config-driver, after the hang) and
+<code>rdna3/report-20261031-163520</code> (config-metal).</p>
+<h3 id="round-1-findings-config-driver-no-plugin-broken-in-three-ways">config-driver (no plugin): broken in three ways</h3>
+<ol>
+<li><strong>WindowServer watchdog kill when a window is dragged</strong> (16:24:11,
+<code>WindowServer-2026-10-31-162411.ips</code> + <code>.userspace_watchdog_timeout.spin</code>):
+main thread waited 40 s on a <code>CompositorSW::CompositeLayersToDestination</code>
+worker that was in <code>CA::gaussian_blur</code> / <code>box_filter_8</code>
+(CA::OGL::render_layers, CPU only; the kernel frames there were interrupts,
+no thread in our kexts). The software compositor's blur (vibrancy, window
+backgrounds) is too slow on the CPU. <code>reduceTransparency</code> set to true for
+user shrek as a workaround (<code>defaults write com.apple.universalaccess reduceTransparency -bool true</code>; still set).</li>
+<li><strong><code>swap_gen_cpu=1</code> (default) shows a stale frame</strong>: the screen stayed on
+one old frame, a window drag showed the new one for a fraction of a second,
+then the old came back. <code>swaps_abab_h0</code> 1 -&gt; 10, <code>h1</code> 0 -&gt; 9,
+<code>ababwide_h&lt;N&gt;</code> 3, <code>swaps_gencpu_h0</code> 357. This is N65 open item (c).</li>
+<li><strong><code>swap_gen_cpu=0</code> (live)</strong>: no A/B any more (abab unchanged), the menu-bar
+clock updates, but Terminal text waits for a window move: 122 holds in
+~1 min, <strong>all <code>genhold_older_h0</code>, <code>genhold_same</code> 0</strong>. So the backs judged
+OLDER sometimes carry the newest CPU-drawn content and sometimes are really
+stale: the write generation alone cannot tell them apart without the
+plugin. Needs a different criterion (content, or which back WindowServer
+last drew into) - Linux session.</li>
+<li>Display sleep (<code>pmset displaysleepnow</code>): WindowServer survived (same pid),
+<code>vm_pageoff_sys</code> 2, <code>vm_pageoff_sys_us</code> 5598, every <code>_fail_*</code> 0 (P4 works).
+But <strong>moving the mouse did not wake the displays</strong> (IODisplayWrangler stayed
+1/4); <code>caffeinate -u</code> woke them at once (4/4 USEABLE, gamma reprogrammed on
+both MPCCs). HID wake path or USB (dmesg has <code>IOHIDInterface ... SetElementValues failed: 0xe0005000</code> / <code>Set LED</code> failures) - not checked.</li>
+</ol>
+<h3 id="round-1-findings-config-metal-rdna3agdc3-the-plugin-works">config-metal (<code>rdna3agdc=3</code>, the plugin): works</h3>
+<ul>
+<li>The desktop comes up on both heads and refreshes by itself; the owner: a
+YouTube video plays much smoother than without the plugin (~3 fps before).</li>
+<li><code>iop_copy_fmt_l10r</code> 367 == <code>iop_copy_fmt_l10r_seen</code> 367, <code>_fmt_other</code> 0,
+<code>iop_flip_fmt</code> 0, <code>iop_copy_sdma_fb_format</code> 367 (SDMA skipped for l10r as
+designed), no <code>REFUSED</code> / <code>not BGRA</code> in dmesg, <code>swaps_abab_*</code> 0,
+<code>genhold_*</code> 0, no new WindowServer crash.</li>
+<li>CPU conversion cost: <code>iop_copy_us_h0</code> 5954923 / 500 copies (avg 11.9 ms,
+dominated by the first frames after boot: the next 4 copies added 1.3 ms in
+total), <code>iop_copy_us_h1</code> 5110992 / 1978, then +607092 us for +1848 copies =
+<strong>0.33 ms per frame</strong> in steady state on head 1. N66 is not urgent for
+speed; measure h0 again under load.</li>
+<li><code>swap_gen_wsmetal</code> stays 0 with the plugin and <code>swaps_h&lt;N&gt;</code> /
+<code>hook_didsubmitswap</code> 0: WindowServer presents through IOPresentment only,
+the swap path is unused here.</li>
+<li>VRAM heap (dmesg 101 s): visible 147456 KiB, free 21260 + 924 KiB, <code>gem</code>
+refused 1, surfgem <code>refused 2149</code> (ok 8).</li>
+</ul>
+<h3 id="round-1-findings-for-the-linux-session">For the Linux session</h3>
+<ul>
+<li>(no plugin) replace / refine the CPU write-generation rule (3 above); the
+blur hang (1) makes the no-plugin path unusable for window drags even with
+a correct rule unless reduceTransparency stays on.</li>
+<li>the mouse not waking the displays (4).</li>
+<li><code>surfgem refused 2149</code> and the nearly full visible VRAM heap with the plugin.</li>
+<li>Geekbench 7.0.0 (the owner's Linux baseline is GB7) is in
+/Applications; its free CLI has only <code>--cpu</code>, so the GPU (Metal) run is
+the owner's, from the app.</li>
+</ul>
+<h3 id="round-1-findings-gpu-checks-on-config-metal-run-91s-userspace-tools-over-ssh">GPU checks on config-metal (run 91's userspace tools, over SSH)</h3>
+<ul>
+<li><code>rdna3_drminfo</code>: amdgpu 3.61.0, 0x747e rev 0xc8, 60 CUs, GTT and VRAM BO
+write/read-back ok, &quot;Stage 4 UAPI smoke test passed&quot;.</li>
+<li><code>mtlprobe</code>: one Metal device &quot;AMD Radeon RX 7800 XT&quot; (NVMTLDevice),
+families Common1-3 Mac2 Metal3, recommendedMaxWorkingSetSize 11148 MiB,
+compute kernel and rendered triangle correct (&quot;METAL: ALL PASSED&quot;).</li>
+<li><code>rdna3_vktest /Library/GPUBundles/rdna3mtl/libvulkan_radeon.dylib</code>:
+&quot;ALL PASSED: 14 submit(s) tested&quot; (all queue families, host-pointer import,
+OPAQUE_FD, DRM-modifier images, SDMA tiled copies, timeline semaphore,
+mutable descriptors).</li>
+<li>The tools need <code>libdrm.2.dylib</code> / <code>libdrm_amdgpu.1.dylib</code> next to them;
+the artifact ships them as <code>libdrm.dylib</code> / <code>libdrm_amdgpu.dylib</code> (symlinks
+made by hand).</li>
+</ul>
+<h3 id="round-1-findings-smoothness-and-geekbench-7-config-metal-1700-1725">Smoothness and Geekbench 7 (config-metal, 17:00-17:25)</h3>
+<ul>
+<li>The owner sees ~20-30 fps everywhere (window drags, animations, YouTube).
+The driver side measures a steady 60 Hz: <code>iop_ok_h1</code> sampled every ~1.5 ms
+for 3 s rose 180 times, every gap 16.7 ms; during a window drag 479 presents
+in 8 s (378 gaps ~17 ms, one 50 ms gap). SDMA copy 0.32 ms per frame
+(max 3 ms), vblank IRQs ~60/s per head (<code>virq_lat_avg_us</code> 6), the plugin's
+<code>ws frame</code> ~120/s for both heads (rec 1.2 ms CPU, 0.5 ms GPU per frame).
+So if the eye sees 30 fps, WindowServer presents repeated content: not
+yet explained. Next checks: whether consecutive presented surfaces differ
+(content duplicates), the cursor path, and N59 (frames stepping back).</li>
+<li>testufo.com in Safari shows <strong>SYNC FAILURE</strong> (no frame-rate reading): Safari
+is <code>-Safari</code> in the allow list (N1, WebKit.GPU sandbox), so WebKit renders
+on the CPU (two WebKit processes at 54% + 39% CPU) - Safari and YouTube in
+Safari say nothing about the plugin's speed.</li>
+<li><strong>Geekbench 7.0.0 GPU (Metal) does not run</strong>:
+<ol>
+<li>The benchmark worker is <code>Geekbench 7.app/Contents/Resources/geekbench_avx2</code>,
+not in Contents/MacOS, so <code>%apps</code> refuses it (&quot;not allow-listed: no
+device&quot;) and the run ends at once. Added <code>geekbench_avx2</code> to
+<code>/Library/GPUBundles/rdna3mtl-allow.txt</code> on the Mac by hand (backup
+<code>/private/tmp/rdna3mtl-allow.txt.bak</code>); the repo's <code>metal/rdna3mtl-allow.txt</code>
+should get it too (or <code>%apps</code> should cover executables under
+Contents/Resources of an app).</li>
+<li>Then it crashes in MPS: <code>MPSNDArrayConvolutionDeviceBehaviorAMD:: EncodeNDArrayConvolution</code> -&gt; <code>MPSLibrary::MPSKey_Compile</code>; plugin log:
+<code>link FAILED: &quot;AMDConvolution::ndArrayConvolution2DAMD_NHWC&quot; ... native emitter: unsupported Metal visible function reference; dynamic linked functions are not expressible in Logical SPIR-V</code>, then MPSLibrary.mm
+line 639 error. The translator needs visible-function / linked-function
+support (inline the 10 linked functions at pipeline creation) before
+Geekbench's GPU run (MPS NDArray convolution) can work.
+Crash <code>~/Library/Logs/DiagnosticReports/geekbench_avx2-2026-10-31-172324.ips</code>
+and the log stream are on the Pi in <code>~/rdna3-bm/gb/</code>.</li>
+</ol>
+</li>
+<li><code>rdna3_drminfo</code> crashed once (16:42, before the libdrm symlinks: dyld).</li>
+<li><strong>What the panel shows changes at 60 Hz</strong> during a window drag on head 0:
+<code>debug.rdna3accel_crc</code> (CRC32 of the head's scanout, <code>crc_head=0</code>) sampled
+every ~2 ms for 7 s changed 421 times (60.1/s), 419 gaps ~17 ms, presents
+420 (60.0/s): every present carries new pixels. The mouse (SteelSeries
+Rival 3 Wireless Gen 2, USB, ReportInterval 1000) delivered ~988 reports/s
+(<code>InputReportCount</code> 139436 -&gt; 146084 in 6.7 s). Nothing measured explains
+the owner's ~30 fps impression; left: latency (the hardware cursor moves
+at once, the window trails it by the WindowServer -&gt; plugin -&gt; copy -&gt;
+flip chain) or uneven step sizes. Next: a 240 fps phone video of a drag
+(cursor and window), cut into frames.</li>
+</ul>
+<h3 id="round-1-findings-the-240-fps-drag-videos-linux-session-2026-10-31">The 240 fps drag videos (Linux session, 2026-10-31)</h3>
+<p><code>IMG_7132.MOV</code> (slow drag) and <code>IMG_7133.MOV</code> (fast drag), 240 fps, the
+Terminal window tracked frame by frame against the static Dock (camera shake
+removed; the script stayed in the Linux session's scratchpad):</p>
+<ul>
+<li>The window moves on the panel's 60 Hz grid: in the slow drag 196 of the
+gaps between position changes are exactly 4 camera frames (one refresh);
+only 18 of 342 refreshes repeat the previous position.</li>
+<li><strong>The steps are uneven.</strong> Fast drag, the window's movement per 60 Hz
+refresh (px at 480-wide scale): <code>10 1 8 10 4 8 11 0 21 9 44 10 12 11 19 4 13 5 19 19 46 17 ...</code> (median 13, coefficient of variation 0.68). Small
+steps followed by catch-up jumps of 3-4x read as ~30 fps judder, which is
+what the owner sees, although every refresh carries new pixels (the CRC
+measurement above).</li>
+<li>So WindowServer's composited frame lags the mouse by a varying amount:
+some presents carry a frame composited from an older mouse position. Next
+for the Pi session, during fast drags: per-head <code>iop_*</code> wait/stale
+counters and the plugin's <code>ws frame</code> timing (does a frame's GPU work miss
+the refresh and the IOP copy take the previous surface?), A/B with
+<code>debug.rdna3accel_iop_sdma=0</code> (CPU copy) and with the plugin's surface
+wait off, each with a new 240 fps video.</li>
+</ul>
+</section>
+<section id="round-2-plan">
+<h2>Round 2 plan (Linux session, 2026-11-01): build fe04d3c</h2>
+<p>What changed since round 1 (all merged in <code>stage1-kext</code> fe04d3c; take every
+artifact from the ONE full <code>build.yml</code> run on fe04d3c: <code>RDNA3-pkg</code> tarball,
+<code>RDNA3Accel-kext</code> core for the stick, <code>RDNA3MTL</code>, <code>radv-macos-logs</code>):</p>
+<ul>
+<li>N68: the window-drag judder. Instrumentation K1-K4 (<code>iop_txn_*</code>, <code>iop_vbl_*</code>,
+<code>iop_txn_overlap*</code>, trace event <code>RD3_TR_IOP</code>, plugin <code>held_us_max</code>) and an
+opt-in latched copy: <code>sudo sysctl -w debug.rdna3accel_iop_latch=1</code> (live,
+default 0; boot-arg <code>rdna3ioplatch</code>). Details and the expected numbers:
+docs/AFTER-TESTS.md &quot;Presents at 60 Hz but a dragged window steps unevenly&quot;.</li>
+<li>N67: the Metal translator links visible functions (Geekbench 7 GPU / MPS).</li>
+<li><code>metal/rdna3mtl-allow.txt</code> carries <code>geekbench_avx2</code>.</li>
+<li><code>report.sh</code> now also saves <code>trace-stream.bin</code>, <code>trace-sec.bin</code>,
+<code>31-plugin-trace/</code> and dmesg after <code>debug.rdna3accel_trace_dump</code>; copy the
+new <code>tools/baremetal/stick/report.sh</code> to <code>/Volumes/OPENCORE/rdna3/</code>.</li>
+</ul>
+<p>Checks, in this order (one Mac boot if possible):</p>
+<ol>
+<li><strong>Judder A/B</strong> (config-metal). Fast window drag for ~8 s, reading the
+counters listed in AFTER-TESTS N68 before and after each, with a 240 fps
+phone video each (the owner; videos land in Linux <code>~/Downloads</code>):
+a. <code>iop_latch=0</code> (baseline, measures the cause: <code>iop_vbl_same/skip/mid</code>).
+b. <code>iop_latch=1</code> (the fix: <code>iop_latch_n</code> rises with <code>swaps_pq_latched</code>,
+<code>iop_latch_fb_*</code> stay 0, <code>same</code>/<code>skip</code> near 0).
+c. optional: <code>debug.rdna3accel_iop_stale_wait_ms=0</code> with the better of a/b.
+Then <code>report.sh</code>, and the join:
+<code>python3 tools/plugin_trace.py &lt;report&gt;/31-plugin-trace --kernel &lt;report&gt;/trace-stream.bin</code>
+(present age per frame). The owner says which run felt smooth.</li>
+<li><strong>Geekbench 7 GPU (Metal)</strong> from the app (the owner). Plugin log lines to
+find (<code>log show --last 10m --predicate 'eventMessage CONTAINS &quot;link:&quot;'</code>):
+<code>link: &quot;AMDConvolution::ndArrayConvolution2DAMD_NHWC&quot; visible functions: linked N ...</code> and no MPSLibrary.mm:639 error. If it still fails: set
+<code>NVMTL_LINK_DUMP</code> and bring back the <code>.kernel.ll</code>, <code>.linked.ll</code>, <code>mod.*.ll</code>,
+<code>.err.txt</code> files (DRIVER-PLAN N67). Score vs the Linux baseline
+(Geekbench 6 Vulkan 145267; ask the owner for the GB7 Linux number).</li>
+<li><strong>Mouse does not wake the displays.</strong> After <code>pmset displaysleepnow</code>: press
+a key, click, and move the mouse, each on its own, and after each read
+<code>ioreg -r -c IOHIDSystem -d1 | grep HIDIdleTime</code>,
+<code>ioreg -r -c IODisplayWrangler | grep CurrentPowerState</code>, <code>pmset -g log | tail</code>, <code>log show --last 2m --predicate 'process==&quot;hidd&quot; OR process==&quot;powerd&quot;'</code>; repeat with another USB mouse or port. If HIDIdleTime
+resets but the wrangler stays at 1, report it: the suspect is
+fb/rdna3-fb.cpp swallowing <code>kIOWindowServerActiveAttribute</code>.</li>
+<li><strong>Bigger BAR0</strong> (visible VRAM heap was 21 of 144 MiB free). The owner sets
+BIOS Settings -&gt; Advanced -&gt; PCI Subsystem Settings -&gt; Re-Size BAR Support:
+Enabled (Above 4G stays on). In <code>/Volumes/OPENCORE/EFI/OC/config.plist</code>
+set <code>Booter/Quirks/ResizeAppleGpuBars</code> to 10 (1 GiB); reboot; check the
+dmesg line <code>VRAM aperture: BAR0 ... MiB, mapped ...</code> and the heap numbers.
+If macOS does not come up or BAR0 is not mapped, use 9 (512 MiB, proven in
+the VM, N62). Linux keeps its 16 GiB BAR (the quirk is macOS-only).</li>
+<li>Note: the run's userspace tools need <code>libdrm.2.dylib</code> /
+<code>libdrm_amdgpu.1.dylib</code> next to them (the artifact ships <code>libdrm.dylib</code> /
+<code>libdrm_amdgpu.dylib</code>): make the symlinks as in round 1 (not fixed yet).</li>
+</ol>
+<p>Write the findings as &quot;## Round 2 findings&quot; below, push to Forgejo.</p>
+</section>
+<section id="round-2-findings">
+<h2>Round 2 findings (2026-10-31 evening, Pi session; build bf2c3fa = fe04d3c + docs, CI run 103)</h2>
+<p>Run 102 (fe04d3c) was incomplete (macos-tests log cut mid-build, radv-macos skipped: a
+Forgejo outage); run 103 on bf2c3fa (same code) is green and is what was installed.
+Install note: the stick's <code>install.sh</code> takes the tarball NEXT TO IT and ignores an
+argument; move the old tarball to <code>rdna3/old/</code> first (the first attempt reinstalled
+6f55f46). Copies: <code>~/rdna3-bm/</code> on the Pi (r2-*, report-20261031-211339/, r2-gb/).</p>
+<ol>
+<li><strong>Judder A/B, phase a only (<code>iop_latch=0</code>)</strong>, video <code>IMG_7135.MOV</code> (Pi <code>~/</code>):
+during the drag every copy went by SDMA, 0.33 ms a transaction, stale wait 0;
+<code>iop_vbl_same</code> 13 of 1529, <code>mid</code> 1434 of 1529 (copies end mid-scan: torn,
+into the live scanout). The IOP join (report-20261031-211339): the 195 joined
+frames had present age median 0.4 ms (max 0.5): the scanout is not late; the
+plugin trace ring wrapped (only 195 of 2596 joined: read the report right
+after a drag). Before a0 (login): 511 l10r frames converted by the CPU at
+27 ms each. Phase b (<code>iop_latch=1</code>) NOT run yet (the owner moved to the game).</li>
+<li><strong>Geekbench 7 GPU</strong>: N67 works (<code>link: &quot;AMDConvolution::ndArrayConvolution2DAMD_NHWC&quot; visible functions: linked 2 ... unresolved 0</code>, translated). It now fails one
+kernel later: <code>link FAILED: &quot;depthwiseConv_3x3&quot; linked (676122 B AIR) but did not translate: native emitter: Private pointer phi %metal2vulkan.ct.slot.48 has differing structural sources; raw construction failed: native emitter: pointer merge storage mismatch Function vs Private at Local(&quot;%1425&quot;) across [Local(&quot;%72&quot;), Local(&quot;%1425&quot;)]</code>, after 297-311 s of translation (spindump: the
+translator hashing/cloning Strings), then MPSLibrary.mm:639 and the abort.
+<code>NVMTL_LINK_DUMP</code> dump (kernel.ll, linked.ll, mod.<em>.ll, err.txt, fc.txt,
+stitch-</em>.mtlb) + the .ips: Pi <code>~/rdna3-bm/r2-gb/gb-linkdump.tgz</code>.</li>
+<li><strong>Horizon (a wgpu Minecraft client)</strong>: <code>horizon-client</code> lives in
+<code>~/Library/Application Support/horizon-launcher/versions/.../</code>, not in an
+.app, so <code>%apps</code> gave it no device (&quot;not allow-listed: no device&quot;) and it
+quit in 0.3 s with no .ips. <code>horizon-client</code> was added by hand to
+<code>/Library/GPUBundles/rdna3mtl-allow.txt</code>; add it to <code>metal/rdna3mtl-allow.txt</code>.
+It then renders correctly (the owner: no artefacts), ~180 fps where Linux
+gives ~2000. Found (DTrace, passtime, plugin fps log): 13 commits and ~5
+copy-outs of the 1920x1080 drawable (8.3 MB into the IOSurface's host pages,
+0.44 ms GPU each) per frame; render passes 69-75 us. Fixed by <strong>N69</strong>
+(merge 243bc28, CI run 107): a presented drawable is copied once, by the
+presenting buffer. Measured after: copy-outs 702 for 703 presents, ~230-300
+fps. Left: ~0.8 ms GPU a frame but 4.3 ms a frame; the plugin's execution
+thread waits on a fence after each of ~6 submits a frame (gpuwait 30-60 %),
+~13 commits a frame; <code>[CAMetalLayer nextDrawable]</code> 2-4 ms waits (DTrace).
+rdna3_pmctl reads gfx activity 100 % at 2229 MHz even at 0.8 ms GPU a frame
+(the SMU's activity is not a GPU-time measure here).</li>
+<li><strong>Live plugin updates: never <code>cp</code> over a mapped dylib.</strong> Copying the new
+<code>librdna3mtl_translate.dylib</code> over the old file (same inode) left the
+kernel's cached code signature of the old one: every process that mapped it
+afterwards got &quot;code identity has been invalidated&quot; (<code>codesign -v &lt;pid&gt;</code>),
+securityd then &quot;suppressing keychain prompt for invalidly signed client&quot; and
+the Horizon launcher could not read its Microsoft token
+(CSSMERR_CSP_OPERATION_AUTH_DENIED, &quot;platform secure storage failure ...
+already exists in keychain&quot;). <code>rm</code> first, then copy (new inode). metal.sh
+also copies in place but is followed by a reboot.</li>
+<li>Not run yet: judder phase b/c, mouse wake (3), bigger BAR0 (4).</li>
+<li><strong>N70 (submit ahead past an empty last part), branch quick/gsub-last 4436584, NOT merged.</strong>
+It works mechanically (horizon-client, 3 s: 2910 submits ahead, 600 in turn; was 35 / 3396; the
+plugin's execution thread CPU 2.6 s -&gt; 0.68 s per 4 s) but presented frames stayed ~185/s, A/B by
+NVMTL_GSUB_LAST_EMPTY=0 (the owner's in-game counter read 220 on, 300 off: noise of the view). The
+game's main thread waits 50-60 % in <code>[CAMetalLayer nextDrawable]</code>; drawables come back by
+WindowServer's <code>_XImageQueueCollectable</code> mach message (DTrace stack). Reviewed (code-reviewer: nothing
+confirmed). CI run 109: host-tests failed in test_baremetal &quot;a damaged copy was not caught&quot;
+(unrelated, passes 3/3 on the Pi with bash: a flaky test).</li>
+<li><strong>WindowServer and the game, numbers</strong> (before the BAR change): WS commits all 500 of its command
+buffers in turn (<code>commitAndWaitUntilSubmitted</code> -&gt; the plugin's waitUntilCompleted, 366 calls / 3 s,
+0.6-1 ms each: CoreDisplay AccessComplete, CompositorMetal MetalContext::Flush); ws_main_thread 40 %
+CPU, half its samples idle in mach_msg; 17 % in nvmtlSurfaceIn (the game's surface uploaded by the
+CPU, 167/s, 377 MB/s). IOP transactions on the game's head ~134/s (more than the refresh). With
+<code>debug.rdna3accel_iop_latch=1</code> NOTHING latched: <code>iop_latch_fb_vram</code> 791 (the visible heap had no
+8 MiB), set back to 0.</li>
+<li><strong>Bigger BAR0 (plan item 4) done</strong>: BIOS Re-Size BAR Support Enabled (the owner),
+<code>Booter/Quirks/ResizeAppleGpuBars</code> 10 in <code>EFI/OC/config.plist</code> (old file <code>config-before-bar.plist</code>;
+config-metal.plist / config-driver.plist still -1). macOS came up; <code>debug.rdna3_vram visible_kib=933888</code>
+(was 147456), refused 0. <strong>But the game got slower</strong> (~123-145 presented fps, WindowServer 187 % CPU):
+with room in the visible heap the game's drawables became VRAM surfaces (&quot;item 7&quot;, <code>_vramOn</code>, copy-out
+&quot;dirty, no copy&quot;), and WindowServer's import of the family VRAM is refused by the kernel:
+<code>item 7: surface N plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation not permitted, 8294400 B) - private image + copies</code> (WS's nvmtl.log; it stops logging after a few), so
+WS reads every frame through the BAR with the CPU (sin_us ~57 % of its thread, ~4.5 ms a frame,
+locked_skip_vram 0). Also after the boot WS's <code>com.apple.coreanimation.pipelines</code> thread ran 100 %
+translating CA's shaders (nvmtl_translate_with_fc) for minutes. <strong>Workaround now (not persistent):</strong>
+<code>launchctl setenv NVMTL_NO_SURFACE_SHARE 1</code> in the owner's session -&gt; drawables private again, N61 DMA
+copy-out, WS 80 % CPU, ~215 presented fps (the owner's counter 300-400). <strong>The fix is in the kernel:</strong>
+why the family-VRAM import (nvmtl_vk_surface_vram -&gt; libdrm_xnu surface fd -&gt; the accel's surface/GEM
+import) gives EPERM to WindowServer for a surface another process placed in VRAM; until then a VRAM
+surface whose consumer cannot import it is slower than a private one.</li>
+<li>Mac state at 23:35: plugin = N69 build (run 107), RADV/kexts run 103, BAR 1 GiB, iop_latch 0,
+NVMTL_NO_SURFACE_SHARE=1 set by launchctl (gone at logout), horizon-client in the allow list,
+reduceTransparency on.</li>
+<li><strong>The EPERM is the A3 policy, not a bug</strong> (kernel log): <code>surfgem: surface N refused: a WindowServer input ... its writers ... are not ordered with the VRAM WindowServer would sample (card run 58)</code> and
+<code>GEM: IOSurface N import refused: kept out of A3: a WindowServer input (rdna3a3ws=1 lets it in)</code>
+(<code>debug.rdna3accel_a3ws_refused</code> 18230). Live A/B <code>debug.rdna3accel_a3ws=1</code> + no
+NVMTL_NO_SURFACE_SHARE: WS imported some family VRAM (<code>-&gt; the family's VRAM, already current (no upload)</code>, WS CPU 95 %) but the game still ~150 presented fps: WS keeps uploading the game's frames
+(locked_upload ~128/s, locked_skip_vram did not move), 29 % of ws_main_thread in IOSurfaceClientLock
+(the lock of a VRAM surface) and it takes the game's frames by <code>MetalCompositeDetachedIOSurface</code>
+with a <code>newTextureWithDescriptor:iosurface:</code> per frame. Set back to 0. Best config tonight:
+a3ws 0 + NVMTL_NO_SURFACE_SHARE=1 in the session (<code>launchctl setenv</code>, gone at logout; a
+LaunchAgent for it was not made: the owner decides). Next for N71: (a) the plugin should not put an
+app's drawable in family VRAM while WindowServer cannot import it (a3ws 0), so the BAR change needs
+no env; (b) WindowServer's detached-surface path: a texture per frame + a CPU lock + upload of a
+surface it already has (cache by IOSurface ID + seed).</li>
+<li><strong>N71 (a) merged (9c16a43, CI run 111 metal green)</strong>: with BAR0 1 GiB and NO env, horizon-client
+300-400 fps (owner's counter), 232 presented/s, copy-outs by the GPU 695/695, WindowServer 73 % CPU.
+The NVMTL_NO_SURFACE_SHARE session env was removed. Mac state now: plugin run 111 (N69 + N71; N70
+not in it), RADV/kexts run 103, BAR 1 GiB (<code>config.plist</code> ResizeAppleGpuBars 10), a3ws 0, iop_latch 0.
+Flaky host tests on the macOS-side CI: test_baremetal &quot;a damaged copy was not caught&quot; (run 109),
+test_bootwatch &quot;bash late: no snapshot&quot; (run 111); both pass on the Pi.
+Still open from round 2: judder 1b/1c (iop_latch=1 now has VRAM room: retest), mouse wake (3);
+the game's remaining cap is nextDrawable waits (~50-60 %, drawables handed back by WindowServer).</li>
+<li><strong>The owner (2026-11-01 00:0x): &quot;okna chodza plynnie, wszystko jest teraz plynne&quot;</strong> (windows move smoothly,
+everything is smooth), and corrected: it was smooth BEFORE the bigger BAR too, i.e. already on this
+round's build (bf2c3fa, CI run 103) with iop_latch 0 - the round-1 complaint (~20-30 fps feel, N68) did
+not come back in round 2. What fixed it is not pinned (round 1 ran 6f55f46); not yet measured by a
+240 fps video. The BAR change is still worth keeping (no VRAM refusals, room for iop_latch); make
+ResizeAppleGpuBars 10 the default in the stick's config-*.plist (config-metal.plist /
+config-driver.plist still -1; only config.plist has 10).</li>
+</ol>
+</section>
+<section id="round-3-checks-n73">
+<h2>Round 3 checks for N73 (the game's nextDrawable wait; Linux session, 2026-11-01)</h2>
+<p>Install the plugin with N73 (CI <code>full: true</code>), reboot or log out (WindowServer reads rdna3mtl.conf at its start).</p>
+<ol>
+<li>horizon-client in a world, 30 s, VSync off; then <code>sudo sh /Volumes/OPENCORE/rdna3/report.sh</code> and
+<code>grep &quot;vk: drawable: SUMMARY&quot; rdna3-3h.log | tail</code> (or <code>python3 tools/triage_present_cost.py sysctl.txt rdna3-3h.log</code>).
+The game's line: <code>next_pct</code> (share of its wall in nextDrawable), <code>pres_us_avg</code> (commit -&gt; present, ours in the app),
+<code>away_us_avg</code> (present -&gt; the same surface back: WindowServer's hold). WindowServer's line: <code>st_new</code> (new 8 MB images:
+with <code>keep=8</code> a few per surface, not one per frame), <code>st_alias</code>, <code>st_evict</code>, <code>st_new_us_avg</code> (what an image costs).</li>
+<li>A/B: <code>NVMTL_SURFTEX_KEEP=0</code> in <code>/Library/GPUBundles/rdna3mtl/rdna3mtl.conf</code>, log out and in, the same 30 s; compare
+presented fps (DTrace <code>presentDrawable</code> count or the plugin's <code>fps:</code> lines), <code>away_us_avg</code>, WindowServer CPU. Remove the line.</li>
+<li>Also record WindowServer's <code>vk: ws frame: SUMMARY</code> (up_us_avg = the CPU upload of the game's frame, wait_us_avg) and the
+game's <code>nvmtl-fps-&lt;pid&gt;.log</code> (gpuwait, submits/frame) for the same window: they say which half to cut next (DRIVER-PLAN N73 OPEN).</li>
+<li>Desktop sanity with the keep ring on: drag windows, resize the game's window, close it; no stale or wrong window contents
+(a reused image keeps the seed check; a wrong picture = set NVMTL_SURFTEX_KEEP=0 and report).</li>
+</ol>
+</section>
+<section id="round-3-plan">
+<h2>Round 3 plan (Linux session, 2026-11-01): build 2a0525d</h2>
+<p>All from the ONE green full <code>build.yml</code> run on 41ca260 or later (run 115 on
+2a0525d failed only a flaky host test, fixed in 41ca260; the driver code is
+the same). Kexts are unchanged since round 2, but take the core, tarball, <code>RDNA3MTL</code> and <code>radv-macos-logs</code> from
+the same run). Plugin installs: <code>rm</code> the old dylib/bundle first, never <code>cp</code>
+over a mapped file (round-2 lesson); log out after installing the plugin.</p>
+<p>New since round 2:</p>
+<ul>
+<li>N73 (merged, CI run 113 green): WindowServer keeps IOSurface texture images
+(<code>NVMTL_SURFTEX_KEEP</code>, 8 in WindowServer) instead of rebuilding an 8 MB
+image and re-uploading it every frame; <code>vk: drawable: SUMMARY</code> lines with
+the apps' nextDrawable wait; triage row <code>drawable</code>. Checks: the section
+<a href="#round-3-checks-n73">&quot;Round 3 checks for N73&quot;</a> above (horizon-client 30 s, A/B with
+<code>NVMTL_SURFTEX_KEEP=0</code>, <code>ws frame</code> + <code>nvmtl-fps-&lt;pid&gt;.log</code>, desktop sanity).</li>
+<li>N72 (merged): the translator splits a pointer phi that mixes Function and
+Private storage and is ~2x faster on large kernels; translator notes now
+reach the release syslog as <code>translator note: &lt;fn&gt;: ...</code>. Check: Geekbench
+7 GPU from the app; look for <code>translator note: depthwiseConv_3x3: ... demoted to a per-storage value select (DRIVER-PLAN N72)</code>, the link time,
+and the next <code>link FAILED</code> line if any (bring back <code>NVMTL_LINK_DUMP</code> files
+to the Pi if it still fails). Score vs Linux (ask the owner for GB7 Linux).</li>
+<li><code>metal/rdna3mtl-allow.txt</code> now carries <code>horizon-client</code> and <code>geekbench_avx2</code>.</li>
+</ul>
+<p>Also in this round:</p>
+<ol>
+<li>Set <code>Booter/Quirks/ResizeAppleGpuBars</code> to 10 in <code>config-metal.plist</code> and
+<code>config-driver.plist</code> on the stick too (only config.plist has it).</li>
+<li>Mouse wake (round-2 plan item 3, still not done).</li>
+<li>One 240 fps video of a fast window drag on the desktop (confirms the
+round-2 &quot;smooth&quot; by numbers; the Linux session analyses it).</li>
+<li>N70 (branch quick/gsub-last, unmerged): decide keep or drop from the N73
+numbers (<code>pres_us_avg</code> large -&gt; the app's execution thread, N70 matters).</li>
+</ol>
+<p>Write &quot;## Round 3 findings&quot; below and push to Forgejo.</p>
+</section>
+<section id="round-3-findings">
+<h2>Round 3 findings (2026-11-01 afternoon, Pi session; build 02b2210, CI run 117)</h2>
+<p>Installed from run 117 (all jobs green): tarball, RDNA3MTL, radv-macos-logs; the stick's
+<code>install.sh</code> / <code>metal.sh</code> replaced by the repo's (the stick had the round-1 copies) and
+<code>metal/rdna3mtl-allow.txt</code> from the repo (adds <code>geekbench_avx2</code>); round-2 files in
+<code>rdna3/old/</code>. <code>install.sh</code> recreates <code>/Library/GPUBundles/rdna3mtl</code> (no conf survives it).
+<code>debug.rdna3accel_a3ws</code> 0, <code>iop_latch</code> 0, BAR 1 GiB, no rdna3mtl.conf unless said.</p>
+<ol>
+<li>
+<p><strong>Plan correction: logging out does not restart WindowServer on macOS 26.</strong> After log out /
+log in WindowServer kept its pid (195) and its knobs; an rdna3mtl.conf change for
+WindowServer needs a reboot (or a WindowServer restart). Apps read the conf at their start.</p>
+</li>
+<li>
+<p><strong>N73 A/B (horizon-client in a world, VSync off, 35 s each, the plugin's <code>fps:</code> lines).</strong>
+The owner's observation decided the setup: whenever the Claude app on the Mac redraws
+(streaming text), the game loses ~100-150 fps; so each side was measured with that app
+hidden and with it visible.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>KEEP=0</th>
+<th>KEEP=8 (default)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Claude app hidden</td>
+<td>~390 fps (325-400)</td>
+<td>~398 fps (386-404)</td>
+</tr>
+<tr>
+<td>Claude app visible, redrawing</td>
+<td>~240 fps</td>
+<td>~290 fps</td>
+</tr>
+<tr>
+<td>game next_pct (hidden)</td>
+<td>34.1</td>
+<td>36.2</td>
+</tr>
+<tr>
+<td>game away_us_avg (hidden)</td>
+<td>5607</td>
+<td>5438</td>
+</tr>
+<tr>
+<td>game pres_us_avg (hidden)</td>
+<td>1670</td>
+<td>1685</td>
+</tr>
+<tr>
+<td>CPU WindowServer / game (hidden)</td>
+<td>84 % / 126 %</td>
+<td>89 % / 128 %</td>
+</tr>
+</tbody>
+</table>
+<figure>
+<svg viewBox="0 0 560 124" width="560" role="img" aria-labelledby="t83958 d83958" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t83958">N73 A/B: horizon-client fps</title>
+<desc id="d83958">horizon-client frame rate with the surface texture keep ring off (KEEP=0) and on (KEEP=8), with the Claude app hidden or visible.</desc>
+<text x="182" y="25" text-anchor="end" style="fill:var(--fg);font-size:12px">KEEP=0, Claude app hidden</text><rect x="190" y="13" width="254.3" height="16" rx="3" style="fill:var(--muted);opacity:.85"/><path d="M402.0 21 H450.9 M402.0 16 V26 M450.9 16 V26" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="456.9" y="25" style="fill:var(--fg);font-size:12px">~390 (325-400)</text><text x="182" y="51" text-anchor="end" style="fill:var(--fg);font-size:12px">KEEP=8, Claude app hidden</text><rect x="190" y="39" width="259.6" height="16" rx="3" style="fill:var(--accent2);opacity:.85"/><path d="M441.7 47 H453.5 M441.7 42 V52 M453.5 42 V52" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="459.5" y="51" style="fill:var(--fg);font-size:12px">~398 (386-404)</text><text x="182" y="77" text-anchor="end" style="fill:var(--fg);font-size:12px">KEEP=0, Claude app visible</text><rect x="190" y="65" width="156.5" height="16" rx="3" style="fill:var(--muted);opacity:.85"/><text x="352.5" y="77" style="fill:var(--fg);font-size:12px">~240</text><text x="182" y="103" text-anchor="end" style="fill:var(--fg);font-size:12px">KEEP=8, Claude app visible</text><rect x="190" y="91" width="189.1" height="16" rx="3" style="fill:var(--accent2);opacity:.85"/><text x="385.1" y="103" style="fill:var(--fg);font-size:12px">~290</text></svg>
+<figcaption>Chart of the table above (the table has the other columns).</figcaption>
+</figure>
+<p>Keep it: little gain on an empty desktop, ~+50 fps when WindowServer has other windows
+to draw. WindowServer with KEEP=8: <code>st_new</code> ~1 per 1000+ game frames, <code>st_alias</code> ~1 per
+game frame (the ring does what it should). DTrace objc probes on the game cost ~40 % of
+its fps (228/s under the probe), so the 30 s count is not a clean number.</p>
+</li>
+<li>
+<p><strong>What caps the game now: WindowServer's CPU upload of every game frame.</strong> WindowServer's
+<code>ws frame: SUMMARY</code> <code>ups</code> / <code>up_kb</code> and <code>surfin</code> <code>in_mb</code>: ~230 uploads/s of a full
+1920x1080 frame (7-8 MB), ~1.6 GB/s, <code>in_us_avg</code> ~860 us. The game's drawables are copied
+out by the GPU into the IOSurface's host pages (N61) and WindowServer uploads them again
+(G13 surface-in), because N71 keeps app surfaces private while <code>a3ws</code> is 0. The drawable
+comes back after ~5.5 ms (<code>away_us_avg</code>), and the game waits 34-36 % of its wall in
+nextDrawable. Next cut (DRIVER-PLAN N73 OPEN): share the game's surface with WindowServer
+in VRAM, or a GPU upload in WindowServer, i.e. N71 (b)/(c).</p>
+</li>
+<li>
+<p><strong>N70</strong> (<code>quick/gsub-last</code>): <code>pres_us_avg</code> ~1.7 ms (commit -&gt; present in the app) against a
+2.5 ms frame at 400 fps. Not measured with N70 this round; the Linux session decides.</p>
+</li>
+<li>
+<p><strong>Desktop with the keep ring:</strong> no stale, foreign, black or torn window content while
+dragging windows or resizing the game's window. The game drops from ~300-400 to ~130-160
+fps while its window is dragged or resized and is back at ~400 right after; the owner says
+the window may refresh slowly and not look smooth during the drag (240 fps video still to do).</p>
+</li>
+<li>
+<p><strong>Geekbench 7 GPU (Metal): still fails, N72 did not reach the failing phi.</strong> Twice: after
+~270-280 s of linking (<code>link cache: miss ... 281515 ms</code>; round 2 was ~300 s, so no 2x),
+<code>link FAILED: &quot;depthwiseConv_3x3&quot; ... native emitter: Private pointer phi %metal2vulkan.ct.slot.48 has differing structural sources; raw construction failed: native emitter: pointer merge storage mismatch Function vs Private at Local(&quot;%1425&quot;) across [Local(&quot;%72&quot;), Local(&quot;%1425&quot;)]</code>, byte for byte the round-2 text; then the MPS
+assert (SIGABRT in <code>MPSLibrary::MPSKey_Compile</code>). No <code>translator note</code> line at all, so
+<code>emit_mixed_storage_pointer_phi</code> (phi_mixed_storage.rs) never demoted it. The failing phi
+is the translator's own <code>%metal2vulkan.ct.slot.48</code> (function-constant slot path, <code>function constants: re-translate FAILED</code>), one of its sources is the phi itself (a loop-carried
+edge, <code>%1425</code> across <code>[%72, %1425]</code>); the N72 fixtures are plain two-edge LLVM phis. Two
+more re-translate lines in the same run: <code>visible function reference to 2 function(s) [postfixPrimary_f, postfixPrimary_4xf] not linked into this module</code> and the same for 3
+functions (the linked retry then found them). An <code>NVMTL_LINK_DUMP</code> of this build
+(depthwiseConv_3x3 .kernel.ll / .linked.ll / .fc.txt / .err.txt, mod.<em>.ll, stitch-00</em>)
+is on the Pi in <code>~/rdna3-bm/r3/gb7/</code> (Apple MPS IR: evidence only, never committed).
+No score; the owner's Linux GB7 GPU number is about 145k.</p>
+</li>
+<li>
+<p><strong>Mouse wake: the mouse, not the driver.</strong> <code>pmset displaysleepnow</code> with the SteelSeries
+Rival 3 Wireless Gen 2 (2.4 GHz dongle, USB 1038:1872): used a moment before, moving it
+wakes the displays within ~2 s (<code>HIDIdleTime</code> back to 0, <code>IODisplayWrangler</code>
+CurrentPowerState 1 -&gt; 4). After 6 min without input (HIDIdleTime 360 s), 30 s of moving it
+delivered no event at all (HIDIdleTime kept counting, no USB/HID line in the kernel log);
+the first click reset HIDIdleTime and the wrangler went 1 -&gt; 4 in the same second. Once
+an event arrives the card and both displays wake at once, so <code>fb/rdna3-fb.cpp</code> /
+<code>kIOWindowServerActiveAttribute</code> is cleared. On Linux the same mouse wakes the screen by
+motion after a long idle (the owner), so it is macOS's USB side on this machine (the most
+likely: the dongle's port idle-suspended and motion not raising a remote wakeup; USB
+port map / XHCI power, a hackintosh setup item), not the GPU driver.
+Side note: <code>bluetoothd</code> restarts its bluetool script every ~32 s (no Bluetooth controller;
+the owner's Realtek RTL8761BU dongle 0bda:a728 has no driver yet).</p>
+</li>
+<li>
+<p><strong>Stick:</strong> <code>Booter/Quirks/ResizeAppleGpuBars</code> is 10 in config-metal.plist and
+config-driver.plist too now (copies <code>*-before-r3bar.plist</code> next to them).</p>
+</li>
+<li>
+<p><strong>The torn window in the 240 fps video (IMG_7137.MOV, on the Pi) is N68, and
+<code>iop_latch=1</code> fixes it.</strong> The owner: a dragged window splits into two parts, the lower one
+at the mouse and the upper one late, only while the window is in the top quarter of the
+screen. The frames show a sharp horizontal tear at about 1/4 of the height. With
+<code>iop_latch</code> 0 the driver never flips (<code>iop_flips</code> 0); every desktop frame is copied by SDMA
+into the LIVE scanout: on head 1, 70388 of 70430 copies ended mid-scan, 68214 of them in
+scan bin 1 (the second quarter), i.e. the copy lands about a quarter of a refresh after the
+vblank and the panel shows the old frame above that line. <code>sudo sysctl debug.rdna3accel_iop_latch=1</code> live (BAR 1 GiB: two 8 MB D buffers, <code>iop_latch_vram_bytes</code>
+16588800): every frame latched (<code>iop_latch_n_h0/h1</code> = <code>swaps_pq_latched_h0/h1</code>, no
+fallback counters, no new mid-scan copy), and the owner sees no split anywhere. Left on for
+this session (sysctl, gone at reboot). Proposal: make <code>iop_latch</code> 1 the default (or
+<code>rdna3ioplatch=1</code> in the stick's boot-args) now that the BAR is 1 GiB; N68 OPEN (a)-(d) stay.</p>
+</li>
+<li>
+<p>Side note, not the driver: the Arctis Nova 7 headset gave no sound after the reboots
+(default output, 34 %, not muted, the USB stream opened and closed per sound); switching
+the headset off and on fixed it.</p>
+</li>
+<li>
+<p><strong>Bluetooth on the Mac (setup, not the driver; the owner's request).</strong> The owner's dongle is a
+Realtek RTL8761BU (USB 0bda:a728, Linux: <code>lmp_subver=8761</code>, <code>rtl8761bu_fw.bin</code>, fw
+0xdfc6d922). Added to the stick: <code>BlueToolFixup.kext</code> 2.7.2 (acidanthera/BrcmPatchRAM release)
+and <code>RTLBluetoothFirmware.kext</code> (github.com/bennetzakaria/RTLBluetoothFirmware b83e314, read
+before use: a port of Linux btrtl's upload, USB only; built on the Mac from source with a second
+IOKitPersonality for 0bda:a728, firmware from linux-firmware) in <code>Kernel/Add</code> after
+RDNA3Accel (MinKernel 21.0.0); <code>NVRAM/Add</code> 7C436110-...: <code>bluetoothExternalDongleFailed</code> =
+&lt;00&gt;, <code>bluetoothInternalControllerInfo</code> = 14 zero bytes, <code>bluetoothHostControllerSwitchBehavior</code>
+= &quot;always&quot;, the same three in <code>NVRAM/Delete</code>. Without the NVRAM/Add values the firmware
+uploaded (<code>RTL-Status</code> &quot;firmware uploaded&quot;) but bluetoothd kept the MacPro7,1 UART
+placeholder (BCM_4350C2, Off, address NULL). With them: THIRD_PARTY_DONGLE, On, a real
+address, firmware v55586 c57286 (= 0xdfc6d922); the owner paired a phone, a speaker
+(A2DP audio fine) and a Magic Mouse. Backups <code>config-before-bt.plist</code> (before any BT change)
+and <code>config-before-btnvram.plist</code>. The sources stay out of this repository (GPL-2.0, not ours).</p>
+</li>
+<li>
+<p><strong><code>rdna3ioplatch=1</code> is now in the stick's config.plist boot-args</strong> (the owner: keep what fixed
+the tear; backup <code>config-before-ioplatch.plist</code>), and the sysctl was set live again after the
+Bluetooth reboots. The boot-arg path itself is not yet seen on a boot (check
+<code>sysctl debug.rdna3accel_iop_latch</code> = 1 after the next restart). config-metal.plist /
+config-driver.plist do not carry it.</p>
+</li>
+<li>
+<p><strong>The secondary display's top tenth flashes black whenever the main display changes: UCLK
+p-state switching, not the copy path.</strong> The owner: only the secondary monitor, only its top
+~1/10, only while something changes on the main one (most of all while the Claude app
+streams text), never the other way round. Ruled out: the copy (the secondary got 0 IOP
+copies in a 25 s window while it flashed; <code>iop_blank</code> did not move) and <code>iop_latch</code> (it
+flashes with 0 and with 1). The A/B (boot-arg <code>rdna3pmctl=1</code> added for it, backup
+<code>config-before-pmctl.plist</code>): <code>rdna3_pmctl levels mclk 8</code> (UCLK pinned at 1218 MHz, +20 W
+idle) - no flash during a long streamed reply; <code>levels mclk 15</code> (back to 96 MHz idle) - the
+flash at once. With <code>rdna3mall</code> 0 (the default) the driver programs no DC p-state decision
+(no <code>RDNA3,DCNPower</code> property), yet the PMFW switches UCLK: the switch is hidden in the
+main head's blank, not the secondary's, which is in its active top lines then and
+underflows. Fix (Linux session): port what amdgpu does for two unsynchronised heads -
+DC's p-state support decision (<code>dcn32_validate_bandwidth</code> -&gt; <code>p_state_change_support</code>
+false -&gt; <code>dcn32_update_clocks</code> hard-min UCLK at max), i.e. make the <code>rdna3mall</code> path (or
+at least its UCLK hard minimum when the lit heads cannot switch in vblank) the default for
+two heads; check <code>RDNA3,DCNPower</code> then says &quot;UCLK pinned&quot; with two displays.
+Left: UCLK unpinned (the flash is back until the fix), <code>rdna3pmctl=1</code> stays in boot-args.</p>
+</li>
+<li>
+<p>Arctis Nova 7: no sound after some reboots until the headset or its dongle is power-cycled
+(unplugging the dongle fixes it; macOS opens the USB stream without errors either way).
+Not every reboot (one right after a re-enumeration worked). <code>~/usb_reenum</code> on the Mac (a
+small IOKit tool, <code>sudo ~/usb_reenum 0x1038 0x22a1</code>, re-enumerates the dongle; source in
+the Pi session's scratchpad, not in git) did re-enumerate it; not installed as a boot job.</p>
+</li>
+</ol>
+<h3 id="round-3-findings-mac-state-after-round-3">Mac state after round 3</h3>
+<p>Run 117 (02b2210): kexts, core, plugin, RADV. Stick config.plist boot-args <code>-v keepsyms=1 debug=0x100 msgbuf=1048576 alcid=13 amfi=0x80 rdna3agdc=3 rdna3ioplatch=1 rdna3pmctl=1</code>,
+ResizeAppleGpuBars 10 (all three configs), Bluetooth kexts + NVRAM values (item 11). No
+rdna3mtl.conf. Backups in EFI/OC: config-before-bt / -btnvram / -ioplatch / -pmctl /
+-r3bar (metal, driver).</p>
+<h3 id="round-3-findings-for-the-linux-session-round-3-open-work">For the Linux session (round 3 open work)</h3>
+<ol>
+<li>Two-head UCLK p-state (item 13): the secondary's top flashes; amdgpu's p-state decision.
+Done in DRIVER-PLAN N74 (needs the Mac): with <code>rdna3mall</code> 0 the core pins UCLK's hard
+minimum at 1218 MHz while two heads are lit; check <code>ioreg -lw0 | grep -E 'RDNA3,(DCNPower|UclkPinned)'</code> reads <code>UCLK pinned (two heads, ...)</code> and 1, no flash with
+<code>rdna3_pmctl levels mclk 15</code>; A/B live with <code>sudo sysctl -w debug.rdna3_uclk_pin=0</code> / <code>=1</code>
+(boot-arg <code>rdna3uclkpin=0</code> turns it off).</li>
+<li><code>iop_latch</code> 1 as the default (item 9; the boot-arg carries it on the stick now).
+Done (DRIVER-PLAN N68): <code>debug.rdna3accel_iop_latch</code> defaults to 1, <code>rdna3ioplatch=0</code>
+turns it off; the stick's <code>rdna3ioplatch=1</code> may stay or go. The round-2 plan above
+(&quot;default 0&quot;) describes the build of that round.</li>
+<li>Geekbench: the <code>%metal2vulkan.ct.slot.48</code> loop phi in the function-constant path (item 6).</li>
+<li>The game's next cap: WindowServer's CPU upload of every app frame (item 3, N71 (b)/(c)).</li>
+<li>N70 keep/drop (item 4).</li>
+</ol>
+</section>
+<section id="round-4-plan">
+<h2>Round 4 plan (Linux session, 2026-11-01 evening): build 9db526b</h2>
+<p>All from the ONE green full <code>build.yml</code> run 123 on be56ee3 (workflow_dispatch, full;
+the driver and translator code of 9db526b, plus a test fix):
+kexts, core, tarball, <code>RDNA3MTL</code>, <code>radv-macos-logs</code>. As in round 3: <code>rm</code> the old
+plugin before installing, use the repo's <code>install.sh</code> / <code>metal.sh</code> /
+<code>metal/rdna3mtl-allow.txt</code>, reboot after a WindowServer-side change (round 3 item 1:
+logging out does not restart WindowServer).</p>
+<p>New since round 3:</p>
+<ul>
+<li><strong>N74, UCLK pinned while two heads are lit</strong> (DRIVER-PLAN N74; the fix for round 3
+item 13, the secondary's flashing top). Default on; boot-arg <code>rdna3uclkpin=0</code>, live
+<code>sudo sysctl -w debug.rdna3_uclk_pin=0|1</code>. Checks with both displays on:
+<ol>
+<li><code>ioreg -lw0 | grep -E 'RDNA3,(DCNPower|DCNPowerInit|UclkPinned)'</code>: DCNPower says
+<code>UCLK pinned (two heads, ...) at 1218 MHz ... fails 0, unconfirmed 0</code>, UclkPinned <strong>1</strong>
+(2 = accepted but not confirmed by the PMFW: then check UCLK with <code>rdna3_pmctl</code>).</li>
+<li>Kernel log: <code>display power: UCLK pin (N74): PMFW ...</code>, <code>display power: UCLK pinned ...</code>,
+<code>DAL SMU: hard min clock 2 = 1218 MHz</code>; no <code>GAVE UP</code>, no <code>status wait skipped</code>, no <code>FAILED</code>.</li>
+<li><code>rdna3_pmctl</code> with <code>levels mclk 15</code> (all levels allowed): UCLK stays at 1218 MHz idle.</li>
+<li>The owner: no flash on the secondary during a long streamed reply in the Claude app.</li>
+<li>A/B: <code>sysctl -w debug.rdna3_uclk_pin=0</code> -&gt; &quot;UCLK switching (switched off ...)&quot;, UCLK back
+to 96 MHz, the flash back; <code>=1</code> -&gt; pinned again, no flash.</li>
+<li>Display sleep and wake (<code>pmset displaysleepnow</code>, then a click): still pinned after the
+wake (UclkPinned 1), no multi-second stall of the desktop at the wake.</li>
+<li>Idle power with the pin (about +20 W expected): the PMFW's socket power from
+<code>rdna3_pmctl</code>, pinned vs <code>uclk_pin=0</code>.</li>
+</ol>
+</li>
+<li><strong>N68, <code>iop_latch</code> on by default.</strong> Remove <code>rdna3ioplatch=1</code> from the stick's config.plist
+boot-args (backup first) to check the default: after the reboot
+<code>sysctl debug.rdna3accel_iop_latch</code> = 1 and the boot line <code>iop latch (N68): ... (the default; rdna3ioplatch=0 turns it off)</code>; a fast window drag in the top quarter shows no split (the
+owner's eye is enough; a 240 fps video only if it looks wrong).</li>
+<li><strong>N75, Geekbench 7 GPU.</strong> Run it from the app. Look for <code>translator note: depthwiseConv_3x3: ... pointer phi %metal2vulkan.ct.slot.48 merges Function and Private storage; demoted to a per-storage value select; its network is loop-carried (DRIVER-PLAN N72, N75)</code> (the phi name
+may differ) and the <code>link cache: miss ... ms</code> time. If it still fails, copy the full
+<code>link FAILED</code> text: an N75 refusal names its shape (<code>... more than one &lt;storage&gt; root (...)</code>,
+<code>... was taken on root ...</code>, <code>... emitted without its split ...</code>, <code>... structural zero path (N75)</code>); take a new <code>NVMTL_LINK_DUMP</code> of that kernel to the Pi (evidence only, never
+committed). With a score: GPU score vs the Linux ~145k.</li>
+</ul>
+<p>Also, if time allows (the owner's call):</p>
+<ol>
+<li>N70 (<code>quick/gsub-last</code>): one horizon-client run with N70's plugin vs this build's,
+<code>pres_us_avg</code> and fps (round 3 item 4: pres_us_avg ~1.7 ms of a 2.5 ms frame).</li>
+<li>Mouse wake (round 3 item 7, macOS USB): a USB port map for the B550 is a setup item, not
+the driver; only with the owner's go-ahead and a config backup.</li>
+</ol>
+<p>Write &quot;## Round 4 findings&quot; below and push to Forgejo.</p>
+</section>
+<section id="round-4b-plan">
+<h2>Round 4b plan (Linux session, 2026-11-01 night): N71 (c) and N70, build e400b68 (run 126)</h2>
+<p>Run 126 (workflow_dispatch, full, all green) has everything of run 123 plus N70 and N71 (c).
+If round 4 has not started yet, install run 126 instead of 123 and do round 4, then this.
+If round 4 ran on run 123, install run 126 now (kexts, core, tarball, <code>RDNA3MTL</code>; reboot,
+since WindowServer loads the plugin at its start) and do only this section.</p>
+<p><strong>N71 (c): WindowServer samples an app's VRAM drawable read-only</strong> (DRIVER-PLAN N71 &quot;PLAN (c)&quot;,
+risks R1-R9; AFTER-TESTS rows <code>A3 share</code> and <code>ws share</code>). Default OFF: <code>debug.rdna3accel_a3share</code> 0.
+The kernel switch is live; apps decide at texture creation, so <strong>restart the app for each leg</strong>.</p>
+<ol>
+<li>Before anything: <code>sysctl debug.rdna3accel_a3share</code> = 0; the boot log has <code>A3 share: off</code>;
+WindowServer's plugin log has <code>vk: a3share: read-only imports accepted from the kernel</code>.</li>
+<li>Leg A (off): horizon-client in a world, 35 s, as round 3 item 2 (Claude app hidden and visible):
+fps, <code>vk: drawable: SUMMARY</code> (next_pct, away_us_avg, pres_us_avg), WindowServer's
+<code>vk: ws frame: SUMMARY</code> (ups, up_kb, in_us_avg), CPU of WindowServer and the game.</li>
+<li><code>sudo sysctl -w debug.rdna3accel_a3share=1</code>, quit and restart the game, Leg B (on), the same numbers, plus:
+<ul>
+<li>the game's log: <code>vk: a3share: surface S plane 0 shared (allocation #G)</code>; app SUMMARY <code>pr_shared</code> &gt; 0,
+the other <code>pr_*</code> 0;</li>
+<li>WindowServer: <code>item 7: surface S WxH -&gt; read-only shared VRAM (allocation #G)</code> with the same G;
+<code>ws frame: SUMMARY</code> <code>sh_imp</code> &gt; 0, <code>sh_skip</code> growing with frames, and <strong>0</strong> for <code>sh_war</code>,
+<code>sh_wr</code>, <code>sh_rw</code>, <code>sh_refused</code>, <code>sh_pdem</code>, <code>sh_off</code>; <code>ups</code> for the game ~0;</li>
+<li><code>sysctl -a | grep a3share</code>: <code>recorded</code> and <code>imported</code> &gt; 0, <code>fault_off</code> 0, <code>noaccept</code> 0;</li>
+<li>no <code>item 7: ... -&gt; the family's VRAM</code> line in WindowServer, no <code>surfshare: VM fault</code>, no
+<code>GEM: VM fault at VA ... inside the read-only shared import</code>, no <code>[gfxhub] page fault</code>;</li>
+<li>the owner: the game window shows the live frame (no old frames, no flicker, no black), the
+desktop and other windows are normal; drag and resize the game window.
+Expected: next_pct well below round 3's 34-36 %, fps above ~400 with the Claude app hidden,
+WindowServer CPU down.</li>
+</ul>
+</li>
+<li>If <code>sh_inelig</code> is large and <code>sh_imp</code> 0: copy the <code>shared by its producer but this texture stays private: &lt;reason&gt; (usage 0x..)</code> lines (WindowServer's real texture usage).</li>
+<li><strong>Stop at once</strong> and set <code>debug.rdna3accel_a3share=0</code> if the desktop or a window shows stale or
+torn content, WindowServer stalls, or any fault line appears; take a report first (<code>report.sh</code>).</li>
+<li>Back to 0 at the end (it is 0 again after a reboot anyway).</li>
+</ol>
+<p><strong>N70 (submit ahead past an empty last part)</strong>: in the Leg A run, the game's log has
+<code>commit: N70 G-SUB an empty LAST part is retired by the ahead pass ...</code> and
+<code>commit: N70 G-SUB &lt;n&gt; empty LAST parts retired ...</code> growing with commits; one more 35 s run with
+<code>NVMTL_GSUB_LAST_EMPTY=0</code> in the game's environment (rdna3mtl.conf for that app, or the app's env)
+for the A/B: the plugin's execution thread CPU and pres_us_avg, on vs off.</p>
+<p>Write &quot;## Round 4b findings&quot; below and push to Forgejo.</p>
+</section>
+<section id="round-4-findings">
+<h2>Round 4 findings (2026-11-01 evening, Pi session; build e400b68, CI run 126)</h2>
+<p>Round 4 had not started, so the Pi installed run 126 (Forgejo run_id 204, artifacts 227-230:
+kexts, core, tarball, <code>RDNA3MTL</code>, <code>radv-macos-logs</code>) and did round 4, then 4b. The stick's
+<code>rdna3/</code> holds the e400b68 tarball, the repo's <code>tools/baremetal/stick/*.sh</code> and <code>metal/</code> with
+run 126's files; the old files are in <code>rdna3/old/02b2210/</code>, the old core in
+<code>EFI/OC/Kexts-old/02b2210/</code>, the config before round 4 in <code>EFI/OC/config-before-r4.plist</code>.
+One reboot after the owner approved the extensions (boot 20:15:56).</p>
+<ol>
+<li><strong>N74, UCLK pin: works.</strong>
+<ul>
+<li>ioreg: <code>RDNA3,UclkPinned</code> = 1, <code>RDNA3,DCNPower</code> = <code>UCLK pinned (two heads, unsynchronised, no FPO / SubVP: no shared vblank) at 1218 MHz: hard min kept (mirror on, decision 3, pins 1, releases 0, fails 0, unconfirmed 0)</code>, <code>RDNA3,DCNPowerInit</code> = <code>UCLK pin (N74): PMFW 0x505c00, UCLK 4 levels 96..1218 MHz, on (rdna3uclkpin, debug.rdna3_uclk_pin)</code>.</li>
+<li>The kernel log lines of check 2 could not be read: the boot part of the message buffer was
+already overwritten (<code>dmesg</code> starts later) and <code>log show</code> has no <code>display power:</code> lines.
+The ioreg strings above are the evidence; <code>report.sh</code> was not run.</li>
+<li><code>rdna3_pmctl levels mclk 15</code> (all levels allowed): <code>pp_dpm_mclk (now 1218 MHz)</code> stays.</li>
+<li>No flash on the secondary during two long streamed replies (the owner watched).</li>
+<li>A/B: <code>debug.rdna3_uclk_pin=0</code> -&gt; <code>UCLK switching (switched off (rdna3uclkpin=0 / debug.rdna3_uclk_pin 0); two heads lit): hard min released to the lowest level now (sysctl, decision 4, pins 1, releases 1, fails 0, unconfirmed 0)</code>, UCLK 96 MHz. <strong>The flash did not
+come back</strong>: the owner watched through two streamed replies and 30 s of scrolling and
+dragging, while UCLK did switch (samples every 0.5 s: 33 x 96 / 7 x 456 MHz, then
+34 x 96 / 26 x 456 MHz; never 772 or 1218). <code>=1</code> -&gt; <code>hard min sent now (sysctl, decision 5, pins 2, releases 1, fails 0, unconfirmed 0)</code>, 1218 MHz. So round 3 item 13's A/B did not
+reproduce on this build; possibly round 3's flashes came with switches to the higher levels.</li>
+<li>Display sleep (<code>pmset displaysleepnow</code> 20:24:22) and a click: the desktop was back at once;
+<code>hard min kept (display wake, decision 10, pins 3, releases 2, fails 0, unconfirmed 0)</code>,
+still 1218 MHz.</li>
+<li>Idle power (PMFW socket power from <code>rdna3_pmctl</code>, desktop only): <strong>50 W pinned, 28 W
+with <code>uclk_pin=0</code></strong> (+22 W).</li>
+<li>Mouse wake as round 3 item 7: motion of the SteelSeries Rival 3 (USB dongle) and of the
+Magic Mouse (Bluetooth) does not wake, a click does. After the wake the Rival reconnects to
+its dongle; the kernel log at the sleep has <code>Rival 3 Wireless Gen 2 ... endpoint 0x00: status 0xe0005000 (pipe stalled)</code>. macOS USB, not the driver.</li>
+</ul>
+<figure>
+<svg viewBox="0 0 560 72" width="560" role="img" aria-labelledby="t32778 d32778" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t32778">N74 UCLK pin: idle power</title>
+<desc id="d32778">PMFW socket power from rdna3_pmctl with the desktop only: 50 W pinned, 28 W unpinned.</desc>
+<text x="182" y="25" text-anchor="end" style="fill:var(--fg);font-size:12px">UCLK pinned (default)</text><rect x="190" y="13" width="250.0" height="16" rx="3" style="fill:var(--warn);opacity:.85"/><text x="446.0" y="25" style="fill:var(--fg);font-size:12px">50 W</text><text x="182" y="51" text-anchor="end" style="fill:var(--fg);font-size:12px">uclk_pin=0</text><rect x="190" y="39" width="140.0" height="16" rx="3" style="fill:var(--ok);opacity:.85"/><text x="336.0" y="51" style="fill:var(--fg);font-size:12px">28 W</text></svg>
+<figcaption>Idle power with and without the pin (+22 W).</figcaption>
+</figure>
+</li>
+<li><strong>N68, <code>iop_latch</code> default on: works, but it caps the game at 120 fps.</strong>
+<ul>
+<li><code>rdna3ioplatch=1</code> removed from the stick's boot-args (now <code>-v keepsyms=1 debug=0x100 msgbuf=1048576 alcid=13 amfi=0x80 rdna3agdc=3 rdna3pmctl=1</code>): <code>debug.rdna3accel_iop_latch</code>
+= 1, boot line <code>iop latch (N68): ... (the default; rdna3ioplatch=0 ...)</code>; a fast drag in the
+top quarter shows no split (the owner).</li>
+<li><strong>New:</strong> horizon-client ran at a flat 119-120 fps (no in-game limit; round 3 had
+300-400). WindowServer composited ~120 frames/s (2 per 60 Hz vblank), the game waited in
+<code>nextDrawable</code> (<code>next_pct</code> 58 %, <code>away_us_avg</code> 22-24 ms against 5-6 ms without the latch).
+Live <code>debug.rdna3accel_iop_latch=0</code> -&gt; 250-315 fps at once, <code>=1</code> -&gt; 119 again; <code>uclk_pin</code>
+makes no difference. With <code>a3share=1</code> (round 4b) the cap stays: 120 fps, WindowServer 15 %
+CPU, game 25 %, <code>next_pct</code> 87 %, <code>away_us_avg</code> 23.8 ms. Each WindowServer frame waits for
+a latch, so the game gets two drawables back per vblank. This needs a fix before N68 stays
+the default (round 4b ran with the latch off to compare with round 3).</li>
+</ul>
+<figure>
+<svg viewBox="0 0 560 72" width="560" role="img" aria-labelledby="t69366 d69366" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t69366">N68 iop_latch: horizon-client fps</title>
+<desc id="d69366">Frame rate of horizon-client with the latch on (flat 119-120) and off (250-315), measured live in round 4.</desc>
+<text x="182" y="25" text-anchor="end" style="fill:var(--fg);font-size:12px">iop_latch 1 (default)</text><rect x="190" y="13" width="100.0" height="16" rx="3" style="fill:var(--fail);opacity:.85"/><path d="M289.2 21 H290.0 M289.2 16 V26 M290.0 16 V26" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="296.0" y="25" style="fill:var(--fg);font-size:12px">119-120</text><text x="182" y="51" text-anchor="end" style="fill:var(--fg);font-size:12px">iop_latch 0 (live)</text><rect x="190" y="39" width="235.0" height="16" rx="3" style="fill:var(--ok);opacity:.85"/><path d="M398.3 47 H452.5 M398.3 42 V52 M452.5 42 V52" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="458.5" y="51" style="fill:var(--fg);font-size:12px">250-315</text></svg>
+<figcaption>The latch caps the game at two composites per vblank (live A/B, item 2).</figcaption>
+</figure>
+</li>
+<li><strong>N75, Geekbench 7 GPU: still fails, unchanged.</strong> Run from the app (Metal): no
+<code>translator note</code>, <code>link cache: miss 0 B 330417.95 ms [0 hit, 4 miss, 3 stored]</code>, then
+<code>link FAILED: &quot;depthwiseConv_3x3&quot; linked (676122 B AIR) but did not translate: native emitter: Private pointer phi %metal2vulkan.ct.slot.48 has differing structural sources; raw construction failed: native emitter: pointer merge storage mismatch Function vs Private at Local(&quot;%1425&quot;) across [Local(&quot;%72&quot;), Local(&quot;%1425&quot;)]</code>, the same text as round 3 (also the two
+<code>re-translate FAILED: ... visible function reference ... [postfixPrimary_f, ...]</code> lines). The
+translator is run 126's (<code>cache tag sha256-dffa2fd92b99cad0...</code>, the artifact's hash). None of
+the N75 refusal shapes appears. The &quot;it just closes&quot; is Geekbench's backend aborting:
+<code>MTLReportFailure</code> from <code>MPSLibrary::MPSKey_Compile</code> in <code>EncodeDWConv</code> (no pipeline for
+the depthwise convolution), SIGABRT. A new <code>NVMTL_LINK_DUMP</code> is on the Pi in
+<code>~/rdna3-bm/r4/gb7/nvmtl-link-2359/</code> (evidence only, never committed): its
+<code>depthwiseConv_3x3.kernel.ll</code>, <code>.linked.ll</code> and <code>.fc.txt</code> are byte-identical to round 3's
+dump, so round 3's dump reproduces this on Linux.</li>
+<li>Optional items: N70 was done in round 4b; the USB port map for mouse wake was not done.</li>
+<li>Seen in the kernel log at boot (not new, for the record): <code>RDNA3-fb: cursor: head 0/1 move to 0,0 hidden FAILED in the core (1 such)</code>.</li>
+</ol>
+</section>
+<section id="round-4b-findings">
+<h2>Round 4b findings (2026-11-01 night, Pi session; build e400b68, CI run 126)</h2>
+<p>All runs: horizon-client, <code>iop_latch</code> 0 (round 4 item 2), UCLK pinned, 45 s windows (<code>top</code>
+every 5 s, the game's 2 s fps samples, SUMMARY counters as the difference across the window).
+Moving around the world changes fps from ~140 to ~600 (the owner: ground 350-400, walking
+150,
+standing 180, sky ~600), so the A/B was done standing still, looking at the sky, at the same
+spot, restarting the game for each leg. The first walking runs (a3share 0: 299 fps hidden /
+215 visible; a3share 1: 219 hidden) are not comparable for that reason.</p>
+<p><strong>N71 (c), a3share: works, no fault, ~15 % more fps and a third less WindowServer CPU.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Leg (sky, standing)</th>
+<th>fps avg (min-max)</th>
+<th>game CPU</th>
+<th>WindowServer CPU</th>
+<th>next_pct</th>
+<th>pres_us_avg</th>
+<th>away_us_avg</th>
+<th>WS uploads in 45 s</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A, a3share 0, Claude hidden</td>
+<td>454 (436-497)</td>
+<td>96 %</td>
+<td>74 %</td>
+<td>57.5</td>
+<td>1076</td>
+<td>4863</td>
+<td>9643 (in_us 905)</td>
+</tr>
+<tr>
+<td>B, a3share 1, Claude hidden</td>
+<td>524 (592 max)</td>
+<td>79 %</td>
+<td>51 %</td>
+<td>50.6</td>
+<td>587</td>
+<td>3961</td>
+<td>0 (sh_skip 11819)</td>
+</tr>
+<tr>
+<td>A, a3share 0, Claude visible</td>
+<td>309 (267-426)</td>
+<td>69 %</td>
+<td>70 %</td>
+<td>67.5</td>
+<td>1049</td>
+<td>7065</td>
+<td>8090 (in_us 890)</td>
+</tr>
+<tr>
+<td>B, a3share 1, Claude visible</td>
+<td>364 (320-440)</td>
+<td>65 %</td>
+<td>65 %</td>
+<td>59.8</td>
+<td>666</td>
+<td>6704</td>
+<td>1611 (the Claude window only)</td>
+</tr>
+</tbody>
+</table>
+<figure>
+<svg viewBox="0 0 560 124" width="560" role="img" aria-labelledby="t20685 d20685" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t20685">N71 (c) a3share A/B: fps</title>
+<desc id="d20685">Average frame rate of horizon-client in the sky, standing still, with a3share off (A) and on (B), Claude app hidden or visible; the whisker is the min-max.</desc>
+<text x="182" y="25" text-anchor="end" style="fill:var(--fg);font-size:12px">A, a3share 0, Claude hidden</text><rect x="190" y="13" width="212.8" height="16" rx="3" style="fill:var(--muted);opacity:.85"/><path d="M394.4 21 H423.0 M394.4 16 V26 M423.0 16 V26" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="429.0" y="25" style="fill:var(--fg);font-size:12px">454 (436-497)</text><text x="182" y="51" text-anchor="end" style="fill:var(--fg);font-size:12px">B, a3share 1, Claude hidden</text><rect x="190" y="39" width="245.6" height="16" rx="3" style="fill:var(--accent2);opacity:.85"/><text x="441.6" y="51" style="fill:var(--fg);font-size:12px">524 (max 592)</text><text x="182" y="77" text-anchor="end" style="fill:var(--fg);font-size:12px">A, a3share 0, Claude visible</text><rect x="190" y="65" width="144.8" height="16" rx="3" style="fill:var(--muted);opacity:.85"/><path d="M315.2 73 H389.7 M315.2 68 V78 M389.7 68 V78" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="395.7" y="77" style="fill:var(--fg);font-size:12px">309 (267-426)</text><text x="182" y="103" text-anchor="end" style="fill:var(--fg);font-size:12px">B, a3share 1, Claude visible</text><rect x="190" y="91" width="170.6" height="16" rx="3" style="fill:var(--accent2);opacity:.85"/><path d="M340.0 99 H396.2 M340.0 94 V104 M396.2 94 V104" style="stroke:var(--fg);stroke-width:1.5;fill:none"/><text x="402.2" y="103" style="fill:var(--fg);font-size:12px">364 (320-440)</text></svg>
+<figcaption>Chart of the fps column of the table above.</figcaption>
+</figure>
+<ul>
+<li>Step 1: <code>debug.rdna3accel_a3share</code> 0, boot log <code>A3 share: off: WindowServer's imports are refused as above (rdna3a3share=0)</code>, WindowServer <code>vk: a3share: read-only imports accepted from the kernel</code>.</li>
+<li>Leg B, the game: <code>vk: a3share: surface 160 plane 0 shared (allocation #57)</code> and five more
+(#58-#62); WindowServer: <code>item 7: surface 160 1920x1080 -&gt; read-only shared VRAM (allocation #57)</code> with the same numbers; <code>vk: a3share: surface-in SKIPPED (read-only shared VRAM current at seed 2695, allocation #59): 8000 skipped, 0 stale</code>. App SUMMARY <code>pr_shared</code> 6, the other <code>pr_*</code>
+0; WindowServer <code>sh_imp</code> 9, <code>sh_skip</code> growing with frames, 0 for <code>sh_war</code>, <code>sh_wr</code>, <code>sh_rw</code>,
+<code>sh_refused</code>, <code>sh_pdem</code>, <code>sh_off</code>, <code>sh_stale</code>, <code>sh_inelig</code>; the game's <code>ups</code> 0.</li>
+<li>sysctl: <code>recorded</code> 9, <code>imported</code> 9, <code>stale</code> 0, <code>fault_off</code> 0, <code>noaccept</code> 0, <code>norecord</code> 125
+(WindowServer imports of other surfaces, <code>no share record ... as before</code>).</li>
+<li>No <code>item 7: ... -&gt; the family's VRAM</code> line, no <code>surfshare: VM fault</code>, no <code>GEM: VM fault</code>, no
+<code>[gfxhub]</code> line in 25 minutes of kernel log.</li>
+<li>The owner: the game window showed the live picture (no old frames, flicker or black), the
+desktop and other windows normal. Dragging and resizing the game window with a3share 1 was
+<strong>not</strong> tried.</li>
+<li>Expected vs seen: fps above 400 with Claude hidden, yes (524); WindowServer CPU down, yes
+(74 -&gt; 51 %). <code>next_pct</code> fell only from 57.5 to 50.6 %: at ~500 fps the game still waits for
+WindowServer's composite (one per two game frames), not for an upload.</li>
+<li>Left at <code>debug.rdna3accel_a3share=0</code>.</li>
+</ul>
+<p><strong>N70: keep it.</strong> Sky, standing, Claude hidden, a3share 0:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>fps</th>
+<th>game CPU</th>
+<th>pres_us_avg</th>
+<th>busiest game threads (3 samples)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>N70 on (default)</td>
+<td>433 (392-443)</td>
+<td>89 %</td>
+<td>1039</td>
+<td>22/11/11, 32/9/6, 27/11/6 %</td>
+</tr>
+<tr>
+<td><code>NVMTL_GSUB_LAST_EMPTY=0</code> (rdna3mtl.conf)</td>
+<td>433 (415-443)</td>
+<td>96 %</td>
+<td>1612</td>
+<td>25/19/6, 25/17/9, 24/21/9 %</td>
+</tr>
+</tbody>
+</table>
+<p>On: <code>commit: N70 G-SUB an empty LAST part is retired by the ahead pass, which goes on to the next buffer (NVMTL_GSUB_LAST_EMPTY=unset)</code> and <code>N70 G-SUB &lt;n&gt; empty LAST parts retired ...</code> growing
+2, 4, 8, ... 64. Off: <code>an empty LAST part stops the ahead pass (later buffers submit + wait in turn) (NVMTL_GSUB_LAST_EMPTY=0)</code>, <code>&lt;n&gt; ahead pass(es) stopped at an empty LAST part</code>. Same fps;
+with N70 pres_us_avg is 35 % lower and the second-busiest thread uses about half the CPU.</p>
+<h3 id="round-4b-findings-mac-state-after-round-4">Mac state after round 4</h3>
+<ul>
+<li>Build e400b68 (run 126) installed: kexts, the core on the stick, the plugin, RADV.</li>
+<li>Stick boot-args without <code>rdna3ioplatch</code> (the latch is on by default); <code>rdna3pmctl=1</code> stays.</li>
+<li><code>debug.rdna3_uclk_pin</code> 1, <code>debug.rdna3accel_iop_latch</code> 1, <code>debug.rdna3accel_a3share</code> 0; no
+<code>rdna3mtl.conf</code>.</li>
+<li>On the Mac: <code>~/meas4.sh</code> (the 45 s measurement), <code>~/r4meas/</code> (the raw runs, also on the Pi in
+<code>~/rdna3-bm/r4/meas/</code>), <code>~/r4-gbdump/</code> (the Geekbench dump).</li>
+</ul>
+<h3 id="round-4b-findings-for-the-linux-session-round-4-open-work">For the Linux session (round 4 open work)</h3>
+<ol>
+<li>N68: the latch caps WindowServer at two composites per vblank, so a game gets 120 fps on
+a 60 Hz desktop (item 2). Fix before keeping it as the default, or default it off again.</li>
+<li>N74: the pin works and costs 22 W idle, but this round the flash did not come back with the
+pin off. Decide whether to keep it on by default; a longer unpinned watch may be needed.</li>
+<li>N75: the Geekbench <code>ct.slot.48</code> case is still refused the old way, with no N75 note; round
+3's dump (identical input) reproduces it.</li>
+<li>N71 (c): works on the card; next steps are the drag and resize check with a3share 1 and
+turning it on by default.</li>
+<li>N70: keep.</li>
+<li>Push these commits to GitHub (the Pi pushes only to Forgejo).</li>
+</ol>
+</section>
+<section id="how-to-add-the-next-round">
+<h2>How to add the next round</h2>
+<div class="warnbox">
+<p><strong>For the Pi session.</strong> This file is plain HTML so that you can extend it by hand. After every test round,
+<strong>append</strong> one new <code>&lt;section&gt;</code> for it, <strong>before</strong> the
+<code>&lt;footer class="doc"&gt;</code> at the end of the file. Never rewrite or reorder an earlier round. Where an older plan above says
+&quot;Write ## Round N findings below&quot;, that means exactly this: an <code>&lt;h2&gt;</code> inside a new section.</p>
+</div>
+<ol>
+<li>Pick the id from the round number: <code>round-N-findings</code> (or <code>round-Nb-findings</code> for a second half of a round).
+The Linux session writes <code>round-N-plan</code> in the same way; if it has written the plan already, your findings go right after
+the plan sections, still before the footer.</li>
+<li>Put the id on the <code>&lt;section&gt;</code> and give the <code>&lt;h2&gt;</code> no id of its own. Sub-headings are
+<code>&lt;h3&gt;</code> and their ids start with the section id, e.g. <code>round-N-findings-mac-state</code>, so they stay unique.</li>
+<li>Write numbered findings as an <code>&lt;ol&gt;</code>, one <code>&lt;li&gt;</code> per finding, the bold first sentence being the result;
+use <code>&lt;code&gt;</code> for counters, sysctls and log lines, <code>&lt;pre&gt;&lt;code&gt;</code> for commands and output, and a
+<code>&lt;table&gt;</code> for numbers. Put a long log in <code>&lt;details&gt;&lt;summary&gt;...&lt;/summary&gt;...&lt;/details&gt;</code>.
+Escape <code>&lt;</code> and <code>&amp;</code> in text as <code>&amp;lt;</code> and <code>&amp;amp;</code>.</li>
+<li>Also add one <code>&lt;li&gt;&lt;a href="#round-N-findings"&gt;...&lt;/a&gt;&lt;/li&gt;</code> to the <em>Contents</em> list at the top and one row to
+the <em>Rounds at a glance</em> table (build, CI run, links).</li>
+<li>Reports never go into git. Name the report folder on the stick (<code>/Volumes/OPENCORE/rdna3/report-*</code>) in your section.
+Then <code>git pull --rebase</code>, commit the file with the other docs notes, push to Forgejo (the Pi has no GitHub remote), and say so
+to the owner in Polish.</li>
+</ol>
+<p>A new section, copy and fill in:</p>
+<pre><code>&lt;section id="round-N-findings"&gt;
+&lt;h2&gt;Round N findings (2026-MM-DD time, Pi session; build abcdef0, CI run NNN)&lt;/h2&gt;
+&lt;p&gt;What was installed and from which run; where the copies are on the Pi.&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Result of check 1.&lt;/strong&gt; Evidence: &lt;code&gt;counter&lt;/code&gt; 12 -&gt; 40, the log line ...&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Result of check 2.&lt;/strong&gt; ...&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h3 id="round-N-findings-for-the-linux-session"&gt;For the Linux session (round N open work)&lt;/h3&gt;
+&lt;ol&gt;&lt;li&gt;...&lt;/li&gt;&lt;/ol&gt;
+&lt;/section&gt;</code></pre>
+</section>
+<footer class="doc">RDNA3-Hackintosh documentation. </footer>
+</main>
+</body>
+</html>

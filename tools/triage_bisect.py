@@ -2,7 +2,7 @@
 """
 triage_bisect.py - the per-step table of the display bisect (card run
 2026-10-17d): `rdna3vm step bisect` / `bisect-plugin` / `bisect-agdc`,
-tools/vm/macos/autoreport.sh bisect_run, docs/TESTING-VM.md "Display bisect".
+tools/vm/macos/autoreport.sh bisect_run, docs/TESTING-VM.html "Display bisect".
 
     python3 tools/triage_bisect.py bisect.txt [report-prefix] [--owner 0:n,1:y,3:s | --owner FILE] [--log FILE]...
 
@@ -795,7 +795,7 @@ def verdict(steps, verdicts, by_n):
     if ref["bad"] and off is not None and off["known"] and off["bad"]:
         out.append(("FAIL", "BISECT: still broken with every switchable feature off (step 1: %s): not one of these switches - "
                             "look at the boot-args (rdna3gamma, rdna3visreserve ...), the copy forward, kext code without a switch, "
-                            "the Metal plugin (step bisect-plugin) or the hardware (docs/TESTING-VM.md 'Display bisect')" %
+                            "the Metal plugin (step bisect-plugin) or the hardware (docs/TESTING-VM.html 'Display bisect')" %
                             "; ".join(off["why"])))
     elif ref["bad"] and off is not None and off["known"]:
         if firston:

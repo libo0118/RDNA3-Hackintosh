@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>macOS 26 on the real PC: OpenCore installer USB, dual boot with Linux - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / macOS 26 on the real PC: OpenCore installer USB, dual boot with Linux</div>
+  <h1>macOS 26 on the real PC: OpenCore installer USB, dual boot with Linux</h1>
+  <p class="muted">Installing macOS 26 on the owner's PC (MSI B550-A PRO, Ryzen 7 5800X, RX 7800 XT) from an OpenCore USB stick, next to Linux, and then running the driver on it: the machine, the BIOS, the stick, the order.</p>
+</header>
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#1-the-hardware-read-from-the-pc-on-2026-10-29">1. The hardware (read from the PC on 2026-10-29)</a>
+</li>
+<li><a href="#2-bios-settings-msi-click-bios-5-am2-menu-names-vary-a-little-between-versions">2. BIOS settings (MSI Click BIOS 5, A.M2; menu names vary a little between versions)</a>
+</li>
+<li><a href="#3-build-the-stick-on-this-linux-pc">3. Build the stick (on this Linux PC)</a>
+</li>
+<li><a href="#4-install-macos">4. Install macOS</a>
+</li>
+<li><a href="#5-run-the-driver">5. Run the driver</a>
+
+<ol>
+<li><a href="#what-to-check-first-and-the-report">What to check first, and the report</a></li>
+</ol>
+</li>
+<li><a href="#6-what-was-learned-and-what-is-not-certain">6. What was learned, and what is not certain</a>
+</li>
+</ol></nav>
+<p>How to install macOS 26 Tahoe on the owner's PC (MSI B550-A PRO, Ryzen 7 5800X,
+RX 7800 XT) from a USB stick, next to Linux, and then run this driver on it.
+The driver side (kexts, boot-args, the way back) is
+<a href="INSTALL-OPENCORE.html">INSTALL-OPENCORE</a>; this page is the machine, the stick
+and the order of things. The AMD CPU side follows Dortania's AMD (Zen) guide.</p>
+<div class="note">
+<p><strong>Status (2026-10-31):</strong> macOS 26.7.2 is installed on this PC and boots with
+the driver (<code>config-driver.plist</code>). Getting there took three days of hand
+edits on the stick; every one is now in the generator, so a stick rebuilt
+from this page works first time. Part 6 lists what was learned and what is
+still open.</p>
+</div>
+<figure>
+<svg viewBox="0 0 600 554" width="600" role="img" aria-labelledby="t80252 d80252" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t80252">From a blank stick to the driver</title>
+<desc id="d80252">The order of part 3 to part 5: build the stick, BIOS, install macOS from it, install the driver, switch the core kext on, add the Metal plugin, move OpenCore to the disk.</desc>
+<defs><marker id="arr80252" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs><a href="#3-build-the-stick-on-this-linux-pc"><rect x="88" y="8" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="33" style="fill:var(--fg);font-weight:600">Build the stick</text><text x="98" y="49" style="fill:var(--muted);font-size:12px">fetch.sh, build_efi.py --detect-linux, make_usb.sh /dev/sda</text></a><rect x="8" y="22" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="36" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Linux PC</text><line x1="340" y1="56" x2="340" y2="77" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#2-bios-settings-msi-click-bios-5-am2-menu-names-vary-a-little-between-versions"><rect x="88" y="78" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="103" style="fill:var(--fg);font-weight:600">BIOS settings (Del at power-on)</text><text x="98" y="119" style="fill:var(--muted);font-size:12px">UEFI only, Secure Boot off, Above 4G on, XHCI hand-off on</text></a><rect x="8" y="92" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="106" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">BIOS</text><line x1="340" y1="126" x2="340" y2="147" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#4-install-macos"><rect x="88" y="148" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:1.5"/><text x="98" y="173" style="fill:var(--fg);font-weight:600">F11, the stick's UEFI entry, OpenCore picker</text><text x="98" y="189" style="fill:var(--muted);font-size:12px">macOS Base System, Disk Utility, Install macOS Tahoe</text></a><rect x="8" y="162" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="176" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">stick</text><line x1="340" y1="196" x2="340" y2="217" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#4-install-macos"><rect x="88" y="218" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:1.5"/><text x="98" y="243" style="fill:var(--fg);font-weight:600">First boot with config.plist (installer config)</text><text x="98" y="259" style="fill:var(--muted);font-size:12px">core kext disabled; create the user, Remote Login on</text></a><rect x="8" y="232" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="246" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">macOS</text><line x1="340" y1="266" x2="340" y2="287" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#5-run-the-driver"><rect x="88" y="288" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:1.5"/><text x="98" y="313" style="fill:var(--fg);font-weight:600">sudo sh install.sh from the stick</text><text x="98" y="329" style="fill:var(--muted);font-size:12px">kexts and firmware from the tarball; restart; Allow; restart</text></a><rect x="8" y="302" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="316" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">macOS</text><line x1="340" y1="336" x2="340" y2="357" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#5-run-the-driver"><rect x="88" y="358" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:1.5"/><text x="98" y="383" style="fill:var(--fg);font-weight:600">Switch on the core kext</text><text x="98" y="399" style="fill:var(--muted);font-size:12px">cp config-driver.plist config.plist on the stick; boot macOS</text></a><rect x="8" y="372" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="386" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Linux PC</text><line x1="340" y1="406" x2="340" y2="427" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#5-run-the-driver"><rect x="88" y="428" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:1.5"/><text x="98" y="453" style="fill:var(--fg);font-weight:600">metal.sh (Metal plugin, RADV, rdna3agdc=3)</text><text x="98" y="469" style="fill:var(--muted);font-size:12px">config-before-metal.plist is the way back</text></a><rect x="8" y="442" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="456" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">macOS</text><line x1="340" y1="476" x2="340" y2="497" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr80252)"/><a href="#5-run-the-driver"><rect x="88" y="498" width="504" height="48" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:1.5"/><text x="98" y="523" style="fill:var(--fg);font-weight:600">Put OpenCore on the internal ESP</text><text x="98" y="539" style="fill:var(--muted);font-size:12px">cp -r EFI/OC /boot/EFI/OC; efibootmgr -c ... -L OpenCore</text></a><rect x="8" y="512" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="526" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Linux PC</text></svg>
+<figcaption>The order of things (parts 2 to 5). Click a box to jump to the part.</figcaption>
+</figure>
+<h2 id="1-the-hardware-read-from-the-pc-on-2026-10-29">1. The hardware (read from the PC on 2026-10-29)</h2>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>What</th>
+<th>Consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Board / BIOS</td>
+<td>MSI B550-A PRO (MS-7C56), BIOS A.M2 (2026-08-13)</td>
+<td>SSDT-EC-USBX-DESKTOP (no EC device in ACPI), SSDT-CPUR (CPUs are <code>\_SB.PLTF.C000..C00F</code>)</td>
+</tr>
+<tr>
+<td>CPU</td>
+<td>Ryzen 7 5800X, 8 cores / 16 threads, Zen 3</td>
+<td>AMD_Vanilla kernel patches with core count <strong>8</strong>, <code>ProvideCurrentCpuInfo</code>, dummy power management</td>
+</tr>
+<tr>
+<td>GPU</td>
+<td>RX 7800 XT <code>1002:747E</code> (+ HDMI audio <code>1002:AB30</code>)</td>
+<td>this driver; no WhateverGreen; BAR size handling (part 2)</td>
+</tr>
+<tr>
+<td>Ethernet</td>
+<td>RTL8111/8168 <code>10ec:8168</code></td>
+<td>RealtekRTL8111 3.0.0</td>
+</tr>
+<tr>
+<td>Audio</td>
+<td>Realtek <strong>ALC897</strong> (<code>10ec:0897</code>, subsystem <code>1462:9c56</code>) on <code>1022:1487</code></td>
+<td>AppleALC, <code>alcid=13</code> (a guess, part 6)</td>
+</tr>
+<tr>
+<td>NVMe</td>
+<td>Crucial P3 / P3 Plus <code>c0a9:540a</code>, P310 <code>c0a9:5426</code> (DRAM-less)</td>
+<td>NVMeFix</td>
+</tr>
+<tr>
+<td>USB</td>
+<td>AMD 500 Series XHCI <code>1022:43ee</code> (10 USB 2 + 4 USB 3 root ports), Matisse XHCI <code>1022:149c</code> (4 + 4)</td>
+<td>14 and 8 ports: both under macOS's limit of 15 per controller, <strong>no USB map needed</strong></td>
+</tr>
+<tr>
+<td>Disks</td>
+<td><code>nvme1n1</code> (931.5 GB): ESP 1 GB (<code>/boot</code>, Windows Boot Manager and GRUB <code>\EFI\GRUB\GRUBX64.EFI</code>), ext4 720 GB, APFS 210 GB; <code>nvme0n1</code> (1.8 TB) ext4 <code>/mnt/data</code></td>
+<td>the picker gets a GRUB entry; see part 5 for which partition macOS goes on</td>
+</tr>
+<tr>
+<td>Stick</td>
+<td>SanDisk 3.2Gen1, 57.3 GB, <code>/dev/sda</code> (as of 2026-10-29: check it again)</td>
+<td>everything on it is erased</td>
+</tr>
+</tbody>
+</table>
+<h2 id="2-bios-settings-msi-click-bios-5-am2-menu-names-vary-a-little-between-versions">2. BIOS settings (MSI Click BIOS 5, <code>A.M2</code>; menu names vary a little between versions)</h2>
+<p>Press Del at power-on. Set these before the first boot of the stick:</p>
+<table>
+<thead>
+<tr>
+<th>Setting (where)</th>
+<th>Value</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Boot -&gt; CSM / &quot;Windows 10 WHQL Support&quot;</td>
+<td>CSM off, <strong>UEFI only</strong></td>
+<td>OpenCore is a UEFI loader</td>
+</tr>
+<tr>
+<td>Boot -&gt; Secure Boot</td>
+<td><strong>Disabled</strong> (Settings -&gt; Security -&gt; Secure Boot, &quot;Secure Boot Mode&quot;/&quot;Image Execution Policy&quot;: Always Execute)</td>
+<td>OpenCore is not signed for it</td>
+</tr>
+<tr>
+<td>Boot -&gt; Fast Boot</td>
+<td>Disabled</td>
+<td>USB and GPU must be initialised for the picker</td>
+</tr>
+<tr>
+<td>Settings -&gt; Advanced -&gt; PCI Subsystem Settings -&gt; <strong>Above 4G memory / Crypto Mining</strong></td>
+<td><strong>Enabled</strong></td>
+<td>the card's 64-bit BARs</td>
+</tr>
+<tr>
+<td>Settings -&gt; Advanced -&gt; PCI Subsystem Settings -&gt; <strong>Re-Size BAR Support</strong></td>
+<td><strong>Disabled</strong> (what every working boot had)</td>
+<td>the BIOS then leaves BAR0 at 256 MiB, the EFI built here has <code>ResizeAppleGpuBars = -1</code>. With it <strong>Enabled</strong> BAR0 is 16 GiB and macOS takes a GPU BAR only up to 1 GiB (DRIVER-PLAN N62, <a href="INSTALL-OPENCORE.html#5-devices-bios-opencore-uefi">INSTALL-OPENCORE section 5</a>): rebuild with <code>--resize-bars 10</code> (BAR0 cut to 1 GiB for macOS only, Linux keeps 16 GiB). It was <strong>not</strong> the cause of any boot failure</td>
+</tr>
+<tr>
+<td>Settings -&gt; Advanced -&gt; USB Configuration -&gt; <strong>XHCI Hand-off</strong></td>
+<td><strong>Enabled</strong></td>
+<td>the stick keeps working after OpenCore starts (<code>ReleaseUsbOwnership</code> is on too)</td>
+</tr>
+<tr>
+<td>Settings -&gt; Advanced -&gt; AMD CBS -&gt; NBIO Common Options -&gt; <strong>IOMMU</strong></td>
+<td>Auto or Disabled, either works</td>
+<td>it was <strong>not</strong> the cause of the chipset failure (part 6); the config also sets <code>DisableIoMapper</code>. Linux does not need it</td>
+</tr>
+<tr>
+<td>Settings -&gt; Advanced -&gt; Integrated Peripherals -&gt; HD Audio</td>
+<td>Enabled</td>
+<td>onboard audio</td>
+</tr>
+<tr>
+<td>Settings -&gt; Advanced -&gt; Wake Up Event Setup, ErP, Windows OS Configuration</td>
+<td>defaults</td>
+<td>-</td>
+</tr>
+<tr>
+<td>Boot -&gt; Boot Option Priorities</td>
+<td>leave Linux's GRUB first; use <strong>F11</strong> (boot menu) to start the stick</td>
+<td>the stick is a one-off until macOS is installed</td>
+</tr>
+</tbody>
+</table>
+<p>If the screen is black at the picker: primary display PCIe slot 1, the monitor
+on the RX 7800 XT (the 5800X has no graphics of its own).</p>
+<h2 id="3-build-the-stick-on-this-linux-pc">3. Build the stick (on this Linux PC)</h2>
+<pre><code class="language-sh">tools/baremetal/fetch.sh                      # ~/rdna3-baremetal: pinned downloads + macOS recovery (~1 GB)
+python3 -I tools/baremetal/build_efi.py --detect-linux   # ~/rdna3-baremetal/efi, checked with ocvalidate
+sudo tools/baremetal/make_usb.sh /dev/sda     # the stick; asks you to type the device name</code></pre>
+<p>Re-run <code>build_efi.py</code> whenever there is a newer <code>RDNA3Accel-kext</code> (it reads
+<code>~/Downloads/RDNA3Accel-kext.zip</code>, the artifact of the Forgejo <code>build.yml</code> job
+<code>kext</code>; <code>--kext-zip</code> / <code>--kext-dir</code> for another place). The Mac's serial,
+board serial, UUID and ROM are made once by OpenCore's <code>macserial</code> and kept
+in <code>~/rdna3-baremetal/identity.json</code> (mode 600; never commit it).
+<code>--detect-linux</code> reads <code>efibootmgr -v</code> and puts the loader paths (GRUB) into
+<code>Misc/BlessOverride</code>; <code>--bless '\EFI\GRUB\GRUBX64.EFI'</code> does the same by hand.
+<code>--debug</code> switches OpenCore's own log on (<code>Misc/Debug</code> Target 67: console and an
+<code>opencore-*.txt</code> on the ESP, AppleDebug, ApplePanic; the boot-args already carry
+<code>msgbuf=1048576</code>); it is off by default. <code>--resize-bars</code>, <code>--allow-ahci</code> and
+<code>--entry</code> are in <code>--help</code>.</p>
+<p><code>make_usb.sh</code> shows <code>[1/7]</code> ... <code>[7/7]</code> and a percentage for the copy. It
+refuses a disk that is not removable and on USB, a partition, a disk with a
+system partition mounted, and anything smaller than 4 GiB, and wants the
+device name typed. It erases the <strong>whole</strong> stick without reading it, makes a
+GPT with one FAT32 partition <code>OPENCORE</code>, copies <code>EFI/</code> and
+<code>com.apple.recovery.boot/</code> and reads the copy back. About 5 to 10 minutes on
+USB 3. It also puts the helper scripts for macOS into <code>rdna3/</code> on the stick
+(<code>tools/baremetal/stick/</code>: <code>install.sh</code>, <code>report.sh</code>, <code>metal.sh</code>; part 5) and
+whatever is in <code>~/rdna3-baremetal/rdna3/</code> next to them. Put there, before
+running it, from the CI artifacts: <code>RDNA3-Hackintosh-*.tar.gz</code> (artifact
+<code>RDNA3-pkg</code>) and <code>metal/</code> with <code>RDNA3MTLDriver.bundle</code>,
+<code>librdna3mtl_translate.dylib</code> (artifact <code>RDNA3MTL</code>), <code>libvulkan_radeon.dylib</code>
+(artifact <code>radv-macos-logs</code>) and <code>rdna3mtl-allow.txt</code> (<code>metal/</code> in the repo).</p>
+<p>What is on the stick (<code>~/rdna3-baremetal/efi/EFI/OC</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kexts</td>
+<td>Lilu 1.7.2, <strong><code>RDNA3MCEReporterDisabler</code></strong> (generated, see part 6), VirtualSMC 1.3.8, RestrictEvents 1.1.6, AppleALC 1.9.8, RealtekRTL8111 3.0.0, NVMeFix 1.1.3, <code>RDNA3Accel.kext</code> (core kext of this driver)</td>
+</tr>
+<tr>
+<td>ACPI</td>
+<td><code>SSDT-EC-USBX-DESKTOP.aml</code>, <code>SSDT-CPUR.aml</code> (Dortania, pinned)</td>
+</tr>
+<tr>
+<td>Drivers</td>
+<td><code>OpenRuntime</code>, <code>OpenHfsPlus</code>, <code>ResetNvramEntry</code>; text picker, no OpenCanopy</td>
+</tr>
+<tr>
+<td><code>config.plist</code></td>
+<td>the <strong>installer</strong> configuration: <code>RDNA3Accel.kext</code> is listed but <strong>disabled</strong>, no <code>rdna3*</code> boot-args. The installer then runs on the card's GOP framebuffer, so a driver problem cannot stop the installation</td>
+</tr>
+<tr>
+<td><code>config-driver.plist</code></td>
+<td>the same with the core kext enabled and <code>amfi=0x80</code> (part 5). <code>rdna3agdc=3</code> is added later by <code>metal.sh</code></td>
+</tr>
+</tbody>
+</table>
+<p>The versions and why each was chosen: <code>tools/baremetal/SOURCE</code>.</p>
+<p>Common to both configs: Booter quirks for a Ryzen (<code>AvoidRuntimeDefrag</code>,
+<code>EnableSafeModeSlide</code>, <code>ProvideCustomSlide</code>, <code>RebuildAppleMemoryMap</code>,
+<code>SyncRuntimePermissions</code>; <code>EnableWriteUnprotector</code>, <code>DevirtualiseMmio</code> and
+<strong><code>SetupVirtualMap</code> off</strong>, Dortania's setting for 2020+ boards such as this
+B550); <code>Kernel</code>: 27 AMD_Vanilla patches from the file the card VM runs (24
+kernel ones, the four <code>cpuid_cores_per_package</code> with 8, <strong>plus the three
+IOPCIFamily ones</strong>: the two &quot;Disable 10 bit tags&quot; enabled, the AM5
+<code>IOPCIIsHotplugPort</code> one disabled), <code>ProvideCurrentCpuInfo</code>,
+<code>DummyPowerManagement</code>, no CPUID spoof, <code>DisableIoMapper</code>, <code>XhciPortLimit</code>
+off, <code>AppleAHCIPort</code> blocked (<code>Kernel/Block</code>; the owner's working stick has
+it and this PC has no SATA disk; <code>--allow-ahci</code> leaves it out); <code>Misc</code>:
+<code>SecureBootModel = Disabled</code>, <code>DmgLoading = Any</code> (the recovery dmg),
+<code>ScanPolicy = 0</code> (every disk is listed), <code>ShowPicker</code>, <code>HideAuxiliary</code> off
+(the installer dmg is an auxiliary entry), <code>PollAppleHotKeys</code> on (Shift+Enter,
+Cmd+V...), <code>Timeout = 0</code> for the installer, GRUB through <code>BlessOverride</code>;
+<code>csr-active-config = EF0F0000</code> (SIP relaxed, for the ad-hoc signed kexts,
+INSTALL-OPENCORE section 4); SMBIOS <code>MacPro7,1</code> (what the card VM's
+<code>play-desktop</code> step runs); boot-args <code>-v keepsyms=1 debug=0x100 msgbuf=1048576 alcid=13</code>.</p>
+<h2 id="4-install-macos">4. Install macOS</h2>
+<ol>
+<li>Plug the stick into a <strong>rear</strong> USB port (the board's own ports, not a hub).
+Power on, <strong>F11</strong>, choose the stick's UEFI entry (<code>UEFI: SanDisk ...</code>, the
+one with a partition), not the plain one.</li>
+<li>OpenCore's text picker lists <code>macOS Base System (External)</code> (the recovery
+from the stick; it is an auxiliary entry, shown because <code>HideAuxiliary</code> is
+off), <code>Reset NVRAM</code> and Linux's GRUB. Choose the recovery.
+Verbose boot text scrolls, then the macOS Utilities window appears
+(several minutes; the stick is slow). Ethernet works if RealtekRTL8111 loaded;
+the installer needs the network (it downloads macOS, about 15 GB).</li>
+<li><strong>Disk Utility</strong> first. View -&gt; Show All Devices. Find the <strong>partition</strong>
+macOS is to go on (you replace the old Windows partition; this PC's
+second disk also showed a 210 GB APFS partition, so check size and name,
+do not trust this paragraph). Select <strong>that partition, not the physical
+disk above it</strong>, Erase, format <strong>APFS</strong>, name e.g. <code>macOS</code>. Erasing the
+physical disk would delete Linux and its boot partition.
+Do not touch the 1 GB EFI partition: Linux's GRUB (and the Windows boot
+files) live there.</li>
+<li>Quit Disk Utility, <strong>Install macOS Tahoe</strong>, pick that volume. The Mac
+restarts several times; each time press F11 again, choose the stick, and in
+the picker pick the entry that says <code>Install macOS Tahoe</code> (or, at the end,
+<code>macOS</code>) on the new volume, <strong>not</strong> the recovery again. With
+<code>Timeout = 0</code> the picker waits for you every time.</li>
+<li>At the first setup assistant, create the user, skip Apple ID, <strong>Remote
+Login on</strong> (System Settings -&gt; Sharing), so a dark screen still allows ssh
+and a report.</li>
+</ol>
+<p>If the installer or the first boot stops: try the picker's <code>Reset NVRAM</code>
+once; the verbose text before the stop is what to look for (the usual ones: <code>[PCI Configuration Begin]</code> or <code>EB|#LOG:EXITBS:START</code> = a Booter quirk, <code>AppleACPICPU</code> = SSDT-CPUR
+or the core count, a panic mentioning <code>non-monotonic time</code> = the AMD_Vanilla
+file does not match this macOS build).</p>
+<h2 id="5-run-the-driver">5. Run the driver</h2>
+<p>Everything is decided by which <code>config.plist</code> OpenCore reads, and the helper
+scripts on the stick (<code>&lt;stick&gt;/rdna3/</code>) do the macOS side. Messages in the
+scripts are Polish. The order:</p>
+<ol>
+<li><strong><code>install.sh</code>, inside macOS.</strong> <code>sudo sh /Volumes/OPENCORE/rdna3/install.sh</code>
+unpacks the release tarball (<code>RDNA3-Hackintosh-*.tar.gz</code> next to it) and
+runs its <code>install.sh</code>: the same preinstall / postinstall as the <code>.pkg</code>
+(framebuffer, accelerator, AGDC kexts; the accelerator's Tahoe build on
+Darwin 25; ad-hoc signatures; the AMD firmware into
+<code>/Library/Application Support/RDNA3/firmware</code>, which needs the network).
+The tarball is the way because it needs no Installer.app (the <code>.pkg</code>'s
+check now accepts macOS 15 and 26 as well). <strong>Do not run <code>oc_install.sh</code></strong>
+on this EFI: it is for an EFI without our entry and its default kernel
+range is Darwin 24.
+<strong>The EFI partition and the stick need <code>sudo</code> to mount in macOS</strong>: the
+stick's <code>OPENCORE</code> partition is an EFI System partition, which macOS does not
+mount by itself. <code>diskutil list</code> shows it (<code>EFI OPENCORE</code>, e.g. <code>disk2s1</code>),
+then <code>sudo diskutil mount disk2s1</code> (without sudo it says &quot;Unable to mount&quot;).</li>
+<li>Restart; System Settings -&gt; Privacy &amp; Security -&gt; <strong>Allow</strong> the blocked
+system software, restart again (INSTALL-OPENCORE section 4).</li>
+<li><strong>Switch on the core kext.</strong> Shut down, plug the stick into Linux, mount
+<code>OPENCORE</code>, and<pre><code class="language-sh">cd &lt;stick&gt;/EFI/OC &amp;&amp; cp config.plist config-installer.plist.bak &amp;&amp; cp config-driver.plist config.plist</code></pre>
+(the way back is the same with <code>config-installer.plist</code>). Boot from the stick
+again, pick <code>macOS</code>. First thing to look at: <code>ioreg -rc RDNA3Accel -d1 | grep -E 'Stage2|GFXResult|PMFeatures'</code> and the report (below).</li>
+<li><strong><code>metal.sh</code>, inside macOS</strong>, once the driver boots: <code>sudo sh /Volumes/OPENCORE/rdna3/metal.sh</code> installs the Metal plugin, the translator
+and RADV from <code>rdna3/metal/</code> (the way <code>tools/vm/macos/build_metal.sh</code> does in
+the VM: <code>autoreport.sh --sync-metal</code>, root:wheel, <code>fix_tracedir.sh</code>) and sets
+<code>rdna3agdc=3</code> in the stick's <code>config.plist</code> with <code>plutil</code> (WindowServer on
+the plugin). It first copies the file to <code>config-before-metal.plist</code> (only
+the first time: that copy is the way back and a second run keeps it).
+Restart from the stick. If the screen goes dark: Linux,
+<code>cp config-before-metal.plist config.plist</code>.</li>
+<li>Once macOS boots well from the stick, <strong>put OpenCore on the disk</strong>: from
+Linux mount the ESP (<code>/boot</code>), <code>cp -r &lt;stick&gt;/EFI/OC /boot/EFI/OC</code> (and
+<code>BOOT</code>'s <code>BOOTx64.efi</code> is not needed), then<pre><code class="language-sh">sudo efibootmgr -c -d /dev/nvme1n1 -p 1 -L OpenCore -l '\EFI\OC\OpenCore.efi'</code></pre>
+and make OpenCore first in <code>BootOrder</code> (<code>efibootmgr -o</code>) or pick it with
+F11. The 1 GB ESP has room (this EFI is about 8 MB). Keep GRUB's own
+files where they are. In <code>config.plist</code> set <code>Timeout</code> to 5 or so and use
+Ctrl+Enter in the picker to set the default OS (<code>AllowSetDefault</code> is on).</li>
+</ol>
+<p>The driver's boot-args in <code>config-driver.plist</code> are the card VM's <code>apps</code> step
+without what is VM-only (<code>serial=3</code>, <code>gemini_check</code>, the report switches
+<code>rdna3probe</code> / <code>rdna3ladder</code>) and without <code>rdna3agdc=3</code> (that comes with
+<code>metal.sh</code>): the driver's default profile (<code>common/rdna3_bootargs.h</code>) plus
+<code>amfi=0x80</code> (INSTALL-OPENCORE section 4). If the screen goes dark after the
+driver comes up: Linux, <code>cp config-installer.plist.bak config.plist</code> (or
+<code>-rdna3off</code> in the boot-args), see
+<a href="INSTALL-OPENCORE.html#8-the-way-back">INSTALL-OPENCORE section 8</a>.</p>
+<h3 id="what-to-check-first-and-the-report">What to check first, and the report</h3>
+<p>Inside macOS: <code>sudo sh /Volumes/OPENCORE/rdna3/report.sh</code> writes
+<code>rdna3/report-&lt;date&gt;/</code> on the stick: the kernel and RDNA3/WindowServer logs of
+the last 3 hours and of this boot, <code>ioreg</code>, <code>kmutil showloaded</code>, the displays,
+<code>sysctl</code> rdna3, <code>boot-args</code>, the <code>*.ips</code> and WindowServer crash reports. It does
+<strong>not</strong> run <code>autoreport.sh --standalone</code> (its GPU probes crashed WindowServer on
+this Mac, 2026-10-31); <code>sudo RDNA3_FULL=1 sh report.sh</code> does. Send the folder
+like the VM's reports (<code>docs/AFTER-TESTS.md</code>). The lines that decide the first
+questions (kernel log: <code>log show --last boot --predicate 'eventMessage contains &quot;RDNA3&quot;'</code> or the verbose boot):</p>
+<table>
+<thead>
+<tr>
+<th>Look for</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VRAM aperture: BAR0 ... MiB, mapped ... MiB</code></td>
+<td>BAR0 reached the kernel; <code>NOT MAPPED: BAR0 is bigger than 1 GiB</code> = Re-Size BAR is on and the config has <code>ResizeAppleGpuBars = -1</code> (rebuild with <code>--resize-bars 10</code>)</td>
+</tr>
+<tr>
+<td>the bring-up levels up to 8, <code>GFXResult</code> in ioreg</td>
+<td>the card initialised on a <strong>real</strong> PCIe slot (the VM never ran it)</td>
+</tr>
+<tr>
+<td>a panic or hang after <code>RDNA3Accel</code></td>
+<td>this is the bare-metal difference: photograph the verbose text (no serial port here)</td>
+</tr>
+<tr>
+<td><code>RDNA3,Head&lt;n&gt;,...</code> in ioreg, the picture on both outputs</td>
+<td>display side up</td>
+</tr>
+<tr>
+<td>About This Mac: &quot;AMD Ryzen 7 5800X 8-Core Processor&quot;</td>
+<td>RestrictEvents + AMD_Vanilla core count work</td>
+</tr>
+</tbody>
+</table>
+<p>Dual boot notes:</p>
+<ul>
+<li><strong>Linux/GRUB.</strong> <code>--detect-linux</code> (or <code>--bless</code>) puts <code>\EFI\GRUB\GRUBX64.EFI</code>
+into <code>Misc/BlessOverride</code>, and OpenCore lists the <code>GRUB</code> entry of the ESP
+by itself. A <code>Misc/Entries</code> entry with the short device path
+<code>HD(1,GPT,&lt;guid&gt;,0x800,0x200000)/\EFI\GRUB\GRUBX64.EFI</code> made OpenCore say
+<code>LoadImage failed - Not Found</code> (2026-10-30), which is why the generator
+no longer writes one. If GRUB is still missing, use F11 and the firmware's
+own <code>GRUB</code> entry.</li>
+<li>macOS writes nothing into the ESP by itself except what OpenCore/<code>bless</code>
+would; GRUB keeps working. Do not let macOS's Startup Disk change the
+firmware boot order if you want GRUB first.</li>
+<li>Never mount macOS's APFS volume read-write from Linux, and do not put
+macOS's volume on a partition Linux uses.</li>
+<li>With Re-Size BAR on (<code>--resize-bars 10</code>) the RX 7800 XT under Linux keeps
+its 16 GiB BAR (the quirk reduces it for macOS only), so amdgpu is
+unaffected.</li>
+</ul>
+<h2 id="6-what-was-learned-and-what-is-not-certain">6. What was learned, and what is not certain</h2>
+<p>Learned 2026-10-29..31 (the first bare-metal days), now built in:</p>
+<table>
+<thead>
+<tr>
+<th>What happened</th>
+<th>Cause and fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>USB, LAN, the 1 TB NVMe and SATA were dead or the boot stopped early; IOMMU off and Re-Size BAR off changed nothing</td>
+<td><strong>Root cause: the chipset.</strong> Everything behind the B550 chipset (USB, LAN, the 1 TB NVMe, SATA) only works with AMD_Vanilla's <code>IOPCIFamily</code> &quot;Disable 10 bit tags&quot; patch (probeBusGated; macOS otherwise enables PCIe 10-bit tags the chipset does not handle). <code>vmtool.amd_patches()</code> used to keep only the <code>kernel</code> patches (its comment wrongly called the IOPCIFamily ones Zen 4-only); <code>build_efi.py</code> now adds both variants (12.0-15.x and 26.0+, enabled) and the AM5 <code>IOPCIIsHotplugPort</code> one disabled. The VM keeps the kernel-only list (its chipset is QEMU's)</td>
+</tr>
+<tr>
+<td>Panic in <code>AppleIntelMCEReporter</code></td>
+<td>MacPro7,1 makes macOS load the Intel machine-check reporter, which panics on AMD. <code>RDNA3MCEReporterDisabler.kext</code> (generated by <code>build_efi.py</code>, only an <code>Info.plist</code>, listed right after Lilu) has two personalities with probe score 5000 and the reporter's bundle identifier, matching <code>IOPlatformExpertDevice</code> (board-id <code>Mac-27AD2F918AE68F61</code>) and <code>AppleIntelMCEInterruptNub</code> with a plain <code>IOService</code>, so the real driver never matches</td>
+</tr>
+<tr>
+<td>Booter and console settings</td>
+<td><code>SetupVirtualMap</code> is <strong>off</strong> (Dortania: boards from 2020 on, such as this B550). The <code>npci</code> boot-arg is <strong>not needed</strong>, and <code>npci=0x2000</code> / <code>0x3000</code> kill the console when the GPU BAR is above 4 GiB</td>
+</tr>
+<tr>
+<td>The picker showed the stick only</td>
+<td>the recovery dmg is an auxiliary entry: <code>HideAuxiliary</code> off; <code>DmgLoading = Any</code></td>
+</tr>
+<tr>
+<td>OpenCore: <code>LoadImage failed - Not Found</code> for GRUB</td>
+<td>a short <code>HD(...)</code> device path in <code>Misc/Entries</code>; <code>Misc/BlessOverride</code> <code>\EFI\GRUB\GRUBX64.EFI</code> instead</td>
+</tr>
+<tr>
+<td>The <code>.pkg</code> refused macOS 26</td>
+<td>its installation check said 15.0 up to 16.0 although the payload has the Tahoe accelerator: now 15.0 up to 27.0; <code>install.sh</code> on the stick uses the tarball anyway</td>
+</tr>
+<tr>
+<td><code>autoreport.sh --standalone</code> crashed WindowServer</td>
+<td><code>report.sh</code> does not run it unless <code>RDNA3_FULL=1</code></td>
+</tr>
+</tbody>
+</table>
+<p>Open, or a guess:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>How it can fail</th>
+<th>What to try</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Safe Mode (Shift+Enter in the picker, <code>PollAppleHotKeys</code> is on)</td>
+<td>shows the prohibited sign (<strong>open</strong>; the driver already stands down in <code>-x</code>, commit <code>7821cae</code>, the cause is not found)</td>
+<td>not investigated yet; the normal boot works</td>
+</tr>
+<tr>
+<td><code>alcid=13</code></td>
+<td>no sound (or the wrong jack)</td>
+<td><code>alcid=69</code>, then <code>31</code>, <code>97</code> (ALC897 layouts in AppleALC 1.9.8: 11 12 13 21 22 23 31 66 69 77 97 98 99); sound is not needed for the driver</td>
+</tr>
+<tr>
+<td>No USB map</td>
+<td>a port missing in the installer</td>
+<td>none expected (14 and 8 ports &lt; 15). If a keyboard is dead in the picker, use another rear port; map ports later with USBToolBox (Windows/Linux tool) only if needed</td>
+</tr>
+<tr>
+<td><code>DevirtualiseMmio</code></td>
+<td>a MMIO panic</td>
+<td>try it on (needs <code>MmioWhitelist</code> on some boards)</td>
+</tr>
+<tr>
+<td><code>ResizeAppleGpuBars = -1</code></td>
+<td>with Re-Size BAR on in the BIOS the BAR stays 16 GiB: <code>NOT MAPPED: BAR0 is bigger than 1 GiB</code></td>
+<td><code>--resize-bars 10</code> (ocvalidate warns; <code>build_efi.py</code> accepts that note, OpenCore's own text calls values above 8 unstable across sleep) or <code>8</code> (VM-proven)</td>
+</tr>
+<tr>
+<td><code>AppleAHCIPort</code> blocked</td>
+<td>no SATA disk in macOS (none is attached)</td>
+<td><code>build_efi.py --allow-ahci</code>. The block came from the first chipset test, before the 10-bit tags patch; whether SATA works without it is untested</td>
+</tr>
+<tr>
+<td><code>DisableIoMapper</code></td>
+<td>none expected</td>
+<td>AMD boards have no DMAR; it is only a guard</td>
+</tr>
+<tr>
+<td>Core kext range <code>25.0.0..25.99.99</code></td>
+<td>kext not injected on a later Darwin</td>
+<td>change <code>CORE_KERNEL_MAX</code> in <code>tools/baremetal/build_efi.py</code></td>
+</tr>
+<tr>
+<td>AMD_Vanilla file <code>a174cca</code></td>
+<td><code>non-monotonic time</code> panic / hang on a macOS newer than 26.7.2</td>
+<td>a newer file (<code>tools/vm/data/amd_vanilla.SOURCE</code>)</td>
+</tr>
+<tr>
+<td>MCE kext with another SMBIOS</td>
+<td><code>build_efi.py --smbios X</code> refuses a model whose board-id is not in <code>MCE_BOARD_IDS</code></td>
+<td>add the model's board-id there</td>
+</tr>
+</tbody>
+</table>
+<p>Not included on purpose: WhateverGreen (it breaks this driver), SMCProcessor /
+SMCSuperIO (Intel sensors), a CPU power-management kext for Ryzen
+(<code>SMCAMDProcessor</code>, unmaintained; temperatures only), Bluetooth or Wi-Fi
+kexts (this PC has none checked).</p>
+<footer class="doc">RDNA3-Hackintosh documentation. </footer>
+</main>
+</body>
+</html>

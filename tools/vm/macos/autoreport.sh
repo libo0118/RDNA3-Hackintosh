@@ -12,7 +12,7 @@ export HOME=/var/root
 # umask - the kexts, the plugin and the bin copies this script installs must
 # stay readable for macOS and WindowServer
 pend_cp() { ( umask 077; cp "$1" "$2" ) 2>/dev/null; }
-# --standalone: a bare-metal install (package/make_pkg.sh, docs/TESTING-HW.md),
+# --standalone: a bare-metal install (package/make_pkg.sh, docs/TESTING-HW.html),
 # run by hand with sudo: the same tests and report, but no VM host - no
 # wait, no updates, no uploads - the files land in /Users/Shared/rdna3-reports
 STANDALONE=

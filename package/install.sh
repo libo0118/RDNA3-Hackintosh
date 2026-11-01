@@ -110,4 +110,4 @@ run kmutil install --update-all --check-rebuild || run kmutil load -p /Library/E
 echo
 echo "Installed. Reboot, approve the extension in System Settings > Privacy & Security"
 echo "if asked, and reboot again. Without rdna3 boot-args the default profile runs;"
-echo "for the step-by-step ladder start with rdna3lvl=0 (docs/TESTING-HW.md)."
+echo "for the step-by-step ladder start with rdna3lvl=0 (docs/TESTING-HW.html)."

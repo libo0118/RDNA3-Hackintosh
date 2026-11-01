@@ -1,6 +1,6 @@
 #!/bin/bash
 # rdna3vm - test RDNA3-Hackintosh in a macOS VM on a Linux host whose only
-# GPU is the RX 7800 XT (single-GPU passthrough). See docs/TESTING-VM.md.
+# GPU is the RX 7800 XT (single-GPU passthrough). See docs/TESTING-VM.html.
 #
 #   rdna3vm check                                 is this machine ready?
 #   rdna3vm prepare --osx-kvm DIR --artifact ZIP  one-time setup (+ after a new build)
@@ -311,7 +311,7 @@ cmd_check() {
     if sm=$(smbios_asked) && bus=$(gpu_bus); then
         ok "Mac model $([ -n "$sm" ] && echo "$sm (asked: SMBIOS_MODEL)" || echo "not asked: the OpenCore config's own, $SMBIOS_DEFAULT unless edited by hand"), card on $bus$([ "$bus" = pcie0 ] || echo " (not the default pcie0: GPU_BUS)")"
     else fail=1; fi
-    echo "     steps play-macpro / play-rootport / play-desktop change them for one run (docs/TESTING-VM.md, present-mode A/B)"
+    echo "     steps play-macpro / play-rootport / play-desktop change them for one run (docs/TESTING-VM.html, present-mode A/B)"
     say "Programs"
     local t
     for t in qemu-system-x86_64 qemu-img python3 losetup systemd-run systemd-inhibit modprobe; do
@@ -399,7 +399,7 @@ CPUS=${CPUS:-$cpus}
 CPU_MODEL="${CPU_MODEL:-$CPU_DEFAULT}"
 # CPU_MODEL="host" = the real CPU of this computer (AMD Ryzen: OpenCore gets the AMD_Vanilla
 # kernel patches by itself before every boot, and loses them again with any other model);
-# docs/TESTING-VM.md. CPU_THREADS = threads per core (CPUS / CPU_THREADS cores), default 1
+# docs/TESTING-VM.html. CPU_THREADS = threads per core (CPUS / CPU_THREADS cores), default 1
 #CPU_THREADS=1
 TIMEOUT_MIN=${TIMEOUT_MIN:-30}
 AUTO_TIMEOUT_MIN=${AUTO_TIMEOUT_MIN:-8}
@@ -427,7 +427,7 @@ WINDOW_RESOLUTION=${WINDOW_RESOLUTION:-1440x900}
 # the card's BAR0 for the VM, 2^N MiB: 8 = 256 MiB (the safe default; macOS's
 # CPU-visible VRAM heap is then 144 MiB), 9 = 512 MiB (about 400 MiB visible),
 # 10 = 1 GiB (if OVMF fits it below 4 GiB). macOS in a VM uses a BAR only below
-# 4 GiB and none above 1 GiB (docs/TESTING-VM.md "A bigger BAR0"); 0 = leave it
+# 4 GiB and none above 1 GiB (docs/TESTING-VM.html "A bigger BAR0"); 0 = leave it
 # as amdgpu made it
 # RESIZE_BAR_LOG2=8
 # OVMF's 64-bit PCI window in MiB: 0 = none (all BARs below 4 GiB, what macOS in

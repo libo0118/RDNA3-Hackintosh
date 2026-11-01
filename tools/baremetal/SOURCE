@@ -3,7 +3,7 @@ tools/baremetal - what is downloaded for the bare-metal macOS 26 USB, fetched an
 What:     the owner's PC (MSI B550-A PRO, Ryzen 7 5800X, RX 7800 XT, RTL8111 Ethernet, ALC897
           audio, Crucial P3 / P310 NVMe) boots macOS 26 Tahoe through OpenCore from a USB stick.
           fetch.sh downloads the pins below into ~/rdna3-baremetal/dl, build_efi.py builds the
-          EFI folder from them, make_usb.sh writes the stick. docs/BAREMETAL.md is the procedure.
+          EFI folder from them, make_usb.sh writes the stick. docs/BAREMETAL.html is the procedure.
 Format:   tools/baremetal/pins.txt (name, version, sha256, url) is what fetch.sh reads; this file is
           the reason for each pin. tests/test_baremetal.sh checks that they agree.
 Pins:     all are official release builds, fetched and sha256 checked (BSD-3-Clause, except the
@@ -58,9 +58,9 @@ Pins:     all are official release builds, fetched and sha256 checked (BSD-3-Cla
     -b Mac-27AD2F918AE68F61 (MacPro7,1) -os latest; the script verifies every chunk against
     BaseSystem.chunklist. Fetched 2026-10-29: macOS 26.6.2 (25G83), BaseSystem.dmg 960530321
     bytes, sha256 edddd0d5869caaa12e29e6996a04f11590280580976a119dbd42c24fa62fe18e.
-Not used: WhateverGreen (no RDNA3 support, docs/INSTALL-OPENCORE.md section 6), USBToolBox /
+Not used: WhateverGreen (no RDNA3 support, docs/INSTALL-OPENCORE.html section 6), USBToolBox /
     UTBMap (not needed: the 5800X board's two USB controllers have 14 and 8 root ports, both
-    under macOS's limit of 15 per controller; docs/BAREMETAL.md), SMCProcessor, VoodooPS2.
+    under macOS's limit of 15 per controller; docs/BAREMETAL.html), SMCProcessor, VoodooPS2.
 AMD_Vanilla: the kernel patches come from tools/vm/data/amd_vanilla-a174cca.plist
     (tools/vm/data/amd_vanilla.SOURCE), the file the card VM runs.
 Update:   take a newer release's zip sha256 from its GitHub release, set pins.txt and this file,

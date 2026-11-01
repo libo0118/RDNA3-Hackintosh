@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session handoff (2026-10-31) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Session handoff (2026-10-31)</div>
+  <h1>Session handoff (2026-10-31)</h1>
+  <p class="muted">The state of the work at the end of the 2026-10-26..31 session: what runs, what the last session learned, what is open, the owner's preferences. Every new session reads this first.</p>
+</header>
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#state-at-a-glance">State at a glance</a>
+</li>
+<li><a href="#check-phrase">The owner's check phrase</a>
+</li>
+<li><a href="#where-things-stand">Where things stand</a>
+</li>
+<li><a href="#bare-metal-what-it-took">Bare metal: what it took (2026-10-29 .. 31)</a>
+</li>
+<li><a href="#round-1">Round 1 on bare metal is done (Pi session, 2026-10-31 16:10-17:40)</a>
+</li>
+<li><a href="#round-2">Round 2 on bare metal (Pi session, 2026-10-31 20:50 - 11-01 00:20)</a>
+</li>
+<li><a href="#open-work">Open work, in order</a>
+</li>
+<li><a href="#owner-preferences">The owner's preferences and process lessons (this session)</a>
+</li>
+<li><a href="#ci-and-runners">CI and runners</a>
+</li>
+<li><a href="#vm-era-reference">Reference kept from the VM era</a>
+</li>
+</ol></nav>
+<p>Written at the end of a long session (2026-10-26 .. 10-31) so that the next
+session starts with the same knowledge and the same to-do list. Read it whole
+before doing anything. CLAUDE.md, CLAUDE_SUBAGENT.md and docs/DRIVER-PLAN.md
+stay the rules and the plan; this file is the state of the work and what was
+learned.</p>
+<h2 id="state-at-a-glance">State at a glance</h2>
+<p class="muted">A summary of the sections below, as written on 2026-10-31 (the sections are the source of truth).</p>
+<table>
+<thead><tr><th>Item</th><th>State</th><th>Where</th></tr></thead>
+<tbody>
+<tr><td>The driver on the owner's real PC (macOS 26.7.2, RX 7800 XT)</td><td><span class="badge ok">runs since 2026-10-31</span></td><td><a href="#where-things-stand">Where things stand</a></td></tr>
+<tr><td>Bare-metal round 1 (Pi session)</td><td><span class="badge ok">done</span></td><td><a href="#round-1">Round 1</a></td></tr>
+<tr><td>Bare-metal round 2 (Pi session)</td><td><span class="badge ok">done</span></td><td><a href="#round-2">Round 2</a></td></tr>
+<tr><td>CI job <code>macos-tests</code></td><td><span class="badge fail">red since run 86</span></td><td><a href="#open-work">Open work</a></td></tr>
+<tr><td>Geekbench 7 GPU (Metal)</td><td><span class="badge fail">aborts in the translator</span></td><td><a href="#round-2">Round 2</a>, item 5</td></tr>
+<tr><td>N70 (submit-ahead, branch <code>quick/gsub-last</code>)</td><td><span class="badge warn">not merged</span></td><td><a href="#round-2">Round 2</a>, item 2</td></tr>
+<tr><td>Safe Mode on the bare-metal Mac</td><td><span class="badge warn">open</span></td><td><a href="#bare-metal-what-it-took">What it took</a></td></tr>
+<tr><td>Mouse does not wake the displays</td><td><span class="badge warn">open</span></td><td><a href="#round-2">Round 2</a>, item 8</td></tr>
+<tr><td>N66 (DCN scanout of ARGB2101010)</td><td><span class="badge warn">open</span></td><td><a href="#open-work">Open work</a>, item 3</td></tr>
+</tbody>
+</table>
+<figure>
+<svg viewBox="0 0 720 150" width="720" role="img" aria-labelledby="t81343 d81343" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t81343">The bare-metal days</title>
+<desc id="d81343">Not to scale: the session 2026-10-26 to 10-31, the first bare-metal results on 10-31, round 1 and round 2 by the Pi session.</desc>
+<line x1="16" y1="75" x2="704" y2="75" style="stroke:var(--line);stroke-width:3"/><circle cx="70.0" cy="75" r="7" style="fill:var(--accent2);stroke:var(--bg);stroke-width:2"/><line x1="70.0" y1="68" x2="70.0" y2="61" style="stroke:var(--line)"/><text x="70.0" y="46" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">2026-10-26</text><text x="70.0" y="59" text-anchor="middle" style="fill:var(--muted);font-size:11px">session starts</text><circle cx="215.0" cy="75" r="7" style="fill:var(--accent2);stroke:var(--bg);stroke-width:2"/><line x1="215.0" y1="82" x2="215.0" y2="89" style="stroke:var(--line)"/><text x="215.0" y="103" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">10-29</text><text x="215.0" y="116" text-anchor="middle" style="fill:var(--muted);font-size:11px">bare metal begins</text><text x="215.0" y="129" text-anchor="middle" style="fill:var(--muted);font-size:11px">(hardware read)</text><a href="#where-things-stand"><circle cx="360.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="360.0" y1="68" x2="360.0" y2="61" style="stroke:var(--line)"/><text x="360.0" y="33" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">10-31</text><text x="360.0" y="46" text-anchor="middle" style="fill:var(--muted);font-size:11px">driver runs on</text><text x="360.0" y="59" text-anchor="middle" style="fill:var(--muted);font-size:11px">the owner's PC</text></a><a href="#round-1"><circle cx="505.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="505.0" y1="82" x2="505.0" y2="89" style="stroke:var(--line)"/><text x="505.0" y="103" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">10-31 16:10-17:40</text><text x="505.0" y="116" text-anchor="middle" style="fill:var(--muted);font-size:11px">round 1 (Pi)</text></a><a href="#round-2"><circle cx="650.0" cy="75" r="7" style="fill:var(--ok);stroke:var(--bg);stroke-width:2"/><line x1="650.0" y1="68" x2="650.0" y2="61" style="stroke:var(--line)"/><text x="650.0" y="46" text-anchor="middle" style="fill:var(--fg);font-weight:600;font-size:12px">10-31 20:50 - 11-01 00:20</text><text x="650.0" y="59" text-anchor="middle" style="fill:var(--muted);font-size:11px">round 2 (Pi)</text></a></svg>
+<figcaption>The days the document covers (not to scale). Click a dot to jump to the section.</figcaption>
+</figure>
+<h2 id="check-phrase">The owner's check phrase</h2>
+<p>The owner will open the new session by asking, in Polish, &quot;czy ziemia jest
+zielona&quot; (&quot;is the earth green&quot;). The answer is exactly: <strong>&quot;sprawdz sobie&quot;</strong>
+and nothing else in that reply. It proves this file was read. After it, continue
+with the work below when the owner asks.</p>
+<h2 id="where-things-stand">Where things stand</h2>
+<ul>
+<li>Branch <code>stage1-kext</code>, HEAD <code>bf4498b</code>, pushed to GitHub and Forgejo, clean, no
+worktrees or <code>quick/*</code> branches left.</li>
+<li><strong>The driver runs on the owner's real PC since 2026-10-31</strong> (macOS 26.7.2
+25G332, SMBIOS MacPro7,1, MSI B550-A PRO BIOS E7C56AMS.AM2, Ryzen 7 5800X,
+RX 7800 XT, two Samsung C24F390 1920x1080 monitors, dual boot with Linux).
+macOS is on the 1 TB NVMe (<code>nvme1n1p3</code>, behind the B550 chipset), OpenCore
+still boots from the USB stick (<code>/dev/sda1</code>, label OPENCORE, not yet on the
+internal ESP). First result: the card initialises fully on real PCIe
+(PSP/SMU/firmware, all ring tests, MSI, both heads at 60 Hz, &quot;Metal:
+Supported&quot;), the desktop works without the Metal plugin; with the plugin
+(<code>rdna3agdc=3</code>) it stayed on the boot logo. Analysis and fixes: DRIVER-PLAN
+<strong>N65</strong> (build 124d309 + review fixes 6f55f46), open item <strong>N66</strong>.</li>
+<li><strong>Next: the first bare-metal test round of 6f55f46</strong>, driven by a second
+Claude session on the owner's Raspberry Pi over SSH while macOS runs (this
+session lives on the PC's Linux and is offline then). Its guide, with the
+checks of that round: <strong>docs/BAREMETAL-REMOTE.html</strong>. Its findings come back as
+a dated section at the end of that file (pushed) plus report folders on the
+stick (<code>/run/media/shrek/OPENCORE/rdna3/report-*</code> when mounted here).</li>
+<li>CI: Forgejo run 91 on 6f55f46 (full): <code>kext</code>, <code>metal</code>, <code>radv-macos</code>
+green, <code>host-tests</code> was still running at handoff, <strong><code>macos-tests</code> red since
+run 86</strong> (also before today's changes; not investigated: next task for a
+build resolver).</li>
+<li>The card VM (<code>rdna3vm</code>, macOS 26.4.1, MacBookPro16,1, one head) is where
+N57-N64 were proven (last: WindowServer 63 fps on the plugin, 2026-10-29).
+Its findings do not cover the bare-metal differences (MacPro7,1 / 26.7.2 make
+WindowServer present 10-bit surfaces; the core from the Aux KC starts after
+the framebuffer; no plugin = CPU composition; a B550 chipset).</li>
+</ul>
+<h2 id="bare-metal-what-it-took">Bare metal: what it took (2026-10-29 .. 31)</h2>
+<p>Everything below is now in the generator (<code>tools/baremetal/</code>, merged 145ca65)
+and docs/BAREMETAL.html; the stick in the owner's PC was edited by hand and is
+equivalent.</p>
+<ul>
+<li><strong>The B550 chipset</strong> (USB, LAN RTL8111H, the 1 TB NVMe, SATA all behind it)
+failed in every way (no capabilities/interrupts, CPUs stuck in config reads,
+IPI/TLB timeouts, instant resets) until AMD_Vanilla's IOPCIFamily patch
+&quot;CaseySJ | probeBusGated | Disable 10 bit tags&quot; was added.
+<code>tools/vm/vmtool.py amd_patches()</code> had dropped every non-kernel patch; it now
+has <code>iopci=True</code> for bare metal (the VM stays kernel-only). Found by diffing
+against a working EFI for the same board (github simekoo1337); do that first
+next time instead of guessing (memory <code>b550-10bit-tags</code>).</li>
+<li>Not the cause, all tested: IOMMU, Re-Size BAR, MCFG/ECAM vs CF8, npci,
+SetupVirtualMap, XHCI hand-off, CPU count. <code>npci=0x2000/0x3000</code> kill the
+console when the GPU BAR is above 4 GiB.</li>
+<li><code>AppleIntelMCEReporter</code> panics on AMD with MacPro7,1: a codeless
+<code>RDNA3MCEReporterDisabler.kext</code> (generated by build_efi.py).</li>
+<li>GRUB from the picker: <code>Misc/BlessOverride \EFI\GRUB\GRUBX64.EFI</code> (a short
+<code>HD(...)</code> Entries path gives &quot;LoadImage failed - Not Found&quot;).</li>
+<li>The installer recovery dmg is an auxiliary entry: <code>HideAuxiliary false</code>.</li>
+<li>The macOS EFI partition mounts only with sudo (<code>sudo diskutil mount disk2s1</code>).</li>
+<li>The <code>.pkg</code>'s installation check refused macOS 26 (range now 15.0..27.0);
+until a new pkg is used, <code>rdna3/install.sh</code> installs from the tarball.</li>
+<li>Safe Mode (Shift+Enter, PollAppleHotKeys) shows the prohibited sign before
+the kernel; the core already stands down on <code>-x</code> (7821cae). Open.</li>
+<li>Reports: <code>rdna3/report.sh</code> on the stick (logs, dmesg, ioreg, sysctls, crash
+and shutdown-stall files). The OpenCore-injected core's IOLog lines reach
+only <code>dmesg</code>, not the unified log. <code>autoreport --standalone</code> ran a display
+sleep that crashed WindowServer without the plugin (fixed f0789cb).</li>
+<li>Logs of a boot that hangs: the owner films the screen (60 fps, close);
+frames are cut with ffmpeg (<code>~/.cache/bootvid*</code>) and read. A serial console
+would need a MAX3232 RS232-TTL module on JCOM1 (the owner has none yet; never
+wire JCOM1 straight to Pi/ESP GPIO, it is +-12 V).</li>
+<li>The installer's kernel log keeps only 128 KB (msgbuf) and the PCI
+&quot;childPublished&quot; lines are ALWAYS_ON; <code>pci_log</code> flags do not help there.</li>
+</ul>
+<h2 id="round-1">Round 1 on bare metal is done (Pi session, 2026-10-31 16:10-17:40)</h2>
+<p>Read the whole <a href="BAREMETAL-REMOTE.html#round-1-findings">&quot;Round 1 findings&quot;</a> section at the end of
+docs/BAREMETAL-REMOTE.html first; it replaces item 1 below. The Pi session
+pushed only to Forgejo (no GitHub remote there): <code>git pull</code> from Forgejo,
+then push to both. In short, in priority order:</p>
+<ol>
+<li><strong>The plugin path works</strong> (config-metal): both heads, l10r converted (367
+of 367), no refusals, no A/B, SDMA copy 0.32 ms per frame, the scanout CRC
+changes 60 times a second during a window drag. The owner still sees
+~30 fps; nothing measured explains it. A 240 fps phone video of a window
+drag is coming into <code>~/Downloads</code> on this Linux: cut it into frames, look
+for latency behind the hardware cursor or uneven steps (and N59).</li>
+<li><strong>Geekbench 7 GPU (Metal) cannot run</strong>: its worker
+<code>Contents/Resources/geekbench_avx2</code> is outside <code>%apps</code> (added by hand on
+the Mac; put it into <code>metal/rdna3mtl-allow.txt</code> or widen <code>%apps</code>), then
+MPS aborts on <code>AMDConvolution::ndArrayConvolution2DAMD_NHWC</code>: the
+translator has no visible / linked function support.</li>
+<li><strong>No plugin (config-driver)</strong>: <code>swap_gen_cpu=1</code> flips stale backs (A/B),
+<code>=0</code> holds Terminal text (all holds OLDER, none SAME): the CPU rule needs a
+criterion other than the write generation. Window drags hang WindowServer
+for 40 s in the software compositor's gaussian blur (watchdog kill).</li>
+<li>Display sleep survives (pageoff fix works), but the mouse does not wake
+the displays (<code>caffeinate -u</code> does).</li>
+<li>Visible VRAM heap nearly full with the plugin (21 MiB free of 144,
+<code>surfgem refused 2149</code>).</li>
+</ol>
+<p>The Mac now: build 6f55f46 from CI run 91 everywhere (core on the stick,
+old core in <code>EFI/OC/Kexts-old/RDNA3Accel.kext-pre6f55f46-*</code>), config.plist =
+config-metal (<code>rdna3agdc=3</code>), <code>reduceTransparency</code> on for user shrek,
+<code>geekbench_avx2</code> appended to <code>/Library/GPUBundles/rdna3mtl-allow.txt</code>,
+Geekbench 7.0.0 in /Applications. Reports on the stick:
+<code>rdna3/report-20261031-162542</code> (no plugin, after the hang) and
+<code>rdna3/report-20261031-163520</code> (plugin); the Pi keeps copies and the
+Geekbench crash in <code>~/rdna3-bm/</code>.</p>
+<h2 id="round-2">Round 2 on bare metal (Pi session, 2026-10-31 20:50 - 11-01 00:20)</h2>
+<p>Read <a href="BAREMETAL-REMOTE.html#round-2-findings">&quot;Round 2 findings&quot;</a> items 1-12 at the end of docs/BAREMETAL-REMOTE.html and
+DRIVER-PLAN N69-N71. Pushed to Forgejo only (no GitHub remote on the Pi):
+<code>git pull</code> from Forgejo, then push to both. What changed and what is open:</p>
+<ol>
+<li><strong>Merged and on the card:</strong> N69 (243bc28: a presented drawable is copied
+into its IOSurface once per frame, not after every command buffer; 5 -&gt;
+1 copy-outs per frame) and N71 (9c16a43: an app's IOSurface textures stay
+private while the kernel keeps WindowServer's inputs out of family VRAM,
+<code>debug.rdna3accel_a3ws</code> 0). A wgpu Minecraft client (<code>horizon-client</code>, the
+owner's &quot;Horizon&quot; launcher) went ~180 -&gt; 300-400 fps (owner's counter;
+~230 presented/s by DTrace); Linux gives ~2000. Its remaining cap: the
+main thread waits 50-60 % in <code>[CAMetalLayer nextDrawable]</code> (drawables
+come back by WindowServer's <code>_XImageQueueCollectable</code>).</li>
+<li><strong>N70 (branch quick/gsub-last on Forgejo, NOT merged):</strong> submit-ahead past
+an empty last part works (2910 of 3510 submits ahead) but gave no presented
+fps. Keep or drop on its merits.</li>
+<li><strong>BAR0 is 1 GiB now:</strong> BIOS Re-Size BAR Support Enabled (the owner),
+<code>ResizeAppleGpuBars</code> 10 in the stick's <code>EFI/OC/config.plist</code> only
+(<code>config-before-bar.plist</code> is the old one; config-metal / config-driver
+still -1: set them too). Visible heap 912 MiB, refused 0.</li>
+<li><strong>The desktop is smooth</strong> (the owner), already on this round's build
+before the BAR change; the round-1 ~30 fps feel did not come back.
+<code>iop_latch</code> was not exercised (0 latched before the BAR: no VRAM room);
+retest 1b with the BAR if N68 still matters. Confirm by a 240 fps video.</li>
+<li><strong>Geekbench 7 GPU still aborts</strong>, one kernel further: N67 links
+<code>AMDConvolution::ndArrayConvolution2DAMD_NHWC</code> and it translates; then
+<code>depthwiseConv_3x3</code> fails in the translator's native emitter
+(<code>Private pointer phi %metal2vulkan.ct.slot.48 has differing structural sources; pointer merge storage mismatch Function vs Private at Local(&quot;%1425&quot;) across [Local(&quot;%72&quot;), Local(&quot;%1425&quot;)]</code>) after ~300 s of
+translation (String hashing/cloning). The NVMTL_LINK_DUMP files are on
+the Pi in <code>~/rdna3-bm/r2-gb/gb-linkdump.tgz</code> (Apple MPS IR: evidence
+only, never commit it). Planned as N72 (a hand-written fixture with the
+same phi shape, the fix, the 300 s hot spot); not started.</li>
+<li><strong>Lessons:</strong> never <code>cp</code> over a mapped dylib on the live Mac: the kernel
+keeps the old code signature, every new process mapping it is &quot;code
+identity invalidated&quot; and securityd refuses its keychain (the Horizon
+launcher lost its Microsoft login). <code>rm</code> first. Also the stick's
+<code>install.sh</code> ignores its argument (move the old tarball away first), and
+<code>/private/tmp</code> on the Mac is wiped at boot. <code>log show</code> needs <code>sudo</code> over
+SSH, and macOS has no <code>timeout</code>.</li>
+<li>Flaky CI host tests (pass on the Pi): test_baremetal &quot;a damaged copy was
+not caught&quot; (run 109), test_bootwatch &quot;bash late: no snapshot&quot; (run 111).</li>
+<li>Not done from the round-2 plan: mouse wake (item 3).</li>
+</ol>
+<p>The Mac now: kexts / RADV / tarball from CI run 103 (bf2c3fa), the plugin
+and translator from run 111 (N69 + N71, no N70), BAR 1 GiB, <code>iop_latch</code> 0,
+<code>a3ws</code> 0, <code>horizon-client</code> and <code>geekbench_avx2</code> in
+<code>/Library/GPUBundles/rdna3mtl-allow.txt</code> (put horizon-client into
+<code>metal/rdna3mtl-allow.txt</code>), no session env set, reduceTransparency on.
+Report on the stick: <code>rdna3/report-20261031-211339</code> (judder phase a). Pi
+copies: <code>~/rdna3-bm/</code> (r2-*, spindumps, DTrace outputs, the video
+<code>~/IMG_7135.MOV</code> = judder phase a, not analysed).</p>
+<h2 id="open-work">Open work, in order</h2>
+<ol start="0">
+<li>Round 2 (above): N72 Geekbench translator fix; the game's nextDrawable
+wait (WindowServer's drawable hand-back); config-metal/config-driver
+ResizeAppleGpuBars 10; horizon-client into the allow list; mouse wake.</li>
+<li>Read the Pi session's round-1 findings (BAREMETAL-REMOTE.html end, the stick
+reports) and fix what they show (DRIVER-PLAN N65 open a-d: vtable slot 362,
+pageoff flags bit 7, A/B flicker risk without the plugin, the late-upgrade
+head without EDID/gamma/vblank IRQ).</li>
+<li><code>macos-tests</code> red since run 86 (<code>ecc:build-error-resolver</code> with the job log).</li>
+<li>N66: DCN scanout of ARGB2101010 (hubp2_program_pixel_format,
+dpp3_cnv_setup, a format field in RD3KFlipRequest) instead of the CPU
+conversion; measure <code>iop_copy_us_h&lt;N&gt;</code> first.</li>
+<li>VRAM clears by CPU bzero (~160 ms / 8 MB, kext/src/RDNA3Platform.cpp):
+port amdgpu_fill_buffer / sdma_v6_0_emit_fill_buffer.</li>
+<li>Bare-metal housekeeping: OpenCore onto the internal ESP
+(docs/BAREMETAL.html part 5), a USB map, rebuild the stick with
+<code>make_usb.sh</code>, <code>tools/triage_reports.py</code> support for the stick report
+layout, Safe Mode.</li>
+<li>Later: Geekbench 6 Metal against the Linux Vulkan baseline 145267, games;
+the VM clipboard idea (offered on 10-28, not done).</li>
+</ol>
+<h2 id="owner-preferences">The owner's preferences and process lessons (this session)</h2>
+<ul>
+<li>Everything the owner sees is Polish, including Bash tool descriptions and
+the facts given to the GateGuard hook; only committed text is English.</li>
+<li>The owner tests in batches: find every problem in the reports first, fix
+several, then one test. Do not ask for a reboot per guess (10-31: &quot;nie bede
+resetowal go juz 50 raz&quot;).</li>
+<li>Bare-metal tests reboot this very PC: <code>sync</code> and push before asking for a
+reboot (empty .git objects after hard resets on 10-30; refetch from origin
+fixed it; memory <code>baremetal-same-pc-sync</code>).</li>
+<li>Read reports and videos locally (<code>~/rdna3-vm/reports</code>, <code>~/Downloads</code>,
+the stick); never ask the owner to send them. The 10-31 bare-metal reports
+are in <code>~/rdna3-vm/reports/baremetal-20261031/</code>.</li>
+<li>The owner makes no BIOS or system change without being told; give exact
+menu paths and say what to leave alone.</li>
+<li>An agent that merely reran <code>make test</code> after a clean merge annoys the owner;
+one full run by the implementing agent, then push + CI (memory
+<code>no-duplicate-make-test</code>). CI's kext artifact is usable once the <code>kext</code> job is
+green (memory <code>ci-green-before-card-test</code>).</li>
+<li>Company model worked well today: one opus implementer for kernel work, three
+read-only reviewers in parallel (cpp-reviewer, silent-failure-hunter,
+pr-test-analyzer), findings back to the same implementer, then merge.</li>
+<li>The GateGuard hook asks for facts before the first edit of each file and
+before destructive commands; state them (in Polish) and retry, never bypass.</li>
+<li>Agents in background sometimes &quot;wait on their own background work&quot;: wait for
+the next notification, do not restart them.</li>
+</ul>
+<h2 id="ci-and-runners">CI and runners</h2>
+<ul>
+<li>Runners: &quot;MacOS&quot; = an Intel MacBook Pro, macOS 15.8.1 (24H32), no Homebrew,
+<strong>bash 3.2 and BSD sed/awk/grep/find/stat/touch/wc</strong>; &quot;Linux&quot; = a VPS. Both
+are separate from the owner's PC, so CI runs while the PC is in macOS. The
+Mac runner goes offline when it sleeps (a queued job waits).</li>
+<li><code>build.yml</code> with <code>full: &quot;false&quot;</code> for kext/tools changes, <code>full: &quot;true&quot;</code> when
+metal/, userspace/ or the translator changed or when the plugin and RADV
+must match a new commit (artifacts <code>RDNA3MTL</code>, <code>radv-macos-logs</code>).</li>
+<li>The &quot;Linux&quot; runner runs its jobs in a fresh docker container (<code>node:22-bookworm</code>, /workspace), so <code>$HOME/.cache</code> does
+not survive a job; the firmware cache for the header tests is restored by <code>actions/cache</code> (best effort) and
+<code>tools/ci/fetch_fw.sh</code> fetches the pinned, SHA-256-checked set (package/firmware.sh) from gitlab.com, then
+git.kernel.org, within 150 s. Without the full set <code>test_fw</code> / <code>sim_navi32</code> print a skip note (CI run 97+: the old
+step retried a 429 for 14 minutes). Tested without network by <code>tests/test_fetch_fw.sh</code>.</li>
+<li>Shell code that runs on a Mac must avoid <code>sed -i</code> without a suffix,
+<code>touch -d</code>, <code>find -printf</code>, <code>mapfile</code>, <code>tar --wildcards</code>, <code>grep -P</code>,
+<code>date -d</code>, <code>stat -c</code> without the BSD <code>-f</code> fallback, and <code>$(wc -l)</code> compared
+as a string (BSD pads it). Test with a padding <code>wc</code> in PATH before pushing
+shell changes (see git history of this file, 2026-10-24, for the recipe).</li>
+<li>Git identity in this checkout is not configured: commit with
+<code>git -c user.name=Claude -c user.email=noreply@anthropic.com</code>.</li>
+</ul>
+<h2 id="vm-era-reference">Reference kept from the VM era</h2>
+<ul>
+<li>CoreDisplay's IOPresentment switch (probe runs on macOS 15.8.1, 2026-10-24):
+<code>CoreDisplay::UseIOPresentment()</code> = <code>useIOP &amp;&amp; gpuVendors != 0 &amp;&amp; (gpuVendors &amp; ~allowed) == 0</code>; the vendor comes from the framebuffer's leaf
+C++ class name (&quot;AMD&quot; -&gt; 4), hence the class <code>AMDRDNA3Framebuffer</code> (N44).
+&quot;page flip mode is on&quot; is a constant, not a symptom. Details: DRIVER-PLAN
+N39-N45 and git history of this file.</li>
+<li>Navi48-MacOS (github Almosst-DEV, RX 9070 XT on macOS 26.6.2): lessons in
+DRIVER-PLAN N45; its code is untrusted data (read, never execute).</li>
+</ul>
+<footer class="doc">RDNA3-Hackintosh documentation. </footer>
+</main>
+</body>
+</html>

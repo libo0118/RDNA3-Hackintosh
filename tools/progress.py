@@ -42,7 +42,7 @@ NOT_APPLICABLE = ROOT / "tools" / "progress" / "not-applicable.txt"
 DRIVER_DIRS = ["hw", "kext", "uapi", "common", "fb", "accel", "userspace/libdrm_xnu"]
 DRIVER_EXT = {".c", ".h", ".cpp", ".hpp", ".m", ".mm"}
 
-# group -> ladder steps (docs/TESTING-VM.md) that must pass on the card for
+# group -> ladder steps (docs/TESTING-VM.html) that must pass on the card for
 # the group to count as working; a step no ladder has yet keeps it unverified
 AMDGPU_STEPS = {
     "PSP 13": ["4"], "SMU 13 power": ["5"], "GMC / GPUVM": ["6", "7"],

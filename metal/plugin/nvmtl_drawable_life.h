@@ -1,7 +1,7 @@
 /*
  * nvmtl_drawable_life.h - where a CAMetalLayer drawable spends its time on the way back to the app (DRIVER-PLAN N73).
  *
- * Bare metal 2026-10-31, round 2 (docs/BAREMETAL-REMOTE.md "Round 2 findings" 3, 6, 11): horizon-client (a wgpu Minecraft
+ * Bare metal 2026-10-31, round 2 (docs/BAREMETAL-REMOTE.html "Round 2 findings" 3, 6, 11): horizon-client (a wgpu Minecraft
  * client) presents ~230 frames a second where Linux/RADV gives ~2000; its main thread waits 50-60 % in
  * -[CAMetalLayer nextDrawable], the drawables coming back by WindowServer's _XImageQueueCollectable message. A drawable's
  * cycle, with the stages the plugin can see:
