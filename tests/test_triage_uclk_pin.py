@@ -23,8 +23,19 @@ def level(props, log=""):
     return rows[0][0] if rows else None
 
 
+T0 = "decision 1, pins 1, releases 0, fails 0, unconfirmed 0"
 PINNED = ("UCLK pinned (two heads, unsynchronised, no FPO / SubVP: no shared vblank) at 1218 MHz: hard min sent now "
-          "(init, decision 1, pins 1, releases 0, fails 0)")
+          "(init, " + T0 + ")")
+PINNED_AFTER_FAIL = PINNED.replace("fails 0", "fails 2")
+PINNED_UNCONF = ("UCLK pinned (two heads, unsynchronised, no FPO / SubVP: no shared vblank) at 1218 MHz: hard min sent "
+                 "now, accepted, NOT confirmed by ReturnHardMinStatus (init, decision 1, pins 1, releases 0, fails 0, "
+                 "unconfirmed 1)")
+GAVE_UP = ("UCLK pin GAVE UP (mode set): 3 refused / unanswered SetHardMinByFreq in a row (last -62): no DAL message "
+           "until the next bring-up, UCLK as the PMFW has it (last minimum 0 MHz); two heads lit (decision 3, pins 0, "
+           "releases 0, fails 3, unconfirmed 0)")
+TIMED_OUT = ("UCLK pin FAILED (mode set): SetHardMinByFreq(UCLK, 1218 MHz) for two heads (unsynchronised, no FPO / "
+             "SubVP: no shared vblank) -> -62 (no answer from the DAL mailbox), tried again at the next update, 1 in a "
+             "row of 3 allowed (decision 1, pins 0, releases 0, fails 1, unconfirmed 0)")
 ONE = ("UCLK switching (one head: its vblank hides the switch; 1 head lit): no hard min sent, the PMFW's own (init, "
        "decision 1, pins 0, releases 0, fails 0)")
 RELEASED = ("UCLK switching (one head: its vblank hides the switch; 1 head lit): hard min released to the lowest level "
@@ -34,7 +45,8 @@ TWO_SWITCHING = ("UCLK switching (the heads' timings synchronised: one shared vb
 OFF = ("UCLK switching (switched off (rdna3uclkpin=0 / debug.rdna3_uclk_pin 0); two heads lit): hard min released to "
        "the lowest level now (sysctl, decision 2, pins 1, releases 1, fails 0)")
 FAILED = ("UCLK pin FAILED (mode set): SetHardMinByFreq(UCLK, 1218 MHz) for two heads (unsynchronised, no FPO / SubVP: "
-          "no shared vblank) -> -5, tried again at the next update (decision 2, pins 0, releases 0, fails 1)")
+          "no shared vblank) -> -5 (refused by the PMFW), tried again at the next update, 1 in a row of 3 allowed "
+          "(decision 2, pins 0, releases 0, fails 1, unconfirmed 0)")
 UNAVAIL = ("UCLK pin (N74) unavailable (init): the PMFW's DAL mailbox did not answer at the bring-up (-62); two heads "
            "lit, UCLK left to the PMFW")
 MALL = ("mode set: state 0, UCLK switching at 96 MHz (vactive), FCLK switching, DCFCLK 506 MHz, deep sleep 10 MHz, WM A "
@@ -53,6 +65,15 @@ check(level({"DisplayHeads": 2}) == "WARN", "two heads without RDNA3,DCNPower is
 check(level({"DisplayHeads": 1, "ExtendHead": 1}) == "WARN", "the extended clone head counts as a second head")
 check(level({"DisplayHeads": 1}) is None, "one head without the property: no row")
 check(level({"DCNPower": MALL}) == "INFO", "the rdna3mall path is INFO")
+check(level({"DCNPower": PINNED_AFTER_FAIL}) == "WARN", "pinned after failed messages is a WARN")
+check("2 SetHardMinByFreq" in uclk_pin_rows({"DCNPower": PINNED_AFTER_FAIL})[0][2], "the earlier failures counted")
+check(level({"DCNPower": PINNED_UNCONF}) == "WARN", "an unconfirmed pin is a WARN")
+check(level({"DCNPower": GAVE_UP}) == "FAIL", "giving up is a FAIL")
+r = uclk_pin_rows({"DCNPower": TIMED_OUT})[0]
+check(r[0] == "FAIL" and "did not answer" in r[2] and "refused SetHardMin" not in r[2], "a timeout is not called a refusal")
+r = uclk_pin_rows({"DCNPower": FAILED})[0]
+check(r[0] == "FAIL" and "the PMFW refused" in r[2], "a refusal is called one")
+check(level({"DCNPower": RELEASED.replace("fails 0", "fails 1")}) == "WARN", "a release after a failure is a WARN")
 
 if FAILS:
     print("test_triage_uclk_pin: %d check(s) failed" % len(FAILS))

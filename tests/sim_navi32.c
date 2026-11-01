@@ -376,6 +376,9 @@ typedef struct sim {
     /* N74: the PMFW refuses DAL message 'dal_refuse' (0 = none) with
      * DALSMC_Result_Failed */
     unsigned dal_refuse, dal_refused;
+    /* N74: the PMFW never answers DAL message 'dal_silent' (0 = none), and
+     * ReturnHardMinStatus leaves out the bits of 'dal_status_omit' */
+    unsigned dal_silent, dal_silenced, dal_status_omit;
     unsigned dal_norder, dal_order[8], dal_order_nseq[8], dal_order_htotal[8];
     /* the PMFW stops answering once the DMCUB ran this many VBIOS commands
      * (0 = never), as it did on the card after the clone */
@@ -4895,6 +4898,11 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (dw == RD_DAL_MSG_REG) {
         uint32_t arg = S.reg[RD_DAL_ARG_REG];
         S.dal_msgs++;
+        if (S.dal_silent && v == S.dal_silent) {
+            S.dal_silenced++;
+            *R(dw) = v;          /* taken, never answered: RESP stays 0 */
+            return;
+        }
         if (S.dal_refuse && v == S.dal_refuse) {
             S.dal_refused++;
             S.reg[RD_DAL_RESP_REG] = 0xff;   /* DALSMC_Result_Failed */
@@ -4933,7 +4941,7 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             S.reg[RD_DAL_ARG_REG] = (arg & 0xff) == 0xff ? S.dal_dpm_n
                                   : (arg & 0xff) < S.dal_dpm_n ? S.dal_dpm[arg & 0xff] : 0;
         } else if (v == RD_DALSMC_MSG_ReturnHardMinStatus)
-            S.reg[RD_DAL_ARG_REG] = 0x3f;
+            S.reg[RD_DAL_ARG_REG] = 0x3f & ~S.dal_status_omit;
         else
             S.reg[RD_DAL_RESP_REG] = 0xfe;   /* DALSMC_Result_UnknownCmd */
         *R(dw) = v;

@@ -79,6 +79,11 @@ int  dcn32_smu_num_displays(rdna3_dev *d, uint32_t n);
  * PMFW's answer. */
 int  dcn32_smu_set_hard_min(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t pmfw,
                             uint32_t *got_khz);
+/* the same; '*taken' (may be NULL) 1 when the PMFW answered SetHardMinByFreq
+ * OK, so an RDNA3_ETIME with '*taken' 1 is the status wait's: the minimum
+ * was accepted but ReturnHardMinStatus did not confirm it within 2 s */
+int  dcn32_smu_set_hard_min_ex(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t pmfw,
+                               uint32_t *got_khz, int *taken);
 
 /* Can the display clocks carry one more pipe at 'pclk_khz' without ODM
  * combine? DISPCLK and DPPCLK at least the pixel rate (DML's single-pipe

@@ -595,8 +595,12 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe, bool reinit)
             PE_parse_boot_argn("rdna3pstate", &pf, sizeof(pf));
             fMirror->pstate_force = pf & 3;
         }
-        if (ret == RDNA3_OK)
+        if (ret == RDNA3_OK) {
+            /* N74: UCLK pinned before the second head fetches
+             * (dcn32_prepare_bandwidth raises clocks before the plane) */
+            displayUclkPinRaise("mirror on (before the clone)", 1);
             ret = dcn32_clone_enable(fDispDev, dm, fMirror);
+        }
         if (ret == RDNA3_OK) {
             /* does the new pipe make the boot head's picture? (frame
              * counter + OTG CRC); a pass with a black monitor = PHY side */
@@ -619,6 +623,7 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe, bool reinit)
         } else {
             snprintf(val, sizeof(val), "failed (%d) on %s-%u", ret, vbios_connector_name(p->connector),
                      p->connector_enum);
+            displayUclkPinUpdate("mirror failed");   /* N74: the raise before the clone taken back */
         }
         break;
     }
@@ -791,6 +796,7 @@ void RDNA3Accel::displayShutdown()
     hotplugStop();
     /* item O: no phantom pipe or CAB left for the next driver, UCLK pinned */
     fPowerStop = true;
+    displayUclkPinStop("shutdown");   /* N74: a pin stays for the next driver (the PMFW restarts with the card) */
     if (fPowerOn && fDispLock) {
         IOLockLock(fDispLock);
         displayPowerQuiesce(true);
@@ -812,7 +818,7 @@ void RDNA3Accel::displayShutdown()
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
 {
     displayPowerFree();   /* item O: SubVP / CAB off while the DMCUB runs */
-    displayUclkPinStop();   /* N74: no DAL message until the next bring-up */
+    displayUclkPinStop("the bring-up goes");   /* N74: no DAL message until the next bring-up */
     fMirrorDm = nullptr;
     fDisplayDm = nullptr;
     if (fHotplugCall)
@@ -1097,6 +1103,8 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
     IOLockLock(fDispLock);
     int r;
     displayNoteBlank(head, blank);   /* D4: what a restore brings back */
+    if (!blank && !fDispAsleep)
+        displayUclkPinRaise("display wake (before the unblank)", 0);   /* N74: pinned before the head fetches */
     /* rdna3dpms=2: the head we lit ourselves also takes its link down, so
      * the monitor goes to standby (dcn32_clone_link) */
     if (fDispAsleep)

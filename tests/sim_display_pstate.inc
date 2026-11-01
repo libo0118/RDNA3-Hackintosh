@@ -801,8 +801,52 @@ static void test_uclk_pin(rdna3_dev *dev)
     CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
     dcn32_uclk_pin_power_lost(&u);
     S.dal_hard_min[RD_PPCLK_UCLK] = 0;
-    CHECK(u.p_state_change_support && u.hard_min_mhz == 0);
+    CHECK(u.p_state_change_support && u.hard_min_mhz == 0 && u.resync);
     CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+    /* a suspend that kept the power (the pin still in the PMFW): the wake's
+     * one-head decision is sent, not skipped as "unchanged" */
+    dcn32_uclk_pin_power_lost(&u);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 96 &&
+          !u.resync);
+
+    /* accepted, but ReturnHardMinStatus never shows UCLK (0x20): taken as
+     * set, not sent again, no failure */
+    S.dal_status_omit = RD_CHECK_HARD_MIN_CLK_UCLK;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+    CHECK(!u.p_state_change_support && u.unconfirmed == 1 && u.last_unconfirmed && !u.resync && u.fails == 2 &&
+          u.consecutive_fails == 0 && u.last_err == RDNA3_ETIME);
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 0 && S.dal_msgs == msgs);
+    S.dal_status_omit = 0;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1 && !u.last_unconfirmed &&
+          u.last_err == 0 && S.dal_hard_min[RD_PPCLK_UCLK] == 96);
+
+    /* SetHardMinByFreq never answered (the mailbox wait times out): a
+     * failure each; RD_UCLK_PIN_MAX_FAILS in a row and the pin gives up */
+    S.dal_silent = RD_DALSMC_MSG_SetHardMinByFreq;
+    S.dal_silenced = 0;
+    for (k = 0; k < RD_UCLK_PIN_MAX_FAILS; k++) {
+        CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_ETIME && sent == 1);
+        S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;   /* the PMFW answers the next one's wait at once */
+    }
+    CHECK(S.dal_silenced == RD_UCLK_PIN_MAX_FAILS && u.gave_up && !u.ready && u.consecutive_fails == RD_UCLK_PIN_MAX_FAILS &&
+          u.p_state_change_support);
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_ENODEV && sent == 0 && S.dal_msgs == msgs);
+    S.dal_silent = 0;
+
+    /* GetSmuVersion refused at the init: not ready, nothing sent */
+    S.dal_refuse = RD_DALSMC_MSG_GetSmuVersion;
+    CHECK(dcn32_uclk_pin_init(dev, &u, 0) == RDNA3_ENODEV && !u.ready && !u.gave_up && u.last_err == RDNA3_EIO);
+    S.dal_refuse = 0;
+    S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_ENODEV && S.dal_msgs == msgs);
+    /* GetSmuVersion never answered */
+    S.dal_silent = RD_DALSMC_MSG_GetSmuVersion;
+    CHECK(dcn32_uclk_pin_init(dev, &u, 0) == RDNA3_ENODEV && !u.ready && u.last_err == RDNA3_ETIME);
+    S.dal_silent = 0;
+    S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;
 
     /* a bring-up again after a pin (resync): the first decision is sent,
      * even one head's release */
@@ -815,6 +859,6 @@ static void test_uclk_pin(rdna3_dev *dev)
 
     memcpy(S.reg, save, sizeof(save));
     SP.on = 0;
-    S.dal_refuse = 0;
+    S.dal_refuse = S.dal_silent = S.dal_status_omit = 0;
     memset(S.dal_hard_min, 0, sizeof(S.dal_hard_min));
 }

@@ -537,7 +537,18 @@ typedef struct rdna3_uclk_pin {
     uint32_t why, lit;                       /* the last decision */
     uint32_t decisions, pins, releases, fails;
     int      last_err;                       /* of the last message (0 after one that went through) */
+    /* accepted by SetHardMinByFreq but not confirmed by ReturnHardMinStatus
+     * within 2 s: taken as set (amdgpu's dcn32_smu_set_hard_min_by_freq only
+     * prints "SMU Hard Min not set within 2s" then) */
+    uint32_t unconfirmed;
+    int      last_unconfirmed;               /* the last message was such a one */
+    uint32_t consecutive_fails;              /* refused / unanswered in a row */
+    int      gave_up;                        /* RD_UCLK_PIN_MAX_FAILS in a row: 'ready' 0 until the next init */
 } rdna3_uclk_pin;
+
+/* refused / unanswered messages in a row before the pin stops sending (each
+ * may hold the display lock up to 2 s in the mailbox wait) */
+#define RD_UCLK_PIN_MAX_FAILS 3
 
 /* dcn32_init_clocks' part: GetSmuVersion and the UCLK levels over the DAL
  * mailbox (read-only messages); switching supported as
@@ -551,11 +562,16 @@ int  dcn32_uclk_pin_init(rdna3_dev *d, rdna3_uclk_pin *u, int resync);
  * for it: SetHardMinByFreq(UCLK, top level) when switching stops being
  * supported, SetHardMinByFreq(UCLK, lowest level) when it is supported
  * again; nothing when nothing changed (unless 'resync'). '*sent' 1 when a
- * message went out. A refused message leaves the state as it was and
- * 'resync' set (the next decision tries again). RDNA3_ENODEV when not
+ * message went out. Accepted but not confirmed by the status wait: taken
+ * as set, counted in 'unconfirmed', 0 returned. A refused or unanswered
+ * message leaves the state as it was and 'resync' set (the next decision
+ * tries again); RD_UCLK_PIN_MAX_FAILS of them in a row and the pin gives
+ * up ('gave_up', 'ready' 0) until the next init. RDNA3_ENODEV when not
  * ready, else 0 or the DAL mailbox's error. */
 int  dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int synchronized, int off, int *sent);
-/* the card lost its power (the PMFW started again with its own minimum) */
+/* the IPs went down in a sleep (the card lost its power, or amdgpu's
+ * suspend ran with it kept): the PMFW may hold its own minimum or still
+ * ours, so the next decision is sent whatever it is */
 void dcn32_uclk_pin_power_lost(rdna3_uclk_pin *u);
 
 #ifdef __cplusplus

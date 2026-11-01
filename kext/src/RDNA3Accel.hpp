@@ -472,7 +472,7 @@ private:
     void          displayPowerFlip(uint32_t head, uint64_t addr, bool immediate, int when);
     void          displayPowerQuiesce(bool pin);
     void          displayPowerSuspend();
-    void          displayPowerWake(bool powerLost);
+    void          displayPowerWake(bool powerLost, bool pmfwBack = true);
     void          displayPowerFree();
     static void   displayPowerTick(void *owner, void *);
     /* N74: the default path's UCLK pin (rdna3mall 0; boot-arg rdna3uclkpin,
@@ -482,9 +482,12 @@ private:
     bool          fUclkPinOn   = true;          /* the switch (boot-arg / sysctl) */
     bool          fUclkPinEver = false;         /* a pin went through since the start */
     bool          fUclkPinSysctl = false;
+    bool          fUclkPinNoDevLogged = false;
     uint32_t      displayUclkPinLit(int *mirrorPipe);
     void          displayUclkPinUpdate(const char *why);
-    void          displayUclkPinStop();
+    void          displayUclkPinRaise(const char *why, uint32_t extra);
+    void          displayUclkPinApply(const char *why, uint32_t lit, int mirror);
+    void          displayUclkPinStop(const char *why);
     void          displayUclkPinFree();
     /* rdna3hdmi=1 / 3: DC's HDMI stream on TMDS heads (hw/dcn32_hdmi.c), the
      * sink's HDMI caps from the EDID of the last mode list */

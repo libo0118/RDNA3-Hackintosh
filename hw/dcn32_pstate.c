@@ -1900,7 +1900,7 @@ int dcn32_uclk_pin_init(rdna3_dev *d, rdna3_uclk_pin *u, int resync)
     /* dcn32_init_clocks: smu_present when GetSmuVersion answers */
     u->last_err = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &ver);
     if (u->last_err) {
-        RERR(d, "uclk pin: the PMFW does not answer the DAL mailbox (GetSmuVersion -> %d): UCLK is left to it",
+        RERR(d, "uclk pin: GetSmuVersion over the DAL mailbox -> %d (-5 refused, -62 no answer): UCLK is left to the PMFW",
              u->last_err);
         return RDNA3_ENODEV;
     }
@@ -1924,7 +1924,7 @@ int dcn32_uclk_pin_init(rdna3_dev *d, rdna3_uclk_pin *u, int resync)
 int dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int synchronized, int off, int *sent)
 {
     uint32_t why = 0, mhz;
-    int support = dcn32_uclk_pin_decide(lit, synchronized, off, &why), r;
+    int support = dcn32_uclk_pin_decide(lit, synchronized, off, &why), r, taken = 0;
     if (sent)
         *sent = 0;
     u->decisions++;
@@ -1939,17 +1939,40 @@ int dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int syn
      * switching again: the hard minimum at the state's DRAM clock (the lowest
      * level: dcn32_initialize_min_clocks') */
     mhz = support ? u->min_mhz : u->max_mhz;
-    r = dcn32_smu_set_hard_min(d, RD_PPCLK_UCLK, mhz, u->pmfw, NULL);
+    r = dcn32_smu_set_hard_min_ex(d, RD_PPCLK_UCLK, mhz, u->pmfw, NULL, &taken);
     if (sent)
         *sent = 1;
     u->last_err = r;
+    u->last_unconfirmed = 0;
+    if (r == RDNA3_ETIME && taken) {
+        /* accepted, ReturnHardMinStatus did not confirm it within 2 s:
+         * dcn32_smu_set_hard_min_by_freq prints and goes on; resending
+         * would only wait the 2 s again */
+        u->unconfirmed++;
+        u->last_unconfirmed = 1;
+        if (u->unconfirmed == 1 || (u->unconfirmed & 63) == 0)
+            RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) accepted but not confirmed by ReturnHardMinStatus in "
+                 "2 s (%u such): taken as set, not sent again", mhz, u->unconfirmed);
+        r = RDNA3_OK;
+    }
     if (r) {
         u->fails++;
+        u->consecutive_fails++;
         u->resync = 1;   /* not known what the PMFW holds now: the next decision is sent again */
-        RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) for %u head(s) (%s) -> %d (%u failed): tried again at the "
-             "next decision", mhz, lit, dcn32_uclk_pin_why_name(why), r, u->fails);
+        if (u->consecutive_fails >= RD_UCLK_PIN_MAX_FAILS) {
+            u->ready = 0;
+            u->gave_up = 1;
+            RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) for %u head(s) (%s) -> %d, %u in a row: GIVING UP, no "
+                 "DAL message until the next bring-up (UCLK left as the PMFW has it)", mhz, lit,
+                 dcn32_uclk_pin_why_name(why), r, u->consecutive_fails);
+        } else {
+            RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) for %u head(s) (%s) -> %d (%u failed, %u in a row): "
+                 "tried again at the next decision", mhz, lit, dcn32_uclk_pin_why_name(why), r, u->fails,
+                 u->consecutive_fails);
+        }
         return r;
     }
+    u->consecutive_fails = 0;
     u->p_state_change_support = support;
     u->resync = 0;
     u->hard_min_mhz = mhz;
@@ -1962,8 +1985,10 @@ int dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int syn
 
 void dcn32_uclk_pin_power_lost(rdna3_uclk_pin *u)
 {
-    /* the PMFW's own minimum again: as dcn32_initialize_min_clocks starts */
+    /* as dcn32_initialize_min_clocks starts; what the PMFW holds is not
+     * known (its own after a power loss, ours after a suspend that kept the
+     * power): the next decision is sent */
     u->p_state_change_support = 1;
     u->hard_min_mhz = 0;
-    u->resync = 0;
+    u->resync = 1;
 }
