@@ -244,7 +244,7 @@ static int gA3Ws = 0, gA3On = 1;
  * off (rd3AccelShareFault). 0 (the default for the first card round) = every answer as before. */
 static int gA3Share = 0;
 static SInt64 gCntA3ShareRecorded, gCntA3ShareImported, gCntA3ShareStale, gCntA3ShareWsRecordRefused,
-    gCntA3ShareNoRecord, gCntA3ShareFaultOff, gCntA3ShareRecordRefused;
+    gCntA3ShareNoRecord, gCntA3ShareFaultOff, gCntA3ShareRecordRefused, gCntA3ShareNoAccept;
 /* debug.rdna3accel_iop_flip (the IOP zero-copy flip; its sysctl is with the IOP counters) */
 static int gIopFlip = 0;
 static SInt64 gCntA3WsRefused, gCntA3OffRefused;
@@ -2769,6 +2769,7 @@ RD3ACCEL_CNT(rdna3accel_a3share_ws_record_refused, gCntA3ShareWsRecordRefused, "
 RD3ACCEL_CNT(rdna3accel_a3share_norecord,          gCntA3ShareNoRecord,        "N71 (c): WindowServer imports with sharing on but no share record (as before)");
 RD3ACCEL_CNT(rdna3accel_a3share_fault_off,         gCntA3ShareFaultOff,        "N71 (c): GPU VM faults inside a read-only shared import (each turns sharing off)");
 RD3ACCEL_CNT(rdna3accel_a3share_record_refused,    gCntA3ShareRecordRefused,   "N71 (c): share records refused for another reason (sharing off, no import of the live allocation, no VRAM, no surface)");
+RD3ACCEL_CNT(rdna3accel_a3share_noaccept,          gCntA3ShareNoAccept,        "N71 (c): WindowServer imports of a surface with a live share record that did not ask for a read-only one (an older plugin / libdrm_xnu in WindowServer, or NVMTL_WS_SHARE=0): refused as before");
 RD3ACCEL_CNT(rdna3accel_swaps_abab_h0, gCntSwapAbab[0], "head 0's swaps that showed the picture of two swaps before (A B A B: flicker)");
 RD3ACCEL_CNT(rdna3accel_swaps_abab_h1, gCntSwapAbab[1], "head 1's swaps that showed the picture of two swaps before (A B A B: flicker)");
 RD3ACCEL_CNT(rdna3accel_swaps_abab_h2, gCntSwapAbab[2], "head 2's swaps that showed the picture of two swaps before (A B A B: flicker)");
@@ -2956,7 +2957,7 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_recorded); sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_imported);
     sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_stale);    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_ws_record_refused);
     sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_norecord); sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_fault_off);
-    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_record_refused);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_record_refused); sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_noaccept);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h0);   sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h1);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h2);   sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_ababwide_h0); sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_ababwide_h1);
@@ -4086,6 +4087,30 @@ static void rd3AccelShareMiss(unsigned surfaceID, unsigned plane, RD3Resource *r
              "(a3share_norecord %lld)", surfaceID, plane, cg, !res ? " (no resource)" : !vm ? " (no vidmem)"
              : (vm->fScanout ? " (a scanout buffer)" : !vm->fRmHandle ? " (not wired)" : ""), (long long)n + 1);
 }
+/* N71 (c): a WindowServer import that did not ask for a read-only one (an older plugin / libdrm_xnu, or
+ * NVMTL_WS_SHARE=0) is refused as before. Counted and logged (the first 4, then every 1024th) only when a share
+ * record of the surface's live allocation exists, the case an opt-in would have changed: WindowServer's own
+ * display framebuffers and the surfaces of applications that share nothing never have one. Takes the family lock. */
+static void rd3AccelShareNoAccept(RDNA3Accelerator *a, void *surf, unsigned surfaceID, unsigned plane, unsigned dispHeads)
+{
+    if (!rd3FamLock(a, false)) return;
+    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, plane);
+    OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
+    RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
+    RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    const unsigned long long sg = res ? res->fShareGen : 0;
+    const int pid = res ? res->fSharePid : 0;
+    const bool live = rd3_a3_ws_policy(1, dispHeads, 0, 0, 1, sg, vm && vm->fRmHandle && !vm->fScanout ? vm->fAllocGen : 0) ==
+                      RD3_A3_ALLOW_SHARED;
+    if (cache) ((OSObject *)cache)->release();
+    rd3FamUnlock(a);
+    if (!live) return;
+    const SInt64 n = OSAddAtomic64(1, &gCntA3ShareNoAccept);
+    if (rd3_log_due((uint64_t)n, 4, 1023))
+        ALOG("surfshare: WindowServer's import of surface %u plane %u (share record of allocation #%llu, producer pid %d) does not "
+             "accept a read-only one (an older plugin / libdrm_xnu, or NVMTL_WS_SHARE=0): refused as before (a3share_noaccept %lld)",
+             surfaceID, plane, sg, pid, (long long)n + 1);
+}
 static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
 {
     p->kapiMemory = nullptr; p->bytes = 0;
@@ -4120,13 +4145,8 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
     unsigned dispHeads = 0, reason = kA3WhyNone;
     bool shareTry = false;
     const unsigned pst = rd3AccelA3Policy(surf, task, p->surfaceID, &dispHeads, &reason, acceptRo && gA3Share, &shareTry);
-    if (pst && !shareTry && gA3Share && v2 && !acceptRo && (reason == kA3WhyDisplay || reason == kA3WhyWs)) {
-        static SInt64 gNoAccept;
-        const SInt64 n = OSAddAtomic64(1, &gNoAccept);
-        if (rd3_log_due((uint64_t)n, 4, 1023))
-            ALOG("surfshare: WindowServer's import of surface %u plane %u does not accept a read-only one (an older plugin "
-                 "/ libdrm_xnu): refused as before, no share looked up (%lld such)", p->surfaceID, p->plane, (long long)n + 1);
-    }
+    if (pst && !shareTry && gA3Share && v2 && !acceptRo && (reason == kA3WhyDisplay || reason == kA3WhyWs))
+        rd3AccelShareNoAccept(a, surf, p->surfaceID, p->plane, dispHeads);
     if (pst && !shareTry) {
         const SInt64 n = rd3AccelA3WhyCount(reason);
         p->status = pst;

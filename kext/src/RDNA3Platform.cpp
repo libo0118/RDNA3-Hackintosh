@@ -631,9 +631,13 @@ int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t sur
     }
     const bool v2 = g.version == RD3K_SURFGEM_VERSION;
     const bool shared = v2 && (g.flags & RD3K_SG_SHARED_RO);
-    if (shared && !(flags & RD_SURFACE_BO_ACCEPT_RO))   /* never: the accelerator shares only when asked; the UAPI refuses it */
-        LOG("GEM: IOSurface %u plane %u: the accelerator answered a read-only shared import the caller did not ask for: "
-            "refused (EPERM)", surfaceId, plane);
+    if (shared && !(flags & RD_SURFACE_BO_ACCEPT_RO)) {   /* never: the accelerator shares only when asked; the UAPI refuses it */
+        static SInt32 gSurfBoUnasked;   /* the first few, then every 1024th (the triage FAILs on the first line) */
+        const SInt32 u = OSIncrementAtomic(&gSurfBoUnasked);
+        if (u < 4 || (u & 1023) == 0)
+            LOG("GEM: IOSurface %u plane %u: the accelerator answered a read-only shared import the caller did not ask for: "
+                "refused (EPERM) (%d such)", surfaceId, plane, (int)u + 1);
+    }
     RDNA3VramHandle *h = (RDNA3VramHandle *)g.kapiMemory;
     bo->vram_offset = h->offset;
     bo->size = h->size;

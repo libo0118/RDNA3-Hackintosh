@@ -1128,6 +1128,7 @@ static NSMapTable *nvmtl_ro_cache(id device) {
             NVMTLTexture *rb = [roCache objectForKey:key];
             int pw = 0;
             int plan = nvmtl_wss_plan(rb != nil, rb ? rb->_roGen : 0, pgen, nvmtl_vram_tag_current(surf, 0, IOSurfaceGetSeed(surf)), &pw);
+            plan = nvmtl_wss_plan_demote(plan, rb && rb->_vramRO && nvmtl_vk_wss_producer_demoted(rb->_vramBuf.share_pid));   /* nvmtl_ws_share.h: a demoted producer's cached alias is not sampled any more */
             if (plan == NVMTL_WSS_PLAN_CACHED) {
                 NVMTLTexture *alias = (NVMTLTexture *)[rb newTextureViewWithPixelFormat:d.pixelFormat];
                 if (alias) {
@@ -1141,6 +1142,11 @@ static NSMapTable *nvmtl_ro_cache(id device) {
             }
             const int po = nvmtl_wss_plan_outcome(plan, pw);
             if (po == NVMTL_WSS_PO_IMPORT) wsPlan = plan;
+            else if (po == NVMTL_WSS_PO_DEMOTED_PRIVATE) {   /* ECC review: the cached read-only alias of a demoted producer is dropped, its surface demoted */
+                wsSkip = 1;
+                [roCache removeObjectForKey:key];
+                nvmtl_vk_wss_demote(sid, "its producer was demoted (hazards): the cached read-only alias is dropped");
+            }
             else if (po == NVMTL_WSS_PO_STALE_PRIVATE) {   /* the CPU copy is the newer one: the private path; nothing is uploaded into an alias */
                 wsSkip = 1;
                 NVMTL_WSS_INC(&g_wss, stale);
