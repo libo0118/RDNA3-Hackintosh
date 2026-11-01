@@ -42,11 +42,17 @@ The owner's decision (2026-11-01): documentation is written as `.html`, not
 tables, CSS, SVG charts, code, live interactions, workflows, spatial data and
 real images. Every new document is a self-contained `.html` file (inline CSS
 and SVG, no external fetches, readable from a local checkout), and a document
-that is rewritten moves to `.html`. The one exception is this `CLAUDE.md`,
-which Claude Code reads only as Markdown. When a `.md` file becomes `.html`,
+that is rewritten moves to `.html`. The exceptions stay Markdown: this
+`CLAUDE.md` (Claude Code reads it only as Markdown), `CLAUDE_SUBAGENT.md` (the
+agents' rules) and a short `README.md` (GitHub and Forgejo render only that on
+the repository page), which carries excerpts of the full HTML status and links
+to it. All other docs are converted to proper HTML. When a `.md` file becomes `.html`,
 update in the same commit every tool, test and link that reads or names it
 (`tools/progress.py`, the triage scripts, `CLAUDE_SUBAGENT.md`, other docs).
-Brief every agent that writes docs accordingly.
+Every HTML doc uses the style and header layout of
+[docs/doc-template.html](docs/doc-template.html) (copy its `<style>` block
+verbatim) and is listed in `docs/index.html`. Brief every agent that writes
+docs accordingly.
 
 ## How we work: a company
 
