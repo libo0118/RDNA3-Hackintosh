@@ -558,11 +558,29 @@ Installed from run 117 (all jobs green): tarball, RDNA3MTL, radv-macos-logs; the
    wakes the displays within ~2 s (`HIDIdleTime` back to 0, `IODisplayWrangler`
    CurrentPowerState 1 -> 4). After 6 min without input (HIDIdleTime 360 s), 30 s of moving it
    delivered no event at all (HIDIdleTime kept counting, no USB/HID line in the kernel log);
-   the first click reset HIDIdleTime and the wrangler went 1 -> 4 in the same second. The
-   mouse's own power save drops motion until a click; once an event arrives the card and
-   both displays wake at once, so `fb/rdna3-fb.cpp` / `kIOWindowServerActiveAttribute` is
-   cleared. Asked the owner whether Linux behaves the same after a long idle.
+   the first click reset HIDIdleTime and the wrangler went 1 -> 4 in the same second. Once
+   an event arrives the card and both displays wake at once, so `fb/rdna3-fb.cpp` /
+   `kIOWindowServerActiveAttribute` is cleared. On Linux the same mouse wakes the screen by
+   motion after a long idle (the owner), so it is macOS's USB side on this machine (the most
+   likely: the dongle's port idle-suspended and motion not raising a remote wakeup; USB
+   port map / XHCI power, a hackintosh setup item), not the GPU driver.
    Side note: `bluetoothd` restarts its bluetool script every ~32 s (no Bluetooth controller;
    the owner's Realtek RTL8761BU dongle 0bda:a728 has no driver yet).
 8. **Stick:** `Booter/Quirks/ResizeAppleGpuBars` is 10 in config-metal.plist and
    config-driver.plist too now (copies `*-before-r3bar.plist` next to them).
+9. **The torn window in the 240 fps video (IMG_7137.MOV, on the Pi) is N68, and
+   `iop_latch=1` fixes it.** The owner: a dragged window splits into two parts, the lower one
+   at the mouse and the upper one late, only while the window is in the top quarter of the
+   screen. The frames show a sharp horizontal tear at about 1/4 of the height. With
+   `iop_latch` 0 the driver never flips (`iop_flips` 0); every desktop frame is copied by SDMA
+   into the LIVE scanout: on head 1, 70388 of 70430 copies ended mid-scan, 68214 of them in
+   scan bin 1 (the second quarter), i.e. the copy lands about a quarter of a refresh after the
+   vblank and the panel shows the old frame above that line. `sudo sysctl
+   debug.rdna3accel_iop_latch=1` live (BAR 1 GiB: two 8 MB D buffers, `iop_latch_vram_bytes`
+   16588800): every frame latched (`iop_latch_n_h0/h1` = `swaps_pq_latched_h0/h1`, no
+   fallback counters, no new mid-scan copy), and the owner sees no split anywhere. Left on for
+   this session (sysctl, gone at reboot). Proposal: make `iop_latch` 1 the default (or
+   `rdna3ioplatch=1` in the stick's boot-args) now that the BAR is 1 GiB; N68 OPEN (a)-(d) stay.
+10. Side note, not the driver: the Arctis Nova 7 headset gave no sound after the reboots
+   (default output, 34 %, not muted, the USB stream opened and closed per sound); switching
+   the headset off and on fixed it.
