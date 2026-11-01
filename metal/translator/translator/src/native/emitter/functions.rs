@@ -386,6 +386,9 @@ impl Emitter {
         self.selected_pointers.clear();
         self.selected_load_pointers.clear();
         self.selected_access_trees.clear();
+        self.mixed_storage_pointers.clear();
+        self.mixed_alloca_roots.clear();
+        self.mixed_storage_function = f.name.clone();
         self.vector_word_roots.clear();
         self.vector_word_pointers.clear();
         self.local_pointer_fields.clear();

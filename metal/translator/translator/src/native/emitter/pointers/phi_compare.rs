@@ -10,6 +10,10 @@ impl Emitter {
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
         let result_ty = self.resolve_type(phi_ty)?;
+        self.refuse_split_pointer_operand(
+            &format!("pointer phi {name}"),
+            parsed_incoming.iter().map(|(value, _)| value),
+        )?;
         let incoming = if matches!(result_ty, LlType::Ptr(_)) {
             parsed_incoming
                 .into_iter()
@@ -28,6 +32,9 @@ impl Emitter {
             return Ok(());
         }
         if self.emit_unmodeled_pointer_phi(&name, &incoming, &result_ty, instructions)? {
+            return Ok(());
+        }
+        if self.emit_mixed_storage_pointer_phi(&name, &incoming, &result_ty, instructions)? {
             return Ok(());
         }
         let mut pointer_meta = self.pointer_merge_meta(

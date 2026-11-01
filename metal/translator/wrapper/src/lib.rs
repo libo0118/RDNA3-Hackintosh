@@ -54,7 +54,7 @@ fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pass
     for (index, length) in threadgroup_lengths() {
         match o.with_threadgroup_memory_length(index, length) {
             Ok(next) => o = next,
-            Err(e) => { eprintln!("nvmtl_translate: threadgroup index {index} length {length} refused: {e}"); break; }
+            Err(e) => { metal2vulkan::notes::push(format!("nvmtl_translate: threadgroup index {index} length {length} refused: {e}")); break; }
         }
     }
     o
@@ -81,7 +81,7 @@ fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     if let Some(o) = if caps != 0 { formatless_options(ll, st, caps) } else { None } {
         match metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(o)) {
             Ok(v) => return Ok(v),
-            Err(e) => eprintln!("nvmtl_translate: formatless storage images refused, falling back: {e}"),
+            Err(e) => metal2vulkan::notes::push(format!("nvmtl_translate: formatless storage images refused, falling back: {e}")),
         }
     }
     metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(metal2vulkan::passes::TransformOptions::default()))
@@ -126,7 +126,7 @@ fn dump_failed(ll: &str, st: Stage, e: &str) {
     ll.hash(&mut h);
     let base = std::path::Path::new(&dir).join(format!("{:016x}-{:?}", h.finish(), st));
     if let Err(w) = std::fs::write(base.with_extension("ll"), ll).and_then(|_| std::fs::write(base.with_extension("err"), e)) {
-        eprintln!("nvmtl_translate: NVMTL_DUMP_FAILED_DIR write failed: {w}");
+        metal2vulkan::notes::push(format!("nvmtl_translate: NVMTL_DUMP_FAILED_DIR write failed: {w}"));
     }
 }
 
@@ -206,6 +206,20 @@ pub extern "C" fn nvmtl_link_visible(
 pub extern "C" fn nvmtl_link_report(out: *mut *mut u8, out_len: *mut usize) -> i32 {
     if out.is_null() || out_len.is_null() { return -1; }
     let mut v = metal2vulkan::visible_stubs::take().summary().into_bytes(); v.push(0);
+    let mut b = v.into_boxed_slice();
+    unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
+    std::mem::forget(b);
+    0
+}
+
+/// The notes the translations on this thread left since the last call
+/// (metal2vulkan::notes: a demoted pointer phi, a refused threadgroup length, a
+/// formatless-image fallback), one per line, NUL-terminated, empty when there are
+/// none; the plugin logs them after each translate. Free with nvmtl_translate_free.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_notes(out: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { return -1; }
+    let mut v = metal2vulkan::notes::take().join("\n").into_bytes(); v.push(0);
     let mut b = v.into_boxed_slice();
     unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
     std::mem::forget(b);

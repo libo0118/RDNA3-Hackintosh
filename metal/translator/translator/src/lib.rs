@@ -19,6 +19,7 @@ pub mod linked_functions;
 pub mod mesh_lower;
 pub mod meta;
 pub mod native;
+pub mod notes;
 pub mod passes;
 mod passthrough;
 pub mod reflect;

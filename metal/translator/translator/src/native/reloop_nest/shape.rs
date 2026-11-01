@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 type Cut = BTreeSet<(Label, Label)>;
 
@@ -262,7 +262,9 @@ fn make_loop(
             }
         }
     }
-    blocks.retain(|label| !inner.contains(label));
+    for label in &inner {
+        blocks.remove(label);
+    }
     let next_entries = inner
         .iter()
         .flat_map(|label| {
@@ -320,7 +322,9 @@ fn make_multiple(
         .values()
         .flat_map(|group| group.iter().copied())
         .collect::<BTreeSet<_>>();
-    blocks.retain(|label| !owned.contains(label));
+    for label in &owned {
+        blocks.remove(label);
+    }
     let mut handled = Vec::new();
     let mut next_entries = entries
         .iter()
@@ -355,38 +359,121 @@ fn make_multiple(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    Owned(Label),
+    Shared,
+}
+
+/// The blocks only one entry reaches (Relooper's "independent groups").
+///
+/// The old form built a full reachability set per entry, so a chain of N
+/// diamonds (each arm reaching the rest of the function) cost O(N^2)
+/// (DRIVER-PLAN N72: Geekbench's 676 KB MPS kernels took ~300 s). Here
+/// ownership spreads from the entries and stops where two owners meet
+/// (`Shared`); an owned block with a predecessor that is shared or owned by
+/// another entry is reachable from two entries, and so is everything it
+/// reaches inside its owner's set, which is then dropped. That is exact as
+/// long as no owned block has a predecessor the walk never reached (it
+/// might be reachable only through a shared block); then the full walk,
+/// which spreads `Shared` too, decides instead. The cost is the size of the
+/// owned sets plus their frontier, not of the whole region.
 fn independent_groups(
     graph: &Graph,
     blocks: &BTreeSet<Label>,
     entries: &BTreeSet<Label>,
     cut: &Cut,
 ) -> Option<BTreeMap<Label, BTreeSet<Label>>> {
-    let reach = entries
+    let edge_live = |from: Label, to: Label| blocks.contains(&to) && !cut.contains(&(from, to));
+    let mut state = spread_ownership(graph, entries, blocks, &edge_live, false);
+    let owned = state
         .iter()
-        .map(|entry| (*entry, graph.reachable_within(*entry, blocks, cut)))
-        .collect::<BTreeMap<_, _>>();
-    let mut groups = BTreeMap::new();
-    for entry in entries {
-        let Some(own) = reach.get(entry) else {
-            continue;
-        };
-        let exclusive = own
-            .iter()
-            .copied()
-            .filter(|label| {
-                if entries.contains(label) && label != entry {
-                    return false;
-                }
-                reach
-                    .iter()
-                    .all(|(other, seen)| other == entry || !seen.contains(label))
-            })
-            .collect::<BTreeSet<_>>();
-        if !exclusive.is_empty() {
-            groups.insert(*entry, exclusive);
+        .filter_map(|(label, reach)| match reach {
+            Reach::Owned(owner) => Some((*label, *owner)),
+            Reach::Shared => None,
+        })
+        .collect::<Vec<_>>();
+    let mut contaminated = VecDeque::new();
+    let mut unknown_predecessor = false;
+    for (label, owner) in &owned {
+        for predecessor in graph.pred(*label) {
+            if !blocks.contains(predecessor) || cut.contains(&(*predecessor, *label)) {
+                continue;
+            }
+            match state.get(predecessor) {
+                Some(Reach::Owned(other)) if other == owner => {}
+                Some(_) => contaminated.push_back(*label),
+                None => unknown_predecessor = true,
+            }
         }
     }
+    if unknown_predecessor {
+        state = spread_ownership(graph, entries, blocks, &edge_live, true);
+    } else {
+        while let Some(current) = contaminated.pop_front() {
+            let Some(Reach::Owned(owner)) = state.get(&current).copied() else {
+                continue;
+            };
+            state.insert(current, Reach::Shared);
+            for target in graph.succ(current) {
+                if edge_live(current, *target) && state.get(target) == Some(&Reach::Owned(owner)) {
+                    contaminated.push_back(*target);
+                }
+            }
+        }
+    }
+    let mut groups: BTreeMap<Label, BTreeSet<Label>> = BTreeMap::new();
+    for (label, reach) in state {
+        let Reach::Owned(entry) = reach else {
+            continue;
+        };
+        if entries.contains(&label) && label != entry {
+            continue;
+        }
+        groups.entry(entry).or_default().insert(label);
+    }
     (!groups.is_empty()).then_some(groups)
+}
+
+/// Spreads `Owned(entry)` from each entry; two owners meeting make a block
+/// `Shared`, which spreads further only when `spread_shared` (each block
+/// then changes state at most twice).
+fn spread_ownership(
+    graph: &Graph,
+    entries: &BTreeSet<Label>,
+    blocks: &BTreeSet<Label>,
+    edge_live: &impl Fn(Label, Label) -> bool,
+    spread_shared: bool,
+) -> HashMap<Label, Reach> {
+    let mut state: HashMap<Label, Reach> = HashMap::new();
+    let mut queue = VecDeque::new();
+    for entry in entries {
+        if blocks.contains(entry) {
+            state.insert(*entry, Reach::Owned(*entry));
+            queue.push_back(*entry);
+        }
+    }
+    while let Some(current) = queue.pop_front() {
+        let reach = state[&current];
+        if reach == Reach::Shared && !spread_shared {
+            continue;
+        }
+        for target in graph.succ(current) {
+            if !edge_live(current, *target) {
+                continue;
+            }
+            let merged = match state.get(target) {
+                None => reach,
+                Some(existing) if *existing == reach => continue,
+                Some(_) => Reach::Shared,
+            };
+            if state.get(target) != Some(&merged) {
+                state.insert(*target, merged);
+                queue.push_back(*target);
+            }
+        }
+    }
+    state
 }
 
 fn fresh(counter: &mut usize) -> usize {

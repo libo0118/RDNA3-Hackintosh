@@ -116,6 +116,8 @@ int main(void)
     CHECK(!nvmtl_log_failure("msdl: STENCIL 4-sample image 971x680 -> buffer (vk format 130)"));
     /* a pipeline link's visible-function report reaches it too (DRIVER-PLAN N67), linked or failed */
     CHECK(nvmtl_log_failure("link: \"AMDConvolution::ndArrayConvolution2DAMD_NHWC\" visible functions: linked 10 [a, b]; unresolved 0 []"));
+    /* a translation's notes (DRIVER-PLAN N72: a demoted pointer phi) reach it as well */
+    CHECK(nvmtl_log_failure("translator note: depthwiseConv_3x3: metal2vulkan: kernel k: pointer phi %p merges Function and Private storage; demoted to a per-storage value select (DRIVER-PLAN N72)"));
     CHECK(nvmtl_log_failure("link: \"k\" visible functions (link FAILED): linked 0 []; unresolved 1 [f]"));
     CHECK(!nvmtl_log_failure("link: \"k\" references f; 1 linked function(s): [f air=10 fc=0]"));
 

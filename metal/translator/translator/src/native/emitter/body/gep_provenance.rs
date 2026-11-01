@@ -15,6 +15,9 @@ impl Emitter {
                 ))
             }
         };
+        if self.emit_mixed_storage_pointer_gep(name, gep, instructions)? {
+            return Ok(None);
+        }
         let parsed_source_ty = self.resolve_type(&gep.source_ty)?;
         if let LlValue::Local(base_name) = &gep.base.value {
             if self.pointer_phi_values.contains(base_name)

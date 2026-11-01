@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
+#include <string.h>
 #include <fcntl.h>
 #include <time.h>
 extern char **environ;
@@ -99,6 +100,27 @@ typedef int (*nvmtl_lower_mesh2_fn)(const char *, const char *, const char *, co
 static nvmtl_lower_mesh2_fn xlate_lower_mesh2;
 static char kNVMTLTableFns;
 
+/* DRIVER-PLAN N72: what a translation decided without failing (a demoted pointer phi, a refused
+ * threadgroup length, a formatless-image fallback; translator src/notes.rs). The translator's stderr
+ * reaches no report, so the notes left on this thread are logged after each translate, one line each,
+ * as "translator note: ..." (a release-log keyword in nvmtl_log_failure.h). */
+typedef int (*nvmtl_notes_fn)(uint8_t **, size_t *);
+static nvmtl_notes_fn xlate_notes;
+static void nvmtl_log_xlate_notes(const char *what)
+{
+    if (!xlate_notes || !xlate_free) return;
+    uint8_t *np = NULL; size_t nn = 0;
+    if (xlate_notes(&np, &nn) != 0 || !np) return;
+    const char *line = (const char *)np, *end = (const char *)np + (nn && np[nn - 1] == 0 ? nn - 1 : nn);
+    while (line < end) {
+        const char *eol = memchr(line, '\n', (size_t)(end - line));
+        if (!eol) eol = end;
+        if (eol > line) nvlog("translator note: %s: %.*s", what ? what : "?", (int)(eol - line), line);
+        line = eol + 1;
+    }
+    xlate_free(np, nn);
+}
+
 static int nvmtl_xlate_ready(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -125,6 +147,8 @@ static int nvmtl_xlate_ready(void) {
         xlate_link = (nvmtl_link_fn)dlsym(h, "nvmtl_link_visible");
         xlate_link_rt = (nvmtl_link_rt_fn)dlsym(h, "nvmtl_link_runtime");
         if (!xlate_link_rt) nvlog("translate: no nvmtl_link_runtime in this translator - visible function tables cannot be linked");
+        xlate_notes = (nvmtl_notes_fn)dlsym(h, "nvmtl_translate_notes");
+        if (!xlate_notes) nvlog("translate: no nvmtl_translate_notes in this translator - its notes (demoted phis, fallbacks) reach only stderr");
         xlate_link_report = (nvmtl_link_report_fn)dlsym(h, "nvmtl_link_report");
         if (!xlate_link_report) nvlog("translate: no nvmtl_link_report in this translator - links are not itemised in the log");
         xlate_link_ext = (nvmtl_link_ext_fn)dlsym(h, "nvmtl_link_externs");
@@ -736,7 +760,9 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
         if (hit) { gSpvHit++; utimes(spvp.fileSystemRepresentation, NULL); }
         else {
             gSpvMiss++;
-            if (xlate(ll.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err) != 0) {
+            int xrc = xlate(ll.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err);
+            nvmtl_log_xlate_notes(name.UTF8String);
+            if (xrc != 0) {
                 nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err); if (error) *error = @(err); return nil;
             }
             spvData = [NSData dataWithBytes:spv length:spvn];
@@ -1069,7 +1095,9 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     if (!xlate_fc) { if (err) *err = @"this translator has no nvmtl_translate_fc — rebuild nvmtl_translate"; return nil; }
     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
-    if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
+    int fcrc = xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e);
+    nvmtl_log_xlate_notes("function constants");
+    if (fcrc != 0) {
         nvlog("function constants: re-translate FAILED: %s", e);
         if (err) *err = [NSString stringWithUTF8String:e[0] ? e : "specialization failed"];
         return nil;
@@ -1602,12 +1630,16 @@ NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states
                 nvlog("ZFC idx %-4u size %-2u bytes %s", idx[nfc-1], sz[nfc-1], fx);
             }
         }
-        if(xlate_fc(fn->_air.UTF8String,fn->_stage.UTF8String,idx,sz,pay,nfc,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
+        int tvrc = xlate_fc(fn->_air.UTF8String,fn->_stage.UTF8String,idx,sz,pay,nfc,&out,&len,e,sizeof e);
+        nvmtl_log_xlate_notes(fn->_fname.UTF8String);
+        if(tvrc) { if(err)*err=@(e); }
         else { data=[NSData dataWithBytes:out length:len]; xlate_free(out,len);
                nvlog("threadgroup variant: %s re-specialized with %zu constant(s) -> %lu B",
                      fn->_fname.UTF8String, nfc, (unsigned long)data.length); }
     } else {
-        if(xlate(fn->_air.UTF8String,fn->_stage.UTF8String,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
+        int tvrc = xlate(fn->_air.UTF8String,fn->_stage.UTF8String,&out,&len,e,sizeof e);
+        nvmtl_log_xlate_notes(fn->_fname.UTF8String);
+        if(tvrc) { if(err)*err=@(e); }
         else { data=[NSData dataWithBytes:out length:len]; xlate_free(out,len); }
     }
     if (high && xlate_tglen) xlate_tglen(NULL, 0);
@@ -1822,6 +1854,7 @@ static NVMTLFunction *nvmtl_link_dylibs(NVMTLFunction *fn, NSArray *dylibs, NSEr
     for (size_t i = 0; i < n; i++) mls[i] = mods[i].UTF8String;
     uint8_t *out = NULL; size_t len = 0; char e[1024] = {0};
     int rc = xlate_link_ext(fn->_air.UTF8String, mls, n, &out, &len, e, sizeof e);
+    nvmtl_log_xlate_notes(fn->_fname.UTF8String);
     free(mls);
     if (rc != 0 || !out) {
         if (err) *err = nvmtl_b41_err([NSString stringWithFormat:@"dylib: \"%@\" needs %@ - %s; searched%@", fn->_fname, want, e[0] ? e : "link failed", from.length ? from : @" nothing (no preloadedLibraries, no compile-time libraries, no DYNL)"]);
@@ -1934,6 +1967,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         free(cs); free(cm);
     } else
     rc = xlate_link(fn->_air.UTF8String, fn->_stage.UTF8String, syms, mls, n, &out, &len, e, sizeof e);
+    nvmtl_log_xlate_notes(fn->_fname.UTF8String);
     free(syms); free(mls);
     if (xlate_link_report && xlate_free) {
         /* Every visible function the link met, by name: linked, left unresolved, a table slot, or a stub
