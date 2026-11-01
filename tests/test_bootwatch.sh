@@ -129,6 +129,9 @@ mkdir -p "$S/pend"
 # the console user: the file $S/user, root when there is none
 bw_console_user() { cat "$S/user" 2>/dev/null || echo root; }
 BW_POLL=1; BW_REPEAT=1; BW_MAXN=2; BW_MAXSEC=40; BW_N=1
+# waits (60 s at most) until the first snapshot reached the host: a scenario event after a fixed sleep 3 came before the
+# first snapshot on a loaded runner and the watch ended without one (CI run 115, macOS, dash late: no snapshot)
+after_snap() { _as=0; until ls "$S"/host/bootwatch-*-1.txt >/dev/null 2>&1 || [ "$_as" -ge 300 ]; do sleep 0.2; _as=$((_as + 1)); done; }
 eval "$SCEN"
 EOF2
 
@@ -188,12 +191,12 @@ assert len(r) == 1 and r[0][0] == "FAIL" and "did not reach the GPU within 1 s" 
 ' "$H") || fail "$sh never: triage_bootwatch.py on the uploaded files"
 
     # 2. WindowServer gets its client after the first snapshot: END state=gpu
-    run_scen $sh late 'BW_MAXN=9; ( sleep 3; touch "$S/wsgpu" ) & bootwatch_run; wait'
+    run_scen $sh late 'BW_MAXN=9; ( after_snap; touch "$S/wsgpu" ) & bootwatch_run; wait'
     S=$T/$sh-late; H=$S/host
     ls "$H"/bootwatch-*-1.txt >/dev/null 2>&1 || fail "$sh late: no snapshot"
     grep -l '^BOOTWATCH-END: state=gpu' "$H"/bootwatch-*.txt >/dev/null 2>&1 || fail "$sh late: no END state=gpu: $(ls "$H")"
     # 3. a user logs in: END state=login
-    run_scen $sh login 'BW_MAXN=9; ( sleep 3; echo shrek > "$S/user" ) & bootwatch_run; wait'
+    run_scen $sh login 'BW_MAXN=9; ( after_snap; echo shrek > "$S/user" ) & bootwatch_run; wait'
     S=$T/$sh-login; H=$S/host
     grep -q '^BOOTWATCH-END: state=login' "$H"/bootwatch-*.txt || fail "$sh login: no END state=login: $(ls "$H")"
     # 4. WindowServer is up before the trigger: nothing is written at all, nothing uploaded
