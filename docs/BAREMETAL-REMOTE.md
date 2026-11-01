@@ -584,3 +584,17 @@ Installed from run 117 (all jobs green): tarball, RDNA3MTL, radv-macos-logs; the
 10. Side note, not the driver: the Arctis Nova 7 headset gave no sound after the reboots
    (default output, 34 %, not muted, the USB stream opened and closed per sound); switching
    the headset off and on fixed it.
+11. **Bluetooth on the Mac (setup, not the driver; the owner's request).** The owner's dongle is a
+   Realtek RTL8761BU (USB 0bda:a728, Linux: `lmp_subver=8761`, `rtl8761bu_fw.bin`, fw
+   0xdfc6d922). Added to the stick: `BlueToolFixup.kext` 2.7.2 (acidanthera/BrcmPatchRAM release)
+   and `RTLBluetoothFirmware.kext` (github.com/bennetzakaria/RTLBluetoothFirmware b83e314, read
+   before use: a port of Linux btrtl's upload, USB only; built on the Mac from source with a second
+   IOKitPersonality for 0bda:a728, firmware from linux-firmware) in `Kernel/Add` after
+   RDNA3Accel (MinKernel 21.0.0); `NVRAM/Add` 7C436110-...: `bluetoothExternalDongleFailed` =
+   <00>, `bluetoothInternalControllerInfo` = 14 zero bytes, `bluetoothHostControllerSwitchBehavior`
+   = "always", the same three in `NVRAM/Delete`. Without the NVRAM/Add values the firmware
+   uploaded (`RTL-Status` "firmware uploaded") but bluetoothd kept the MacPro7,1 UART
+   placeholder (BCM_4350C2, Off, address NULL). With them: THIRD_PARTY_DONGLE, On, a real
+   address, firmware v55586 c57286 (= 0xdfc6d922); the owner paired a phone, a speaker
+   (A2DP audio fine) and a Magic Mouse. Backups `config-before-bt.plist` (before any BT change)
+   and `config-before-btnvram.plist`. The sources stay out of this repository (GPL-2.0, not ours).
