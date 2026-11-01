@@ -10,10 +10,12 @@ impl Emitter {
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
         let result_ty = self.resolve_type(phi_ty)?;
-        self.refuse_split_pointer_operand(
-            &format!("pointer phi {name}"),
-            parsed_incoming.iter().map(|(value, _)| value),
-        )?;
+        if !self.mixed_storage_network.is_member(&name) {
+            self.refuse_split_pointer_operand(
+                &format!("pointer phi {name}"),
+                parsed_incoming.iter().map(|(value, _)| value),
+            )?;
+        }
         let incoming = if matches!(result_ty, LlType::Ptr(_)) {
             parsed_incoming
                 .into_iter()
@@ -22,6 +24,15 @@ impl Emitter {
         } else {
             parsed_incoming
         };
+        // A member of a mixed network is split before the selected-pointer
+        // paths can take it: its arms are named in advance by phis that are
+        // already emitted (N75).
+        if self.mixed_storage_network.is_member(&name) {
+            if self.emit_mixed_storage_pointer_phi(&name, &incoming, &result_ty, instructions)? {
+                return Ok(());
+            }
+            self.refuse_unsplit_network_member(&name, "pointer phi")?;
+        }
         if self.emit_selected_access_tree_phi(&name, &incoming, &result_ty, instructions)? {
             return Ok(());
         }

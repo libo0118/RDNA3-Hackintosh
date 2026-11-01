@@ -68,6 +68,8 @@ pub(super) struct Emitter {
     mixed_storage_pointers: HashSet<String>,
     mixed_storage_function: String,
     mixed_alloca_roots: HashSet<String>,
+    /// The function's Function/Private pointer networks (pointers/mixed_network.rs).
+    mixed_storage_network: pointers::MixedStorageNetwork,
     vector_word_roots: HashMap<Word, VectorWordRoot>,
     vector_word_pointers: HashMap<String, VectorWordPointer>,
     local_pointer_fields: HashMap<LocalPointerField, TypedValue>,
@@ -382,6 +384,7 @@ impl Emitter {
             mixed_storage_pointers: HashSet::new(),
             mixed_storage_function: String::new(),
             mixed_alloca_roots: HashSet::new(),
+            mixed_storage_network: pointers::MixedStorageNetwork::default(),
             vector_word_roots: HashMap::new(),
             vector_word_pointers: HashMap::new(),
             local_pointer_fields: HashMap::new(),

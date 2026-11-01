@@ -388,6 +388,7 @@ impl Emitter {
         self.selected_access_trees.clear();
         self.mixed_storage_pointers.clear();
         self.mixed_alloca_roots.clear();
+        self.mixed_storage_network = Default::default();
         self.mixed_storage_function = f.name.clone();
         self.vector_word_roots.clear();
         self.vector_word_pointers.clear();
@@ -1350,6 +1351,7 @@ impl Emitter {
                 }
             }
         }
+        self.collect_mixed_storage_network(&tir);
         if self.bda_device_pointers {
             let seeds = self
                 .raw_buffer_params
