@@ -90,6 +90,16 @@ int main(void)
         test_bootargs = a3off;
         CHECK(!rd3_a3_on() && !rd3_a3_ws_on());
     }
+    /* DRIVER-PLAN N71 (c): the read-only shared import off unless rdna3a3share=1, profile or not */
+    {
+        static const struct test_bootarg shon[] = { { "rdna3a3share", 1 }, { NULL, 0 } };
+        test_bootargs = none;
+        CHECK(!rd3_a3_share_on());
+        test_bootargs = ladder;
+        CHECK(!rd3_a3_share_on());
+        test_bootargs = shon;
+        CHECK(rd3_a3_share_on() && !rd3_a3_ws_on() && rd3_a3_on());
+    }
 
     /* N68, bare-metal round 3: the latched IOP copy on by default, with or
      * without the profile; rdna3ioplatch=0 turns it off */

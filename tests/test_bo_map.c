@@ -80,9 +80,9 @@ static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_
 }
 /* IOSurface 7: 100 MiB of the accelerator's VRAM at 128 MiB (more than
  * half of RD_SURFACE_BO_FILE_MAX's 128 MiB over two imports) */
-static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane, uint32_t flags)
 {
-    (void)c; (void)os;
+    (void)c; (void)os; (void)flags;
     if (id != 7 || plane)
         return -RD_ENOENT;
     bo->vram_offset = 128ull << 20;

@@ -144,7 +144,7 @@ VidMemory / Surface / DisplayPipe / contexts are generated vendor subclasses
 | `Pq` | present queue (N38): off-thread flips, `rd3AccelInstallSysctlPq` |
 | `Latch`, `Wg`, `Swap`, `Cf`, `Copy` | flip latch, write generation, legacy swap, copy forward, SDMA copy of surfaces |
 | `Iop` | IOPresentment flip path (`rdna3accel_iop*`) |
-| `Surf`, `Res`, `Vm` (`rd3Vm*`) | surfaces / resources, VRAM parking (N41) |
+| `Surf`, `Res`, `Vm` (`rd3Vm*`), `Share` | surfaces / resources, VRAM parking (N41); N71 (c) WindowServer's read-only shared import: `rd3AccelShareRecord` (the producer's record, plane flag `RD3K_SS_PLANE_SHARE`), `rd3AccelShareFault` (`RD3K_SS_PLANE_SHARE_FAULT`), `rd3AccelSurfGem` (RD3KSurfGem v2, `RD3K_SG_SHARED_RO`); decisions in `common/rdna3_a3_display.h` |
 | `Perf` | GPU busy credit: `rd3AccelPerfUpdate` writes PerformanceStatistics (Device Utilization %), `rd3AccelPerfCreditOne` adds GPU time to each process's `IOAccelSubmitter2` `accumulatedGPUTime` (N38, N49) |
 | `Trace`, `Sc` (`ScPost`/`ScApply`), `Scan` | per-frame trace (`debug.rdna3accel_trace*`); the swap-as-copy head state posted by non-swap paths and applied under the family lock; scans of other surfaces |
 | `rd3AccelInstallSysctl*` | registers the `debug.rdna3accel_*` counters (`RD3ACCEL_CNT`) |
@@ -213,6 +213,7 @@ Helper headers (pure C, each with a host test) by feature:
 | Drawable copy-out deferred to the present (N69) | `nvmtl_drawable_defer.h`; `nvmtl_seal_surfaces` in `NVMTLEventSync.m`; `_soDrawable`, `_presentRoots` |
 | A/B switches (N50) | `nvmtl_ab_switch.h` (`nvmtl_ab_knobs[]`: the switches a process logs in `vk: ab switches`; managed-buffer page logic) |
 | Framebuffer fetch (N48) | `nvmtl_fbfetch_plan.h` (N64: `nvmtl_fbf_barrier_mode`, the image barrier before a reading draw, `NVMTL_FBF_MEMBAR`), `nvmtl_spirv_fbfetch.h` |
+| Shared VRAM drawables, read-only for WindowServer (N71 (c) steps 3-4) | producer `nvmtl_surface_share.h` (the gate `nvmtl_surface_share_kept_private`, the share record decision `nvmtl_ps_decide` / `nvmtl_ps_result`, `pr_*` counters; `nvmtl_vk_surface_share_after_gpu` in `nvmtl_vk.c`, called from `nvmtl_ps_after_gpu` in `NVMTLObjects.m` at the part loop of `NVMTLEventSync.m`); consumer `nvmtl_ws_share.h` (eligibility, `nvmtl_wss_plan`, `nvmtl_wss_wrapper_action`, `nvmtl_wss_import_verdict`, the R1 detector `nvmtl_wss_hazard`, demotion, `sh_*` counters); `NVMTLDevice.m` (`nvmtl_surface_image_create` read-only branch, `nvmtl_ro_cache`, `NVMTLShareGen` IOSurface value), `NVMTLObjects.m` (`nvmtl_ro_sample` / `nvmtl_ro_commit` / `nvmtl_ro_complete` / `nvmtl_ro_write`), `nvmtl_vk_image_create_buffer_alias_ro`; triage row `ws share` (`ws_share_rows` in `tools/triage_present_cost.py`); knob `NVMTL_WS_SHARE` |
 | What a frame costs (N64) | `nvmtl_ws_frame.h` (`vk: ws frame: SUMMARY`, `nvmtl_wf_note` / `nvmtl_vk_wf_upload` in `nvmtl_vk.c`) |
 | A drawable's way back (N73) | `nvmtl_drawable_life.h` (`vk: drawable: SUMMARY`; the `-[CAMetalLayer nextDrawable]` hook and the IOSurface keep ring `nvmtl_keep_put` / `nvmtl_keep_prune` in `NVMTLDevice.m`, the present note in `NVMTLEventSync.m` `nvmtlFinishExecution`, `nvmtl_dl_summary` in `NVMTLObjects.m`) |
 | Multisample copies (N48/N52) | `nvmtl_msupload.h`, `nvmtl_msdl.h`, `nvmtl_msbuf.h`, `nvmtl_msstat.h`, `*_spv.h`; plain copies `nvmtl_copy_pack.h` |
@@ -241,7 +242,8 @@ Counters and state:
 - Core: `debug.rdna3_coh*` (N54 switches + counters), `debug.rdna3_vram` (visible-VRAM heap),
   `debug.rdna3_dispirq`, `debug.rdna3_vblirq`, `debug.rdna3_drmtrace[_stream]` (binary), `debug.rdna3_uclk_pin` (N74 switch).
 - Accelerator: `debug.rdna3accel_*` (`swap*`, `swaps_*`, `perf_*`, `vm_*`, `surface_wait*`, `iop_*`,
-  `cf_*`, `present_*`, `flipbuf*`, `trace[_sec|_stream]`); AGDC: `debug.rdna3agdc*`.
+  `cf_*`, `present_*`, `flipbuf*`, `trace[_sec|_stream]`, `a3*`; N71 (c): switch `a3share` + `a3share_*`, triage
+  `A3 share`); AGDC: `debug.rdna3agdc*`.
 - IORegistry: `RDNA3,*` properties on the core, `RDNA3,FBStats` on the framebuffer.
 - Plugin SUMMARY lines (`nvlog_uncapped`, key=value, newest line per process counts): `managed: SUMMARY`,
   `census: SUMMARY`, `vk: ab: SUMMARY`, `vk: fbfetch: SUMMARY`, `vk: surfin: SUMMARY[2]`, `msdl: SUMMARY`,
@@ -280,7 +282,7 @@ all); a new scenario goes into an existing part or a new part name. It runs, by 
 | Hardware model | `sim_navi32` (Navi 32 register model: PSP/SMU/GMC/IH/SDMA/GFX/DCN; `tests/sim_*.inc`), `test_discovery`, `test_fw`, `test_range_alloc` |
 | UAPI / libdrm | `test_uapi`, `test_bo_map`, `test_bo_map_race`, `test_libdrm_amdgpu` (real libdrm over `backend_loopback`), `rdna3_drminfo_host` (`--scanout`, DMA/GFX tests) |
 | Accelerator / display logic | `test_a3_display`, `test_swap_front`, `test_attr_ring`, `test_swap_copy`, `test_write_gen`, `test_flip_latch`, `test_iop_stale`, `test_iop_copy`, `test_strip`, `test_flip_queue`, `test_vbl_irq`, `test_tcall`, `test_fbgate`, `test_gpu_busy`, `test_vram_park`, `test_vram_place`, `test_bar_window`, `test_surf_pending`, `test_trace`, `test_coh`, `test_fb_policy`, `test_bootargs`, `test_gamma_judge`, `test_agdc_k5`, `test_agdc_n48` |
-| Metal plugin helpers | `test_mtl_allow`, `test_handoff`, `test_present_cost`, `test_ws_frame`, `test_linear_pitch`, `test_gpu_time_queue`, `test_ab_switch`, `test_drawable_defer`, `test_gsub_empty`, `test_surf_census`, `test_surfin_cache`, `test_copy_pack`, `test_capture` (+ `tools/capture_decode.py --check`), `test_msupload`, `test_msdl`, `test_spirv_fbfetch`, `test_fbfetch_plan` |, `test_ci_refl`
+| Metal plugin helpers | `test_mtl_allow`, `test_handoff`, `test_present_cost`, `test_ws_frame`, `test_surface_share`, `test_ws_share`, `test_linear_pitch`, `test_gpu_time_queue`, `test_ab_switch`, `test_drawable_defer`, `test_gsub_empty`, `test_surf_census`, `test_surfin_cache`, `test_copy_pack`, `test_capture` (+ `tools/capture_decode.py --check`), `test_msupload`, `test_msdl`, `test_spirv_fbfetch`, `test_fbfetch_plan` |, `test_ci_refl`
 | Python / source checks | `test_accel_hash_parity.py`, `test_fb_agdc_hash_parity.py`, `test_trace_parity.py`, `test_accel_slots.py` (`tools/check_accel_slots.py`), `test_accel_locks.py`, `test_kext_kpi_versions.py`, `test_kmutil_kpi_guard.py` |
 | Triage / tools | `test_triage_*.py` / `.sh` (fixtures in `reports/<date>` and `tests/trace_fixture.py`), `test_bootwatch.sh`, `test_glyph_verdict.py`, `test_lookimg.py`, `test_plugin_trace.sh`, `test_result_checklist.sh`, `test_bisect_step.sh`, `test_ladder_step.sh`, `test_apps_step.sh`, `test_triage_apps.py`, `test_frame_order.sh` (N59: strips end to end on the loopback, `tools/frame_order.py`), `test_play_step.sh`, `test_approve_gate.sh`, `test_vm_*.sh`, `test_forgejo_update.sh` |
 | Packaging | `test_oc_install.sh`, `test_make_pkg.sh`, `test_coredisplay_prefs.sh`, `test_prune_traces.sh`, `test_membw_load.sh` |

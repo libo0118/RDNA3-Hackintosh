@@ -57,14 +57,48 @@ int main(void)
     }
 
     /* card run 58 (2026-10-15d): every WindowServer import stays out by default */
-    CHECK(rd3_a3_ws_policy(0, 0x3u, 0, 0) == RD3_A3_ALLOW);            /* an app's own full-screen surface */
-    CHECK(rd3_a3_ws_policy(0, 0, 0, 0) == RD3_A3_ALLOW);               /* an app's window */
-    CHECK(rd3_a3_ws_policy(1, 0x1u, 0, 0) == RD3_A3_REFUSE_DISPLAY);   /* WindowServer's framebuffer */
-    CHECK(rd3_a3_ws_policy(1, 0x1u, 0, 1) == RD3_A3_REFUSE_DISPLAY);   /* rdna3a3ws=1 is not rdna3a3display=1 */
-    CHECK(rd3_a3_ws_policy(1, 0x1u, 1, 0) == RD3_A3_ALLOW);
-    CHECK(rd3_a3_ws_policy(1, 0, 0, 0) == RD3_A3_REFUSE_WS);           /* the menu bar, a window it composites */
-    CHECK(rd3_a3_ws_policy(1, 0, 1, 0) == RD3_A3_REFUSE_WS);
-    CHECK(rd3_a3_ws_policy(1, 0, 0, 1) == RD3_A3_ALLOW);
+    CHECK(rd3_a3_ws_policy(0, 0x3u, 0, 0, 0, 0, 0) == RD3_A3_ALLOW);            /* an app's own full-screen surface */
+    CHECK(rd3_a3_ws_policy(0, 0, 0, 0, 0, 0, 0) == RD3_A3_ALLOW);               /* an app's window */
+    CHECK(rd3_a3_ws_policy(1, 0x1u, 0, 0, 0, 0, 0) == RD3_A3_REFUSE_DISPLAY);   /* WindowServer's framebuffer */
+    CHECK(rd3_a3_ws_policy(1, 0x1u, 0, 1, 0, 0, 0) == RD3_A3_REFUSE_DISPLAY);   /* rdna3a3ws=1 is not rdna3a3display=1 */
+    CHECK(rd3_a3_ws_policy(1, 0x1u, 1, 0, 0, 0, 0) == RD3_A3_ALLOW);
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 0, 0, 0, 0) == RD3_A3_REFUSE_WS);           /* the menu bar, a window it composites */
+    CHECK(rd3_a3_ws_policy(1, 0, 1, 0, 0, 0, 0) == RD3_A3_REFUSE_WS);
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 1, 0, 0, 0) == RD3_A3_ALLOW);
+    /* DRIVER-PLAN N71 (c): a share record of the current allocation lets WindowServer import read-only */
+    CHECK(rd3_a3_ws_policy(1, 0x3u, 0, 0, 1, 42, 42) == RD3_A3_ALLOW_SHARED);   /* a full-screen app's drawable */
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 0, 1, 42, 42) == RD3_A3_ALLOW_SHARED);      /* a window's drawable */
+    CHECK(rd3_a3_ws_policy(1, 0x3u, 1, 1, 1, 42, 42) == RD3_A3_ALLOW_SHARED);   /* read-only wins over the old allows */
+    CHECK(rd3_a3_ws_policy(1, 0x3u, 0, 0, 1, 41, 42) == RD3_A3_REFUSE_DISPLAY); /* a record of an older allocation */
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 0, 1, 43, 42) == RD3_A3_REFUSE_WS);
+    CHECK(rd3_a3_ws_policy(1, 0x3u, 0, 0, 1, 0, 0) == RD3_A3_REFUSE_DISPLAY);   /* generation 0 never matches */
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 0, 1, 0, 0) == RD3_A3_REFUSE_WS);
+    CHECK(rd3_a3_ws_policy(0, 0x3u, 0, 0, 1, 42, 42) == RD3_A3_ALLOW);          /* an app: its own import, as before */
+    /* the switch off: the card run 58 table, whatever the record */
+    {
+        int disp, heads, ws;
+        for (disp = 0; disp < 2; disp++)
+            for (ws = 0; ws < 2; ws++)
+                for (heads = 0; heads < 2; heads++) {
+                    const unsigned m = heads ? 0x1u : 0u;
+                    CHECK(rd3_a3_ws_policy(1, m, disp, ws, 0, 42, 42) == rd3_a3_ws_policy(1, m, disp, ws, 0, 0, 0));
+                    CHECK(rd3_a3_ws_policy(1, m, disp, ws, 0, 42, 42) ==
+                          (m ? (disp ? RD3_A3_ALLOW : RD3_A3_REFUSE_DISPLAY) : (ws ? RD3_A3_ALLOW : RD3_A3_REFUSE_WS)));
+                    CHECK(rd3_a3_ws_policy(1, m, disp, ws, 0, 42, 42) != RD3_A3_ALLOW_SHARED);
+                }
+    }
+    /* who may record: an app with an import of the live allocation; never WindowServer, never generation 0 */
+    CHECK(rd3_a3_share_may_record(0, 42, 42));
+    CHECK(!rd3_a3_share_may_record(1, 42, 42));
+    CHECK(!rd3_a3_share_may_record(0, 41, 42));   /* its import is of an allocation the surface no longer has */
+    CHECK(!rd3_a3_share_may_record(0, 0, 0));
+    CHECK(!rd3_a3_share_may_record(0, 0, 42));
+    CHECK(!rd3_a3_share_matches(0, 0) && rd3_a3_share_matches(7, 7) && !rd3_a3_share_matches(7, 8));
+    /* WindowServer by name AND uid 88 for the shared import */
+    CHECK(rd3_a3_ws_identity(1, 88));
+    CHECK(!rd3_a3_ws_identity(1, 501));   /* a user process named WindowServer */
+    CHECK(!rd3_a3_ws_identity(0, 88));
+    CHECK(!rd3_a3_ws_identity(1, 0));
     /* the flicker test: A B A B */
     CHECK(rd3_flicker_abab(0xa, 0xb, 0xa, 3));
     CHECK(!rd3_flicker_abab(0xa, 0xb, 0xa, 2));    /* too early */

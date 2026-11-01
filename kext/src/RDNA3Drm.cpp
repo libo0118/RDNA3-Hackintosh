@@ -840,6 +840,8 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.now_ns = drmNowNs;
     ops.surface_bo = drmSurfaceBo;
     ops.surface_dirty = drmSurfaceDirty;
+    ops.surface_share = drmSurfaceShare;   /* DRIVER-PLAN N71 (c) */
+    ops.surface_fault = drmSurfaceFault;
     {
         /* user queues: the hooks only with rdna3userq=1, so the default
          * profile has no path into them; the UAPI offers queues once the

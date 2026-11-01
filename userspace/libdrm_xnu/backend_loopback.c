@@ -41,11 +41,37 @@ static void lb_bo_free(void *c, rdna3_bo *bo)
 #define LB_SURFACE_SIZE (64u << 10)
 static void *lb_surface;
 uint32_t lb_surface_dirty_count, lb_surface_try_count, lb_surface_mark_count[2];
-static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+/* DRIVER-PLAN N71 (c): every import of 0x51 is over allocation #5; "IOSurface"
+ * 0x53 is the same memory imported READ-ONLY, shared by pid 4242 (what
+ * WindowServer gets for an application's shared drawable) */
+#define LB_SURFACE_RO_ID 0x53u
+#define LB_SURFACE_GEN   5u
+/* 0x100..0x1ff: writable aliases of 0x51 (the share table's tests need many surfaces) */
+#define LB_SURFACE_ALIAS(id) ((id) >= 0x100u && (id) < 0x200u)
+uint32_t lb_surface_share_count, lb_surface_share_gen;
+static int lb_surface_share(void *c, void *os, uint32_t id, uint32_t plane, uint64_t gen)
 {
     (void)c; (void)os;
-    if (id != LB_SURFACE_ID || plane)
+    if ((id != LB_SURFACE_ID && !LB_SURFACE_ALIAS(id)) || plane)
         return -RD_ENOENT;
+    if (gen != LB_SURFACE_GEN)
+        return -RD_EPERM;
+    lb_surface_share_count++;
+    lb_surface_share_gen = (uint32_t)gen;
+    return 0;
+}
+static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane, uint32_t flags)
+{
+    (void)c; (void)os;
+    if (id == LB_SURFACE_RO_ID && !(flags & RD_SURFACE_BO_ACCEPT_RO))
+        return -RD_EPERM;   /* the kernel's old refusal of WindowServer's import */
+    if ((id != LB_SURFACE_ID && id != LB_SURFACE_RO_ID && !LB_SURFACE_ALIAS(id)) || plane)
+        return -RD_ENOENT;
+    bo->surf_gen = LB_SURFACE_GEN;
+    if (id == LB_SURFACE_RO_ID) {
+        bo->gpu_ro = 1;
+        bo->surf_pid = 4242;
+    }
     if (!lb_surface) {
         void *p = mmap(NULL, LB_SURFACE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (p == MAP_FAILED)
@@ -427,11 +453,12 @@ static void dev_init(void)
                           lb_submit, lb_signaled, lb_wait, NULL,
                           lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout, lb_privileged,
                           NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty, NULL,
-                          lb_txstate, NULL };
+                          lb_txstate, NULL, NULL, NULL };
     amd_discovery disc;
     if (g_dev_ready)
         return;
     ops.now_ns = lb_now;   /* wait-any slices its waits by it */
+    ops.surface_share = lb_surface_share;   /* N71 (c) */
     memset(&disc, 0, sizeof(disc));
     disc.has_gc_info = 1;
     disc.gc.num_se = 3; disc.gc.num_sa_per_se = 2; disc.gc.num_wgp0_per_sa = 5;

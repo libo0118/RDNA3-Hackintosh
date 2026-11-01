@@ -486,6 +486,21 @@ static inline int rd3k_ss_plane_ok(unsigned int plane) { return plane <= RD3K_SS
 #define RD3K_SS_PLANE_GPU_MARK 0x80000000u
 #define RD3K_SS_PLANE_TRYLOCK  0x40000000u
 #define RD3K_SS_BUSY          0x80000009u   /* TRYLOCK: the accelerator's lock was taken; nothing marked */
+/* DRIVER-PLAN N71 (c), two more flags of the dirty escape's plane word.
+ * SHARE: the producer's share record: an application that holds an A3
+ * import of the plane records that WindowServer may import this allocation
+ * READ-ONLY; 'size' carries the allocation generation of the caller's own
+ * import (the core passes its BO's, never a user value). Answers: 0,
+ * RD3K_SS_OFF (debug.rdna3accel_a3share 0), RD3K_SS_POLICY (WindowServer,
+ * or an import of another allocation than the live one), RD3K_SS_NO_SURFACE,
+ * RD3K_SS_NO_CACHE / _NO_VRAM. An older accelerator answers RD3K_SS_NO_CACHE
+ * (a plane out of range): no share.
+ * SHARE_FAULT: the core reports a GPU VM fault inside a read-only shared
+ * import (its importer's task); 'size' the fault VA, hClient the producer's
+ * pid. The accelerator turns sharing off (debug.rdna3accel_a3share 0) and
+ * logs it. Never reachable from a user plane (the UAPI keeps planes <= 15). */
+#define RD3K_SS_PLANE_SHARE       0x20000000u
+#define RD3K_SS_PLANE_SHARE_FAULT 0x10000000u
 struct RD3KSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;
@@ -505,7 +520,20 @@ struct RD3KSurfShareEsc {
  * RD3K_VRAM_FN_REF while it still holds the surface, so the allocation
  * outlives its own free until the core drops that reference. */
 #define RD3K_ESC_SURF_GEM      0xE4u
-#define RD3K_SURFGEM_VERSION   1u
+/* 2 (N71 (c)): the out tail (flags, sharePid, allocGen). The accelerator
+ * answers both; it writes the tail only for a v2 caller. A v1 caller
+ * cannot make a BO read-only, so it never gets a shared import (refused as
+ * before); a new core retries v1 when an older accelerator answers
+ * RD3K_SS_BAD_VERSION. */
+#define RD3K_SURFGEM_VERSION   2u
+#define RD3K_SURFGEM_VERSION_1 1u
+/* out flags: SHARED_RO = WindowServer's read-only import of an application's
+ * shared allocation (N71 (c)): the core must give it no CPU mapping and no
+ * writable GPU page */
+#define RD3K_SG_SHARED_RO      0x1u
+/* in (ECC security review of N71 (c)): the core's caller understands a
+ * read-only import; without it WindowServer's import is refused as before */
+#define RD3K_SG_ACCEPT_RO      0x100u
 #define RD3K_VRAM_FN_REF      "rdna3RefVram"
 /* DRIVER-PLAN N41 (security review): the core's reference count of an
  * accelerator allocation (p1 the handle, p2 unsigned int * out): 1 only the
@@ -520,7 +548,12 @@ struct RD3KSurfGem {
     unsigned int status;               /* out: 0 or RD3K_SS_* */
     void *kapiMemory;                  /* out: the allocation, referenced */
     unsigned long long bytes;          /* out */
+    /* v2 (N71 (c)); a v1 caller's struct ends here (RD3K_SURFGEM_V1_SIZE) */
+    unsigned int flags;                /* in: RD3K_SG_ACCEPT_RO; out: RD3K_SG_SHARED_RO */
+    int sharePid;                      /* out: SHARED_RO: the producer that recorded the share */
+    unsigned long long allocGen;       /* out: the allocation generation the reference is of (never 0) */
 };
+#define RD3K_SURFGEM_V1_SIZE 32u   /* sizeof the v1 struct: version .. bytes */
 
 #ifdef RD3K_SS_KERNEL_ABI
 #define RD3ACCEL_SS_FN     "rdna3SurfVram"

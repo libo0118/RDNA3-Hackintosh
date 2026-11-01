@@ -78,7 +78,8 @@ static IOAccelResource2  *rd3AccelCfOwn(IOAccelResource2 *const *bufs, unsigned 
  * the refusal's log line (card run 58b review: a WindowServer caller whose
  * task did not match was logged and counted as "a WindowServer input") */
 enum RD3A3Why { kA3WhyNone = 0, kA3WhyOff, kA3WhyTaskMismatch, kA3WhyNoName, kA3WhyDisplay, kA3WhyWs };
-static unsigned           rd3AccelA3Policy(void *surf, task_t task, unsigned surfaceID, unsigned *headsOut, unsigned *whyOut);
+static unsigned           rd3AccelA3Policy(void *surf, task_t task, unsigned surfaceID, unsigned *headsOut, unsigned *whyOut,
+                                           bool shareAsk, bool *shareTry);
 static SInt64             rd3AccelA3WhyCount(unsigned why);
 static void               rd3AccelA3Why(char *why, unsigned long n, unsigned reason, unsigned heads, void *surf);
 static bool               rd3AccelA3RefusedFirst(unsigned surfaceID, SInt64 n);
@@ -237,6 +238,13 @@ static int gA3Display = 0;
  * inputs out of A3 unless gA3Ws (rdna3a3ws=1); gA3On 0 (rdna3a3=0) keeps
  * every import out. rdna3_a3_display.h, rd3_a3_ws_policy. */
 static int gA3Ws = 0, gA3On = 1;
+/* DRIVER-PLAN N71 (c): WindowServer imports an application's shared VRAM drawable read-only when the
+ * application recorded a share of the live allocation (rd3_a3_ws_policy share_on). Boot-arg rdna3a3share,
+ * sysctl debug.rdna3accel_a3share (live; the plugin re-reads it); a VM fault inside such an import turns it
+ * off (rd3AccelShareFault). 0 (the default for the first card round) = every answer as before. */
+static int gA3Share = 0;
+static SInt64 gCntA3ShareRecorded, gCntA3ShareImported, gCntA3ShareStale, gCntA3ShareWsRecordRefused,
+    gCntA3ShareNoRecord, gCntA3ShareFaultOff, gCntA3ShareRecordRefused;
 /* debug.rdna3accel_iop_flip (the IOP zero-copy flip; its sysctl is with the IOP counters) */
 static int gIopFlip = 0;
 static SInt64 gCntA3WsRefused, gCntA3OffRefused;
@@ -1243,6 +1251,7 @@ public:
         gA3Display = rd3_a3_display_on() ? 1 : 0;
         gA3Ws = rd3_a3_ws_on() ? 1 : 0;
         gA3On = rd3_a3_on() ? 1 : 0;
+        gA3Share = rd3_a3_share_on() ? 1 : 0;
         gSwapLatch = (int)rd3_arg("rdna3swaplatch", 1);
         gSwapTorn = (int)rd3_arg("rdna3swaptorn", 1);
         gSwapSameNoFlip = rd3_arg("rdna3swapsamenoflip", 1) ? 1 : 0;
@@ -1383,6 +1392,10 @@ public:
              "debug.rdna3accel_a3display)", gA3Display
              ? "MAY become BOs over their own VRAM, which no legacy swap scans out (rdna3a3display=1: the run 58 picture)"
              : "are kept out of A3: WindowServer composites them through copies the legacy swap pages on");
+        ALOG("A3 share: %s (DRIVER-PLAN N71 (c); boot-arg rdna3a3share, sysctl debug.rdna3accel_a3share, live)", gA3Share
+             ? "ON: WindowServer may import an application's VRAM drawable READ-ONLY once the application recorded a "
+               "share of that allocation"
+             : "off: WindowServer's imports are refused as above (rdna3a3share=0)");
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             unsigned waited = 0;
             while (pci->getProperty("rdna3-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
@@ -2745,6 +2758,17 @@ SYSCTL_INT(_debug, OID_AUTO, rdna3accel_a3, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLA
            "0 = no IOSurface of any process becomes an A3 BO (boot-arg rdna3a3=0); 1 (default)");
 RD3ACCEL_CNT(rdna3accel_a3ws_refused,       gCntA3WsRefused,    "card run 58: WindowServer inputs kept out of A3 (rdna3a3ws=0)");
 RD3ACCEL_CNT(rdna3accel_a3off_refused,      gCntA3OffRefused,   "imports refused because A3 is off (rdna3a3=0)");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_a3share, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gA3Share, 0,
+           "DRIVER-PLAN N71 (c): 1 = WindowServer may import an application's shared VRAM drawable read-only (the "
+           "application records the share); 0 (default, boot-arg rdna3a3share) = refused as before; a VM fault in such an "
+           "import sets it 0");
+RD3ACCEL_CNT(rdna3accel_a3share_recorded,          gCntA3ShareRecorded,        "N71 (c): share records applications made (one per allocation)");
+RD3ACCEL_CNT(rdna3accel_a3share_imported,          gCntA3ShareImported,        "N71 (c): WindowServer's read-only imports of a shared allocation");
+RD3ACCEL_CNT(rdna3accel_a3share_stale,             gCntA3ShareStale,           "N71 (c): WindowServer imports whose record was of an older allocation (refused, record cleared)");
+RD3ACCEL_CNT(rdna3accel_a3share_ws_record_refused, gCntA3ShareWsRecordRefused, "N71 (c): share records refused because the caller is WindowServer (name or uid 88)");
+RD3ACCEL_CNT(rdna3accel_a3share_norecord,          gCntA3ShareNoRecord,        "N71 (c): WindowServer imports with sharing on but no share record (as before)");
+RD3ACCEL_CNT(rdna3accel_a3share_fault_off,         gCntA3ShareFaultOff,        "N71 (c): GPU VM faults inside a read-only shared import (each turns sharing off)");
+RD3ACCEL_CNT(rdna3accel_a3share_record_refused,    gCntA3ShareRecordRefused,   "N71 (c): share records refused for another reason (sharing off, no import of the live allocation, no VRAM, no surface)");
 RD3ACCEL_CNT(rdna3accel_swaps_abab_h0, gCntSwapAbab[0], "head 0's swaps that showed the picture of two swaps before (A B A B: flicker)");
 RD3ACCEL_CNT(rdna3accel_swaps_abab_h1, gCntSwapAbab[1], "head 1's swaps that showed the picture of two swaps before (A B A B: flicker)");
 RD3ACCEL_CNT(rdna3accel_swaps_abab_h2, gCntSwapAbab[2], "head 2's swaps that showed the picture of two swaps before (A B A B: flicker)");
@@ -2928,6 +2952,11 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_a3display_noname);
     sysctl_register_oid(&sysctl__debug_rdna3accel_a3ws);            sysctl_register_oid(&sysctl__debug_rdna3accel_a3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_a3ws_refused);    sysctl_register_oid(&sysctl__debug_rdna3accel_a3off_refused);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_recorded); sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_imported);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_stale);    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_ws_record_refused);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_norecord); sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_fault_off);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_a3share_record_refused);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h0);   sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h1);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h2);   sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_abab_h3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_ababwide_h0); sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_ababwide_h1);
@@ -3607,12 +3636,121 @@ static void rd3AccelSurfPlaneRefused(const char *what, unsigned surfaceID, unsig
         ALOG("%s: surface %u plane %u REFUSED: an IOSurface has planes 0..%u -- not looked up (%d such)", what,
              surfaceID, plane, RD3K_SS_MAX_PLANE, (int)k + 1);
 }
+/* ---- DRIVER-PLAN N71 (c): the producer's share record and the fault turn-off ----
+ * RD3K_SS_PLANE_SHARE on the dirty escape: an application that holds an A3 import of the plane's live
+ * allocation (p->size: its BO's generation, from the core, never a user value) records that WindowServer may
+ * import that allocation read-only. Refused for WindowServer (its name OR uid 88), for a generation that is not
+ * the live one (rd3_a3_share_may_record), with sharing off, for a surface the caller cannot look up (lookupSurface:
+ * an unrelated task guessing ids gets RD3K_SS_NO_SURFACE). Each refusal is counted and logged (first 8, then every
+ * 1024th); a record is logged when it is new (another generation or producer). */
+static unsigned rd3AccelShareRecordRefused(SInt64 *cnt, unsigned st, unsigned surfaceID, unsigned plane, int pid,
+                                           const char *why)
+{
+    const SInt64 n = OSAddAtomic64(1, cnt);
+    if (rd3_log_due((uint64_t)n, 8, 1023))
+        ALOG("surfshare: share record of surface %u plane %u by pid %d REFUSED: %s (status %#x, %lld of this kind)",
+             surfaceID, plane, pid, why, st, (long long)n + 1);
+    return st;
+}
+static unsigned rd3AccelShareRecord(const struct RD3KSurfShareEsc *p, task_t task)
+{
+    const unsigned plane = p->plane & ~RD3K_SS_PLANE_SHARE;
+    const int pid = proc_selfpid();
+    const unsigned long long gen = p->size;
+    if (!rd3k_ss_plane_ok(plane))   /* another flag with it, or a plane out of range */
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, RD3K_SS_NO_CACHE, p->surfaceID, plane, pid,
+                                          "a plane out of range or another flag with SHARE");
+    if (!gA3Share)
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, RD3K_SS_OFF, p->surfaceID, plane, pid,
+                                          "sharing is off (debug.rdna3accel_a3share 0)");
+    if (task != current_task())
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, RD3K_SS_POLICY, p->surfaceID, plane, pid,
+                                          "for another task than the caller's (its process is unknown)");
+    char proc[32];
+    proc[0] = 0;
+    proc_selfname(proc, (int)sizeof proc);
+    const uint32_t uid = (uint32_t)kauth_cred_getuid(kauth_cred_get());
+    if (!proc[0] || rd3_a3_display_proc(proc) || uid == RD3_A3_WS_UID)
+        return rd3AccelShareRecordRefused(&gCntA3ShareWsRecordRefused, RD3K_SS_POLICY, p->surfaceID, plane, pid,
+                                          !proc[0] ? "a process the kernel could not name (it might be WindowServer)"
+                                                   : "the caller is WindowServer (its name or uid 88): it never shares");
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a || !rd3AccelSurfaceRoot())
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, RD3K_SS_OFF, p->surfaceID, plane, pid,
+                                          "the accelerator is not up");
+    void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
+    if (!surf)
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, RD3K_SS_NO_SURFACE, p->surfaceID, plane, pid,
+                                          "no such surface for this task");
+    if (!rd3FamLock(a, false)) {
+        ((OSObject *)surf)->release();
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, RD3K_SS_OFF, p->surfaceID, plane, pid,
+                                          "the family lock is gone (accelerator stopping)");
+    }
+    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, plane);
+    OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
+    RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
+    RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    unsigned st = 0;
+    const char *why = nullptr;
+    const unsigned long long cur = vm && vm->fRmHandle && !vm->fScanout ? vm->fAllocGen : 0;
+    bool fresh = false;
+    if (!cache || !res) { st = RD3K_SS_NO_CACHE; why = "the accelerator never drew it (no resource)"; }
+    else if (!cur) { st = RD3K_SS_NO_VRAM; why = !vm ? "no vidmem" : vm->fScanout ? "a scanout buffer" : "its vidmem is not wired"; }
+    else if (!rd3_a3_share_may_record(0, gen, cur)) { st = RD3K_SS_POLICY; why = "the caller's import is of another allocation than the live one"; }
+    else {
+        fresh = res->fShareGen != gen || res->fSharePid != pid;
+        res->fShareGen = gen;
+        res->fSharePid = pid;
+    }
+    const unsigned long long bytes = vm ? vm->fBytes : 0;
+    if (cache) ((OSObject *)cache)->release();
+    rd3FamUnlock(a);
+    ((OSObject *)surf)->release();
+    if (st) {
+        char w[160];
+        snprintf(w, sizeof w, "%s (its import #%llu, the surface's #%llu)", why, gen, cur);
+        return rd3AccelShareRecordRefused(&gCntA3ShareRecordRefused, st, p->surfaceID, plane, pid, w);
+    }
+    if (fresh) {
+        const SInt64 n = OSAddAtomic64(1, &gCntA3ShareRecorded);
+        if (rd3_log_due((uint64_t)n, 8, 1023))
+            ALOG("surfshare: surface %u plane %u shared by pid %d (%s): WindowServer may import allocation #%llu (%llu B) "
+                 "read-only (a3share_recorded %lld)", p->surfaceID, plane, pid, proc, gen, bytes, (long long)n + 1);
+    }
+    return 0;
+}
+/* RD3K_SS_PLANE_SHARE_FAULT (the core, in the faulting importer's ioctl): a GPU VM fault inside a read-only
+ * shared import. Something wrote (or read past) memory WindowServer must only sample: sharing goes off for
+ * everyone at once (the plugin re-reads the switch), logged with the VA, the surface and both processes. */
+static unsigned rd3AccelShareFault(const struct RD3KSurfShareEsc *p)
+{
+    const unsigned plane = p->plane & ~RD3K_SS_PLANE_SHARE_FAULT;
+    const SInt64 n = OSAddAtomic64(1, &gCntA3ShareFaultOff);
+    const int was = gA3Share;
+    gA3Share = 0;
+    if (was || rd3_log_due((uint64_t)n, 8, 1023))
+        ALOG("surfshare: VM fault at VA 0x%llx in a read-only shared import of surface %u plane %u (importer pid %d, "
+             "producer pid %d): sharing turned OFF%s (a3share_fault_off %lld; sysctl debug.rdna3accel_a3share=1 turns "
+             "it on again)", p->size, p->surfaceID, plane, proc_selfpid(), (int)p->hClient,
+             was ? "" : " (it was off already)", (long long)n + 1);
+    return 0;
+}
 static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsigned cmd)
 {
     p->hSrcClient = p->hSrcMemory = 0;
     if (p->version != RD3K_SURFSHARE_VERSION) { p->status = RD3K_SS_BAD_VERSION; return kIOReturnSuccess; }
     /* N41: WindowServer's pending / ready marks (no family lock: a page-off waiting for this very mark
      * holds that lock; a pending mark looks the surface up for the caller) and the try-lock dirty mark */
+    /* N71 (c): the producer's share record, the core's fault report (no family lock taken before them) */
+    if (cmd == RD3K_ESC_SURF_DIRTY && !(p->plane & RD3K_SS_PLANE_GPU_MARK) && (p->plane & RD3K_SS_PLANE_SHARE_FAULT)) {
+        p->status = rd3AccelShareFault(p);
+        return kIOReturnSuccess;
+    }
+    if (cmd == RD3K_ESC_SURF_DIRTY && !(p->plane & RD3K_SS_PLANE_GPU_MARK) && (p->plane & RD3K_SS_PLANE_SHARE)) {
+        p->status = rd3AccelShareRecord(p, task);
+        return kIOReturnSuccess;
+    }
     if (cmd == RD3K_ESC_SURF_DIRTY && (p->plane & RD3K_SS_PLANE_GPU_MARK)) {
         p->status = (p->plane & ~(RD3K_SS_PLANE_GPU_MARK | 1u)) ? RD3K_SS_NO_CACHE
                                                                  : rd3AccelSurfGpuMark(p->surfaceID, (p->plane & 1u) != 0,
@@ -3636,7 +3774,8 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
     /* card run 58: the RM share is the same VRAM as a GEM import - the same rule, before the wire */
     if (cmd != RD3K_ESC_SURF_DIRTY) {
         unsigned dh = 0, reason = kA3WhyNone;
-        const unsigned st = rd3AccelA3Policy(surf, task, p->surfaceID, &dh, &reason);
+        bool shareTry;   /* never: the RM share has no read-only form (N71 (c) is the GEM import's) */
+        const unsigned st = rd3AccelA3Policy(surf, task, p->surfaceID, &dh, &reason, false, &shareTry);
         if (st) {
             const SInt64 n = rd3AccelA3WhyCount(reason);
             char why[256];
@@ -3752,10 +3891,23 @@ static bool rd3AccelA3Miss(SInt64 *cnt, long long *nOut)
     *nOut = (long long)n + 1;
     return n < 8 || (n & 1023) == 0;
 }
-static unsigned rd3AccelA3Policy(void *surf, task_t task, unsigned surfaceID, unsigned *headsOut, unsigned *whyOut)
+/* counts a WindowServer refusal of rd3AccelA3Policy that was left to the caller (N71 (c): the share check
+ * under the family lock decides first) */
+static void rd3AccelA3CountRefusal(unsigned why)
+{
+    if (why == kA3WhyDisplay) OSAddAtomic64(1, &gCntA3DispRefused);
+    else if (why == kA3WhyWs) OSAddAtomic64(1, &gCntA3WsRefused);
+}
+/* shareAsk (N71 (c)): the caller can make the BO read-only (a v2 core) and debug.rdna3accel_a3share is 1.
+ * *shareTry: the importer is WindowServer by name AND uid 88 and shareAsk - the verdict (returned as without
+ * the share) is then not counted here: the caller looks for a share record under the family lock first and
+ * counts the refusal (rd3AccelA3CountRefusal) only when none matches. */
+static unsigned rd3AccelA3Policy(void *surf, task_t task, unsigned surfaceID, unsigned *headsOut, unsigned *whyOut,
+                                 bool shareAsk, bool *shareTry)
 {
     *headsOut = 0;
     *whyOut = kA3WhyNone;
+    *shareTry = false;
     if (!surf) return 0;
     IOSurface *s = (IOSurface *)surf;
     const unsigned W = (unsigned)s->getWidth(), H = (unsigned)s->getHeight();
@@ -3819,9 +3971,11 @@ static unsigned rd3AccelA3Policy(void *surf, task_t task, unsigned surfaceID, un
         ALOG("surfgem: WindowServer surface %u %ux%u is not a display framebuffer (heads, scanout/swap size: %s) "
              "(%lld so far): a BO (rdna3a3ws=1)", surfaceID, W, H, heads, n);
     }
-    switch (rd3_a3_ws_policy(1, mask, displayOn, gA3Ws)) {
-    case RD3_A3_REFUSE_DISPLAY: OSAddAtomic64(1, &gCntA3DispRefused); *whyOut = kA3WhyDisplay; return RD3K_SS_DISPLAY;
-    case RD3_A3_REFUSE_WS:      OSAddAtomic64(1, &gCntA3WsRefused);   *whyOut = kA3WhyWs;      return RD3K_SS_POLICY;
+    /* N71 (c): WindowServer by its name AND uid 88 may get a read-only import of a shared allocation */
+    *shareTry = shareAsk && rd3_a3_ws_identity(1, (uint32_t)kauth_cred_getuid(kauth_cred_get()));
+    switch (rd3_a3_ws_policy(1, mask, displayOn, gA3Ws, 0, 0, 0)) {
+    case RD3_A3_REFUSE_DISPLAY: *whyOut = kA3WhyDisplay; if (!*shareTry) rd3AccelA3CountRefusal(kA3WhyDisplay); return RD3K_SS_DISPLAY;
+    case RD3_A3_REFUSE_WS:      *whyOut = kA3WhyWs;      if (!*shareTry) rd3AccelA3CountRefusal(kA3WhyWs);      return RD3K_SS_POLICY;
     default:                    return 0;
     }
 }
@@ -3912,13 +4066,39 @@ static void rd3AccelA3Why(char *why, unsigned long n, unsigned reason, unsigned 
     else
         snprintf(why, n, "an unknown reason %u (%ux%u) -- copies instead", reason, w, h);
 }
+/* N71 (c): a WindowServer import that found no share record of the live allocation: why, counted and logged
+ * (the first 8, then every 1024th), a stale record cleared. Family lock held. */
+static void rd3AccelShareMiss(unsigned surfaceID, unsigned plane, RD3Resource *res, const RD3VidMemory *vm)
+{
+    const unsigned long long sg = res ? res->fShareGen : 0, cg = vm ? vm->fAllocGen : 0;
+    if (sg && sg != cg) {
+        const SInt64 n = OSAddAtomic64(1, &gCntA3ShareStale);
+        if (rd3_log_due((uint64_t)n, 8, 1023))
+            ALOG("surfshare: surface %u plane %u: record of allocation #%llu (pid %d), the surface has #%llu now: refused "
+                 "(stale), record cleared (a3share_stale %lld)", surfaceID, plane, sg, res->fSharePid, cg, (long long)n + 1);
+        res->fShareGen = 0;
+        res->fSharePid = 0;
+        return;
+    }
+    const SInt64 n = OSAddAtomic64(1, &gCntA3ShareNoRecord);
+    if (rd3_log_due((uint64_t)n, 8, 1023))
+        ALOG("surfshare: surface %u plane %u: WindowServer import, no share record of allocation #%llu%s: as before "
+             "(a3share_norecord %lld)", surfaceID, plane, cg, !res ? " (no resource)" : !vm ? " (no vidmem)"
+             : (vm->fScanout ? " (a scanout buffer)" : !vm->fRmHandle ? " (not wired)" : ""), (long long)n + 1);
+}
 static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
 {
     p->kapiMemory = nullptr; p->bytes = 0;
-    if (p->version != RD3K_SURFGEM_VERSION) {
+    /* N71 (c): v2 has the out tail; a v1 caller's struct ends before it (never written) */
+    const bool v2 = p->version == RD3K_SURFGEM_VERSION;
+    if (!v2 && p->version != RD3K_SURFGEM_VERSION_1) {
         p->status = RD3K_SS_BAD_VERSION; rd3AccelSurfGemLog(p, "the core kext speaks another version", nullptr, 0);
         return kIOReturnSuccess;
     }
+    /* the caller's user space understands a read-only import (ECC security review: an older WindowServer plugin
+     * would write an alias over one): read before the tail is cleared */
+    const bool acceptRo = v2 && (p->flags & RD3K_SG_ACCEPT_RO);
+    if (v2) { p->flags = 0; p->sharePid = 0; p->allocGen = 0; }
     if (!rd3k_ss_plane_ok(p->plane)) {
         p->status = RD3K_SS_NO_CACHE;
         rd3AccelSurfPlaneRefused("surfgem", p->surfaceID, p->plane);
@@ -3934,10 +4114,20 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
     if (!root) { p->status = RD3K_SS_OFF; rd3AccelSurfGemLog(p, "no IOSurfaceRoot", nullptr, 0); return kIOReturnSuccess; }
     void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(root, p->surfaceID, task);
     if (!surf) { p->status = RD3K_SS_NO_SURFACE; rd3AccelSurfGemLog(p, "no such surface for this task", nullptr, 0); return kIOReturnSuccess; }
-    /* card run 58: before the wire below, which would give it a second VRAM copy */
+    /* card run 58: before the wire below, which would give it a second VRAM copy. N71 (c): a WindowServer
+     * import (name and uid 88) by a v2 core with sharing on is decided below, under the family lock, by the
+     * share record first */
     unsigned dispHeads = 0, reason = kA3WhyNone;
-    const unsigned pst = rd3AccelA3Policy(surf, task, p->surfaceID, &dispHeads, &reason);
-    if (pst) {
+    bool shareTry = false;
+    const unsigned pst = rd3AccelA3Policy(surf, task, p->surfaceID, &dispHeads, &reason, acceptRo && gA3Share, &shareTry);
+    if (pst && !shareTry && gA3Share && v2 && !acceptRo && (reason == kA3WhyDisplay || reason == kA3WhyWs)) {
+        static SInt64 gNoAccept;
+        const SInt64 n = OSAddAtomic64(1, &gNoAccept);
+        if (rd3_log_due((uint64_t)n, 4, 1023))
+            ALOG("surfshare: WindowServer's import of surface %u plane %u does not accept a read-only one (an older plugin "
+                 "/ libdrm_xnu): refused as before, no share looked up (%lld such)", p->surfaceID, p->plane, (long long)n + 1);
+    }
+    if (pst && !shareTry) {
         const SInt64 n = rd3AccelA3WhyCount(reason);
         p->status = pst;
         rd3AccelTraceSurf(0, p->surfaceID, p->plane, pst, reason, surf, nullptr, nullptr);
@@ -3961,9 +4151,37 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
     RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
     RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    /* N71 (c): the share record of the live allocation (never generation 0) makes it a read-only import; no
+     * wire for it (the producer's import wired that allocation; an unwired one is not the recorded one) */
+    bool shared = false;
+    if (shareTry) {
+        const int v = rd3_a3_ws_policy(1, dispHeads, gA3Display || gIopFlip, gA3Ws, gA3Share, res ? res->fShareGen : 0,
+                                       vm && vm->fRmHandle && !vm->fScanout ? vm->fAllocGen : 0);
+        shared = v == RD3_A3_ALLOW_SHARED;
+        if (!shared) rd3AccelShareMiss(p->surfaceID, p->plane, res, vm);
+        if (!shared && pst) {   /* the card run 58 refusal after all */
+            rd3AccelA3CountRefusal(reason);
+            const SInt64 n = rd3AccelA3WhyCount(reason);
+            p->status = pst;
+            rd3AccelTraceSurf(0, p->surfaceID, p->plane, pst, reason, surf, nullptr, nullptr);
+            OSIncrementAtomic(&gNVSVGemRefused);
+            OSIncrementAtomic(&gNVSVGemCause[pst & 15u]);
+            const bool say = rd3AccelA3RefusedFirst(p->surfaceID, n);
+            if (cache) ((OSObject *)cache)->release();
+            rd3FamUnlock(a);
+            if (say) {
+                char why[256];
+                rd3AccelA3Why(why, sizeof why, reason, dispHeads, surf);
+                ALOG("surfgem: surface %u plane %u refused: %s (status %#x, %lld of this cause; ok %d, refused %d)",
+                     p->surfaceID, p->plane, why, p->status, (long long)n, (int)gNVSVGemOk, (int)gNVSVGemRefused);
+            }
+            ((OSObject *)surf)->release();
+            return kIOReturnSuccess;
+        }
+    }
     const char *why = nullptr;
     IOReturn rr = kIOReturnSuccess;
-    if (vm && !vm->fRmHandle && !vm->fScanout) _ZN16IOAccelVidMemory4wireEv(vm);
+    if (!shared && vm && !vm->fRmHandle && !vm->fScanout) _ZN16IOAccelVidMemory4wireEv(vm);
     if (!cache || !res) { p->status = RD3K_SS_NO_CACHE; why = !cache ? "no device cache (never used on this GPU)" : "no resource in its cache"; }
     else if (!vm) { p->status = RD3K_SS_NO_VRAM; why = "the resource has no vidmem"; }
     else if (vm->fScanout) { p->status = RD3K_SS_NO_VRAM; why = "a scanout buffer"; }
@@ -3976,18 +4194,33 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
             p->status = 0; p->kapiMemory = vm->fRmHandle; p->bytes = vm->fBytes;
             res->fImportGen = vm->fAllocGen;   /* N41: the allocation this BO draws into */
             vm->fBoGen = vm->fAllocGen;        /* N41 security review: only this allocation is parked */
+            if (v2) {
+                p->allocGen = vm->fAllocGen;
+                if (shared) { p->flags = RD3K_SG_SHARED_RO; p->sharePid = res->fSharePid; }
+            }
         }
         else { p->status = RD3K_SS_NO_VRAM; why = "the core kext refused the reference (allocation unknown or freed)"; }
     }
+    /* what the shared import's log line names, read under the lock */
+    const int shPid = res ? res->fSharePid : 0;
+    const unsigned long long shGen = vm ? vm->fAllocGen : 0, shBytes = vm ? vm->fBytes : 0;
     rd3AccelSurfGemLog(p, why ? why : "?", vm, vm ? vm->fBytes : 0ull);
     rd3AccelTraceSurf(p->status == 0 ? 1u : 0u, p->surfaceID, p->plane, p->status, 0, surf, res, vm);
     if (rr != kIOReturnSuccess) ALOG("surfgem: rdna3RefVram -> %#x", rr);
-    /* a display framebuffer let in (rdna3a3display=1, or the display-pipe flip): its VRAM for the swap verdict */
-    const bool a3Note = p->status == 0 && dispHeads && vm;
+    /* a display framebuffer let in (rdna3a3display=1, or the display-pipe flip): its VRAM for the swap verdict;
+     * never a shared import (an application's drawable, not WindowServer's framebuffer) */
+    const bool a3Note = p->status == 0 && dispHeads && vm && !shared;
     const unsigned long long a3Phys = a3Note ? vm->fPhys : 0;
     const void *a3Vm = vm;
     if (cache) ((OSObject *)cache)->release();
     rd3FamUnlock(a);
+    if (shared && p->status == 0) {
+        const SInt64 n = OSAddAtomic64(1, &gCntA3ShareImported);
+        if (rd3_log_due((uint64_t)n, 8, 1023))
+            ALOG("surfshare: WindowServer (pid %d) imports surface %u plane %u READ-ONLY: allocation #%llu (%llu B) "
+                 "shared by pid %d%s (a3share_imported %lld)", proc_selfpid(), p->surfaceID, p->plane, shGen, shBytes,
+                 shPid, dispHeads ? ", the size of a head's scanout" : "", (long long)n + 1);
+    }
     if (a3Note) {
         const SInt64 n = OSAddAtomic64(1, &gCntA3DispImported);
         rd3AccelA3DispNote(p->surfaceID, dispHeads, a3Phys, a3Vm);

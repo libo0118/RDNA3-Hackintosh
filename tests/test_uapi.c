@@ -9,6 +9,7 @@
 #include <string.h>
 #include "rdna3_drm.h"
 #include "amd_fw.h"
+#include "rdna3_bo_map.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { \
@@ -74,15 +75,31 @@ static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_
  * is 100 MiB (more than half of the 256 MiB visible VRAM over two imports) */
 static int h_surf_refs[16];
 static uint32_t h_dirty_surface, h_dirty_plane;
-static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+/* N71 (c) security review: the read-only shared surfaces (13, 15) answer the old refusal unless the caller
+ * accepts a read-only import; h_ro_force sets gpu_ro regardless (an OS bug the UAPI must refuse) */
+static int h_ro_force;
+static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane, uint32_t flags)
 {
     (void)c;
+    if ((id == 13 || id == 15) && !(flags & RD_SURFACE_BO_ACCEPT_RO) && !h_ro_force)
+        return -RD_EPERM;
     if ((os != (void *)0x7a5c && os != (void *)0x7a5d) || plane)
         return -RD_ENOENT;
     if (id == 9) {
         bo->vram_offset = 0x100800; bo->size = 0x10000;
     } else if (id == 7) {
         bo->vram_offset = 0x100000; bo->size = 0x10000;
+        bo->surf_gen = 3;   /* N71 (c): the accelerator allocation's generation */
+    } else if (id == 13) {
+        /* N71 (c): surface 7's allocation, as WindowServer's READ-ONLY shared import of it */
+        bo->vram_offset = 0x100000; bo->size = 0x10000;
+        bo->surf_gen = 3; bo->gpu_ro = 1; bo->surf_pid = 4242;
+        id = 7;   /* the same allocation: the same hold */
+    } else if (id == 15 || id == 14) {
+        /* N71 (c) review: one page of the accelerator's VRAM, 15 imported READ-ONLY (shared), 14 writable */
+        bo->vram_offset = 0x200000; bo->size = 0x1000;
+        bo->surf_gen = 8;
+        if (id == 15) { bo->gpu_ro = 1; bo->surf_pid = 4242; }
     } else if (id == 11) {
         bo->vram_offset = 0x10000000; bo->size = 100u << 20;
     } else {
@@ -95,6 +112,22 @@ static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t p
 }
 static unsigned h_foreign_seen;
 static void count_foreign(void *ctx, rdna3_bo *bo) { (void)ctx; if (bo->foreign) h_foreign_seen++; }
+/* N71 (c): the producer's share record and the fault report reach the OS */
+static uint32_t h_share_id, h_fault_id, h_fault_plane, h_fault_calls;
+static uint64_t h_share_gen, h_fault_va;
+static int32_t h_fault_pid;
+static int h_surface_share(void *c, void *os, uint32_t id, uint32_t plane, uint64_t gen)
+{
+    (void)c; (void)os; (void)plane;
+    h_share_id = id; h_share_gen = gen;
+    return id == 7 ? 0 : -RD_ENOENT;
+}
+static void h_surface_fault(void *c, void *os, uint32_t id, uint32_t plane, uint64_t va, int32_t pid)
+{
+    (void)c; (void)os;
+    h_fault_id = id; h_fault_plane = plane; h_fault_va = va; h_fault_pid = pid;
+    h_fault_calls++;
+}
 static int h_surface_dirty(void *c, void *os, uint32_t id, uint32_t plane)
 {
     (void)c; (void)os;
@@ -110,10 +143,11 @@ static int h_sensor(void *c, uint32_t type, uint32_t *v)
     default: return -RD_EINVAL;
     }
 }
+static uint64_t h_fault_addr = 0x500000000000ull;
 static int h_fault_info(void *c, void *vm, uint64_t *addr, uint32_t *status, uint32_t *hub)
 {
     (void)c; (void)vm;
-    *addr = 0x500000000000ull; *status = 0x00a02400; *hub = AMDGPU_VMHUB_TYPE_GFX;
+    *addr = h_fault_addr; *status = 0x00a02400; *hub = AMDGPU_VMHUB_TYPE_GFX;
     return 0;
 }
 static uint32_t h_vm_query(void *c, void *vm) { (void)c; (void)vm; return h_query_flags; }
@@ -425,7 +459,8 @@ int main(void)
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
                           NULL, NULL, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                          NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -1038,8 +1073,10 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && h_dirty_surface == 99);
         sb.surface_id = 3;
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT && h_dirty_surface == 3);
-        sb.op = 4; sb.surface_id = 7; sb.plane = 0;   /* an op this UAPI does not know */
+        sb.op = 6; sb.surface_id = 7; sb.plane = 0;   /* an op this UAPI does not know */
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL);
+        sb.op = RD_XNU_SURFACE_BO_SHARE;   /* N71 (c): no OS hook for it */
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOSYS);
         sb.op = RD_XNU_SURFACE_BO_DIRTY; sb.surface_id = 7; sb.plane = 0;
         /* every failure path gives the OS's hold back */
         CHECK(h_surf_refs[7] == 0 && h_surf_refs[9] == 0);
@@ -1090,6 +1127,141 @@ int main(void)
             CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, a2) == -RD_ENOSPC && h_surf_refs[11] == 1);
             gc.handle = a1.handle;
             CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && h_surf_refs[11] == 0 && live_bos == bos0);
+        }
+        /* DRIVER-PLAN N71 (c): WindowServer's READ-ONLY import of an application's shared allocation, the
+         * producer's share record, the old 24-byte caller, the producer's exit, a fault inside the import */
+        {
+            static rdna3_drm_file filep;
+            rdna3_drm_file *fp = &filep;   /* the producer (an application) */
+            struct rd_xnu_surface_bo w, ro;
+            struct { uint32_t op, surface_id, plane, handle; uint64_t size; uint8_t canary[16]; } v1;
+            struct drm_amdgpu_gem_va va;
+            union drm_amdgpu_ctx cx;
+            rdna3_bo *rb;
+            unsigned i, canary_ok = 1;
+            CHECK(rdna3_drm_file_open(&dev, fp) == 0);
+            fp->os = (void *)0x7a5d;
+            /* no hook: -ENOSYS; with it, a file without a writable import of the plane: -ENOENT */
+            memset(&w, 0, sizeof(w));
+            w.op = RD_XNU_SURFACE_BO_SHARE; w.surface_id = 7;
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, w) == -RD_ENOSYS);
+            dev.ops.surface_share = h_surface_share;
+            dev.ops.surface_fault = h_surface_fault;
+            h_share_id = 0;
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, w) == -RD_ENOENT && h_share_id == 0);
+            w.surface_id = 0;
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, w) == -RD_EINVAL);
+            /* the producer's writable import: the out tail says not shared, its generation; then its record
+             * carries that generation (the kernel's, not a user value) */
+            memset(&w, 0, sizeof(w));
+            w.op = RD_XNU_SURFACE_BO_IMPORT; w.surface_id = 7;
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, w) == 0 && w.handle != 0 && w.out_ver == RD_XNU_SURFACE_BO_OUT_VER &&
+                  w.out_flags == 0 && w.alloc_gen == 3);
+            rb = rdna3_drm_bo_lookup(fp, w.handle);
+            CHECK(rb && !rb->gpu_ro && rb->surf_id == 7 && rb->surf_plane == 0 &&
+                  (rb->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED));
+            memset(&ro, 0, sizeof(ro));
+            ro.op = RD_XNU_SURFACE_BO_SHARE; ro.surface_id = 7; ro.size = 99;   /* 'size' is not the generation */
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, ro) == 0 && h_share_id == 7 && h_share_gen == 3);
+            ro.plane = 1; h_share_id = 0;
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, ro) == -RD_ENOENT && h_share_id == 0);   /* no import of plane 1 */
+            ro.plane = 0;
+            rb->surf_gen = 0;   /* an import from an accelerator without the share (no generation) */
+            CHECK(IOCTL(fp, RD_NR_XNU_SURFACE_BO, ro) == -RD_ENODEV && h_share_id == 0);
+            rb->surf_gen = 3;
+            /* WindowServer's import of it: read-only - no CPU mapping, never a writable GPU page, no GART bind */
+            /* an older caller (no IN_ACCEPT_RO, a zero tail or a 24-byte struct) gets the old refusal while the
+             * share record exists; an OS that answers read-only anyway is refused by the UAPI (its hold given back) */
+            memset(&ro, 0, sizeof(ro));
+            ro.op = RD_XNU_SURFACE_BO_IMPORT; ro.surface_id = 13;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == -RD_EPERM && h_surf_refs[7] == 1);
+            memset(&v1, 0, sizeof(v1));
+            v1.op = RD_XNU_SURFACE_BO_IMPORT; v1.surface_id = 13;
+            CHECK(rdna3_drm_ioctl(f, RD_NR_XNU_SURFACE_BO, &v1, RD_XNU_SURFACE_BO_V1_SIZE) == -RD_EPERM && h_surf_refs[7] == 1);
+            h_ro_force = 1;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == -RD_EPERM && h_surf_refs[7] == 1 && ro.handle == 0);
+            h_ro_force = 0;
+            /* the new caller: read-only, the producer's pid with it */
+            memset(&ro, 0, sizeof(ro));
+            ro.op = RD_XNU_SURFACE_BO_IMPORT; ro.surface_id = 13; ro.out_flags = RD_XNU_SURFACE_BO_IN_ACCEPT_RO;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, ro) == 0 && ro.handle != 0 && ro.out_ver == RD_XNU_SURFACE_BO_OUT_VER &&
+                  ro.out_flags == RD_XNU_SURFACE_BO_OUT_SHARED_RO && ro.alloc_gen == 3 && ro.share_pid == 4242 &&
+                  h_surf_refs[7] == 2);
+            rb = rdna3_drm_bo_lookup(f, ro.handle);
+            CHECK(rb && rb->gpu_ro && rb->foreign && (rb->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) &&
+                  !(rb->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED) && rb->surf_pid == 4242);
+            memset(&m, 0, sizeof(m));
+            m.in.handle = ro.handle;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), m) == -RD_EPERM);
+            CHECK(rd3_bomap_classify(rb, 1ull << 30, 0) == RD3_BOMAP_REFUSE_NO_CPU);
+            memset(&va, 0, sizeof(va));
+            va.handle = ro.handle; va.operation = AMDGPU_VA_OP_MAP; va.va_address = 0x7000000;
+            va.map_size = 0x10000; va.flags = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE;
+            vm_last_flags = 0;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0 &&
+                  (vm_last_flags & AMDGPU_VM_PAGE_READABLE) && !(vm_last_flags & AMDGPU_VM_PAGE_WRITEABLE));
+            /* a read-only import never records a share (only writable imports count) */
+            memset(&w, 0, sizeof(w));
+            w.op = RD_XNU_SURFACE_BO_SHARE; w.surface_id = 13; h_share_id = 0;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, w) == -RD_ENOENT && h_share_id == 0);
+            /* an older client's 24-byte struct: imported, nothing written past it */
+            memset(&v1, 0, sizeof(v1));
+            memset(v1.canary, 0x5a, sizeof(v1.canary));
+            v1.op = RD_XNU_SURFACE_BO_IMPORT; v1.surface_id = 7;
+            CHECK(rdna3_drm_ioctl(fp, RD_NR_XNU_SURFACE_BO, &v1, RD_XNU_SURFACE_BO_V1_SIZE) == 0 && v1.handle != 0 &&
+                  v1.size == 0x10000);
+            for (i = 0; i < sizeof(v1.canary); i++)
+                canary_ok &= v1.canary[i] == 0x5a;
+            CHECK(canary_ok && h_surf_refs[7] == 3);
+            /* a buffer too small for the v1 struct, passed through unpadded: refused */
+            CHECK(rdna3_drm_ioctl(fp, RD_NR_XNU_SURFACE_BO, &v1, 4) == -RD_EINVAL && h_surf_refs[7] == 3);
+            /* R9: the producer exits while WindowServer samples: the read-only BO keeps the allocation */
+            rdna3_drm_file_close(fp);
+            CHECK(h_surf_refs[7] == 1 && rdna3_drm_bo_lookup(f, ro.handle) == rb);
+            /* R2: a VM fault of WindowServer's VM inside the shared import goes to the OS once (its refused
+             * submission or its context query on the guilty VM); a fault elsewhere does not */
+            dev.ops.vm_fault_info = h_fault_info;
+            dev.ops.vm_query = h_vm_query;
+            h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
+            memset(&cx, 0, sizeof(cx));
+            cx.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx) == 0);
+            {
+                const uint32_t ctx_id = cx.out.alloc.ctx_id;
+                h_fault_calls = 0;
+                h_fault_addr = 0x500000000000ull;   /* not in it */
+                memset(&cx, 0, sizeof(cx));
+                cx.in.op = AMDGPU_CTX_OP_QUERY_STATE2; cx.in.ctx_id = ctx_id;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx) == 0 && h_fault_calls == 0);
+                h_fault_addr = 0x7003000;           /* inside: page 3 of the import */
+                
+                memset(&cx, 0, sizeof(cx));
+                cx.in.op = AMDGPU_CTX_OP_QUERY_STATE2; cx.in.ctx_id = ctx_id;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx) == 0);
+                CHECK(h_fault_calls == 1 && h_fault_id == 13 &&
+                      h_fault_plane == 0 && h_fault_va == 0x7003000 && h_fault_pid == 4242);
+                memset(&cx, 0, sizeof(cx));
+                cx.in.op = AMDGPU_CTX_OP_QUERY_STATE2; cx.in.ctx_id = ctx_id;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx) == 0 && h_fault_calls == 1);   /* once per fault */
+                h_query_flags = 0;
+                h_fault_addr = 0x7004000;           /* not guilty: not asked */
+                memset(&cx, 0, sizeof(cx));
+                cx.in.op = AMDGPU_CTX_OP_QUERY_STATE2; cx.in.ctx_id = ctx_id;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx) == 0 && h_fault_calls == 1);
+                memset(&cx, 0, sizeof(cx));
+                cx.in.op = AMDGPU_CTX_OP_FREE_CTX; cx.in.ctx_id = ctx_id;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx) == 0);
+            }
+            h_fault_addr = 0x500000000000ull;
+            dev.ops.vm_fault_info = NULL;
+            dev.ops.vm_query = NULL;
+            va.operation = AMDGPU_VA_OP_UNMAP;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+            gc.handle = ro.handle; gc.pad = 0;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && h_surf_refs[7] == 0 && live_bos == bos0);
+            f->share_fault_seen = 0;
+            dev.ops.surface_share = NULL;
+            dev.ops.surface_fault = NULL;
         }
         dev.ops.surface_bo = NULL;
         dev.ops.surface_dirty = NULL;
@@ -1438,6 +1610,60 @@ int main(void)
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
             g_uf.handle = 9999; g_uf.offset = 0;
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            /* N71 (c) review (SEC-MEDIUM): the user fence is written through VMID0, past the VM's read-only
+             * page: never into a surface BO (a read-only shared import, nor a writable one) */
+            {
+                struct rd_xnu_surface_bo sro, srw;
+                struct drm_amdgpu_gem_va fva;
+                void *os0 = f->os;
+                f->os = (void *)0x7a5c;
+                dev.ops.surface_bo = h_surface_bo;
+                memset(&sro, 0, sizeof(sro)); sro.op = RD_XNU_SURFACE_BO_IMPORT; sro.surface_id = 15;
+                sro.out_flags = RD_XNU_SURFACE_BO_IN_ACCEPT_RO;
+                memset(&srw, 0, sizeof(srw)); srw.op = RD_XNU_SURFACE_BO_IMPORT; srw.surface_id = 14;
+                CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sro) == 0 && sro.out_flags == RD_XNU_SURFACE_BO_OUT_SHARED_RO &&
+                      IOCTL(f, RD_NR_XNU_SURFACE_BO, srw) == 0 && srw.out_flags == 0 && sro.size == 4096);
+                g_uf.handle = sro.handle; g_uf.offset = 16;
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+                g_uf.handle = srw.handle;
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+                g_uf.handle = 0;
+                /* the CS branch of the fault attribution: a guilty VM's submission is refused (-ECANCELED) and
+                 * a fault inside its read-only shared import goes to the OS once, not again for the same address */
+                memset(&fva, 0, sizeof(fva));
+                fva.handle = sro.handle; fva.operation = AMDGPU_VA_OP_MAP; fva.va_address = 0x7100000;
+                fva.map_size = 0x1000; fva.flags = AMDGPU_VM_PAGE_READABLE;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), fva) == 0);
+                dev.ops.surface_fault = h_surface_fault;
+                dev.ops.vm_fault_info = h_fault_info;
+                dev.ops.vm_query = h_vm_query;
+                h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
+                h_fault_calls = 0; f->share_fault_seen = 0;
+                h_fault_addr = 0x7100800;
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED &&
+                      h_fault_calls == 1 && h_fault_id == 15 && h_fault_va == 0x7100800 && h_fault_pid == 4242);
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED && h_fault_calls == 1);
+                h_fault_addr = 0x7200000;   /* a new fault outside it: not reported */
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED && h_fault_calls == 1);
+                h_query_flags = 0;
+                h_fault_addr = 0x500000000000ull;
+                f->share_fault_seen = 0;
+                dev.ops.surface_fault = NULL;
+                dev.ops.vm_fault_info = NULL;
+                dev.ops.vm_query = NULL;
+                fva.operation = AMDGPU_VA_OP_UNMAP;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), fva) == 0);
+                {
+                    struct drm_gem_close c2;
+                    memset(&c2, 0, sizeof(c2));
+                    c2.handle = sro.handle;
+                    CHECK(IOCTL(f, RD_NR_GEM_CLOSE, c2) == 0);
+                    c2.handle = srw.handle;
+                    CHECK(IOCTL(f, RD_NR_GEM_CLOSE, c2) == 0 && h_surf_refs[15] == 0 && h_surf_refs[14] == 0);
+                }
+                dev.ops.surface_bo = NULL;
+                f->os = os0;
+            }
             g_uf.handle = ufh; g_uf.offset = 16;
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &h2) == 0);
             CHECK(last_job.uf_bo == rdna3_drm_bo_lookup(f, ufh) && last_job.uf_offset == 16);

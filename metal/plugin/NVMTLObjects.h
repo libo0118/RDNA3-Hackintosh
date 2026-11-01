@@ -47,6 +47,8 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
   uint32_t _baseSlice, _baseLevel;
   uint32_t _surfSeed, _surfGen; BOOL _surfSynced, _surfOwned;
   nvk_buffer _vramBuf; BOOL _vramOn;
+  BOOL _vramRO; uint64_t _roGen;   // N71 (c): WindowServer's READ-ONLY alias of an application's shared VRAM drawable (_vramBuf is its read-only import; never written, never uploaded into) and its allocation generation
+  nvmtl_ps_tex _ps;                // N71 (c): the producer's share record for this VRAM texture (nvmtl_surface_share.h)
   BOOL _stex;
   uint64_t _resid;
   NSUInteger _usage;
@@ -126,6 +128,8 @@ extern id gNVMTLMainDevice;
   NSMutableSet *_surfOverwrites; // contents defined by writes recorded in this command buffer
   NSMutableDictionary *_wsMarks;  // DRIVER-PLAN N41: surface id -> index of the last part writing it (pending marks taken at commit)
   NSMutableSet *_wsCommitDirty;    // N41: "id:plane" of the surfaces marked newest at commit
+  NSMutableSet *_roSamples;        // N71 (c) R1: the read-only shared aliases (root textures) this command buffer samples
+  NSMutableDictionary *_roGens;    // N71 (c) R1: surface id -> the producer's tag generation at commit
   unsigned _nEnc, _nEnd, _nHandlers, _nStatus, _nEnqueue, _nLabel, _nPresent, _nWait;
   unsigned _nEncSealed;
   CFTimeInterval _gpuStart, _gpuEnd;

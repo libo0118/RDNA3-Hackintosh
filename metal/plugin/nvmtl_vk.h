@@ -8,9 +8,12 @@
 #include <stdint.h>
 #include <stddef.h>
 const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
-typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; } nvk_buffer;
+typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem;
+                 uint64_t share_gen; int share_ro; int32_t share_pid; } nvk_buffer;   /* N71 (c): the import's allocation generation (0: unknown), DRM_XNU_SURFACE_SHARED_RO (a read-only alias: never written) and its producer's pid (0: unknown) */
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_ws_frame.h"
+#include "nvmtl_surface_share.h"
+#include "nvmtl_ws_share.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vpair;  } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -356,7 +359,25 @@ int nvmtl_vk_cmd_copy_image_to_buffer_layer(nvk_cmdbuf *c, nvk_image *img, uint3
 int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img);
 
 int nvmtl_vk_surface_share_on(void);
+/* DRIVER-PLAN N71 (c) (nvmtl_surface_share.h producer, nvmtl_ws_share.h consumer). g_wss / g_ps: the counters of `vk: ws frame: SUMMARY` (sh_* / pr_*).
+   a3share_now: debug.rdna3accel_a3share, re-read at most once a second (-1 the sysctl is absent). ws_share_why: NVMTL_WSS_OK or why a WindowServer texture
+   of this surface and usage may not be a read-only alias (counts nothing). wss_demote: the surface takes the private path for its life (once, logged).
+   wss_hazard: R1, the tag generation at the composite's commit (g0) and at its completion (g1): counts, logs, demotes, may stop the session; returns
+   NVMTL_WSS_H_* bits. surface_share_after_gpu: the producer, after the GPU finished a frame in the surface's VRAM: asks the kernel for the share once
+   per generation (counts and logs the answer). image_create_buffer_alias_ro: the read-only alias of an imported read-only buffer (SAMPLED | TRANSFER_SRC). */
+extern nvmtl_wss_stats g_wss;
+extern nvmtl_ps_stats g_ps;
+int nvmtl_vk_a3share_now(void);
+int nvmtl_vk_ws_share_why(uint32_t surfaceID, uint32_t usage, int cpu_write);
+void nvmtl_vk_wss_demote(uint32_t surfaceID, const char *why);
+int nvmtl_vk_wss_hazard(uint32_t surfaceID, int32_t producerPid, uint64_t tag0, uint64_t tag1);   /* nvmtl_wss_tag_key values: seed << 32 | generation */
+int nvmtl_vk_wss_producer_demoted(int32_t producerPid);   /* its hazards demoted that producer: none of its surfaces is imported read-only */
+int nvmtl_vk_surface_share_after_gpu(uint32_t surfaceID, uint32_t plane, nvmtl_ps_tex *t);   /* NVMTL_PSR_* of the answer, -1 nothing asked */
+int nvmtl_vk_image_create_buffer_alias_ro(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8,
+                                          const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out);
+/* the kernel's errno behind the calling thread's last nvmtl_vk_surface_vram failure (0: it did not fail, or not in the kernel) */
+int nvmtl_vk_last_vram_errno(void);
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane);
 /* why the calling thread's last nvmtl_vk_surface_dirty returned -1: an errno, -2 the dirty path is off, -3 no Vulkan device, 0 it did not fail (frame trace) */
 int nvmtl_vk_last_dirty_errno(void);

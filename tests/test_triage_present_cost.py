@@ -6,7 +6,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
-from triage_present_cost import present_rows as _all_rows, plugin_summaries, kernel_counters, ws_frame_rows, ws_summaries  # noqa: E402
+from triage_present_cost import present_rows as _all_rows, plugin_summaries, kernel_counters, ws_frame_rows, ws_summaries, ws_share_rows  # noqa: E402
 
 
 N68_ROWS = ("IOP timing", "IOP latch")
@@ -276,6 +276,54 @@ two = (DL % (1, "horizon-client", 900, dlbody(pct="10.0") + " next_ms=1000 wall_
 r = drawable_rows(two)
 check(r[0][0] == "WARN" and "80.0 % in the last interval" in r[0][2], "the interval share decides: %r" % r)
 check([x[1] for x in present_rows(txt, "", False)][-2:] == ["drawable", "drawable"], "present_rows carries the drawable rows")
+
+# N71 (c): `ws share` - the producers' pr_* against WindowServer's sh_* on the same `vk: ws frame: SUMMARY` line
+# (metal/plugin/nvmtl_ws_share.h nvmtl_wss_format, nvmtl_surface_share.h nvmtl_ps_format; the bodies tests/test_ws_share.c and tests/test_surface_share.c check)
+
+
+def shbody(imp=3, skip=700, stale=0, reimp=0, refused=0, war=0, demoted=0, wr=0, inelig=0, off=0, eperm=0, rw=0):
+    return ("frames=800 active_s=40 fps_peak=215 passes=800 draws=800 fbf_draws=0 bar_img=0 bar_mem=0 rec_us_avg=1000 rec_us_max=2000 gpu_n=800 gpu_us_avg=900 "
+            "gpu_us_max=2000 wait_us_avg=100 ups=0 up_kb=0 up_us_avg=0 membar=0 sh_imp=%d sh_skip=%d sh_stale=%d sh_reimp=%d sh_refused=%d sh_war=%d "
+            "sh_demoted=%d sh_wr=%d sh_inelig=%d sh_rw=%d sh_eperm=%d sh_enospc=0 sh_enoent=0 sh_enodev=0 sh_enxio=0 sh_eother=0 sh_off=%d" % (
+                imp, skip, stale, reimp, refused, war, demoted, wr, inelig, rw, eperm, off))
+
+
+def prbody(shared=3, enxio=0, stop=0, eperm=0, enoent=0, other=0, nogen=0):
+    return (wbody(frames=900, ups=0, up_kb=0) + " pr_shared=%d pr_enxio=%d pr_stop=%d pr_eperm=%d pr_enoent=%d pr_other=%d pr_nogen=%d" % (
+        shared, enxio, stop, eperm, enoent, other, nogen))
+
+
+APP = "horizon-client[900:3f]"
+good = W % (1, "WindowServer[207:2cd]", shbody()) + W % (2, APP, prbody())
+r = ws_share_rows(good)
+check(len(r) == 1 and r[0][0] == "INFO" and r[0][1] == "ws share" and "applications recorded 3 share(s) (no failures)" in r[0][2]
+      and "3 read-only import(s)" in r[0][2] and "700 sample(s) without an upload" in r[0][2], "a healthy share: %r" % r)
+check([x[1] for x in present_rows(good, "", False)].count("ws share") == 1, "present_rows carries the ws share row")
+# apps shared, WindowServer imported nothing: WARN (the brief's rule), with sh_* present and absent
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(imp=0, skip=0, refused=2, eperm=2)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "WindowServer imported none read-only" in r[0][2] and "EPERM 2" in r[0][2], "apps shared, sh_imp 0: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", wbody()) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "no sh_* keys" in r[0][2], "apps shared, WindowServer's line has no sh_* keys: %r" % r)
+# hazards and the stopped session: WARN
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(war=2, demoted=2)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "2 read-after-write hazard(s)" in r[0][2] and "2 surface(s) demoted" in r[0][2], "sh_war: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(war=4, demoted=4, off=1)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "STOPPED for the session" in r[0][2] and "stopped for the session after the hazards" in r[0][2], "sh_off: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(wr=1)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "1 write(s) asked of a read-only alias" in r[0][2], "sh_wr: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(imp=3, skip=0)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "never sampled without an upload" in r[0][2], "imports never used: %r" % r)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(rw=2)) + W % (2, APP, prbody()))
+check(r[0][0] == "WARN" and "2 WRITABLE import(s)" in r[0][2], "sh_rw: %r" % r)
+# stale samples alone are INFO (a CPU-written surface takes the private path by design)
+r = ws_share_rows(W % (1, "WindowServer[207:2cd]", shbody(stale=5)) + W % (2, APP, prbody()))
+check(r[0][0] == "INFO" and "5 stale (private path)" in r[0][2], "stale is INFO: %r" % r)
+# no share anywhere (a3share 0): no row at all; an older plugin: none either
+check(ws_share_rows(W % (1, "WindowServer[207:2cd]", wbody())) == [], "a3share 0: no ws share row")
+check(ws_share_rows("") == [], "no plugin log: no ws share row")
+# the producers could not record (older kernel): INFO-with-reason WARN is not raised when nothing was shared and WindowServer has no sh_* keys
+r = ws_share_rows(W % (1, APP, prbody(shared=0, stop=2)))
+check(len(r) == 1 and r[0][0] == "WARN" and "producers could not record" in r[0][2], "older kernel: %r" % r)
 
 if FAILS:
     sys.exit("test_triage_present_cost: %d FAILED" % len(FAILS))

@@ -66,6 +66,11 @@ public:
      * another generation marks VRAM that import never drew into (counted: vm_dirty_moved) */
     unsigned long long fApPhys = 0, fApBytes = 0;
     unsigned long long fImportGen = 0;
+    /* DRIVER-PLAN N71 (c), under the family lock: the share record an application made (RD3K_SS_PLANE_SHARE):
+     * WindowServer may import this resource's allocation of generation fShareGen read-only (0: none); a freed or
+     * re-backed allocation has another generation, so the record never matches it (and is cleared when seen) */
+    unsigned long long fShareGen = 0;
+    int fSharePid = 0;
 };
 OSDefineMetaClassAndStructors(RD3Resource, IOAccelResource2)
 class RD3SysMemory : public IOAccelSysMemory {

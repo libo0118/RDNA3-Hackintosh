@@ -49,10 +49,16 @@
 #include <mach/mach_time.h>
 #include <kern/clock.h>
 #include <sys/sysctl.h>
+#include <sys/proc.h>
 
 /* DRIVER-PLAN N41: the UAPI's flags reach the accelerator's escape unchanged */
 static_assert(RD_XNU_SURFACE_PLANE_GPU_MARK == RD3K_SS_PLANE_GPU_MARK, "uapi and accelerator GPU mark bits differ");
 static_assert(RD_XNU_SURFACE_PLANE_TRYLOCK == RD3K_SS_PLANE_TRYLOCK, "uapi and accelerator try-lock bits differ");
+/* DRIVER-PLAN N71 (c): an older accelerator reads a v1 RD3KSurfGem; the v2 tail starts after it */
+static_assert(__builtin_offsetof(RD3KSurfGem, flags) == RD3K_SURFGEM_V1_SIZE, "RD3KSurfGem v1 prefix moved");
+static_assert(((RD_XNU_SURFACE_PLANE_GPU_MARK | RD_XNU_SURFACE_PLANE_TRYLOCK) &
+               (RD3K_SS_PLANE_SHARE | RD3K_SS_PLANE_SHARE_FAULT)) == 0,
+              "the share flags overlap the UAPI's plane flags");
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
@@ -538,16 +544,23 @@ static const char *surfaceStatusName(unsigned int st)
     }
 }
 
-/* the first refusals of each cause, then one in 1024 */
-static void surfaceRefusedLog(const char *what, uint32_t surfaceId, uint32_t plane, unsigned int st, IOReturn rr)
+/* the first refusals of each cause, then one in 1024; 'buckets' (8): each
+ * kind of call its own budget (N71 (c) review: share records must not use up
+ * the import refusals' first lines) */
+static void surfaceRefusedLogIn(SInt32 *buckets, const char *what, uint32_t surfaceId, uint32_t plane,
+                                unsigned int st, IOReturn rr)
 {
-    static SInt32 gRefused[8];
     unsigned i = st == 0 ? 0 : (st & 7u);
-    SInt32 n = OSIncrementAtomic(&gRefused[i]);
+    SInt32 n = OSIncrementAtomic(&buckets[i]);
     if (n < 6 || (n & 1023) == 0)
         LOG("GEM: IOSurface %u plane %u %s refused: %s (status %#x, call %#x, %d of this cause)", surfaceId, plane,
             what, rr != kIOReturnSuccess ? "the accelerator did not answer" : surfaceStatusName(st), st, rr,
             (int)n + 1);
+}
+static void surfaceRefusedLog(const char *what, uint32_t surfaceId, uint32_t plane, unsigned int st, IOReturn rr)
+{
+    static SInt32 gRefused[8];
+    surfaceRefusedLogIn(gRefused, what, surfaceId, plane, st, rr);
 }
 
 /* RD3ACCEL_SS_FN 'cmd' on the accelerator; fDrmLock held and dropped
@@ -574,8 +587,10 @@ IOReturn RDNA3Accel::accelSurfaceCall(void *arg, void *fileOs, unsigned cmd, boo
     return rr;
 }
 
-/* ops.surface_bo, fDrmLock held */
-int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane)
+/* ops.surface_bo, fDrmLock held. DRIVER-PLAN N71 (c): asked as RD3KSurfGem v2 (an older accelerator answers
+ * RD3K_SS_BAD_VERSION: asked again as v1, which never gives a shared import); a read-only shared import
+ * (RD3K_SG_SHARED_RO) becomes a gpu_ro BO: no CPU mapping, never a writable GPU page (uapi surface_bo, va_map_hw) */
+int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane, uint32_t flags)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     RD3KSurfGem g;
@@ -587,7 +602,21 @@ int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t sur
     g.surfaceID = surfaceId;
     g.plane = plane;
     g.status = RD3K_SS_OFF;
+    /* N71 (c), security review: a read-only shared import only when the caller's user space understands one */
+    g.flags = (flags & RD_SURFACE_BO_ACCEPT_RO) ? RD3K_SG_ACCEPT_RO : 0u;
     IOReturn rr = a->accelSurfaceCall(&g, fileOs, RD3K_ESC_SURF_GEM, &svc);
+    if (svc && rr == kIOReturnSuccess && g.status == RD3K_SS_BAD_VERSION) {
+        static SInt32 gV1;
+        if (OSIncrementAtomic(&gV1) < 2)
+            LOG("GEM: the accelerator kext speaks RD3KSurfGem v1 only: surface imports without the N71 (c) read-only "
+                "share (an older accelerator)");
+        bzero(&g, sizeof(g));
+        g.version = RD3K_SURFGEM_VERSION_1;
+        g.surfaceID = surfaceId;
+        g.plane = plane;
+        g.status = RD3K_SS_OFF;
+        rr = a->accelSurfaceCall(&g, fileOs, RD3K_ESC_SURF_GEM, &svc);
+    }
     if (!svc) {
         static SInt32 gNoSvc;
         if (OSIncrementAtomic(&gNoSvc) < 4)
@@ -600,16 +629,89 @@ int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t sur
             return -RD_ENXIO;
         return g.status ? surfaceStatusErrno(g.status) : -RD_ENODEV;
     }
+    const bool v2 = g.version == RD3K_SURFGEM_VERSION;
+    const bool shared = v2 && (g.flags & RD3K_SG_SHARED_RO);
+    if (shared && !(flags & RD_SURFACE_BO_ACCEPT_RO))   /* never: the accelerator shares only when asked; the UAPI refuses it */
+        LOG("GEM: IOSurface %u plane %u: the accelerator answered a read-only shared import the caller did not ask for: "
+            "refused (EPERM)", surfaceId, plane);
     RDNA3VramHandle *h = (RDNA3VramHandle *)g.kapiMemory;
     bo->vram_offset = h->offset;
     bo->size = h->size;
     bo->backing = h;   /* the reference rdna3RefVram took; drmBoFree drops it */
-    static SInt32 gSurfBoLog;
-    SInt32 n = OSIncrementAtomic(&gSurfBoLog);
+    bo->surf_gen = v2 ? g.allocGen : 0;
+    if (shared) {
+        bo->gpu_ro = 1;
+        bo->flags = AMDGPU_GEM_CREATE_NO_CPU_ACCESS;
+        bo->surf_pid = g.sharePid;
+    }
+    static SInt32 gSurfBoLog, gSurfBoShared;
+    SInt32 n = OSIncrementAtomic(shared ? &gSurfBoShared : &gSurfBoLog);
     if (n < 8 || (n & 4095) == 0)
-        LOG("GEM: IOSurface %u plane %u -> %llu KiB of the accelerator's VRAM at 0x%llx (A3, import %d)", surfaceId,
-            plane, (unsigned long long)(h->size >> 10), (unsigned long long)h->offset, (int)n + 1);
+        LOG("GEM: IOSurface %u plane %u -> %llu KiB of the accelerator's VRAM at 0x%llx (A3%s, allocation #%llu, "
+            "import %d%s)", surfaceId, plane, (unsigned long long)(h->size >> 10), (unsigned long long)h->offset,
+            shared ? ", read-only, shared" : "", (unsigned long long)bo->surf_gen, (int)n + 1,
+            shared ? " of the shared ones" : "");
     return 0;
+}
+
+/* ops.surface_share, fDrmLock held (dropped around the accelerator call): DRIVER-PLAN N71 (c), the producer's
+ * record. The plane word carries RD3K_SS_PLANE_SHARE, size the generation of the caller's own import (the
+ * UAPI's record of its BO). An older accelerator answers RD3K_SS_NO_CACHE (-ENODEV): no share. */
+int RDNA3Accel::drmSurfaceShare(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane, uint64_t gen)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    RD3KSurfShareEsc e;
+    bool svc;
+    if (!fileOs)
+        return -RD_ENXIO;
+    bzero(&e, sizeof(e));
+    e.version = RD3K_SURFSHARE_VERSION;
+    e.surfaceID = surfaceId;
+    e.plane = plane | RD3K_SS_PLANE_SHARE;
+    e.status = RD3K_SS_OFF;
+    e.size = gen;
+    IOReturn rr = a->accelSurfaceCall(&e, fileOs, RD3K_ESC_SURF_DIRTY, &svc);
+    if (!svc || rr != kIOReturnSuccess) {
+        /* not the switch being off (that is RD3K_SS_OFF from the accelerator): say which */
+        static SInt32 gShareNoCall;
+        const SInt32 n = OSIncrementAtomic(&gShareNoCall);
+        if (n < 4 || (n & 1023) == 0)
+            LOG("GEM: share record of IOSurface %u plane %u not delivered: %s (call %#x, %d such) -- -ENXIO",
+                surfaceId, plane, !svc ? "no RDNA3Accelerator service" : "the accelerator call failed", rr,
+                (int)n + 1);
+        return -RD_ENXIO;
+    }
+    if (e.status) {   /* the accelerator logged its own reason; this says what the client got */
+        static SInt32 gShareRefused[8];
+        surfaceRefusedLogIn(gShareRefused, "share record", surfaceId, plane, e.status, rr);
+    }
+    return surfaceStatusErrno(e.status);
+}
+
+/* ops.surface_fault, fDrmLock held (dropped around the call): a GPU VM fault inside a read-only shared import
+ * (the UAPI found the fault VA in one); the accelerator turns sharing off and logs it */
+void RDNA3Accel::drmSurfaceFault(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane, uint64_t va,
+                                 int32_t producerPid)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    RD3KSurfShareEsc e;
+    bool svc;
+    LOG("GEM: VM fault at VA 0x%llx inside the read-only shared import of IOSurface %u plane %u (pid %d, shared by "
+        "pid %d): asking the accelerator to turn sharing off (DRIVER-PLAN N71 (c))", (unsigned long long)va, surfaceId,
+        plane, proc_selfpid(), (int)producerPid);
+    if (!fileOs)
+        return;
+    bzero(&e, sizeof(e));
+    e.version = RD3K_SURFSHARE_VERSION;
+    e.surfaceID = surfaceId;
+    e.plane = plane | RD3K_SS_PLANE_SHARE_FAULT;
+    e.hClient = (unsigned int)producerPid;
+    e.status = RD3K_SS_OFF;
+    e.size = va;
+    IOReturn rr = a->accelSurfaceCall(&e, fileOs, RD3K_ESC_SURF_DIRTY, &svc);
+    if (!svc || rr != kIOReturnSuccess || e.status)
+        LOG("GEM: the accelerator did not take the shared-import fault (service %d, call %#x, status %#x): sharing "
+            "may still be on -- sysctl -w debug.rdna3accel_a3share=0", svc ? 1 : 0, rr, e.status);
 }
 
 /* ops.surface_dirty, fDrmLock held: after a GPU write through such a BO */

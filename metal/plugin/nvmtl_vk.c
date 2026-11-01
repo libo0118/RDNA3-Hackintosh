@@ -544,6 +544,12 @@ static int (*pdrm_surface_last_error)(void);
 /* DRIVER-PLAN N41: WindowServer's pending / ready marks and the try-lock dirty mark (libdrm_xnu; absent in an older one) */
 static int (*pdrm_surface_mark)(uint32_t, int);
 static int (*pdrm_surface_dirty_try)(uint32_t, uint32_t);
+/* DRIVER-PLAN N71 (c): the producer's share record and the flags / allocation generation of the last import (libdrm_xnu; absent in an older one) */
+static int (*pdrm_surface_share)(uint32_t, uint32_t);
+static int (*pdrm_surface_last_import)(uint32_t *, uint64_t *);
+static int (*pdrm_surface_last_import_pid)(int32_t *);   /* N71 (c): the read-only import's producer (absent: an older libdrm_xnu) */
+static int nvmtl_ws_share_killed(void);
+static int nvmtl_is_windowserver(void);
 static int (*pnvk_sparse)(void);
 static int g_qsparse, g_sparse;
 static int g_extfd;
@@ -882,6 +888,17 @@ static int nvmtl_vk_initialize_body(void)
             pdrm_surface_last_error = (int (*)(void))dlsym(g_lib, "drm_xnu_surface_last_error");
             pdrm_surface_mark = (int (*)(uint32_t, int))dlsym(g_lib, "drm_xnu_surface_mark");
             pdrm_surface_dirty_try = (int (*)(uint32_t, uint32_t))dlsym(g_lib, "drm_xnu_surface_dirty_try");
+            pdrm_surface_share = (int (*)(uint32_t, uint32_t))dlsym(g_lib, "drm_xnu_surface_share");
+            pdrm_surface_last_import = (int (*)(uint32_t *, uint64_t *))dlsym(g_lib, "drm_xnu_surface_last_import");
+            pdrm_surface_last_import_pid = (int (*)(int32_t *))dlsym(g_lib, "drm_xnu_surface_last_import_pid");
+            {   /* N71 (c), ECC security review: this plugin understands a read-only import (it never writes, maps or uploads into one), so
+                 * libdrm_xnu may ask the kernel for one; an older plugin never says so and keeps the old refusal. NVMTL_WS_SHARE=0: not asked */
+                void (*accept)(int) = (void (*)(int))dlsym(g_lib, "drm_xnu_surface_accept_ro");
+                if (accept && !nvmtl_ws_share_killed()) accept(1);
+                if (nvmtl_is_windowserver())
+                    nvlog("vk: a3share: read-only imports %s", !accept ? "NOT asked for (libdrm_xnu has no drm_xnu_surface_accept_ro: an older one)"
+                                                              : nvmtl_ws_share_killed() ? "not asked for (NVMTL_WS_SHARE=0)" : "accepted from the kernel");
+            }
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
@@ -2036,28 +2053,177 @@ static int nvmtl_drm_surface_probe(void)
               state == 1 ? ": supported" : state == 0 ? ": not offered - IOSurface textures stay private" : ": accelerator not up yet, asked again later");
     return state;
 }
+/* DRIVER-PLAN N71 (c). The kernel's switch debug.rdna3accel_a3share, read live (at most once a second, in every process): 1 lets an
+ * application's drawables live in family VRAM and share the finished frame with WindowServer read-only; absent (-1) is an accelerator before
+ * N71 (c): no share. NVMTL_WS_SHARE=0 is the plugin's own kill switch for both roles (no record, no shared import). */
+static _Atomic int g_a3share_val = -2;   /* -2 never read. A thread that loses the CAS below and sees -2 gets -2 back: "not known yet" - never 1, so the
+                                          * caller treats it as private (nvmtl_vk_surface_share_on returns 0 for it) until the winner has stored the answer */
+static _Atomic uint64_t g_a3share_at;
+int nvmtl_vk_a3share_now(void)
+{
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    uint64_t at = atomic_load(&g_a3share_at);
+    if (nvmtl_ps_reread_due(at, now) && atomic_compare_exchange_strong(&g_a3share_at, &at, now)) {
+        int v = -1; { int x = 0; size_t n = sizeof x; if (sysctlbyname("debug.rdna3accel_a3share", &x, &n, NULL, 0) == 0) v = x ? 1 : 0; }
+        const int was = atomic_exchange(&g_a3share_val, v);
+        if (was != v) nvlog_uncapped("vk: a3share: debug.rdna3accel_a3share reads %d now (was %s; -1 = the sysctl is absent: an accelerator before N71 (c), nothing is shared)",
+                                     v, was == -2 ? "not read yet" : was == 1 ? "1" : was == 0 ? "0" : "absent");
+    }
+    return atomic_load(&g_a3share_val);
+}
+static int nvmtl_ws_share_killed(void)
+{
+    static int k = -1;
+    if (k < 0) { const char *e = getenv("NVMTL_WS_SHARE"); k = e && e[0] == '0'; }
+    return k;
+}
+static int nvmtl_is_windowserver(void)
+{
+    static int w = -1;
+    if (w < 0) { const char *me = getprogname(); w = me && strcmp(me, "WindowServer") == 0; }
+    return w;
+}
 int nvmtl_vk_surface_share_on(void)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
-        int drm = pnvk_stage_import ? 0 : nvmtl_drm_surface_probe();
-        if (drm < 0) return 0;   /* not decided yet: private until the accelerator answers */
-        on = (pnvk_stage_import || drm) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
-        /* N71: while the kernel keeps WindowServer's inputs out of family VRAM (debug.rdna3accel_a3ws 0), an app's drawable placed
-         * there is read by WindowServer through the BAR with the CPU (slower than a private image + the GPU copy-out); keep them private */
-        const char *me = getprogname(), *fe = getenv("NVMTL_SURFACE_SHARE");
-        int a3ws = -1; { int v = 0; size_t n = sizeof v; if (sysctlbyname("debug.rdna3accel_a3ws", &v, &n, NULL, 0) == 0) a3ws = v; }
-        const int kept = on && nvmtl_surface_share_kept_private(me && strcmp(me, "WindowServer") == 0, a3ws, fe && fe[0] == '1');
-        if (kept) on = 0;
-        nvlog("item 7: IOSurface textures %s (NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s; "
-              "N71: debug.rdna3accel_a3ws %d, NVMTL_SURFACE_SHARE=%s%s)",
-              on ? "live in the surface's family VRAM (one per surface, every process)" : "private per process (copies)",
-              pnvk_stage_import ? "present" : "ABSENT", drm ? "present" : pdrm_surface_fd ? "not offered by the kext" : "ABSENT",
-              g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset", a3ws, fe ?: "unset",
-              kept ? ": kept private - the kernel keeps WindowServer's inputs out of family VRAM, so WindowServer could only read them through the BAR" : "");
+    /* The gate's inputs are computed into locals and published together by ONE release store of `base`: a second thread that sees base >= 0
+     * also sees a3ws and kenv (they used to be stored after it, and a texture could land in family VRAM with a3ws still -1). */
+    static _Atomic int base = -1;
+    static int a3ws = -1, shown = -2;
+    static const char *kenv;
+    int b = atomic_load_explicit(&base, memory_order_acquire);
+    if (b < 0) {
+        static pthread_mutex_t once = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&once);
+        b = atomic_load_explicit(&base, memory_order_relaxed);
+        if (b < 0) {
+            const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
+            const int drm = pnvk_stage_import ? 0 : nvmtl_drm_surface_probe();
+            if (drm < 0) { pthread_mutex_unlock(&once); return 0; }   /* not decided yet: private until the accelerator answers */
+            const int nb = (pnvk_stage_import || drm) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
+            { int v = 0; size_t n = sizeof v; if (sysctlbyname("debug.rdna3accel_a3ws", &v, &n, NULL, 0) == 0) a3ws = v; }
+            kenv = getenv("NVMTL_SURFACE_SHARE");
+            nvlog("item 7: IOSurface textures base: NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s%s",
+                  pnvk_stage_import ? "present" : "ABSENT", drm ? "present" : pdrm_surface_fd ? "not offered by the kext" : "ABSENT",
+                  g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset", nb ? "" : " -> private per process");
+            atomic_store_explicit(&base, nb, memory_order_release);   /* last */
+            b = nb;
+        }
+        pthread_mutex_unlock(&once);
     }
-    return on;
+    const int base_on = b;
+    if (!base_on) return 0;
+    /* N71: while the kernel keeps WindowServer's inputs out of family VRAM (debug.rdna3accel_a3ws 0) an app's drawable placed there is read by
+     * WindowServer through the BAR with the CPU (slower than a private image + the GPU copy-out), unless the kernel gives WindowServer a
+     * read-only import of what the app shares (debug.rdna3accel_a3share 1, N71 (c)): then it lives in family VRAM. */
+    const int a3share = nvmtl_ws_share_killed() ? 0 : nvmtl_vk_a3share_now();
+    if (a3share == -2) return 0;   /* another thread is reading the switch for the first time: not known yet = private */
+    const int kept = nvmtl_surface_share_kept_private(nvmtl_is_windowserver(), a3ws, kenv && kenv[0] == '1', a3share);
+    if (shown != kept) {
+        shown = kept;
+        nvlog_uncapped("item 7: IOSurface textures %s (N71: debug.rdna3accel_a3ws %d, debug.rdna3accel_a3share %d, NVMTL_WS_SHARE=%s, NVMTL_SURFACE_SHARE=%s%s)",
+              kept ? "private per process (copies)" : "live in the surface's family VRAM (one per surface, every process)", a3ws, a3share,
+              nvmtl_ws_share_killed() ? "0" : "unset", kenv ?: "unset",
+              kept ? ": kept private - the kernel keeps WindowServer's inputs out of family VRAM and shares nothing read-only (a3share 0), so WindowServer could only read them through the BAR" : "");
+    }
+    return !kept;
+}
+/* DRIVER-PLAN N71 (c): the consumer's demotion state and the counters (`vk: ws frame: SUMMARY` sh_* / pr_*), under one lock; the pure rules are
+ * in nvmtl_ws_share.h / nvmtl_surface_share.h (tests/test_ws_share.c, tests/test_surface_share.c). */
+nvmtl_wss_stats g_wss;
+nvmtl_ps_stats g_ps;
+static nvmtl_wss_state g_wss_st;
+static nvmtl_ps_proc g_ps_proc;
+static pthread_mutex_t g_wss_lock = PTHREAD_MUTEX_INITIALIZER;
+static int nvmtl_wss_session_off(void)
+{
+    pthread_mutex_lock(&g_wss_lock);
+    const int off = g_wss_st.session_off;
+    pthread_mutex_unlock(&g_wss_lock);
+    return off;
+}
+int nvmtl_vk_ws_share_why(uint32_t surfaceID, uint32_t usage, int cpu_write)
+{
+    if (!nvmtl_is_windowserver()) return NVMTL_WSS_NOT_WS;   /* every app texture, without the lock */
+    pthread_mutex_lock(&g_wss_lock);
+    const int dem = nvmtl_wss_demoted(&g_wss_st, surfaceID), off = g_wss_st.session_off;
+    pthread_mutex_unlock(&g_wss_lock);
+    return nvmtl_wss_eligible(nvmtl_is_windowserver(), nvmtl_ws_share_killed(), nvmtl_vk_a3share_now() == 1, off, dem, usage, cpu_write);
+}
+void nvmtl_vk_wss_demote(uint32_t surfaceID, const char *why)
+{
+    pthread_mutex_lock(&g_wss_lock);
+    const int fresh = nvmtl_wss_demote(&g_wss_st, &g_wss, surfaceID);
+    pthread_mutex_unlock(&g_wss_lock);
+    if (fresh) nvlog("vk: a3share: surface %u: %s: the private copy path for the rest of its life", surfaceID, why ? why : "demoted");
+}
+int nvmtl_vk_wss_hazard(uint32_t surfaceID, int32_t producerPid, uint64_t tag0, uint64_t tag1)
+{
+    pthread_mutex_lock(&g_wss_lock);
+    const int r = nvmtl_wss_hazard(&g_wss_st, &g_wss, surfaceID, producerPid, tag0, tag1);
+    const unsigned n = g_wss_st.hazards;
+    const nvmtl_wss_pid *pp = nvmtl_wss_pid_slot(&g_wss_st, producerPid, 0);
+    const unsigned pn = pp ? pp->hazards : 0;
+    /* per producer: one application's hazards cannot crowd the others' lines out */
+    const int say = (r & NVMTL_WSS_H_HAZARD) && nvmtl_wss_pid_log_due(&g_wss_st, producerPid);
+    pthread_mutex_unlock(&g_wss_lock);
+    if (say)
+        nvlog("vk: a3share: surface %u hazard #%u (producer pid %d: #%u): tag %u (seed %u) at commit, %u (seed %u) at completion (the producer finished another frame into the drawable while WindowServer's composite sampled it)",
+              surfaceID, n, (int)producerPid, pn, (uint32_t)tag0, (uint32_t)(tag0 >> 32), (uint32_t)tag1, (uint32_t)(tag1 >> 32));
+    if ((r & NVMTL_WSS_H_DEMOTED) && say)
+        nvlog("vk: a3share: surface %u demoted to the private copy path for the rest of its life (a hazard)", surfaceID);
+    if (r & NVMTL_WSS_H_PRODUCER)   /* once per producer */
+        nvlog_uncapped("vk: a3share: producer pid %d demoted after %u hazards: none of its surfaces is imported read-only any more (the others keep theirs)",
+                       (int)producerPid, NVMTL_WSS_PID_HAZARD_MAX);
+    if (r & NVMTL_WSS_H_SESSION)
+        nvlog_uncapped("vk: a3share: OFF for this session after %u hazards of all producers (no more shared imports in this process)", NVMTL_WSS_HAZARD_MAX);
+    return r;
+}
+int nvmtl_vk_wss_producer_demoted(int32_t producerPid)
+{
+    pthread_mutex_lock(&g_wss_lock);
+    const int d = nvmtl_wss_producer_demoted(&g_wss_st, producerPid);
+    pthread_mutex_unlock(&g_wss_lock);
+    return d;
+}
+/* the producer: after the GPU finished a frame in the surface's VRAM (the command buffer's part was waited for), once per (surface, plane,
+ * generation): tell the kernel WindowServer may import it read-only. Returns the NVMTL_PSR_* class of the answer, -1 when nothing was asked. */
+int nvmtl_vk_surface_share_after_gpu(uint32_t surfaceID, uint32_t plane, nvmtl_ps_tex *t)
+{
+    if (nvmtl_is_windowserver()) return -1;   /* WindowServer never records (the kernel refuses it and counts ws_record_refused) */
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const int d = nvmtl_ps_decide(t, &g_ps_proc, nvmtl_is_windowserver(), nvmtl_ws_share_killed(), nvmtl_vk_a3share_now(), now);
+    if (d == NVMTL_PS_NO_NOGEN) {
+        if (!t->said) {
+            t->said = 1; __atomic_fetch_add(&g_ps.nogen, 1, __ATOMIC_RELAXED);
+            nvlog("vk: a3share: surface %u plane %u not shared: the import carried no allocation generation (libdrm_xnu %s)", surfaceID, plane,
+                  pdrm_surface_last_import ? "answered 0: an older kext or accelerator" : "has no drm_xnu_surface_last_import");
+        }
+        return -1;
+    }
+    if (d != NVMTL_PS_CALL) return -1;
+    errno = 0;
+    int err = 0;
+    if (!pdrm_surface_share) err = ENOSYS;
+    else if (pdrm_surface_share(surfaceID, plane)) err = errno ? errno : EIO;
+    const int cls = nvmtl_ps_result(t, &g_ps_proc, err, now);
+    nvmtl_ps_count(&g_ps, cls);
+    t->said = 1;
+    switch (cls) {
+    case NVMTL_PSR_RECORDED:
+        nvlog("vk: a3share: surface %u plane %u shared (allocation #%llu)", surfaceID, plane, (unsigned long long)t->gen); break;
+    case NVMTL_PSR_RETRY:
+        nvlog("vk: a3share: surface %u plane %u not shared yet: errno %d (%s): the kernel's switch is off or the accelerator is not up; asked again", surfaceID, plane, err, nvmtl_ps_errno_name(err)); break;
+    case NVMTL_PSR_STOP:
+        nvlog_uncapped("vk: a3share: surface %u plane %u not shared: errno %d (%s): an older accelerator or kext; no more asks in this process", surfaceID, plane, err, nvmtl_ps_errno_name(err)); break;
+    case NVMTL_PSR_REBACKED:
+        nvlog("vk: a3share: surface %u plane %u not shared: errno %d (%s): the surface was re-backed since this import (allocation #%llu is not its VRAM any more)",
+              surfaceID, plane, err, nvmtl_ps_errno_name(err), (unsigned long long)t->gen); break;
+    case NVMTL_PSR_NOIMPORT:
+        nvlog("vk: a3share: surface %u plane %u not shared: errno %d (%s): no writable import of it on the connection that holds it", surfaceID, plane, err, nvmtl_ps_errno_name(err)); break;
+    default:
+        nvlog("vk: a3share: surface %u plane %u not shared: errno %d (%s) (answer %u of %u before giving up)", surfaceID, plane, err, nvmtl_ps_errno_name(err), t->tries, NVMTL_PS_OTHER_TRIES); break;
+    }
+    return cls;
 }
 static __thread int g_last_dirty_errno;
 int nvmtl_vk_last_dirty_errno(void) { return g_last_dirty_errno; }
@@ -2213,9 +2379,12 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
         nvlog("surface %u plane %u dirty refused: errno %d (%s) - copy-out (%u of this cause)", surfaceID, plane, er, strerror(er), ncause[k]);
     return -1;
 }
+static __thread int g_vram_errno;
+int nvmtl_vk_last_vram_errno(void) { return g_vram_errno; }
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
+    g_vram_errno = 0;
     if (!nvmtl_vk_surface_share_on()) { nvt_kreq_import(surfaceID, plane, need, NVT_KI_SHARE_OFF, 0, 0, 0); return -1; }
     if (!need) { nvlog("item 7: surface %u: 0 bytes asked - private", surfaceID); return -1; }
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
@@ -2228,6 +2397,7 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
                                     pnvk_stage_import ? open("/dev/null", O_RDONLY | O_CLOEXEC) : pdrm_surface_fd(surfaceID, plane, need) };
     if (imp.fd < 0) {
         int er = errno;
+        g_vram_errno = er;
         nvt_kreq_import(surfaceID, plane, need, NVT_KI_NO_FD, 0, er, nvt_us_since(trT0));
         static unsigned nf; if (nf++ < 8 || nf % 1000 == 0) nvlog("item 7: surface %u: no import fd (errno %d %s) - private", surfaceID, er, strerror(er));
         return -1;
@@ -2242,14 +2412,24 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
         /* the kernel's reason (Vulkan has one VkResult for all of them): ENOENT not this process's surface, ENODEV no
            accelerator VRAM behind it, ENXIO accelerator not up, ENOSPC smaller than asked or the per-process cap */
         int ke = pdrm_surface_last_error ? pdrm_surface_last_error() : 0;
+        g_vram_errno = ke;
         nvt_kreq_import(surfaceID, plane, need, NVT_KI_ALLOC_REFUSED, (int)vr, ke, nvt_us_since(trT0));
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
             nvlog("item 7: surface %u plane %u: family VRAM import refused (VkResult %d, kernel errno %d %s, %zu B) - private image + copies (%u so far)",
                   surfaceID, plane, (int)vr, ke, ke ? strerror(ke) : "", need, n);
         return -1;
     }
+    /* N71 (c): what the kernel gave, asked on the thread that imported (libdrm_xnu keeps it per thread): DRM_XNU_SURFACE_SHARED_RO = WindowServer's
+     * READ-ONLY import of an application's shared allocation (no CPU mapping, the GPU mapping not writable): its buffer carries TRANSFER_SRC only,
+     * and the caller builds a sample-only alias or gives it back. The allocation generation (0 from an older libdrm_xnu / kext) travels with the
+     * buffer: the producer records its share for it, WindowServer caches the alias by it. */
+    uint32_t impFlags = 0; uint64_t impGen = 0; int32_t impPid = 0;
+    if (!pnvk_stage_import && pdrm_surface_last_import) (void)pdrm_surface_last_import(&impFlags, &impGen);
+    if (!pnvk_stage_import && pdrm_surface_last_import_pid) (void)pdrm_surface_last_import_pid(&impPid);
+    const int shRO = (impFlags & 0x1u) != 0;   /* DRM_XNU_SURFACE_SHARED_RO */
     VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, need,
-                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
+                               shRO ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+                               VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
     VkBuffer b = VK_NULL_HANDLE;
     if (pvkCreateBuffer(g_dev, &bci, NULL, &b) != VK_SUCCESS || pvkBindBufferMemory(g_dev, b, m, 0) != VK_SUCCESS) {
         if (b) pvkDestroyBuffer(g_dev, b, NULL);
@@ -2260,6 +2440,7 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     }
     nvt_kreq_import(surfaceID, plane, need, NVT_KI_OK, 0, 0, nvt_us_since(trT0));
     out->buf = b; out->mem = m; out->size = need; out->alloc = 0; out->imported = 1;
+    out->share_gen = impGen; out->share_ro = shRO; out->share_pid = shRO ? impPid : 0;
     g_buf_made++;
     return 0;
 }
@@ -5168,10 +5349,24 @@ static void nvmtl_ab_summary(int force)
 static nvmtl_wf_stats g_wf; static _Atomic uint64_t g_wf_last;
 static void nvmtl_wf_summary(void)
 {
-    const uint64_t ev = nvmtl_wf_events(&g_wf);
+    /* N71 (c): the share counters ride on this line (sh_* in WindowServer - printed even when all are 0 once the consumer path is on, pr_* in a
+     * process that asked the kernel for a share), so a share event moves the line too */
+    static int ws_seen;   /* once the consumer path has been live, WindowServer's line keeps the sh_* keys (a later switch to 0 must not hide them) */
+    if (nvmtl_is_windowserver() && !nvmtl_ws_share_killed() && nvmtl_vk_a3share_now() == 1) ws_seen = 1;
+    const int ws_share = ws_seen;
+    const uint64_t ev = nvmtl_wf_events(&g_wf) + nvmtl_wss_events(&g_wss) + nvmtl_ps_events(&g_ps) + (ws_share ? 1u : 0u);
     if (ev == atomic_load(&g_wf_last)) return;
-    char body[512];
-    if (!nvmtl_wf_format(&g_wf, nvmtl_fbf_membar_on(), body, sizeof body)) return;
+    char body[768], tail[320];
+    size_t used = 0;
+    body[0] = 0;
+    if (nvmtl_wf_format(&g_wf, nvmtl_fbf_membar_on(), body, sizeof body)) used = strlen(body);
+    if (ws_share || nvmtl_wss_events(&g_wss)) {
+        if (nvmtl_wss_format(&g_wss, nvmtl_wss_session_off(), tail, sizeof tail) && used + strlen(tail) + 16 < sizeof body)
+            used += (size_t)snprintf(body + used, sizeof body - used, "%s%s", used ? " " : "frames=0 ", tail);
+    }
+    if (nvmtl_ps_format(&g_ps, tail, sizeof tail) && used + strlen(tail) + 16 < sizeof body)
+        used += (size_t)snprintf(body + used, sizeof body - used, "%s%s", used ? " " : "frames=0 ", tail);
+    if (!used) return;
     atomic_store(&g_wf_last, ev);
     nvlog_uncapped("vk: ws frame: SUMMARY %s", body);
 }
@@ -8158,19 +8353,32 @@ int nvmtl_vk_buffer_create_placed(size_t size, nvk_heap *heap, size_t offset, nv
 }
 
 static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
-                                       const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);
+                                       const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out, int ro);
 unsigned long nvmtl_vk_buftex_pitch_copies(void) { return atomic_load(&g_buftex_pitch_copy); }
 int nvmtl_vk_image_create_buffer_alias(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
                                        const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out)
 {
     nvk_image pending = {0};
-    int result = nvmtl_vk_image_create_buffer_alias_lifetime_body(w, h, vkfmt, bpp, a8, storage, render, b, offset, row_pitch, &pending);
+    int result = nvmtl_vk_image_create_buffer_alias_lifetime_body(w, h, vkfmt, bpp, a8, storage, render, b, offset, row_pitch, &pending, 0);
+    if (result) { nvmtl_failed_image(&pending); memset(out, 0, sizeof *out); }
+    else { nvmtl_commit_image(&pending); *out = pending; }
+    return result;
+}
+/* DRIVER-PLAN N71 (c): the alias over a READ-ONLY imported buffer (WindowServer's view of an application's shared drawable): SAMPLED | TRANSFER_SRC
+ * usage only - no TRANSFER_DST, no storage, no colour attachment. The kernel maps the memory without WRITEABLE as well; this keeps the plugin's own
+ * recording from ever naming the image as a destination. A buffer that is not read-only is refused. */
+int nvmtl_vk_image_create_buffer_alias_ro(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8,
+                                          const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out)
+{
+    nvk_image pending = {0};
+    if (!b || !b->share_ro) { nvlog("buffer texture (read-only): the buffer is not a read-only import - refused"); memset(out, 0, sizeof *out); return -1; }
+    int result = nvmtl_vk_image_create_buffer_alias_lifetime_body(w, h, vkfmt, bpp, a8, 0, 0, b, offset, row_pitch, &pending, 1);
     if (result) { nvmtl_failed_image(&pending); memset(out, 0, sizeof *out); }
     else { nvmtl_commit_image(&pending); *out = pending; }
     return result;
 }
 static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
-                                       const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out)
+                                       const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out, int ro)
 {
     if (nvmtl_vk_init() || !b || !b->buf || !b->mem || !w || !h) { nvlog("buffer texture: no buffer memory to alias (%ux%u)", w, h); return -1; }
     { uint32_t bw = 0, bh = 0, bb = 0;
@@ -8206,7 +8414,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         0 , 1, &pl };
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, g_linmod ? (void *)&eci : NULL, 0, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt,
         { w, h, 1 }, 1, 1, VK_SAMPLE_COUNT_1_BIT, g_linmod ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_LINEAR,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (ro ? 0 : VK_IMAGE_USAGE_TRANSFER_DST_BIT)
             | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | (render ? NVMTL_COLOR_USAGE(2) : 0),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_PREINITIALIZED };
     uint32_t vp = a8 ? 0 : nvmtl_vk_srgb_pair(vkfmt);
