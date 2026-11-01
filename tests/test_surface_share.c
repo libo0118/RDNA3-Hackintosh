@@ -93,6 +93,21 @@ int main(void)
     /* the kill switch beats everything, WindowServer beats the kill switch (nothing is asked either way) */
     check(nvmtl_ps_decide(&b, &p, 1, 1, 1, NS), NVMTL_PS_NO_WS, "WindowServer, killed: still no call");
 
+    /* ---- the prefilter before the call (nvmtl_ps_wants) ---- */
+    { nvmtl_ps_tex w; memset(&w, 0, sizeof w); w.gen = 4;
+      check(nvmtl_ps_wants(&w, 1, 0, 1), 1, "a VRAM texture with a generation, not shared yet: ask");
+      check(nvmtl_ps_wants(&w, 0, 0, 1), 0, "not a VRAM texture");
+      check(nvmtl_ps_wants(&w, 1, 1, 1), 0, "a read-only alias never records");
+      check(nvmtl_ps_wants(&w, 1, 0, 0), 0, "no IOSurface");
+      w.shared_gen = 4;
+      check(nvmtl_ps_wants(&w, 1, 0, 1), 0, "recorded for this generation: skip");
+      w.shared_gen = 0; w.dead = 1;
+      check(nvmtl_ps_wants(&w, 1, 0, 1), 0, "dead: skip");
+      nvmtl_ps_tex n; memset(&n, 0, sizeof n);
+      check(nvmtl_ps_wants(&n, 1, 0, 1), 1, "no generation, not said: ask once (to log it)");
+      n.said = 1;
+      check(nvmtl_ps_wants(&n, 1, 0, 1), 0, "no generation, said: skip"); }
+
     /* ---- counters and their SUMMARY tail ---- */
     nvmtl_ps_stats s; memset(&s, 0, sizeof s);
     char buf[256];

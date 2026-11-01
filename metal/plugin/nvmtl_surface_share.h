@@ -56,6 +56,15 @@ typedef struct {
 } nvmtl_ps_tex;
 typedef struct { uint8_t stop; } nvmtl_ps_proc;   /* ENODEV / ENOSYS: an older kernel, no more asks in this process */
 
+/* the prefilter before the call into nvmtl_vk.c (NVMTLObjects.m nvmtl_ps_after_gpu), per part and surface: 1 = worth asking nvmtl_ps_decide.
+ * vram_on: a writable family-VRAM texture; ro: a read-only alias; has_surf: it has an IOSurface. Done, dead and "no generation, said already" skip. */
+static inline int nvmtl_ps_wants(const nvmtl_ps_tex *t, int vram_on, int ro, int has_surf)
+{
+    if (!vram_on || ro || !has_surf || t->dead) return 0;
+    if (!t->gen) return !t->said;
+    return t->shared_gen != t->gen;
+}
+
 enum {   /* nvmtl_ps_decide */
     NVMTL_PS_NO_WS = 0,   /* WindowServer never records */
     NVMTL_PS_NO_KILL,     /* NVMTL_NO_SURFACE_SHARE=1 or NVMTL_WS_SHARE=0 */

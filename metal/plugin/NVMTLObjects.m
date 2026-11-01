@@ -1515,23 +1515,23 @@ static void nvmtl_ro_sample(NVMTLCommandBuffer *cb, NVMTLTexture *r) {
  * WindowServer may import it read-only (nvmtl_vk_surface_share_after_gpu logs and counts the answer), and on success the generation is put on the surface
  * (NVMTLShareGen) where WindowServer finds it. Before the publish below it, which bumps the tag WindowServer checks. */
 static void nvmtl_ps_after_gpu(NVMTLTexture *r) {
-    if (!r->_vramOn || r->_vramRO || !r->_surf || r->_ps.dead || (!r->_ps.gen && r->_ps.said) || (r->_ps.gen && r->_ps.shared_gen == r->_ps.gen)) return;
+    if (!nvmtl_ps_wants(&r->_ps, r->_vramOn, r->_vramRO, r->_surf != NULL)) return;   /* nvmtl_surface_share.h, tested */
     const int cls = nvmtl_vk_surface_share_after_gpu((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane, &r->_ps);
     if (cls == NVMTL_PSR_RECORDED) nvmtl_share_gen_write(r->_surf, r->_plane, r->_ps.gen);
 }
-/* R1, at the composite's commit: the tag generation of every alias it samples; at its completion: compared (nvmtl_vk_wss_hazard) */
+/* R1, at the composite's commit: the tag (seed, generation) of every alias it samples; at its completion: compared (nvmtl_vk_wss_hazard) */
 static void nvmtl_ro_commit(NVMTLCommandBuffer *cb) {
     if (!cb->_roSamples.count) return;
     if (!cb->_roGens) cb->_roGens = [NSMutableDictionary new];
     for (NVMTLTexture *r in cb->_roSamples)
-        if (r->_surf) cb->_roGens[@((uint32_t)IOSurfaceGetID(r->_surf))] = @(nvmtl_vram_gen(r->_surf, r->_plane));
+        if (r->_surf) cb->_roGens[@((uint32_t)IOSurfaceGetID(r->_surf))] = @(nvmtl_vram_tag_key_of(r->_surf, r->_plane));
 }
 static void nvmtl_ro_complete(NVMTLCommandBuffer *cb, BOOL failed) {
     if (!failed && cb->_roGens.count)   /* a failed command buffer may not have sampled anything: no verdict */
         for (NVMTLTexture *r in cb->_roSamples) {
             if (!r->_surf) continue;
             NSNumber *g0 = cb->_roGens[@((uint32_t)IOSurfaceGetID(r->_surf))];
-            if (g0) (void)nvmtl_vk_wss_hazard((uint32_t)IOSurfaceGetID(r->_surf), g0.unsignedIntValue, nvmtl_vram_gen(r->_surf, r->_plane));
+            if (g0) (void)nvmtl_vk_wss_hazard((uint32_t)IOSurfaceGetID(r->_surf), g0.unsignedLongLongValue, nvmtl_vram_tag_key_of(r->_surf, r->_plane));
         }
     cb->_roSamples = nil; cb->_roGens = nil;
 }

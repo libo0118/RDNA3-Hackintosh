@@ -20,10 +20,10 @@
  *      same generation    -> the cached backing (no import)
  *      other generation   -> a new import (sh_reimp)
  *      no backing         -> an import (sh_imp)
- *  - At a sample (nvmtl_wss_sample): tag current = skip the upload (sh_skip); stale = no upload either (sh_stale), the surface
- *    is demoted so the next wrapper is private.
- *  - R1, read-after-write: the tag generation recorded at the composite's commit and compared at its completion
- *    (nvmtl_wss_hazard): a move means the producer finished a NEXT frame into the drawable while WindowServer's samples were
+ *  - At a sample (nvmtl_wss_sample): tag current = skip the upload (sh_skip); stale = no upload either (sh_stale). The sample
+ *    does not demote: the next wrapper's plan sees the stale tag itself and is private while it stays stale.
+ *  - R1, read-after-write: the producer's tag (seed, generation) recorded at the composite's commit and compared at its
+ *    completion (nvmtl_wss_hazard; the CPU copy-out fallback moves the seed without the generation): a move means the producer finished a NEXT frame into the drawable while WindowServer's samples were
  *    in flight (sh_war); that surface is demoted for its life; NVMTL_WSS_HAZARD_MAX hazards stop shared imports for the session.
  *  - R4, any import error: the private path, the surface demoted (so it is asked once), counted per errno.
  */
@@ -48,7 +48,7 @@ enum nvmtl_wss_why {
     NVMTL_WSS_KILL,          /* NVMTL_WS_SHARE=0 / NVMTL_NO_SURFACE_SHARE=1 */
     NVMTL_WSS_SWITCH_OFF,    /* debug.rdna3accel_a3share is 0 or absent (live: the A/B back to the private path) */
     NVMTL_WSS_SESSION_OFF,   /* 4 hazards: no shared imports for the rest of the session */
-    NVMTL_WSS_DEMOTED,       /* this surface had a hazard / an import error / a stale sample */
+    NVMTL_WSS_DEMOTED,       /* this surface had a hazard / an import error / a write asked of its alias */
     NVMTL_WSS_USAGE_UNKNOWN, /* usage 0: Metal lets such a texture be used any way */
     NVMTL_WSS_RENDER_TARGET,
     NVMTL_WSS_SHADER_WRITE,
@@ -83,6 +83,7 @@ static inline int nvmtl_wss_eligible(int is_ws, int kill, int switch_on, int ses
 typedef struct {
     uint64_t imp, skip, stale, reimp, refused, war, demoted;
     uint64_t wr;                                               /* a write recorded against a read-only alias (refused or detected) */
+    uint64_t rw;                                               /* a WRITABLE import where a read-only one was planned (the record is gone, a3ws 1): given back, never used */
     uint64_t inelig;                                           /* wrappers of a shared surface that stayed private: a usage that can write, a CPU writer */
     uint64_t e_perm, e_nospc, e_noent, e_nodev, e_nxio, e_other;   /* refused imports by errno */
 } nvmtl_wss_stats;
@@ -128,11 +129,12 @@ static inline int nvmtl_wss_demote(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint
 }
 
 /* R1: the tag generation at the composite's commit (g0) and at its completion (g1). Returns a bit set:
- * 1 a hazard (g0 != g1; counted sh_war), 2 the surface was newly demoted, 4 this hazard was the one that stops the session. */
+ * 1 a hazard (g0 != g1: nvmtl_wss_tag_key of the tag's seed and generation; counted sh_war), 2 the surface was newly demoted, 4 this hazard was the one that stops the session. */
 #define NVMTL_WSS_H_HAZARD 1
 #define NVMTL_WSS_H_DEMOTED 2
 #define NVMTL_WSS_H_SESSION 4
-static inline int nvmtl_wss_hazard(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint32_t sid, uint32_t g0, uint32_t g1)
+static inline uint64_t nvmtl_wss_tag_key(uint32_t seed, uint32_t gen) { return (uint64_t)seed << 32 | gen; }
+static inline int nvmtl_wss_hazard(nvmtl_wss_state *st, nvmtl_wss_stats *s, uint32_t sid, uint64_t g0, uint64_t g1)
 {
     int r = 0;
     if (g0 == g1) return 0;
@@ -159,12 +161,48 @@ static inline int nvmtl_wss_plan(int have_cached, uint64_t cached_gen, uint64_t 
     return p;
 }
 
+/* ---- what a wrapper creation does about a surface (NVMTLDevice.m nvmtlNewSurfaceTexture) ----
+ * why: nvmtl_wss_eligible's answer for the wrapper; pgen: the producer's generation on the surface. The caller reads pgen only when
+ * nvmtl_wss_reads_gen(why) (a3share 0, NVMTL_WS_SHARE=0 and every app never touch the surface's values: "as before"). */
+enum { NVMTL_WSS_WA_UNTOUCHED = 0,   /* today's path, byte for byte */
+       NVMTL_WSS_WA_PLAN,            /* nvmtl_wss_plan decides */
+       NVMTL_WSS_WA_PRIVATE_INELIG,  /* shared, but this texture can write: private, counted (sh_inelig) and logged */
+       NVMTL_WSS_WA_PRIVATE_QUIET }; /* shared, demoted or the session stopped: private, already said */
+static inline int nvmtl_wss_reads_gen(int why)
+{
+    return why != NVMTL_WSS_NOT_WS && why != NVMTL_WSS_KILL && why != NVMTL_WSS_SWITCH_OFF;
+}
+static inline int nvmtl_wss_wrapper_action(int why, uint64_t pgen)
+{
+    if (!nvmtl_wss_reads_gen(why) || !pgen) return NVMTL_WSS_WA_UNTOUCHED;
+    if (why == NVMTL_WSS_OK) return NVMTL_WSS_WA_PLAN;
+    if (why == NVMTL_WSS_DEMOTED || why == NVMTL_WSS_SESSION_OFF) return NVMTL_WSS_WA_PRIVATE_QUIET;
+    return NVMTL_WSS_WA_PRIVATE_INELIG;
+}
+/* the plan's outcome for the image creation: whether it asks for an import (ws_plan) and whether it skips the kernel */
+enum { NVMTL_WSS_PO_NONE = 0, NVMTL_WSS_PO_IMPORT, NVMTL_WSS_PO_STALE_PRIVATE, NVMTL_WSS_PO_PRIVATE };
+static inline int nvmtl_wss_plan_outcome(int plan, int pw)
+{
+    if (plan == NVMTL_WSS_PLAN_IMPORT || plan == NVMTL_WSS_PLAN_REIMPORT) return NVMTL_WSS_PO_IMPORT;
+    return pw == NVMTL_WSS_PW_STALE ? NVMTL_WSS_PO_STALE_PRIVATE : NVMTL_WSS_PO_PRIVATE;
+}
+
 /* ---- a sample ---- */
 enum { NVMTL_WSS_SAMPLE_SKIP = 0, NVMTL_WSS_SAMPLE_STALE };
 static inline int nvmtl_wss_sample(int tag_current) { return tag_current ? NVMTL_WSS_SAMPLE_SKIP : NVMTL_WSS_SAMPLE_STALE; }
 
 /* ---- what the kernel gave (drm_xnu_surface_last_import) ---- */
 enum { NVMTL_WSS_IMP_ERR = 0, NVMTL_WSS_IMP_RO, NVMTL_WSS_IMP_RO_UNUSABLE, NVMTL_WSS_IMP_RW };
+/* what the image creation does with a SUCCESSFUL import: ws_plan != 0 = a read-only one was planned (the producer shared the surface) */
+enum { NVMTL_WSS_IV_WRITABLE_AS_BEFORE = 0,   /* a writable import, none planned: WindowServer's own surface, today's path */
+       NVMTL_WSS_IV_USE_RO,                   /* planned and read-only: build the sample-only alias */
+       NVMTL_WSS_IV_DROP_RW,                  /* planned but WRITABLE (the record is gone, a3ws 1): give it back, sh_rw, demote, private - it must never be uploaded into */
+       NVMTL_WSS_IV_DROP_RO_UNPLANNED };      /* read-only but not planned (no producer generation on the surface): give it back, demote, private, no sh_refused */
+static inline int nvmtl_wss_import_verdict(int ro, int ws_plan)
+{
+    if (ro) return ws_plan ? NVMTL_WSS_IV_USE_RO : NVMTL_WSS_IV_DROP_RO_UNPLANNED;
+    return ws_plan ? NVMTL_WSS_IV_DROP_RW : NVMTL_WSS_IV_WRITABLE_AS_BEFORE;
+}
 /* import_err: the errno of the import (0 worked); ro: DRM_XNU_SURFACE_SHARED_RO; usable: the texture is eligible and its
  * alias could be built read-only. A writable answer (the kernel's own policy for WindowServer's surfaces) is no share. */
 static inline int nvmtl_wss_import_class(int import_err, int ro, int usable)
@@ -196,7 +234,7 @@ static inline uint64_t nvmtl_wss_events(const nvmtl_wss_stats *s)
 {
     return __atomic_load_n(&s->imp, __ATOMIC_RELAXED) + __atomic_load_n(&s->skip, __ATOMIC_RELAXED) + __atomic_load_n(&s->stale, __ATOMIC_RELAXED) +
            __atomic_load_n(&s->reimp, __ATOMIC_RELAXED) + __atomic_load_n(&s->refused, __ATOMIC_RELAXED) + __atomic_load_n(&s->war, __ATOMIC_RELAXED) +
-           __atomic_load_n(&s->demoted, __ATOMIC_RELAXED) + __atomic_load_n(&s->wr, __ATOMIC_RELAXED) + __atomic_load_n(&s->inelig, __ATOMIC_RELAXED);
+           __atomic_load_n(&s->demoted, __ATOMIC_RELAXED) + __atomic_load_n(&s->wr, __ATOMIC_RELAXED) + __atomic_load_n(&s->inelig, __ATOMIC_RELAXED) + __atomic_load_n(&s->rw, __ATOMIC_RELAXED);
 }
 /* the key=value tail of `vk: ws frame: SUMMARY` for a process that runs the consumer (WindowServer): printed even when all are 0,
  * so the triage can tell "the consumer path ran and imported nothing" from "an older plugin". session_off: sh_off. */
@@ -205,8 +243,8 @@ static inline int nvmtl_wss_format(const nvmtl_wss_stats *s, int session_off, ch
 #define W_(x) ((unsigned long long)__atomic_load_n(&s->x, __ATOMIC_RELAXED))
     if (!cap) return 0;
     snprintf(out, cap, "sh_imp=%llu sh_skip=%llu sh_stale=%llu sh_reimp=%llu sh_refused=%llu sh_war=%llu sh_demoted=%llu sh_wr=%llu "
-                       "sh_inelig=%llu sh_eperm=%llu sh_enospc=%llu sh_enoent=%llu sh_enodev=%llu sh_enxio=%llu sh_eother=%llu sh_off=%d",
-             W_(imp), W_(skip), W_(stale), W_(reimp), W_(refused), W_(war), W_(demoted), W_(wr), W_(inelig),
+                       "sh_inelig=%llu sh_rw=%llu sh_eperm=%llu sh_enospc=%llu sh_enoent=%llu sh_enodev=%llu sh_enxio=%llu sh_eother=%llu sh_off=%d",
+             W_(imp), W_(skip), W_(stale), W_(reimp), W_(refused), W_(war), W_(demoted), W_(wr), W_(inelig), W_(rw),
              W_(e_perm), W_(e_nospc), W_(e_noent), W_(e_nodev), W_(e_nxio), W_(e_other), session_off ? 1 : 0);
 #undef W_
     return 1;

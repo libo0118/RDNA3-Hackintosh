@@ -46,6 +46,43 @@ int main(void)
     check(nvmtl_wss_plan(1, 7, 8, 1, &why), NVMTL_WSS_PLAN_REIMPORT, "a new generation: import again");
     check(nvmtl_wss_plan(0, 0, 8, 1, NULL), NVMTL_WSS_PLAN_IMPORT, "why may be NULL");
 
+    /* ---- the wrapper action: every (why, pgen) combination; "a3share 0 = as before" ---- */
+    { const int whys[] = { NVMTL_WSS_NOT_WS, NVMTL_WSS_KILL, NVMTL_WSS_SWITCH_OFF };
+      for (unsigned i = 0; i < 3; i++) {
+          check(nvmtl_wss_reads_gen(whys[i]), 0, "an app / the kill switch / a3share 0 never read the surface's generation");
+          check(nvmtl_wss_wrapper_action(whys[i], 0), NVMTL_WSS_WA_UNTOUCHED, "  ... untouched without a generation");
+          check(nvmtl_wss_wrapper_action(whys[i], 77), NVMTL_WSS_WA_UNTOUCHED, "  ... untouched even when a stale generation sits on the surface");
+      }
+      for (int w = NVMTL_WSS_SESSION_OFF; w < NVMTL_WSS_N; w++) {
+          check(nvmtl_wss_reads_gen(w), 1, "every other reason reads the generation");
+          check(nvmtl_wss_wrapper_action(w, 0), NVMTL_WSS_WA_UNTOUCHED, "WindowServer's own surface (no generation): today's path, whatever the usage");
+      }
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_OK, 5), NVMTL_WSS_WA_PLAN, "shared and eligible: the plan");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_DEMOTED, 5), NVMTL_WSS_WA_PRIVATE_QUIET, "shared, demoted: private, quiet");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_SESSION_OFF, 5), NVMTL_WSS_WA_PRIVATE_QUIET, "shared, session stopped: private, quiet");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_USAGE_UNKNOWN, 5), NVMTL_WSS_WA_PRIVATE_INELIG, "shared, usage Unknown: private, counted");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_RENDER_TARGET, 5), NVMTL_WSS_WA_PRIVATE_INELIG, "shared, RenderTarget: private, counted");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_SHADER_WRITE, 5), NVMTL_WSS_WA_PRIVATE_INELIG, "shared, ShaderWrite: private, counted");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_CPU_ACCESS, 5), NVMTL_WSS_WA_PRIVATE_INELIG, "shared, CPU writer: private, counted");
+      check(nvmtl_wss_wrapper_action(NVMTL_WSS_USAGE_OTHER, 5), NVMTL_WSS_WA_PRIVATE_INELIG, "shared, unknown usage bit: private, counted"); }
+    check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_IMPORT, 0), NVMTL_WSS_PO_IMPORT, "plan import -> ask for an import");
+    check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_REIMPORT, 0), NVMTL_WSS_PO_IMPORT, "plan re-import -> ask for an import");
+    check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_PRIVATE, NVMTL_WSS_PW_STALE), NVMTL_WSS_PO_STALE_PRIVATE, "stale -> private, counted");
+    check(nvmtl_wss_plan_outcome(NVMTL_WSS_PLAN_PRIVATE, NVMTL_WSS_PW_NOSHARE), NVMTL_WSS_PO_PRIVATE, "no share -> private");
+
+    /* ---- what the image creation does with a successful import ---- */
+    check(nvmtl_wss_import_verdict(1, 1), NVMTL_WSS_IV_USE_RO, "planned, read-only: the alias");
+    check(nvmtl_wss_import_verdict(0, 1), NVMTL_WSS_IV_DROP_RW, "planned but WRITABLE (record gone, a3ws 1): never used (card run 58)");
+    check(nvmtl_wss_import_verdict(0, 0), NVMTL_WSS_IV_WRITABLE_AS_BEFORE, "not planned, writable: WindowServer's own surface, as before");
+    check(nvmtl_wss_import_verdict(1, 0), NVMTL_WSS_IV_DROP_RO_UNPLANNED, "not planned but read-only: no generation on the surface");
+
+    /* ---- the hazard also sees a seed-only move (the CPU copy-out fallback) ---- */
+    { nvmtl_wss_state hs; nvmtl_wss_stats ht; memset(&hs, 0, sizeof hs); memset(&ht, 0, sizeof ht);
+      check(nvmtl_wss_hazard(&hs, &ht, 9, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(7, 3)), 0, "same seed and generation: none");
+      check(nvmtl_wss_hazard(&hs, &ht, 9, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(8, 3)) & NVMTL_WSS_H_HAZARD, 1, "the seed moved, the generation did not: a hazard");
+      check(nvmtl_wss_hazard(&hs, &ht, 10, nvmtl_wss_tag_key(7, 3), nvmtl_wss_tag_key(7, 4)) & NVMTL_WSS_H_HAZARD, 1, "the generation moved: a hazard");
+      check(nvmtl_wss_tag_key(1, 2) != nvmtl_wss_tag_key(2, 1), 1, "(seed, gen) and (gen, seed) differ"); }
+
     /* ---- a sample ---- */
     check(nvmtl_wss_sample(1), NVMTL_WSS_SAMPLE_SKIP, "tag current: skip the upload");
     check(nvmtl_wss_sample(0), NVMTL_WSS_SAMPLE_STALE, "tag stale: no upload either");
@@ -102,10 +139,10 @@ int main(void)
       check(nvmtl_wss_events(&z), 0, "no events");
       check(nvmtl_wss_format(&z, 0, buf, sizeof buf), 1, "the tail is written even with zeros (the consumer ran)");
       check(strstr(buf, "sh_imp=0 sh_skip=0 sh_stale=0 sh_reimp=0 sh_refused=0 sh_war=0 sh_demoted=0 ") == buf, 1, "the order the brief lists");
-      z.imp = 3; z.skip = 100; z.stale = 2; z.reimp = 1; z.war = 1; z.demoted = 1; z.wr = 4; z.inelig = 6; z.e_perm = 2; z.refused = 2;
+      z.imp = 3; z.skip = 100; z.stale = 2; z.reimp = 1; z.war = 1; z.demoted = 1; z.wr = 4; z.inelig = 6; z.rw = 2; z.e_perm = 2; z.refused = 2;
       check(nvmtl_wss_events(&z) > 0, 1, "events");
       nvmtl_wss_format(&z, 1, buf, sizeof buf);
-      check(strstr(buf, "sh_imp=3 sh_skip=100 sh_stale=2 sh_reimp=1 sh_refused=2 sh_war=1 sh_demoted=1 sh_wr=4 sh_inelig=6 sh_eperm=2 ") == buf, 1, "values");
+      check(strstr(buf, "sh_imp=3 sh_skip=100 sh_stale=2 sh_reimp=1 sh_refused=2 sh_war=1 sh_demoted=1 sh_wr=4 sh_inelig=6 sh_rw=2 sh_eperm=2 ") == buf, 1, "values");
       check(strstr(buf, "sh_off=1") != NULL, 1, "sh_off=1 after the session stop");
       check(nvmtl_wss_format(&z, 0, buf, 0), 0, "no room: nothing"); }
 

@@ -326,15 +326,16 @@ def ws_share_rows(plugin_text):
     shared = sum(_num(d, "pr_shared") for _, d in apps)
     pr_bad = dict((k, sum(_num(d, k) for _, d in apps)) for k in ("pr_enxio", "pr_stop", "pr_eperm", "pr_enoent", "pr_other", "pr_nogen"))
     k = lambda key: sum(_num(d, key) for d in ws)
-    imp, skip, stale, reimp, ref, war, dem, wr, inel = (k("sh_imp"), k("sh_skip"), k("sh_stale"), k("sh_reimp"), k("sh_refused"),
-                                                           k("sh_war"), k("sh_demoted"), k("sh_wr"), k("sh_inelig"))
+    imp, skip, stale, reimp, ref, war, dem, wr, inel, rw = (k("sh_imp"), k("sh_skip"), k("sh_stale"), k("sh_reimp"), k("sh_refused"),
+                                                               k("sh_war"), k("sh_demoted"), k("sh_wr"), k("sh_inelig"), k("sh_rw"))
     errs = ", ".join("%s %d" % (n.upper(), k("sh_" + n)) for n in ("eperm", "enospc", "enoent", "enodev", "enxio", "eother") if k("sh_" + n))
     off = any(d.get("sh_off") == "1" for d in ws)
     text = ("applications recorded %d share(s) (%s); WindowServer: %d read-only import(s) (%d re-import(s) after a new allocation), %d sample(s) without an upload, "
             "%d stale (private path), %d import(s) not used%s, %d hazard(s) (the producer finished another frame into a drawable while a composite sampled it), "
-            "%d surface(s) demoted to the private path, %d write(s) asked of a read-only alias, %d wrapper(s) of a shared surface kept private (a usage that can write)%s" % (
+            "%d surface(s) demoted to the private path, %d write(s) asked of a read-only alias, %d wrapper(s) of a shared surface kept private (a usage that can write), "
+            "%d WRITABLE import(s) where a read-only one was planned (given back)%s" % (
                 shared, ", ".join("%s %d" % (n[3:], v) for n, v in sorted(pr_bad.items()) if v) or "no failures", imp, reimp, skip, stale, ref,
-                " (" + errs + ")" if errs else "", war, dem, wr, inel, "; shared imports STOPPED for the session" if off else ""))
+                " (" + errs + ")" if errs else "", war, dem, wr, inel, rw, "; shared imports STOPPED for the session" if off else ""))
     why = []
     if shared and not imp:
         why.append("applications shared %d drawable(s) but WindowServer imported none read-only (%s)" % (
@@ -348,6 +349,8 @@ def ws_share_rows(plugin_text):
         why.append("shared imports stopped for the session after the hazards")
     if wr:
         why.append("%d write(s) asked of a read-only alias (a texture WindowServer wrote after all)" % wr)
+    if rw:
+        why.append("%d WRITABLE import(s) of a shared surface (the producer's record was gone while debug.rdna3accel_a3ws is 1): not used, but the kernel stopped giving the read-only one" % rw)
     if ref:
         why.append("%d read-only import(s) refused or unusable" % ref)
     if not why and (pr_bad["pr_stop"] or pr_bad["pr_nogen"]) and not shared:

@@ -2044,7 +2044,8 @@ static int nvmtl_drm_surface_probe(void)
 /* DRIVER-PLAN N71 (c). The kernel's switch debug.rdna3accel_a3share, read live (at most once a second, in every process): 1 lets an
  * application's drawables live in family VRAM and share the finished frame with WindowServer read-only; absent (-1) is an accelerator before
  * N71 (c): no share. NVMTL_WS_SHARE=0 is the plugin's own kill switch for both roles (no record, no shared import). */
-static _Atomic int g_a3share_val = -2;   /* -2 never read */
+static _Atomic int g_a3share_val = -2;   /* -2 never read. A thread that loses the CAS below and sees -2 gets -2 back: "not known yet" - never 1, so the
+                                          * caller treats it as private (nvmtl_vk_surface_share_on returns 0 for it) until the winner has stored the answer */
 static _Atomic uint64_t g_a3share_at;
 int nvmtl_vk_a3share_now(void)
 {
@@ -2072,24 +2073,38 @@ static int nvmtl_is_windowserver(void)
 }
 int nvmtl_vk_surface_share_on(void)
 {
-    static int base = -1, a3ws = -1, shown = -2;
+    /* The gate's inputs are computed into locals and published together by ONE release store of `base`: a second thread that sees base >= 0
+     * also sees a3ws and kenv (they used to be stored after it, and a texture could land in family VRAM with a3ws still -1). */
+    static _Atomic int base = -1;
+    static int a3ws = -1, shown = -2;
     static const char *kenv;
-    if (base < 0) {
-        const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
-        int drm = pnvk_stage_import ? 0 : nvmtl_drm_surface_probe();
-        if (drm < 0) return 0;   /* not decided yet: private until the accelerator answers */
-        base = (pnvk_stage_import || drm) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
-        { int v = 0; size_t n = sizeof v; if (sysctlbyname("debug.rdna3accel_a3ws", &v, &n, NULL, 0) == 0) a3ws = v; }
-        kenv = getenv("NVMTL_SURFACE_SHARE");
-        nvlog("item 7: IOSurface textures base: NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s%s",
-              pnvk_stage_import ? "present" : "ABSENT", drm ? "present" : pdrm_surface_fd ? "not offered by the kext" : "ABSENT",
-              g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset", base ? "" : " -> private per process");
+    int b = atomic_load_explicit(&base, memory_order_acquire);
+    if (b < 0) {
+        static pthread_mutex_t once = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&once);
+        b = atomic_load_explicit(&base, memory_order_relaxed);
+        if (b < 0) {
+            const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
+            const int drm = pnvk_stage_import ? 0 : nvmtl_drm_surface_probe();
+            if (drm < 0) { pthread_mutex_unlock(&once); return 0; }   /* not decided yet: private until the accelerator answers */
+            const int nb = (pnvk_stage_import || drm) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
+            { int v = 0; size_t n = sizeof v; if (sysctlbyname("debug.rdna3accel_a3ws", &v, &n, NULL, 0) == 0) a3ws = v; }
+            kenv = getenv("NVMTL_SURFACE_SHARE");
+            nvlog("item 7: IOSurface textures base: NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s%s",
+                  pnvk_stage_import ? "present" : "ABSENT", drm ? "present" : pdrm_surface_fd ? "not offered by the kext" : "ABSENT",
+                  g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset", nb ? "" : " -> private per process");
+            atomic_store_explicit(&base, nb, memory_order_release);   /* last */
+            b = nb;
+        }
+        pthread_mutex_unlock(&once);
     }
-    if (!base) return 0;
+    const int base_on = b;
+    if (!base_on) return 0;
     /* N71: while the kernel keeps WindowServer's inputs out of family VRAM (debug.rdna3accel_a3ws 0) an app's drawable placed there is read by
      * WindowServer through the BAR with the CPU (slower than a private image + the GPU copy-out), unless the kernel gives WindowServer a
      * read-only import of what the app shares (debug.rdna3accel_a3share 1, N71 (c)): then it lives in family VRAM. */
     const int a3share = nvmtl_ws_share_killed() ? 0 : nvmtl_vk_a3share_now();
+    if (a3share == -2) return 0;   /* another thread is reading the switch for the first time: not known yet = private */
     const int kept = nvmtl_surface_share_kept_private(nvmtl_is_windowserver(), a3ws, kenv && kenv[0] == '1', a3share);
     if (shown != kept) {
         shown = kept;
@@ -2129,15 +2144,15 @@ void nvmtl_vk_wss_demote(uint32_t surfaceID, const char *why)
     pthread_mutex_unlock(&g_wss_lock);
     if (fresh) nvlog("vk: a3share: surface %u: %s: the private copy path for the rest of its life", surfaceID, why ? why : "demoted");
 }
-int nvmtl_vk_wss_hazard(uint32_t surfaceID, uint32_t g0, uint32_t g1)
+int nvmtl_vk_wss_hazard(uint32_t surfaceID, uint64_t tag0, uint64_t tag1)
 {
     pthread_mutex_lock(&g_wss_lock);
-    const int r = nvmtl_wss_hazard(&g_wss_st, &g_wss, surfaceID, g0, g1);
+    const int r = nvmtl_wss_hazard(&g_wss_st, &g_wss, surfaceID, tag0, tag1);
     const unsigned n = g_wss_st.hazards;
     pthread_mutex_unlock(&g_wss_lock);
     if (r & NVMTL_WSS_H_HAZARD)
-        nvlog("vk: a3share: surface %u hazard #%u: tag %u at commit, %u at completion (the producer finished another frame into the drawable while WindowServer's composite sampled it)",
-              surfaceID, n, g0, g1);
+        nvlog("vk: a3share: surface %u hazard #%u: tag %u (seed %u) at commit, %u (seed %u) at completion (the producer finished another frame into the drawable while WindowServer's composite sampled it)",
+              surfaceID, n, (uint32_t)tag0, (uint32_t)(tag0 >> 32), (uint32_t)tag1, (uint32_t)(tag1 >> 32));
     if (r & NVMTL_WSS_H_DEMOTED)
         nvlog("vk: a3share: surface %u demoted to the private copy path for the rest of its life (a hazard)", surfaceID);
     if (r & NVMTL_WSS_H_SESSION)

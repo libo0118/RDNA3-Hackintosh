@@ -370,7 +370,7 @@ extern nvmtl_ps_stats g_ps;
 int nvmtl_vk_a3share_now(void);
 int nvmtl_vk_ws_share_why(uint32_t surfaceID, uint32_t usage, int cpu_write);
 void nvmtl_vk_wss_demote(uint32_t surfaceID, const char *why);
-int nvmtl_vk_wss_hazard(uint32_t surfaceID, uint32_t g0, uint32_t g1);
+int nvmtl_vk_wss_hazard(uint32_t surfaceID, uint64_t tag0, uint64_t tag1);   /* nvmtl_wss_tag_key values: seed << 32 | generation */
 int nvmtl_vk_surface_share_after_gpu(uint32_t surfaceID, uint32_t plane, nvmtl_ps_tex *t);   /* NVMTL_PSR_* of the answer, -1 nothing asked */
 int nvmtl_vk_image_create_buffer_alias_ro(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8,
                                           const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);
