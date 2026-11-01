@@ -35,6 +35,19 @@
   New amdgpu source files to track: `tools/progress/sources.txt`, then
   `python3 tools/progress/update_index.py`.
 
+## Documentation format
+
+The owner's decision (2026-11-01): documentation is written as `.html`, not
+`.md`. Markdown only has headings, bold and bullets; HTML can also carry
+tables, CSS, SVG charts, code, live interactions, workflows, spatial data and
+real images. Every new document is a self-contained `.html` file (inline CSS
+and SVG, no external fetches, readable from a local checkout), and a document
+that is rewritten moves to `.html`. The one exception is this `CLAUDE.md`,
+which Claude Code reads only as Markdown. When a `.md` file becomes `.html`,
+update in the same commit every tool, test and link that reads or names it
+(`tools/progress.py`, the triage scripts, `CLAUDE_SUBAGENT.md`, other docs).
+Brief every agent that writes docs accordingly.
+
 ## How we work: a company
 
 The owner is the CEO: they say what they want done or fixed. The session
