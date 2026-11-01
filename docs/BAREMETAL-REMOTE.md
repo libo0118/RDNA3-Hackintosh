@@ -649,3 +649,50 @@ rdna3mtl.conf. Backups in EFI/OC: config-before-bt / -btnvram / -ioplatch / -pmc
 3. Geekbench: the `%metal2vulkan.ct.slot.48` loop phi in the function-constant path (item 6).
 4. The game's next cap: WindowServer's CPU upload of every app frame (item 3, N71 (b)/(c)).
 5. N70 keep/drop (item 4).
+
+## Round 4 plan (Linux session, 2026-11-01 evening): build 9db526b
+
+All from the ONE green full `build.yml` run on 9db526b (workflow_dispatch, full):
+kexts, core, tarball, `RDNA3MTL`, `radv-macos-logs`. As in round 3: `rm` the old
+plugin before installing, use the repo's `install.sh` / `metal.sh` /
+`metal/rdna3mtl-allow.txt`, reboot after a WindowServer-side change (round 3 item 1:
+logging out does not restart WindowServer).
+
+New since round 3:
+- **N74, UCLK pinned while two heads are lit** (DRIVER-PLAN N74; the fix for round 3
+  item 13, the secondary's flashing top). Default on; boot-arg `rdna3uclkpin=0`, live
+  `sudo sysctl -w debug.rdna3_uclk_pin=0|1`. Checks with both displays on:
+  1. `ioreg -lw0 | grep -E 'RDNA3,(DCNPower|DCNPowerInit|UclkPinned)'`: DCNPower says
+     `UCLK pinned (two heads, ...) at 1218 MHz ... fails 0, unconfirmed 0`, UclkPinned **1**
+     (2 = accepted but not confirmed by the PMFW: then check UCLK with `rdna3_pmctl`).
+  2. Kernel log: `display power: UCLK pin (N74): PMFW ...`, `display power: UCLK pinned ...`,
+     `DAL SMU: hard min clock 2 = 1218 MHz`; no `GAVE UP`, no `status wait skipped`, no `FAILED`.
+  3. `rdna3_pmctl` with `levels mclk 15` (all levels allowed): UCLK stays at 1218 MHz idle.
+  4. The owner: no flash on the secondary during a long streamed reply in the Claude app.
+  5. A/B: `sysctl -w debug.rdna3_uclk_pin=0` -> "UCLK switching (switched off ...)", UCLK back
+     to 96 MHz, the flash back; `=1` -> pinned again, no flash.
+  6. Display sleep and wake (`pmset displaysleepnow`, then a click): still pinned after the
+     wake (UclkPinned 1), no multi-second stall of the desktop at the wake.
+  7. Idle power with the pin (about +20 W expected): the PMFW's socket power from
+     `rdna3_pmctl`, pinned vs `uclk_pin=0`.
+- **N68, `iop_latch` on by default.** Remove `rdna3ioplatch=1` from the stick's config.plist
+  boot-args (backup first) to check the default: after the reboot
+  `sysctl debug.rdna3accel_iop_latch` = 1 and the boot line `iop latch (N68): ... (the default;
+  rdna3ioplatch=0 turns it off)`; a fast window drag in the top quarter shows no split (the
+  owner's eye is enough; a 240 fps video only if it looks wrong).
+- **N75, Geekbench 7 GPU.** Run it from the app. Look for `translator note: depthwiseConv_3x3:
+  ... pointer phi %metal2vulkan.ct.slot.48 merges Function and Private storage; demoted to a
+  per-storage value select; its network is loop-carried (DRIVER-PLAN N72, N75)` (the phi name
+  may differ) and the `link cache: miss ... ms` time. If it still fails, copy the full
+  `link FAILED` text: an N75 refusal names its shape (`... more than one <storage> root (...)`,
+  `... was taken on root ...`, `... emitted without its split ...`, `... structural zero path
+  (N75)`); take a new `NVMTL_LINK_DUMP` of that kernel to the Pi (evidence only, never
+  committed). With a score: GPU score vs the Linux ~145k.
+
+Also, if time allows (the owner's call):
+1. N70 (`quick/gsub-last`): one horizon-client run with N70's plugin vs this build's,
+   `pres_us_avg` and fps (round 3 item 4: pres_us_avg ~1.7 ms of a 2.5 ms frame).
+2. Mouse wake (round 3 item 7, macOS USB): a USB port map for the B550 is a setup item, not
+   the driver; only with the owner's go-ahead and a config backup.
+
+Write "## Round 4 findings" below and push to Forgejo.
