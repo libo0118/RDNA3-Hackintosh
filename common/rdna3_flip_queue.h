@@ -323,6 +323,23 @@ static inline int rd3_fq_drop_queued(struct rd3_fq *q, uint32_t *dropped)
     return had;
 }
 
+/* DRIVER-PLAN N68 (a), the latched IOP copy's mailbox (rdna3_iop_latch.h
+ * rd3_il_mb_pick): the queued present of 'addr' is taken back before it was
+ * ever programmed, so its buffer can take the newer frame (returns 1,
+ * *dropped its token). 0: it is not the queued one any more (the flip-done
+ * path programmed it meanwhile, or another present replaced it) - the
+ * caller looks again; the in-flight flip and the record stay as they are */
+static inline int rd3_fq_take_queued(struct rd3_fq *q, uint64_t addr, uint32_t *dropped)
+{
+    if (!addr || addr == RD3_FQ_FOREIGN || q->queued != addr)
+        return 0;
+    if (dropped)
+        *dropped = q->queued_tok;
+    q->queued = 0;
+    q->queued_tok = 0;
+    return 1;
+}
+
 /* what a write into the buffer at 'addr' would hit */
 enum rd3_fq_use {
     RD3_FQ_FREE = 0,      /* not on the panel and not about to be */

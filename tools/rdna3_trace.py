@@ -77,6 +77,7 @@ HOOK_KIND = {0: "pickPresentType", 1: "didSubmitSwap", 2: "isBackBufferReady", 3
 # IOP (DRIVER-PLAN N68, common/rdna3_trace.h rd3_trace_iop / RD3_TRI_*, common/rdna3_iop_latch.h)
 IOP_PATH = {0: "no copy", 1: "direct CPU", 2: "direct SDMA", 3: "latched CPU", 4: "latched SDMA", 5: "zero-copy flip"}
 IOP_L10R, IOP_STALE, IOP_STALE_MOV, IOP_TO_D, IOP_OVERLAP, IOP_VBL, IOP_FALLBACK = 1, 2, 4, 8, 16, 32, 64
+IOP_MBOX = 128   # N68 (a): latched through the mailbox (three buffers, the transaction complete at the copy)
 IOP_FB = {0: "queue", 1: "vram", 2: "resize", 3: "busy", 4: "refused", 5: "geom"}
 IOP_VBL_CLASS = {0: "first", 1: "next", 2: "SAME refresh", 3: "SKIP"}
 IOP_BIN = {0: "q1", 1: "q2", 2: "q3", 3: "q4", 4: "blank"}
@@ -95,7 +96,7 @@ def iop_fields(e):
             "fb": IOP_FB.get(e.ba[0], e.ba[0]) if e.flags & IOP_FALLBACK else None,
             "l10r": bool(e.flags & IOP_L10R), "stale": bool(e.flags & IOP_STALE),
             "stale_moved": bool(e.flags & IOP_STALE_MOV), "to_d": bool(e.flags & IOP_TO_D),
-            "overlap": bool(e.flags & IOP_OVERLAP)}
+            "overlap": bool(e.flags & IOP_OVERLAP), "mbox": bool(e.flags & IOP_MBOX)}
 
 
 # PRESENT (DRIVER-PLAN N38, common/rdna3_flip_queue.h): rd3_trace_present
@@ -1681,7 +1682,8 @@ def _fmt_event(trace, e, ms, n):
             ms, e.head if e.head != 0xff else "-", IOP_PATH.get(e.arg, e.arg), f["surf"], f["useed"], f["target"],
             " (D)" if f["to_d"] else "", f["txn_us"], f["gate_us"], f["stale_us"], f["copy_us"], f["wait_us"], where,
             " l10r" if f["l10r"] else "", " STALE%s" % (" (moved)" if f["stale_moved"] else "") if f["stale"] else "",
-            (" FALLBACK %s" % f["fb"]) if f["fb"] is not None else "") + (" overlap" if f["overlap"] else "")
+            (" FALLBACK %s" % f["fb"]) if f["fb"] is not None else "") + (" overlap" if f["overlap"] else "") + (
+            " mailbox" if f["mbox"] else "")
     if n == "PRESENT":
         if e.arg == 11:
             return "%10.3f ms PRESENT h%s a %s into 0x%x waited %d us for the flip away from it%s" % (

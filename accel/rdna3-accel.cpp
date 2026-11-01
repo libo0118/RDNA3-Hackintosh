@@ -296,6 +296,11 @@ static int gIopQueue = 1;
  * bare-metal round 3 (rd3_iop_latch_on); 0: the copy into the live scanout as before). No room for the second
  * buffer (a small BAR): each frame takes the direct copy, counted (iop_latch_fb_vram) and logged */
 static int gIopLatch = 1;
+/* N68 (a): the latched copy's mailbox - a third scanout buffer per head, a frame queued behind the flip in flight
+ * (newest wins) and its transaction complete at the copy, not at the latch (debug.rdna3accel_iop_latch_mbox,
+ * boot-arg rdna3iopmbox, default 1: rd3_iop_mbox_on; 0 = the two-buffer scheme, each transaction waiting for the
+ * latch: bare-metal round 4 capped a windowed game at 120 fps with it) */
+static int gIopLatchMbox = 1;
 /* that zero-copy flip only for VRAM the Metal plugin wrote (its dirty mark
  * recorded this allocation: rd3_iop_flip_ok), else the copy
  * (debug.rdna3accel_iop_wrote, boot-arg rdna3iopwrote, default 1) */
@@ -1258,10 +1263,17 @@ public:
         gSwapAsync = rd3_arg("rdna3swapasync", 1) ? 1 : 0;
         gIopQueue = rd3_arg("rdna3iopqueue", 1) ? 1 : 0;
         gIopLatch = rd3_iop_latch_on() ? 1 : 0;   /* N68: default 1 since the bare-metal round 3 */
+        gIopLatchMbox = rd3_iop_mbox_on() ? 1 : 0;   /* N68 (a): the mailbox, default 1 */
+        ALOG("iop latch (N68 a): mailbox %s (boot-arg rdna3iopmbox, sysctl debug.rdna3accel_iop_latch_mbox): %s", gIopLatchMbox ? "ON" : "off",
+             gIopLatchMbox ? "a third scanout buffer per head, a frame queued behind the flip in flight (newest wins), "
+                             "the transaction complete at the copy (the default)"
+                           : "two buffers, each transaction waits for the flip before it and completes at its latch "
+                             "(rdna3iopmbox=0)");
         ALOG("iop latch (N68): a copied IOP frame goes %s (boot-arg rdna3ioplatch, sysctl debug.rdna3accel_iop_latch; "
              "counters debug.rdna3accel_iop_latch_* / iop_txn_* / iop_vbl_*)",
-             gIopLatch ? "into the buffer the panel does not scan and is flipped to at the next vblank, the transaction "
-                         "complete at the latch (the default; rdna3ioplatch=0 turns it off)"
+             gIopLatch ? "into a buffer the panel does not scan and is flipped to at a vblank, the transaction "
+                         "complete at the latch or, with the mailbox below, at the copy (the default; rdna3ioplatch=0 "
+                         "turns it off)"
                        : "straight into the head's live scanout, the transaction complete at once (rdna3ioplatch=0)");
         gIopWrote = rd3_arg("rdna3iopwrote", 1) ? 1 : 0;
         gPerfStats = rd3_arg("rdna3perfstats", 1) ? 1 : 0;
@@ -6272,6 +6284,8 @@ static SInt64 gCntPqPolled[kRd3MaxFB], gCntPqIop[kRd3MaxFB], gCntPqDropMode[kRd3
 static SInt64 gCntPqForeignTo[kRd3MaxFB], gCntPqGiveup[kRd3MaxFB], gCntPqIopDrop[kRd3MaxFB];
 static SInt64 gCntPqFbWaitTo[kRd3MaxFB], gCntPqFbWaitFast[kRd3MaxFB], gCntPqFreedInflight[kRd3MaxFB];
 static SInt64 gCntPqHome[kRd3MaxFB], gCntPqDoneMax;
+/* N68 (a): mailbox frames replaced before their latch (rd3AccelIopLbTake, or a newer present in the queue's slot) */
+static SInt64 gCntIopLbReplaced[kRd3MaxFB];
 static unsigned gPqLogs[kRd3MaxFB], gPqEarlyLogs, gPqDropLogs, gPqWaitLogs, gPqRefLogs;
 static unsigned gPqStuckLogs, gPqIopDropLogs, gPqFastLogs, gPqHomeLogs, gPqFreedLogs;
 static bool gPresStopping;               /* rd3AccelPresentStop: no worker armed, the waiters leave */
@@ -6677,6 +6691,10 @@ static void rd3AccelPqArmLocked(unsigned head)
 static void rd3AccelPqIopDone(unsigned head, RD3PresDone *d, const RD3PresReq &r, uint32_t tok, const char *why)
 {
     if (r.kind != kPqIop) return;
+    if (!r.pipe) {   /* a mailbox frame (N68 a): its transaction completed at the copy, no pipe to signal */
+        if (r.lb) OSAddAtomic64(1, &gCntIopLbReplaced[head]);   /* replaced before its latch: newest wins */
+        return;
+    }
     rd3AccelPqDonePipe(d, r.pipe);
     const SInt64 k = OSAddAtomic64(1, &gCntPqIopDrop[head]);
     if (rd3_log_due(gPqIopDropLogs++, 4, 4095))
@@ -7128,6 +7146,12 @@ static SInt64 gCntIopLbN[kRd3MaxFB], gCntIopLbD[kRd3MaxFB], gCntIopLbWait[kRd3Ma
 static SInt64 gCntIopLbFbHead[kRd3MaxFB], gCntIopLbFb[RD3_IL_FB_N];
 static SInt64 gCntIopLbVramBytes, gCntIopLbVramAllocs, gCntIopLbVramFrees, gCntIopLbVramRefused, gCntIopLbFreeWait;
 static SInt64 gCntIopLbVramFreeFailed;
+/* N68 (a), the mailbox: frames into E, frames whose transaction completed at the copy (three buffers), queued frames
+ * taken back before the latch (newest wins), frames with the mailbox on but only two buffers, E allocated / refused,
+ * a take-back that found the frame programmed meanwhile */
+static SInt64 gCntIopLbE[kRd3MaxFB], gCntIopLbMbox[kRd3MaxFB], gCntIopLbTwo[kRd3MaxFB];
+static SInt64 gCntIopLbEAllocs, gCntIopLbERefused, gCntIopLbTakeMiss;
+static SInt32 gIopLbTakeLogs, gIopLbELogs;
 /* K2: the head's frame at its copy before, | 1 << 32 once there was one: one 64-bit word swapped atomically, so two
  * transactions of a head never read a half-written pair (ECC cpp-reviewer of aeb57cf, C4) */
 static volatile uint64_t gIopVblPrev[kRd3MaxFB];
@@ -7228,14 +7252,20 @@ static void rd3AccelIopVblNote(IOService *fb, unsigned head, unsigned height, bo
     t->bin = (uint8_t)bin;
 }
 
-/* the latched copy's head: its second scanout buffer D (VRAM of the accelerator's own, counted as swap_d in
- * debug.rdna3_vram), the buffer it last flipped to, the framebuffer it was made for */
+/* the latched copy's head: its extra scanout buffers - D (b[kIopLbD], N68) and the mailbox's E (b[kIopLbE], N68 (a))
+ * - VRAM of the accelerator's own, counted as swap_d in debug.rdna3_vram; the buffer it last flipped to, the
+ * framebuffer it was made for */
+enum { kIopLbD = 0, kIopLbE = 1, kIopLbBufs = 2 };
+static const char *const kIopLbName[kIopLbBufs] = { "second", "third" };
+struct RD3IopLbBuf {
+    void *handle, *kva;
+    unsigned long long phys, cookie, bytes;
+    unsigned w, h, pitch;
+    unsigned retry;                    /* latched frames until the next try after a refusal */
+};
 struct RD3IopLb {
-    void *dHandle, *dKva;
-    unsigned long long dPhys, dCookie, dBytes;
-    unsigned dW, dH, dPitch;
+    RD3IopLbBuf b[kIopLbBufs];
     unsigned long long last;
-    unsigned retry;
     uint32_t modeGen;
     IOService *fb;
 };
@@ -7243,6 +7273,22 @@ static RD3IopLb gIopLb[kRd3MaxFB];
 static IOLock *volatile gIopLbLock[kRd3MaxFB];
 
 /* the HUBP's address now as a BAR address (rd3AccelTracePanel's read, untraced: once per latched frame) */
+/* ECC cpp-reviewer of 0a47349 (M1): why the HUBP's address was unreadable - the pick then works from the queue's
+ * record alone (debug.rdna3accel_iop_latch_hubp_unknown_<reason>, logged with the values) */
+enum { kIopHubpCore = 0, kIopHubpHead = 1, kIopHubpCall = 2, kIopHubpRange = 3, kIopHubpN = 4 };
+static const char *const kIopHubpName[kIopHubpN] = { "core", "head", "call", "range" };
+static SInt64 gCntIopLbHubpUnk[kIopHubpN];
+static SInt32 gIopLbHubpLogs;
+static void rd3AccelIopHubpUnknown(unsigned head, unsigned why, const char *detail, unsigned long long a,
+                                   unsigned long long b)
+{
+    const SInt64 k = OSAddAtomic64(1, &gCntIopLbHubpUnk[why]);
+    if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbHubpLogs), 8, 1023))
+        ALOG("iop latch: head %u: the HUBP's scan address is UNKNOWN (%s: %s; 0x%llx 0x%llx) -- the buffer choice goes "
+             "by the present queue's record alone, home counted as scanned until a latch of ours "
+             "(iop_latch_hubp_unknown_%s %lld)", head, kIopHubpName[why], detail, a, b, kIopHubpName[why],
+             (long long)k + 1);
+}
 static void rd3AccelIopHubp(unsigned head, IOService *fb, struct rd3_il_state *st, bool *pending)
 {
     st->scan_known = 0;
@@ -7252,7 +7298,16 @@ static void rd3AccelIopHubp(unsigned head, IOService *fb, struct rd3_il_state *s
     RD3StatusWhy w = { nullptr, kIOReturnSuccess };
     unsigned coreHead = 0;
     const unsigned long long base = gVramPhysBase;
-    if (!core || !fb || !base || !rd3AccelCoreHead(fb, &coreHead, &w)) return;
+    if (!core || !fb || !base) {
+        rd3AccelIopHubpUnknown(head, kIopHubpCore, !core ? "no core kext" : !fb ? "no framebuffer"
+                               : "the VRAM base is not known yet", (unsigned long long)(uintptr_t)fb, base);
+        return;
+    }
+    if (!rd3AccelCoreHead(fb, &coreHead, &w)) {
+        rd3AccelIopHubpUnknown(head, kIopHubpHead, w.why ? w.why : "the framebuffer's core head unknown",
+                               (unsigned long long)(unsigned)w.ret, 0);
+        return;
+    }
     struct RD3KDisplayScanAddr q;
     bzero(&q, sizeof q);
     q.version = RD3K_DISPLAY_ABI_VERSION;
@@ -7260,14 +7315,24 @@ static void rd3AccelIopHubp(unsigned head, IOService *fb, struct rd3_il_state *s
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_SCANADDR);
     const IOReturn r = sym ? core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
-    if (r != kIOReturnSuccess || q.inUse < q.fbStart) return;
+    if (r != kIOReturnSuccess) {
+        rd3AccelIopHubpUnknown(head, kIopHubpCall, "rdna3DisplayScanAddr failed (return, core head)", (unsigned)r,
+                               coreHead);
+        return;
+    }
+    if (q.inUse < q.fbStart) {
+        rd3AccelIopHubpUnknown(head, kIopHubpRange, "the in-use address is below the VRAM start (in use, fb start)",
+                               q.inUse, q.fbStart);
+        return;
+    }
     st->scan_known = 1;
     st->scan = base + (q.inUse - q.fbStart);
     *pending = q.flipPending != 0;
 }
-/* what rd3_il_pick reads: the present queue's record (a latch the worker has not seen yet taken first, as a present
- * would) and the HUBP's address. Under gIopLbLock[head], not gPresLock */
-static void rd3AccelIopLbState(unsigned head, IOService *fb, struct rd3_il_state *st)
+/* what rd3_il_pick / rd3_il_mb_pick read: the present queue's record (a latch the worker has not seen yet taken
+ * first, as a present would; whether the queued present is a frame of this path) and the HUBP's address. Under
+ * gIopLbLock[head], not gPresLock */
+static void rd3AccelIopLbState(unsigned head, IOService *fb, struct rd3_il_state *st, bool *hubpOnly = nullptr)
 {
     RD3PresDone d = {};
     bool pending = false;
@@ -7276,12 +7341,34 @@ static void rd3AccelIopLbState(unsigned head, IOService *fb, struct rd3_il_state
     st->shown = gPres[head].q.shown;
     st->inflight = gPres[head].q.inflight;
     st->queued = gPres[head].q.queued;
+    st->queued_lb = gPres[head].q.queued && gPres[head].next.kind == kPqIop && gPres[head].next.lb;
     IOLockUnlock(gPresLock);
     rd3AccelPqDoneRun(&d);
     rd3AccelIopHubp(head, fb, st, &pending);
     /* a flip the queue does not know of (a mode set's, the framebuffer's own): the HUBP's in-use address is the
      * buffer it leaves - neither is free until it latched */
+    if (hubpOnly) *hubpOnly = pending && !st->inflight;
     if (pending && !st->inflight) st->inflight = RD3_FQ_FOREIGN;
+}
+/* ECC cpp-reviewer of 0a47349 (L1): a flip pending on the HUBP that the present queue does not know of (a mode set's,
+ * the framebuffer's own, a flip of ours given up early): no worker wakes anyone at its latch, so the HUBP is polled
+ * (1 ms sleeps, at most RD3_IL_HUBP_POLL_MS) and the state read again; counted apart from the queue's waits
+ * (iop_latch_hubp_wait_h<N>, _us). Under gIopLbLock[head] (an IOLock: sleeping is allowed). Returns the us waited */
+static SInt64 gCntIopLbHubpWait[kRd3MaxFB], gCntIopLbHubpWaitUs[kRd3MaxFB], gCntIopLbHubpWaitTo[kRd3MaxFB];
+#define RD3_IL_HUBP_POLL_MS 20u   /* the framebuffer's own wait for a pending flip (flipToLocked: 40 x 500 us) */
+static uint32_t rd3AccelIopLbWaitHubp(unsigned head, IOService *fb, struct rd3_il_state *st)
+{
+    const uint64_t t0 = mach_absolute_time();
+    bool hubpOnly = true;
+    for (unsigned ms = 0; ms < RD3_IL_HUBP_POLL_MS && hubpOnly && !gPresStopping; ms++) {
+        IOSleep(1);
+        rd3AccelIopLbState(head, fb, st, &hubpOnly);
+    }
+    const uint64_t us = rd3AccelUsSince(t0);
+    OSAddAtomic64(1, &gCntIopLbHubpWait[head]);
+    OSAddAtomic64((SInt64)us, &gCntIopLbHubpWaitUs[head]);
+    if (hubpOnly) OSAddAtomic64(1, &gCntIopLbHubpWaitTo[head]);
+    return rd3TrSat(us);
 }
 /* one flip in flight per head: the latched frame waits for its latch (drm_atomic_helper_wait_for_dependencies),
  * bounded by the head's cap; woken by the worker at the latch. Returns the us waited */
@@ -7302,24 +7389,63 @@ static uint32_t rd3AccelIopLbWait(unsigned head)
     OSAddAtomic64((SInt64)us, &gCntIopLbWaitUs[head]);
     return rd3TrSat(us);
 }
-/* D given back when nothing holds it and the HUBP is seen elsewhere (rd3_il_d_freeable); false: kept, counted.
- * Under gIopLbLock[head] */
-static bool rd3AccelIopLbFree(unsigned head, IOService *fb, const char *why)
+/* N68 (a), the mailbox: the queued latched frame in the buffer at 'phys' is taken back before the flip-done worker
+ * programmed it (rd3_fq_take_queued: the HUBP never saw it), so the newer frame goes into that buffer - newest wins,
+ * the frame never reaches the panel, counted (iop_latch_replaced_h<N>, swaps_pq_replaced_h<N>) and logged. false:
+ * it is not the queued one any more (programmed meanwhile): the caller looks again. Under gIopLbLock[head] */
+static bool rd3AccelIopLbTake(unsigned head, unsigned long long phys)
+{
+    RD3Pres &P = gPres[head];
+    RD3PresDone d = {};
+    uint32_t tok = 0;
+    IOLockLock(gPresLock);
+    const bool ours = P.next.kind == kPqIop && P.next.lb && P.next.phys == phys;
+    const bool stopping = gPresStopping;
+    const unsigned long long qd = P.q.queued;
+    const bool took = ours && !stopping && rd3_fq_take_queued(&P.q, phys, &tok);
+    if (took) {
+        OSAddAtomic64(1, &gCntPqReplaced[head]);
+        rd3AccelPqTrace(head, RD3_TRP_REPLACED, kPqIop, tok, 0, tok, 0, kIOReturnSuccess, phys);
+        rd3AccelPqLost(&d, &P.next);   /* a two-buffer frame queued behind a Busy flip: its pipe signalled */
+    }
+    IOLockUnlock(gPresLock);
+    rd3AccelPqDoneRun(&d);
+    if (!took) {
+        const SInt64 k = OSAddAtomic64(1, &gCntIopLbTakeMiss);
+        if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbTakeLogs), 4, 4095))
+            ALOG("iop latch: head %u: the queued frame in phys 0x%llx could not be taken back: %s (queue's queued 0x%llx) "
+                 "-- looked again (iop_latch_take_miss %lld)", head, phys,
+                 stopping ? "the present queue is stopping"
+                 : !ours ? "the queued present is not this frame any more (programmed by the flip-done worker, or "
+                           "replaced)"
+                         : "the queue's record does not hold that address", qd, (long long)k + 1);
+        return false;
+    }
+    const SInt64 n = OSAddAtomic64(1, &gCntIopLbReplaced[head]);
+    if (n < 4 || (n & 0xffff) == 0)
+        ALOG("iop latch: head %u: queued frame #%u in phys 0x%llx replaced before the latch by a newer one (newest "
+             "wins, the mailbox; %lld such)", head, tok, phys, (long long)n + 1);
+    return true;
+}
+/* buffer b[i] given back when nothing holds it and the HUBP is seen elsewhere (rd3_il_d_freeable); false: kept,
+ * counted. Under gIopLbLock[head] */
+static bool rd3AccelIopLbFreeBuf(unsigned head, IOService *fb, unsigned i, const char *why)
 {
     RD3IopLb &L = gIopLb[head];
+    RD3IopLbBuf &B = L.b[i];
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
-    if (!L.dHandle) return true;
+    if (!B.handle) return true;
     struct rd3_il_state st;
     bzero(&st, sizeof st);
-    st.d = L.dPhys;
+    st.d = B.phys;
     st.last = L.last;
     if (gPresReady) rd3AccelIopLbState(head, fb, &st);
     else { bool pending = false; rd3AccelIopHubp(head, fb, &st, &pending); if (pending) st.inflight = RD3_FQ_FOREIGN; }
     if (!a || !rd3_il_d_freeable(&st)) {
         const SInt64 k = OSAddAtomic64(1, &gCntIopLbFreeWait);
         if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbFreeLogs), 8, 1023))
-            ALOG("iop latch: head %u: its second scanout buffer (phys 0x%llx) is not freed yet (%s): %s (HUBP %s0x%llx, "
-                 "queue shown 0x%llx in flight 0x%llx queued 0x%llx; %lld such)", head, L.dPhys, why,
+            ALOG("iop latch: head %u: its %s scanout buffer (phys 0x%llx) is not freed yet (%s): %s (HUBP %s0x%llx, "
+                 "queue shown 0x%llx in flight 0x%llx queued 0x%llx; %lld such)", head, kIopLbName[i], B.phys, why,
                  !a ? "no accelerator" : "the panel may still read it", st.scan_known ? "" : "UNKNOWN ", st.scan,
                  st.shown, st.inflight, st.queued, (long long)k + 1);
         return false;
@@ -7327,41 +7453,54 @@ static bool rd3AccelIopLbFree(unsigned head, IOService *fb, const char *why)
     struct RD3KVramRequest r;
     bzero(&r, sizeof r);
     r.version = RD3K_VRAM_ABI_VERSION;
-    r.handle = L.dHandle; r.kva = L.dKva; r.actualSize = L.dBytes; r.allocationCookie = L.dCookie;
+    r.handle = B.handle; r.kva = B.kva; r.actualSize = B.bytes; r.allocationCookie = B.cookie;
     const IOReturn fr = a->askFramebufferForVram(&r, false);
     if (fr == kIOReturnSuccess) {
-        OSAddAtomic64(-(SInt64)L.dBytes, &gCntIopLbVramBytes);
+        OSAddAtomic64(-(SInt64)B.bytes, &gCntIopLbVramBytes);
         OSAddAtomic64(1, &gCntIopLbVramFrees);
-        ALOG("iop latch: head %u: second scanout buffer phys 0x%llx (%ux%u, %llu bytes) freed (%s)", head, L.dPhys, L.dW,
-             L.dH, L.dBytes, why);
+        ALOG("iop latch: head %u: %s scanout buffer phys 0x%llx (%ux%u, %llu bytes) freed (%s)", head, kIopLbName[i],
+             B.phys, B.w, B.h, B.bytes, why);
     } else {
         /* ECC silent-failure-hunter of aeb57cf (S5): the core kept it - its bytes stay counted as held, the record is
          * dropped (never retried: the same answer would come every frame) */
         const SInt64 k = OSAddAtomic64(1, &gCntIopLbVramFreeFailed);
-        ALOG("iop latch: head %u: the core REFUSED to free the second scanout buffer phys 0x%llx (%ux%u, %llu bytes; %s) "
+        ALOG("iop latch: head %u: the core REFUSED to free the %s scanout buffer phys 0x%llx (%ux%u, %llu bytes; %s) "
              "-> 0x%x: that VRAM stays allocated, counted in iop_latch_vram_bytes (iop_latch_vram_free_failed %lld)", head,
-             L.dPhys, L.dW, L.dH, L.dBytes, why, (unsigned)fr, (long long)k + 1);
+             kIopLbName[i], B.phys, B.w, B.h, B.bytes, why, (unsigned)fr, (long long)k + 1);
     }
-    if (L.last == L.dPhys) L.last = 0;
-    L.dHandle = nullptr; L.dKva = nullptr; L.dPhys = L.dCookie = L.dBytes = 0; L.dW = L.dH = L.dPitch = 0;
+    if (L.last == B.phys) L.last = 0;
+    const unsigned retry = B.retry;
+    bzero(&B, sizeof B);
+    B.retry = retry;
     return true;
 }
-/* D for a w x h head; false: *why (VRAM refused, or the old one of another size still on the panel). Under
+/* every extra buffer of the head given back (rd3AccelIopLbFreeBuf); false: one at least kept */
+static bool rd3AccelIopLbFree(unsigned head, IOService *fb, const char *why)
+{
+    bool all = true;
+    for (unsigned i = 0; i < kIopLbBufs; i++)
+        if (!rd3AccelIopLbFreeBuf(head, fb, i, why)) all = false;
+    return all;
+}
+/* buffer b[i] (D, or the mailbox's E) for a w x h head; false: *why (VRAM refused, or the old one of another size
+ * still on the panel). A refused E leaves the head with two buffers (the caller's two-buffer scheme), counted
+ * (iop_latch_e_refused) and logged; a refused D sends the frame to the direct copy (iop_latch_fb_vram). Under
  * gIopLbLock[head] */
-static bool rd3AccelIopLbEnsureD(unsigned head, IOService *fb, unsigned w, unsigned h, unsigned *why)
+static bool rd3AccelIopLbEnsureBuf(unsigned head, IOService *fb, unsigned i, unsigned w, unsigned h, unsigned *why)
 {
     RD3IopLb &L = gIopLb[head];
+    RD3IopLbBuf &B = L.b[i];
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
-    if (L.dHandle && L.dW == w && L.dH == h) return true;
+    if (B.handle && B.w == w && B.h == h) return true;
     if (!a) { *why = RD3_IL_FB_VRAM; return false; }
-    if (L.dHandle && !rd3AccelIopLbFree(head, fb, "a mode of another size")) { *why = RD3_IL_FB_RESIZE; return false; }
-    if (L.retry) { L.retry--; *why = RD3_IL_FB_VRAM; return false; }
+    if (B.handle && !rd3AccelIopLbFreeBuf(head, fb, i, "a mode of another size")) { *why = RD3_IL_FB_RESIZE; return false; }
+    if (B.retry) { B.retry--; *why = RD3_IL_FB_VRAM; return false; }
     const unsigned pitch = rd3_sc_pitch(w);
     struct RD3KVramRequest r;
     bzero(&r, sizeof r);
     r.version = RD3K_VRAM_ABI_VERSION;
     r.size = (unsigned long long)pitch * h;
-    r.flags = RD3K_VRAM_OWNER_SWAP_D;   /* counted as swap_d in debug.rdna3_vram: the accelerator's second scanouts */
+    r.flags = RD3K_VRAM_OWNER_SWAP_D;   /* counted as swap_d in debug.rdna3_vram: the accelerator's extra scanouts */
     const IOReturn ret = a->askFramebufferForVram(&r, true);
     const char *bad = ret != kIOReturnSuccess || !r.handle || !r.phys ? "refused"
                     : !r.kva ? "granted without a CPU mapping (the CPU copy needs one)"
@@ -7378,24 +7517,30 @@ static bool rd3AccelIopLbEnsureD(unsigned head, IOService *fb, unsigned w, unsig
                      "that VRAM stays allocated", head, f.phys, f.actualSize, (unsigned)gr);
             }
         }
-        L.retry = RD3_IL_VRAM_RETRY;
-        const SInt64 k = OSAddAtomic64(1, &gCntIopLbVramRefused);
-        if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbVramLogs), 8, 255))
-            ALOG("iop latch: head %u: no VRAM for the second scanout buffer (%ux%u pitch %u, %llu bytes): %s (0x%x; "
-                 "%llu MiB handed out) -- its frames are copied into the live scanout (iop_latch_fb_vram), tried "
-                 "again in %u latched frames (%lld such)", head, w, h, pitch, (unsigned long long)pitch * h, bad,
-                 (unsigned)ret, r.mappedTotal >> 20, RD3_IL_VRAM_RETRY, (long long)k + 1);
+        B.retry = RD3_IL_VRAM_RETRY;
+        const SInt64 k = OSAddAtomic64(1, i == kIopLbE ? &gCntIopLbERefused : &gCntIopLbVramRefused);
+        if (rd3_log_due((uint64_t)OSIncrementAtomic(i == kIopLbE ? &gIopLbELogs : &gIopLbVramLogs), 8, 255))
+            ALOG("iop latch: head %u: no VRAM for the %s scanout buffer (%ux%u pitch %u, %llu bytes): %s (0x%x; "
+                 "%llu MiB handed out) -- %s, tried again in %u latched frames (%lld such)", head, kIopLbName[i], w, h,
+                 pitch, (unsigned long long)pitch * h, bad, (unsigned)ret, r.mappedTotal >> 20,
+                 i == kIopLbE ? "the head keeps two buffers: each transaction waits for the latch as before the "
+                                "mailbox (iop_latch_e_refused, iop_latch_two_h<N>)"
+                              : "its frames are copied into the live scanout (iop_latch_fb_vram)",
+                 RD3_IL_VRAM_RETRY, (long long)k + 1);
         *why = RD3_IL_FB_VRAM;
         return false;
     }
-    L.dHandle = r.handle; L.dKva = r.kva; L.dPhys = r.phys; L.dCookie = r.allocationCookie; L.dBytes = r.actualSize;
-    L.dW = w; L.dH = h; L.dPitch = pitch; L.fb = fb;
+    B.handle = r.handle; B.kva = r.kva; B.phys = r.phys; B.cookie = r.allocationCookie; B.bytes = r.actualSize;
+    B.w = w; B.h = h; B.pitch = pitch; B.retry = 0; L.fb = fb;
     rd3AccelVramBase(r.phys, r.allocationCookie);
     OSAddAtomic64((SInt64)r.actualSize, &gCntIopLbVramBytes);
     OSAddAtomic64(1, &gCntIopLbVramAllocs);
-    ALOG("iop latch: head %u: second scanout buffer phys 0x%llx %ux%u pitch %u (%llu bytes; %llu MiB of VRAM handed out "
-         "now): its frames are copied into the buffer the panel does not scan, flipped at the next vblank", head, r.phys,
-         w, h, pitch, r.actualSize, r.mappedTotal >> 20);
+    if (i == kIopLbE) OSAddAtomic64(1, &gCntIopLbEAllocs);
+    ALOG("iop latch: head %u: %s scanout buffer phys 0x%llx %ux%u pitch %u (%llu bytes; %llu MiB of VRAM handed out "
+         "now): %s", head, kIopLbName[i], r.phys, w, h, pitch, r.actualSize, r.mappedTotal >> 20,
+         i == kIopLbE ? "the mailbox - a frame goes into a buffer neither scanned, in flight nor queued, queued "
+                        "(newest wins) and the transaction completes at once"
+                      : "its frames are copied into the buffer the panel does not scan, flipped at the next vblank");
     return true;
 }
 /* a latched frame that took the direct copy: counted per reason, logged (the first 4, then every 1024th) */
@@ -7409,6 +7554,50 @@ static bool rd3AccelIopLbFb(unsigned head, unsigned why, Rd3IopTxn *t, const cha
     if (rd3_log_due((uint64_t)OSIncrementAtomic(&gIopLbFbLogs[why]), 4, 1023))
         ALOG("iop latch: head %u: this frame is copied into the LIVE scanout instead (%s: %s; iop_latch_fb_%s %lld)",
              head, rd3_il_fb_name(why), detail, rd3_il_fb_name(why), (long long)k + 1);
+    return false;
+}
+/* which buffer a frame goes into: *idx 0 home, 1 D, 2 E; false: none (*busy says why). 'mb': E is there - the
+ * mailbox (rd3_il_mb_pick: a free buffer, or the queued frame of this path taken back; a wait only for a flip of
+ * unknown target); else the two-buffer scheme (rd3_il_pick: the flip in flight waited for). 'hubpOnly': the flip in
+ * flight is on the HUBP only, unknown to the present queue - polled (rd3AccelIopLbWaitHubp), no worker wakes it.
+ * Under gIopLbLock[head] */
+static bool rd3AccelIopLbChoose(unsigned head, IOService *fb, bool mb, struct rd3_il_state *st, bool hubpOnly,
+                                Rd3IopTxn *t, unsigned *idx, bool *took, const char **busy)
+{
+    *took = false;
+    if (mb) {
+        /* five looks, four waits between them: the state after the last wait is evaluated too (M1/L1) */
+        for (unsigned tries = 0; tries <= 4; tries++) {
+            unsigned i = 0;
+            const enum rd3_il_mb a = rd3_il_mb_pick(st, &i);
+            if (a == RD3_IL_MB_COPY) { *idx = i; return true; }
+            if (a == RD3_IL_MB_NONE) {
+                *busy = "the three buffers are not distinct";
+                return false;
+            }
+            if (a == RD3_IL_MB_TAKE && rd3AccelIopLbTake(head, rd3_il_mb_buf(st, i))) {
+                *idx = i;
+                *took = true;
+                return true;
+            }
+            if (tries == 4) break;
+            if (a == RD3_IL_MB_WAIT) {
+                const uint32_t w = hubpOnly ? rd3AccelIopLbWaitHubp(head, fb, st) : rd3AccelIopLbWait(head);
+                t->latchWaitUs = t->latchWaitUs > 0xffffffffu - w ? 0xffffffffu : t->latchWaitUs + w;
+            }
+            rd3AccelIopLbState(head, fb, st, &hubpOnly);
+        }
+        *busy = "no buffer of three free after five looks (a flip of unknown target in flight)";
+        return false;
+    }
+    enum rd3_il_pick p = rd3_il_pick(st);
+    if (p == RD3_IL_WAIT) {
+        t->latchWaitUs = hubpOnly ? rd3AccelIopLbWaitHubp(head, fb, st) : rd3AccelIopLbWait(head);
+        rd3AccelIopLbState(head, fb, st);
+        p = rd3_il_pick(st);
+    }
+    if (p == RD3_IL_HOME || p == RD3_IL_D) { *idx = p == RD3_IL_D ? 1u : 0u; return true; }
+    *busy = p == RD3_IL_WAIT ? "a flip still in flight after the wait" : "both buffers in use";
     return false;
 }
 static bool rd3AccelIopLatchCopy(void *pipe, IOService *fb, unsigned head, const struct RD3KVramRequest *home,
@@ -7436,58 +7625,68 @@ static bool rd3AccelIopLatchCopy(void *pipe, IOService *fb, unsigned head, const
     }
     rd3AccelVramBase(home->phys, home->allocationCookie);
     unsigned why = RD3_IL_FB_VRAM;
-    if (!rd3AccelIopLbEnsureD(head, fb, home->width, home->height, &why)) {
+    if (!rd3AccelIopLbEnsureBuf(head, fb, kIopLbD, home->width, home->height, &why)) {
         IOLockUnlock(l);
         return rd3AccelIopLbFb(head, why, t, why == RD3_IL_FB_RESIZE ? "the old second buffer is still on the panel"
                                                                       : "no VRAM for the second buffer");
     }
+    /* N68 (a): the mailbox's third buffer (debug.rdna3accel_iop_latch_mbox); without it the two-buffer scheme */
+    bool mb = false;
+    if (gIopLatchMbox) {
+        unsigned whyE = RD3_IL_FB_VRAM;
+        mb = rd3AccelIopLbEnsureBuf(head, fb, kIopLbE, home->width, home->height, &whyE);
+        if (!mb) OSAddAtomic64(1, &gCntIopLbTwo[head]);
+    } else if (L.b[kIopLbE].handle) {
+        (void)rd3AccelIopLbFreeBuf(head, fb, kIopLbE, "debug.rdna3accel_iop_latch_mbox is 0");
+    }
     struct rd3_il_state st;
     bzero(&st, sizeof st);
     st.home = home->phys;
-    st.d = L.dPhys;
+    st.d = L.b[kIopLbD].phys;
+    st.e = mb ? L.b[kIopLbE].phys : 0;
     st.last = L.last;
-    rd3AccelIopLbState(head, fb, &st);
-    enum rd3_il_pick p = rd3_il_pick(&st);
-    if (p == RD3_IL_WAIT) {
-        t->latchWaitUs = rd3AccelIopLbWait(head);
-        rd3AccelIopLbState(head, fb, &st);
-        p = rd3_il_pick(&st);
-    }
-    if (p != RD3_IL_HOME && p != RD3_IL_D) {
+    bool hubpOnly = false;
+    rd3AccelIopLbState(head, fb, &st, &hubpOnly);
+    unsigned idx = 0;
+    bool took = false;
+    const char *busy = "?";
+    if (!rd3AccelIopLbChoose(head, fb, mb, &st, hubpOnly, t, &idx, &took, &busy)) {
         IOLockUnlock(l);
-        char det[160];
+        char det[200];
         snprintf(det, sizeof det, "%s (HUBP %s0x%llx, queue shown 0x%llx in flight 0x%llx queued 0x%llx, last 0x%llx)",
-                 p == RD3_IL_WAIT ? "a flip still in flight after the wait" : "both buffers in use",
-                 st.scan_known ? "" : "unknown ", st.scan, st.shown, st.inflight, st.queued, st.last);
+                 busy, st.scan_known ? "" : "unknown ", st.scan, st.shown, st.inflight, st.queued, st.last);
         return rd3AccelIopLbFb(head, RD3_IL_FB_BUSY, t, det);
     }
     struct RD3KVramRequest tq = *home;
-    const bool toD = p == RD3_IL_D;
-    if (toD) {
-        tq.kva = L.dKva; tq.phys = L.dPhys; tq.allocationCookie = L.dCookie; tq.actualSize = L.dBytes;
-        tq.pitch = L.dPitch; tq.width = L.dW; tq.height = L.dH; tq.handle = L.dHandle;
+    const RD3IopLbBuf *B = idx == 1 ? &L.b[kIopLbD] : idx == 2 ? &L.b[kIopLbE] : nullptr;
+    if (B) {
+        tq.kva = B->kva; tq.phys = B->phys; tq.allocationCookie = B->cookie; tq.actualSize = B->bytes;
+        tq.pitch = B->pitch; tq.width = B->w; tq.height = B->h; tq.handle = B->handle;
     }
+    static const char *const kTo[3] = { "home", "D", "E" };
     if (!tq.kva || (tq.pitch & 3u) || tq.pitch < 4ull * w || tq.width != w || tq.height != h ||
         (unsigned long long)h * tq.pitch > tq.actualSize) {
         IOLockUnlock(l);
-        char det[128];
-        snprintf(det, sizeof det, "%s %ux%u pitch %u (%llu bytes) for a %ux%u frame", toD ? "D" : "home", tq.width,
-                 tq.height, tq.pitch, tq.actualSize, w, h);
+        char det[160];
+        snprintf(det, sizeof det, "%s %ux%u pitch %u (%llu bytes) for a %ux%u frame%s", kTo[idx], tq.width,
+                 tq.height, tq.pitch, tq.actualSize, w, h, took ? " (its queued frame was taken back: lost)" : "");
         return rd3AccelIopLbFb(head, RD3_IL_FB_GEOM, t, det);
     }
     const bool bySdma = rd3AccelIopCopyInto(srcSlot, head, &tq, src, w, h, pitch, l10r, fromRes, s, &t->copyUs);
     RD3PresReq rq;
     rd3AccelPqZero(&rq);
     rq.f.version = RD3K_FLIP_ABI_VERSION;
-    rq.f.kapiMemory = toD ? L.dHandle : nullptr;
+    rq.f.kapiMemory = B ? B->handle : nullptr;
     rq.f.allocationCookie = tq.allocationCookie;   /* home: the framebuffer's own (fBootVram), as its HOME flip */
     rq.f.width = tq.width; rq.f.height = tq.height; rq.f.pitch = tq.pitch;
     rq.phys = tq.phys;
     rq.cookie = tq.allocationCookie;
-    rq.pipe = pipe;
+    /* the mailbox: the copy is done and nothing of WindowServer's is on the panel - the transaction completes now,
+     * not at the latch (no pipe in the queue: isTransactionComplete does not wait for this flip) */
+    rq.pipe = mb ? nullptr : pipe;
     rq.kind = kPqIop;
     rq.lb = true;
-    rq.lbHome = !toD;
+    rq.lbHome = idx == 0;
     rq.tok = (uint32_t)OSAddAtomic64(1, &gCntPqIop[head]) + 1;
     const unsigned out = rd3AccelPresentSubmit(head, fb, &rq, 0);
     if (out == kPqOutRefused) {
@@ -7499,40 +7698,47 @@ static bool rd3AccelIopLatchCopy(void *pipe, IOService *fb, unsigned head, const
     rd3AccelForgetShown(head);   /* none of WindowServer's buffers is on the panel (copy forward's record) */
     t->path = bySdma ? RD3_TRI_LATCH_SDMA : RD3_TRI_LATCH_CPU;
     t->target = tq.phys;
-    if (toD) { t->flags |= RD3_TRI_TO_D; OSAddAtomic64(1, &gCntIopLbD[head]); }
+    if (idx == 1) { t->flags |= RD3_TRI_TO_D; OSAddAtomic64(1, &gCntIopLbD[head]); }
+    if (idx == 2) OSAddAtomic64(1, &gCntIopLbE[head]);
+    if (mb) { t->flags |= RD3_TRI_MBOX; OSAddAtomic64(1, &gCntIopLbMbox[head]); }
     const SInt64 n = OSAddAtomic64(1, &gCntIopLbN[head]);
     if (n < 4 || (n & 0xffff) == 0)
-        ALOG("iop latch: head %u: frame #%lld copied into %s (phys 0x%llx, %u us) and %s; the transaction completes at "
-             "the latch", head, (long long)n + 1, toD ? "the second buffer" : "home", tq.phys, t->copyUs,
-             out == kPqOutShown ? "flipped to (programmed)" : "queued behind the flip in flight");
+        ALOG("iop latch: head %u: frame #%lld copied into %s (phys 0x%llx, %u us%s) and %s; the transaction completes %s",
+             head, (long long)n + 1, kTo[idx], tq.phys, t->copyUs, took ? ", the queued frame there taken back" : "",
+             out == kPqOutShown ? "flipped to (programmed)" : out == kPqOutReplaced
+             ? "queued, replacing a queued present" : "queued behind the flip in flight",
+             mb ? "now (the mailbox: three buffers)" : "at the latch (two buffers)");
     return true;
 }
-/* debug.rdna3accel_iop_latch 0: the head's second buffer given back once the panel left it (the direct copy's flip
+/* debug.rdna3accel_iop_latch 0: the head's extra buffers given back once the panel left them (the direct copy's flip
  * home moves it) */
 static void rd3AccelIopLbRelease(IOService *fb, unsigned head)
 {
-    if (head >= kRd3MaxFB || !gIopLb[head].dHandle) return;
+    if (head >= kRd3MaxFB || (!gIopLb[head].b[kIopLbD].handle && !gIopLb[head].b[kIopLbE].handle)) return;
     IOLock *l = gIopLbLock[head];
     if (!l) return;
     IOLockLock(l);
     (void)rd3AccelIopLbFree(head, fb, "debug.rdna3accel_iop_latch is 0");
     IOLockUnlock(l);
 }
-/* the accelerator's stop (after the family's and the present queue's): a D the HUBP does not scan is freed, one it
- * may scan is kept (VRAM lost until the next boot - freed, the next allocation would scribble on the panel) */
+/* the accelerator's stop (after the family's and the present queue's): a buffer the HUBP does not scan is freed,
+ * one it may scan is kept (VRAM lost until the next boot - freed, the next allocation would scribble on the panel) */
 static void rd3AccelIopLbStop(void)
 {
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     for (unsigned h = 0; h < kRd3MaxFB; h++) {
         RD3IopLb &L = gIopLb[h];
-        if (!L.dHandle) continue;
         IOService *fb = a && L.fb && a->fFBs[h] == L.fb ? L.fb : nullptr;
         IOLock *l = gIopLbLock[h];
         if (l) IOLockLock(l);
-        if (!fb || !rd3AccelIopLbFree(h, fb, "the accelerator stops"))
-            ALOG("iop latch: stop: head %u's second scanout buffer (phys 0x%llx, %llu bytes) KEPT: %s -- that VRAM is "
-                 "lost until the next boot", h, L.dPhys, L.dBytes,
-                 fb ? "the panel may still scan it" : "its framebuffer is gone (the HUBP cannot be asked)");
+        for (unsigned i = 0; i < kIopLbBufs; i++) {
+            RD3IopLbBuf &B = L.b[i];
+            if (!B.handle) continue;
+            if (!fb || !rd3AccelIopLbFreeBuf(h, fb, i, "the accelerator stops"))
+                ALOG("iop latch: stop: head %u's %s scanout buffer (phys 0x%llx, %llu bytes) KEPT: %s -- that VRAM is "
+                     "lost until the next boot", h, kIopLbName[i], B.phys, B.bytes,
+                     fb ? "the panel may still scan it" : "its framebuffer is gone (the HUBP cannot be asked)");
+        }
         if (l) IOLockUnlock(l);
     }
 }
@@ -7552,8 +7758,30 @@ static int rdna3accel_iop_latch_sysctl SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_iop_latch, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
             rdna3accel_iop_latch_sysctl, "I",
             "N68: 1 = a copied IOP frame goes into the head's buffer the panel does not scan and is flipped to through "
-            "the present queue, the transaction complete at the latch (default since the bare-metal round 3; boot-arg "
-            "rdna3ioplatch); 0 = copied into the live scanout, complete at once");
+            "the present queue, the transaction complete at the latch - or at the copy with debug.rdna3accel_iop_latch_mbox "
+            "1 (default since the bare-metal round 3; boot-arg rdna3ioplatch); 0 = copied into the live scanout, complete "
+            "at once");
+static int rdna3accel_iop_latch_mbox_sysctl SYSCTL_HANDLER_ARGS
+{
+    int v = gIopLatchMbox;
+    const int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr) return err;
+    const int was = gIopLatchMbox;
+    gIopLatchMbox = v ? 1 : 0;
+    if (was != gIopLatchMbox)
+        ALOG("iop latch (N68 a): debug.rdna3accel_iop_latch_mbox %d -> %d: %s", was, gIopLatchMbox,
+             gIopLatchMbox ? "the mailbox - a third scanout buffer per head (made on first use), frames queued behind "
+                             "the flip in flight (newest wins), transactions complete at the copy"
+                           : "two buffers again, each transaction waits for the latch (the third buffers given back "
+                             "once the panel left them)");
+    return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_iop_latch_mbox, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL,
+            0, rdna3accel_iop_latch_mbox_sysctl, "I",
+            "N68 (a): 1 (default, boot-arg rdna3iopmbox) = the latched copy has a third scanout buffer per head: a "
+            "frame goes into a buffer neither scanned, in flight nor queued, is queued behind the flip in flight (a "
+            "newer one replaces it) and its transaction completes at the copy; 0 = two buffers, each transaction "
+            "waits for the flip before it and completes at its latch (paces WindowServer at the refresh)");
 RD3ACCEL_CNT4(rdna3accel_iop_txn_n, gCntIopTxnN, "N68 K1: IOP transactions timed (every one past the head lookup)");
 RD3ACCEL_CNT4(rdna3accel_iop_txn_us, gCntIopTxnUs, "N68 K1: microseconds from performTransaction's entry to its exit, summed");
 RD3ACCEL_CNT4(rdna3accel_iop_txn_max_us, gCntIopTxnMaxUs, "N68 K1: the longest transaction, microseconds");
@@ -7589,6 +7817,21 @@ RD3ACCEL_CNT(rdna3accel_iop_latch_vram_frees, gCntIopLbVramFrees, "N68: second b
 RD3ACCEL_CNT(rdna3accel_iop_latch_vram_refused, gCntIopLbVramRefused, "N68: second buffers refused (the visible VRAM heap full)");
 RD3ACCEL_CNT(rdna3accel_iop_latch_freewait, gCntIopLbFreeWait, "N68: frees put off because the panel may still scan the buffer");
 RD3ACCEL_CNT(rdna3accel_iop_latch_vram_free_failed, gCntIopLbVramFreeFailed, "N68: second buffers the core refused to free (their VRAM stays allocated, still in iop_latch_vram_bytes)");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_e, gCntIopLbE, "N68 (a): latched frames into the third buffer E (the mailbox)");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_mbox, gCntIopLbMbox, "N68 (a): latched frames through the mailbox (three buffers): the transaction complete at the copy, not at the latch");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_replaced, gCntIopLbReplaced, "N68 (a): queued latched frames taken back before the latch by a newer one (never shown; newest wins)");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_two, gCntIopLbTwo, "N68 (a): latched frames with the mailbox on but only two buffers (the third refused or retried later): paced by the latch");
+RD3ACCEL_CNT(rdna3accel_iop_latch_e_allocs, gCntIopLbEAllocs, "N68 (a): third buffers allocated (also in iop_latch_vram_allocs)");
+RD3ACCEL_CNT(rdna3accel_iop_latch_e_refused, gCntIopLbERefused, "N68 (a): third buffers refused (the visible VRAM heap full): the head keeps two buffers");
+RD3ACCEL_CNT(rdna3accel_iop_latch_hubp_unknown_core, gCntIopLbHubpUnk[kIopHubpCore], "N68: HUBP scan address unknown: no core, framebuffer or VRAM base");
+RD3ACCEL_CNT(rdna3accel_iop_latch_hubp_unknown_head, gCntIopLbHubpUnk[kIopHubpHead], "N68: HUBP scan address unknown: the framebuffer's core head unknown");
+RD3ACCEL_CNT(rdna3accel_iop_latch_hubp_unknown_call, gCntIopLbHubpUnk[kIopHubpCall], "N68: HUBP scan address unknown: rdna3DisplayScanAddr failed");
+RD3ACCEL_CNT(rdna3accel_iop_latch_hubp_unknown_range, gCntIopLbHubpUnk[kIopHubpRange], "N68: HUBP scan address unknown: the in-use address below the VRAM start");
+static_assert(kIopHubpN == 4, "N68: a new HUBP-unknown reason needs its debug.rdna3accel_iop_latch_hubp_unknown_<name> counter");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_hubp_wait, gCntIopLbHubpWait, "N68: latched frames that polled a HUBP flip the present queue does not know of");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_hubp_wait_us, gCntIopLbHubpWaitUs, "N68: microseconds those polls took, summed");
+RD3ACCEL_CNT4(rdna3accel_iop_latch_hubp_wait_to, gCntIopLbHubpWaitTo, "N68: of those, still pending after 20 ms");
+RD3ACCEL_CNT(rdna3accel_iop_latch_take_miss, gCntIopLbTakeMiss, "N68 (a): take-backs of a queued frame that found it programmed meanwhile (looked again)");
 static void rd3AccelInstallSysctlLatch(void)
 {
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch);
@@ -7618,6 +7861,18 @@ static void rd3AccelInstallSysctlLatch(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_refused);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_freewait);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_vram_free_failed);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_mbox);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_e); RD3ACCEL_REG4(rdna3accel_iop_latch_mbox);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_replaced); RD3ACCEL_REG4(rdna3accel_iop_latch_two);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_e_allocs);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_e_refused);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_take_miss);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_hubp_unknown_core);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_hubp_unknown_head);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_hubp_unknown_call);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_latch_hubp_unknown_range);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_hubp_wait); RD3ACCEL_REG4(rdna3accel_iop_latch_hubp_wait_us);
+    RD3ACCEL_REG4(rdna3accel_iop_latch_hubp_wait_to);
 }
 
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_async, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapAsync, 0,

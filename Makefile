@@ -89,7 +89,7 @@ $(BUILD)/test_iop_stale: tests/test_iop_stale.c common/rdna3_iop_stale.h | $(BUI
 $(BUILD)/test_iop_copy: tests/test_iop_copy.c common/rdna3_iop_copy.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_iop_copy.c
 
-$(BUILD)/test_iop_latch: tests/test_iop_latch.c common/rdna3_iop_latch.h | $(BUILD)
+$(BUILD)/test_iop_latch: tests/test_iop_latch.c common/rdna3_iop_latch.h common/rdna3_flip_queue.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_iop_latch.c
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c

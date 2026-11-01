@@ -80,6 +80,18 @@ static inline int rd3_iop_latch_on(void)
     return rd3_arg("rdna3ioplatch", 1) != 0;
 }
 
+/* DRIVER-PLAN N68 (a): the latched copy's mailbox - a third scanout
+ * buffer per head, a frame queued behind the flip in flight (newest wins)
+ * and its transaction complete at the copy, not at the latch
+ * (debug.rdna3accel_iop_latch_mbox). On unless rdna3iopmbox=0 (the
+ * two-buffer scheme: bare-metal round 4 capped a windowed game at 120 fps,
+ * each transaction waiting for a vblank). Without room for the third
+ * buffer the head keeps two (iop_latch_e_refused). */
+static inline int rd3_iop_mbox_on(void)
+{
+    return rd3_arg("rdna3iopmbox", 1) != 0;
+}
+
 /* A3 and WindowServer's display framebuffers (rdna3_a3_display.h): kept
  * out of A3 unless rdna3a3display=1 (card run 58: the swap scans out the
  * legacy surface's own VRAM, so a BO over the IOSurface's never reached
