@@ -838,12 +838,32 @@ static void nvmtl_vram_tag_set(IOSurfaceRef surf, NSUInteger plane, uint32_t see
     CFDataRef d = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_vram_tag_key(plane);
     IOSurfaceSetValue(surf, k, d); CFRelease(k); CFRelease(d);
 }
+/* DRIVER-PLAN N71 (c): the allocation generation the producer's share was recorded for, as an IOSurface value next to the tag (nvmtl_ws_share.h
+ * nvmtl_wss_gen_pack): written by the producer after the kernel accepted its share, read by WindowServer at every wrapper (0: nothing shared). */
+static CFStringRef nvmtl_share_gen_key(NSUInteger plane) { return CFStringCreateWithFormat(NULL, NULL, CFSTR("NVMTLShareGen:p%lu"), (unsigned long)plane); }
+static uint64_t nvmtl_share_gen_read(IOSurfaceRef surf, NSUInteger plane)
+{
+    CFStringRef k = nvmtl_share_gen_key(plane); CFTypeRef v = IOSurfaceCopyValue(surf, k); CFRelease(k);
+    uint64_t g = 0;
+    if (v && CFGetTypeID(v) == CFDataGetTypeID()) g = nvmtl_wss_gen_unpack(CFDataGetBytePtr((CFDataRef)v), (size_t)CFDataGetLength((CFDataRef)v));
+    if (v) CFRelease(v);
+    return g;
+}
+static void nvmtl_share_gen_write(IOSurfaceRef surf, NSUInteger plane, uint64_t gen)
+{
+    const nvmtl_wss_gen_rec r = nvmtl_wss_gen_pack(gen);
+    CFDataRef dd = CFDataCreate(NULL, (const UInt8 *)&r, sizeof r); CFStringRef k = nvmtl_share_gen_key(plane);
+    IOSurfaceSetValue(surf, k, dd); CFRelease(k); CFRelease(dd);
+}
 static __thread unsigned g_tr_why;   /* frame trace: why the last surface image is private (NVT_WHY_*), 0 when shared */
+/* ws_plan: WindowServer decided (nvmtl_wss_plan) this wrapper may become a READ-ONLY alias of an application's shared drawable - NVMTL_WSS_PLAN_IMPORT or
+ * _REIMPORT (a new allocation generation); 0 otherwise (every app, and every WindowServer texture that is not such a case). skip_import: the surface is
+ * shared by its producer but this wrapper must not use it (stale tag, a usage that can write, demoted): the private path without asking the kernel. */
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
-                                      uint32_t vkf, uint32_t bpp, int a8, int stex)
+                                      uint32_t vkf, uint32_t bpp, int a8, int stex, int ws_plan, int skip_import)
 {
     g_tr_why = NVT_WHY_SHARE_OFF;
-    if (surf && nvmtl_vk_surface_share_on()) {
+    if (surf && !skip_import && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         /* why a surface stays private, first few of each kind (card logs had only a count) */
         static const char *const kWhy[] = { NULL, "a planar surface", "the texture is wider than a row",
@@ -858,9 +878,29 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                                      (unsigned)IOSurfaceGetID(surf), w, h, row, (unsigned long)plane, why);
         } else {
             nvk_buffer vb;
-            if (!nvmtl_vk_surface_vram(IOSurfaceGetID(surf), 0, row * h, &vb)) {
-                if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
+            const uint32_t sid = (uint32_t)IOSurfaceGetID(surf);
+            if (!nvmtl_vk_surface_vram(sid, 0, row * h, &vb)) {
+                if (vb.share_ro) {
+                    /* N71 (c): the kernel gave WindowServer a READ-ONLY import of an application's shared allocation: a sample-only alias, or nothing */
+                    if (nvmtl_wss_import_class(0, 1, ws_plan != 0) == NVMTL_WSS_IMP_RO &&
+                        !nvmtl_vk_image_create_buffer_alias_ro(w, h, vkf, bpp, a8, &vb, 0, row, &t->_i)) {
+                        t->_vramBuf = vb; t->_vramRO = YES; t->_roGen = vb.share_gen; g_tr_why = 0;
+                        NVMTL_WSS_INC(&g_wss, imp);
+                        if (ws_plan == NVMTL_WSS_PLAN_REIMPORT) NVMTL_WSS_INC(&g_wss, reimp);
+                        t->_surfSeed = IOSurfaceGetSeed(surf); t->_surfSynced = YES;   /* nothing is ever uploaded: the tag is checked at each sample */
+                        nvlog("item 7: surface %u %ux%u -> read-only shared VRAM (allocation #%llu)%s", sid, w, h, (unsigned long long)vb.share_gen,
+                              ws_plan == NVMTL_WSS_PLAN_REIMPORT ? " [re-imported: the producer's allocation changed]" : "");
+                        return 0;
+                    }
+                    nvmtl_vk_buffer_destroy(&vb);
+                    NVMTL_WSS_INC(&g_wss, refused);
+                    nvlog("vk: a3share: surface %u: the read-only shared import %s: private copy path", sid,
+                          ws_plan ? "could not be built as a sample-only alias" : "was not wanted (this texture's usage can write)");
+                    if (ws_plan) nvmtl_vk_wss_demote(sid, "the read-only alias could not be built");
+                    g_tr_why = NVT_WHY_ALIAS_FAILED;
+                } else if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
                     t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++; g_tr_why = 0;
+                    t->_ps.gen = vb.share_gen;   /* N71 (c): the producer's share is recorded for this generation after the GPU finished a frame */
                     uint32_t seed = IOSurfaceGetSeed(surf);
                     int current = nvmtl_vram_tag_current(surf, 0, seed);
                     if (current) { t->_surfSeed = seed; t->_surfSynced = YES; }
@@ -868,10 +908,19 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                         nvlog("item 7: surface %u %ux%u pitch %zu -> the family's VRAM%s (vram %llu, private %llu)", (unsigned)IOSurfaceGetID(surf),
                               w, h, row, current ? ", already current (no upload)" : "", g_surf_vram, g_surf_private);
                     return 0;
+                } else {
+                    nvmtl_vk_buffer_destroy(&vb);
+                    g_tr_why = NVT_WHY_ALIAS_FAILED;
                 }
-                nvmtl_vk_buffer_destroy(&vb);
-                g_tr_why = NVT_WHY_ALIAS_FAILED;
-            } else g_tr_why = NVT_WHY_IMPORT_FAILED;
+            } else {
+                g_tr_why = NVT_WHY_IMPORT_FAILED;
+                if (ws_plan) {   /* R4: an import error where a share was expected: the private path, the surface asked once, counted per errno */
+                    const int er = nvmtl_vk_last_vram_errno() ? nvmtl_vk_last_vram_errno() : EIO;
+                    nvmtl_wss_count_err(&g_wss, er);
+                    nvlog("vk: a3share: surface %u import refused: errno %d (%s): private copy path", sid, er, nvmtl_ps_errno_name(er));
+                    nvmtl_vk_wss_demote(sid, "the read-only import was refused");
+                }
+            }
         }
     }
     g_surf_private++;
@@ -1003,6 +1052,13 @@ static void nvmtl_dl_hook_install(void) {
     os_unfair_lock_unlock(&g_dl_hook_lock);
 }
 static char nvmtl_surface_cache_key;
+/* N71 (c): the read-only shared aliases WindowServer holds, by the same key as the private ones (the generation is checked against the producer's at each wrapper) */
+static char nvmtl_surface_ro_cache_key;
+static NSMapTable *nvmtl_ro_cache(id device) {
+    NSMapTable *c = objc_getAssociatedObject(device, &nvmtl_surface_ro_cache_key);
+    if (!c) { c = [NSMapTable strongToWeakObjectsMapTable]; objc_setAssociatedObject(device, &nvmtl_surface_ro_cache_key, c, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    return c;
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surf plane:(NSUInteger)plane {
     id<MTLTexture> made = nil;
     @synchronized(self) {
@@ -1028,11 +1084,50 @@ static char nvmtl_surface_cache_key;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
     NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(wantStex), @(t->_ropt), @(t->_fbo)] : nil;
+    /* DRIVER-PLAN N71 (c), the consumer (WindowServer only; nvmtl_ws_share.h): an application's VRAM drawable whose producer recorded a share (its allocation
+     * generation sits on the surface) is sampled through a READ-ONLY import, cached per (surface, plane, generation), and never uploaded into. Everything
+     * that cannot be that - a stale tag, a usage that can write, a demoted surface - takes the private path below, and nothing here applies to a surface its
+     * producer did not share (WindowServer's own surfaces keep today's path), nor with debug.rdna3accel_a3share 0 or NVMTL_WS_SHARE=0. */
+    int wsPlan = 0, wsSkip = 0;
+    NSMapTable *roCache = nil;
+    if (key && plane == 0) {
+        const uint32_t sid = (uint32_t)IOSurfaceGetID(surf);
+        const int why = nvmtl_vk_ws_share_why(sid, (uint32_t)d.usage, d.cpuCacheMode == MTLCPUCacheModeWriteCombined);
+        const uint64_t pgen = (why == NVMTL_WSS_NOT_WS || why == NVMTL_WSS_KILL || why == NVMTL_WSS_SWITCH_OFF) ? 0 : nvmtl_share_gen_read(surf, 0);
+        if (pgen && why == NVMTL_WSS_OK) {
+            roCache = nvmtl_ro_cache(self);
+            NVMTLTexture *rb = [roCache objectForKey:key];
+            int pw = 0;
+            int plan = nvmtl_wss_plan(rb != nil, rb ? rb->_roGen : 0, pgen, nvmtl_vram_tag_current(surf, 0, IOSurfaceGetSeed(surf)), &pw);
+            if (plan == NVMTL_WSS_PLAN_CACHED) {
+                NVMTLTexture *alias = (NVMTLTexture *)[rb newTextureViewWithPixelFormat:d.pixelFormat];
+                if (alias) {
+                    alias->_viewParent = nil; alias->_usage = d.usage; alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
+                    nvmtl_texture_desc_swizzle(alias, d);
+                    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+                    alias->_dlBornNs = now; nvmtl_dl_st_alias(&g_dl); nvmtl_keep_put(rb, now);
+                    return alias;
+                }
+                plan = NVMTL_WSS_PLAN_REIMPORT;   /* the view could not be made: a fresh import (its failure takes the private path) */
+            }
+            if (plan == NVMTL_WSS_PLAN_IMPORT || plan == NVMTL_WSS_PLAN_REIMPORT) wsPlan = plan;
+            else if (pw == NVMTL_WSS_PW_STALE) {   /* the CPU copy is the newer one: the private path; nothing is uploaded into an alias */
+                wsSkip = 1;
+                NVMTL_WSS_INC(&g_wss, stale);
+                nvlog("vk: a3share: surface %u: the producer's tag is stale (surface seed %u): this wrapper takes the private copy path", sid, (unsigned)IOSurfaceGetSeed(surf));
+            }
+        } else if (pgen && why != NVMTL_WSS_DEMOTED && why != NVMTL_WSS_SESSION_OFF) {
+            wsSkip = 1;   /* a usage that can write, or a CPU writer: a shared drawable is read-only, so this wrapper is private */
+            NVMTL_WSS_INC(&g_wss, inelig);
+            nvlog("vk: a3share: surface %u: shared by its producer but this texture stays private: %s (usage 0x%lx, cpuCacheMode %lu)", sid,
+                  nvmtl_wss_why_name(why), (unsigned long)d.usage, (unsigned long)d.cpuCacheMode);
+        } else if (pgen) wsSkip = 1;   /* demoted, or shared imports stopped for the session */
+    }
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
     // Failed BAR imports use a private image. Repeated wrappers of the same
     // surface must share that image, just as successful family imports do.
     // Weak entries do not pin the image after the application's last wrapper.
-    if (backing && !backing->_vramOn) {
+    if (backing && !backing->_vramOn && !backing->_vramRO && !wsPlan) {   /* N71 (c): a planned read-only import is not served by a private image */
         NVMTLTexture *alias = (NVMTLTexture *)[backing newTextureViewWithPixelFormat:d.pixelFormat];
         if (alias) {
             alias->_viewParent = nil; alias->_usage = d.usage; alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
@@ -1043,7 +1138,7 @@ static char nvmtl_surface_cache_key;
         }
     }
     const uint64_t dlT0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);   /* N73: what a new image costs */
-    if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex)) {
+    if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex, wsPlan, wsSkip)) {
         nvlog("newTextureWithDescriptor:iosurface:plane: image create FAILED (%zux%zu)", w, h); return nil; }
     const uint64_t dlT1 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (surf) { nvmtl_dl_st_new(&g_dl, dlT1 - dlT0); t->_dlBornNs = dlT1; }
@@ -1055,7 +1150,8 @@ static char nvmtl_surface_cache_key;
     t->_usage = d.usage;
     nvmtl_texture_desc_swizzle(t, d);
     nvmtl_tr_map(t, g_tr_why);
-    if (key && !t->_vramOn) { [cache setObject:t forKey:key]; nvmtl_keep_put(t, dlT1); }   /* N73: the keep ring (NVMTL_SURFTEX_KEEP) */
+    if (key && t->_vramRO) { if (!roCache) roCache = nvmtl_ro_cache(self); [roCache setObject:t forKey:key]; nvmtl_keep_put(t, dlT1); }   /* N71 (c): per (surface, plane, ...); its generation is on the texture */
+    else if (key && !t->_vramOn) { [cache setObject:t forKey:key]; nvmtl_keep_put(t, dlT1); }   /* N73: the keep ring (NVMTL_SURFTEX_KEEP) */
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
           (void *)surf, (unsigned long)plane, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat);
     return t; }

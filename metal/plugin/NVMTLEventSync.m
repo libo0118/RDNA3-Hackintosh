@@ -393,6 +393,7 @@ static NSSet *nvmtl_seal_surfaces(NVMTLCommandBuffer *cb, NSSet **deferred) {
         }
     }
     nvmtl_ws_mark_ready(self, -1, nil);   // N41: no pending mark outlives the command buffer (errors included)
+    nvmtl_ro_complete(self, error != nil);   // N71 (c) R1: compared with the generation at commit
     _wsMarks = nil; _wsCommitDirty = nil;
     if (!error) {
         if (_presentations.count) {   /* N73: the present latency and, per surface, when it left (its return is timed by the nextDrawable hook) */
@@ -634,6 +635,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
                 NVMTLTexture *root = texture->_parent ? texture->_parent : texture;   /* N61 */
                 const BOOL byGpu = part->dma && [part->dma containsObject:root];
                 const int why = [part->dmaWhy[[NSValue valueWithNonretainedObject:root]] intValue];
+                nvmtl_ps_after_gpu(root);   // N71 (c): the GPU finished this part: the share record, before the publish bumps the tag
                 if (!(byGpu ? [texture nvmtlSurfaceOutDMA] : [texture nvmtlSurfaceOutWhy:why])) published = NO;
                 if (committed) nvmtl_vk_surface_dirty_committed_scope(0);
             }
@@ -707,6 +709,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         _hoHold = _hoLastSurfPart >= 0 && nvmtl_ho_hold();
         nvmtl_surface_register_writes(self);
         nvmtl_ws_mark_pending(self);   // N41: before any part reaches the GPU (submit-ahead needs _committed and the pump)
+        nvmtl_ro_commit(self);         // N71 (c) R1: the producer's tag generation of every read-only shared alias this buffer samples
         nvmtl_tr_cb_commit(self);
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];

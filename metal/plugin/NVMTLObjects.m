@@ -1351,11 +1351,24 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+/* DRIVER-PLAN N71 (c): a write asked of (or recorded against) a READ-ONLY shared alias. The alias is WindowServer's view of an application's
+ * drawable: it is sampled and nothing else. A CPU write (replaceRegion), a publish (copy-out / dirty mark) and an upload are refused here; a GPU write
+ * already recorded in a command buffer (a render attachment, a blit destination, a store) cannot be taken back at this point, so it is counted
+ * (sh_wr) and logged loudly, and the surface takes the private path from the next wrapper on. The kernel maps the memory without WRITEABLE: a GPU write
+ * that does reach the card faults and turns the share off (debug.rdna3accel_a3share_fault_off). */
+static void nvmtl_ro_write(NVMTLTexture *r, const char *what, int refused) {
+    NVMTL_WSS_INC(&g_wss, wr);
+    const uint32_t sid = r->_surf ? (uint32_t)IOSurfaceGetID(r->_surf) : 0;
+    nvlog("vk: a3share: surface %u: %s asked of a READ-ONLY shared alias (allocation #%llu): %s", sid, what, (unsigned long long)r->_roGen,
+          refused ? "refused, nothing was written" : "ALREADY RECORDED in a command buffer - the card will fault if it reaches the GPU");
+    nvmtl_vk_wss_demote(sid, "a write was asked of the read-only alias");
+}
 static void nvmtl_surf_dirty(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!cb || !t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
     nvmtl_bsh_forget(r);   /* N51: every recorded write to a texture comes through here; a buffer texture's shadow of its last upload is then stale */
     if (!r->_surf) return;
+    if (r->_vramRO) { nvmtl_ro_write(r, "a GPU write", 0); return; }   /* N71 (c): never registered as a writer: nothing is published for it */
     if (!cb->_surfDirty) cb->_surfDirty = [NSMutableSet new];
     [cb->_surfDirty addObject:r];
 }
@@ -1480,10 +1493,53 @@ static void nvmtl_surface_overwrite_recorded(NVMTLCommandBuffer *cb, NVMTLTextur
     if (!cb->_surfOverwrites) cb->_surfOverwrites = [NSMutableSet new];
     [cb->_surfOverwrites addObject:r];
 }
+/* DRIVER-PLAN N71 (c): a sample of a READ-ONLY shared alias. Nothing is uploaded, ever: the producer's tag current = the VRAM holds the newest frame
+ * (sh_skip); stale = the CPU copy is newer, which the alias cannot take (sh_stale, logged; the next wrapper of the surface is private). The command
+ * buffer remembers the sampled alias for R1: the producer's tag generation at its commit against its completion. */
+static void nvmtl_ro_sample(NVMTLCommandBuffer *cb, NVMTLTexture *r) {
+    if (cb && [cb->_roSamples containsObject:r]) { g_sin_path = 1; return; }   /* once per command buffer and alias: its tag does not change meaning within it */
+    const uint32_t seed = IOSurfaceGetSeed(r->_surf);
+    if (nvmtl_wss_sample(nvmtl_vram_tag_current(r->_surf, r->_plane, seed)) == NVMTL_WSS_SAMPLE_SKIP) {
+        NVMTL_WSS_INC(&g_wss, skip); g_sin_path = 1;
+        static unsigned ns; if (ns++ < 6 || ns % 4000 == 0)
+            nvlog("vk: a3share: surface-in SKIPPED (read-only shared VRAM current at seed %u, allocation #%llu): %llu skipped, %llu stale", seed,
+                  (unsigned long long)r->_roGen, (unsigned long long)g_wss.skip, (unsigned long long)g_wss.stale);
+    } else {
+        NVMTL_WSS_INC(&g_wss, stale);
+        nvlog("vk: a3share: surface %u sampled with a STALE tag (seed %u, allocation #%llu): no upload into a read-only alias - this frame may show the producer's last GPU frame; later wrappers are private",
+              (unsigned)IOSurfaceGetID(r->_surf), seed, (unsigned long long)r->_roGen);
+    }
+    if (cb) { if (!cb->_roSamples) cb->_roSamples = [NSMutableSet new]; [cb->_roSamples addObject:r]; }
+}
+/* DRIVER-PLAN N71 (c), the producer: the GPU finished a part that wrote this VRAM texture's surface; once per allocation generation the kernel is told
+ * WindowServer may import it read-only (nvmtl_vk_surface_share_after_gpu logs and counts the answer), and on success the generation is put on the surface
+ * (NVMTLShareGen) where WindowServer finds it. Before the publish below it, which bumps the tag WindowServer checks. */
+static void nvmtl_ps_after_gpu(NVMTLTexture *r) {
+    if (!r->_vramOn || r->_vramRO || !r->_surf || r->_ps.dead || (!r->_ps.gen && r->_ps.said) || (r->_ps.gen && r->_ps.shared_gen == r->_ps.gen)) return;
+    const int cls = nvmtl_vk_surface_share_after_gpu((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane, &r->_ps);
+    if (cls == NVMTL_PSR_RECORDED) nvmtl_share_gen_write(r->_surf, r->_plane, r->_ps.gen);
+}
+/* R1, at the composite's commit: the tag generation of every alias it samples; at its completion: compared (nvmtl_vk_wss_hazard) */
+static void nvmtl_ro_commit(NVMTLCommandBuffer *cb) {
+    if (!cb->_roSamples.count) return;
+    if (!cb->_roGens) cb->_roGens = [NSMutableDictionary new];
+    for (NVMTLTexture *r in cb->_roSamples)
+        if (r->_surf) cb->_roGens[@((uint32_t)IOSurfaceGetID(r->_surf))] = @(nvmtl_vram_gen(r->_surf, r->_plane));
+}
+static void nvmtl_ro_complete(NVMTLCommandBuffer *cb, BOOL failed) {
+    if (!failed && cb->_roGens.count)   /* a failed command buffer may not have sampled anything: no verdict */
+        for (NVMTLTexture *r in cb->_roSamples) {
+            if (!r->_surf) continue;
+            NSNumber *g0 = cb->_roGens[@((uint32_t)IOSurfaceGetID(r->_surf))];
+            if (g0) (void)nvmtl_vk_wss_hazard((uint32_t)IOSurfaceGetID(r->_surf), g0.unsignedIntValue, nvmtl_vram_gen(r->_surf, r->_plane));
+        }
+    cb->_roSamples = nil; cb->_roGens = nil;
+}
 static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t);
 static void nvmtl_surface_in_for_cb_body(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
+    if (r->_vramRO && r->_surf) { nvmtl_ro_sample(cb, r); return; }   /* N71 (c): before the fast probe and every upload path */
     if (r->_bufCopy) {   /* the buffer's bytes as of this command buffer, once per command buffer */
         if (cb && [cb->_bufCopied containsObject:r]) { atomic_fetch_add(&gBcDedup, 1); return; }
         if (cb) { if (!cb->_bufCopied) cb->_bufCopied = [NSMutableSet new]; [cb->_bufCopied addObject:r]; }
@@ -1703,7 +1759,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (_bsh.buf) { atomic_fetch_sub(&gShadowBytes, (unsigned long long)_bsh.len); free(_bsh.buf); _bsh.buf = NULL; _bsh.len = 0; }
     if (!_parent) nvmtl_vk_image_destroy(&_i);
     if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
-    if (!_parent && _vramOn) { nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
+    if (!_parent && (_vramOn || _vramRO)) { nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; _vramRO = NO; }   /* N71 (c): the read-only import goes the same way */
     if (_soBuf.buf) nvmtl_vk_buffer_destroy(&_soBuf);   /* N61: the surface's pages, unwired before the surface goes (no part holds this texture any more) */
     if (_surfOwned && _surf) CFRelease(_surf);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
@@ -1799,6 +1855,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     NVMTLTexture *r = _parent ? _parent : self;
     if (r->_bufCopy) { [r nvmtlBufCopyIn]; return; }
     if (!r->_surf) return;
+    if (r->_vramRO) { nvmtl_ro_sample(nil, r); return; }   /* N71 (c): a read-only alias is never uploaded into */
     const uint64_t spw = nvmtl_split_now();   /* N51: the time to get the surface's monitor (a refresh or a read-back of the same surface holds it) */
     @synchronized (nvmtl_surface_sync(r)) {
     nvmtl_split_add(spw, &g_split.wait, NULL);
@@ -1845,6 +1902,7 @@ static int nvmtl_so_import(NVMTLTexture *r, int may_import);   /* N61, below */
 - (BOOL)nvmtlSurfaceOutWhy:(int)why {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
+    if (r->_vramRO) { nvmtl_ro_write(r, "a publish (copy-out)", 1); return YES; }   /* N71 (c): nothing to publish, nothing may be written */
     @synchronized (nvmtl_surface_sync(r)) {
     const uint64_t trT0 = nvt_now();   // frame trace: records what happens below, decides nothing
     const uint32_t trSeed0 = nvt_on() ? IOSurfaceGetSeed(r->_surf) : 0;
@@ -1913,6 +1971,7 @@ static int nvmtl_so_import(NVMTLTexture *r, int may_import);   /* N61, below */
 - (BOOL)nvmtlSurfaceOutDMA {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
+    if (r->_vramRO) { nvmtl_ro_write(r, "a publish (GPU copy-out)", 1); return YES; }   /* N71 (c) */
     BOOL moved = NO;
     @synchronized (nvmtl_surface_sync(r)) {
     const uint64_t trT0 = nvt_now();
@@ -2131,6 +2190,7 @@ static NSSet *nvmtl_surface_dma_record(NSSet *surfaces, nvk_cmdbuf *c, NSDiction
     if (rc) nvlog("texture getBytes:slice: readback FAILED");
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row {
+    { NVMTLTexture *ro = _parent ? _parent : self; if (ro->_vramRO) { nvmtl_ro_write(ro, "replaceRegion", 1); return; } }   /* N71 (c) */
     if (level >= [self mipmapLevelCount]) { nvlog("replaceRegion: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
     if (region.size.depth > 1 || region.origin.z) { [self replaceRegion:region mipmapLevel:level slice:0 withBytes:bytes bytesPerRow:row bytesPerImage:row * region.size.height]; return; }
     { int was = nvtrace_scope([self nvi]->w, [self nvi]->h);
@@ -2159,6 +2219,7 @@ static NSSet *nvmtl_surface_dma_record(NSSet *surfaces, nvk_cmdbuf *c, NSDiction
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
             withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)img {
+    { NVMTLTexture *ro = _parent ? _parent : self; if (ro->_vramRO) { nvmtl_ro_write(ro, "replaceRegion", 1); return; } }   /* N71 (c) */
     if (_tbView) {
         id<MTLBuffer> bb = (id<MTLBuffer>)_backBuf; uint8_t *dst = (uint8_t *)[bb contents];
         if (!dst || region.origin.x + region.size.width > _i.w) { nvlog("replaceRegion: texture buffer is not CPU-visible or the region is outside it"); return; }
