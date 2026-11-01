@@ -697,3 +697,45 @@ Also, if time allows (the owner's call):
    the driver; only with the owner's go-ahead and a config backup.
 
 Write "## Round 4 findings" below and push to Forgejo.
+
+## Round 4b plan (Linux session, 2026-11-01 night): N71 (c) and N70, build e400b68 (run 126)
+
+Run 126 (workflow_dispatch, full, all green) has everything of run 123 plus N70 and N71 (c).
+If round 4 has not started yet, install run 126 instead of 123 and do round 4, then this.
+If round 4 ran on run 123, install run 126 now (kexts, core, tarball, `RDNA3MTL`; reboot,
+since WindowServer loads the plugin at its start) and do only this section.
+
+**N71 (c): WindowServer samples an app's VRAM drawable read-only** (DRIVER-PLAN N71 "PLAN (c)",
+risks R1-R9; AFTER-TESTS rows `A3 share` and `ws share`). Default OFF: `debug.rdna3accel_a3share` 0.
+The kernel switch is live; apps decide at texture creation, so **restart the app for each leg**.
+1. Before anything: `sysctl debug.rdna3accel_a3share` = 0; the boot log has `A3 share: off`;
+   WindowServer's plugin log has `vk: a3share: read-only imports accepted from the kernel`.
+2. Leg A (off): horizon-client in a world, 35 s, as round 3 item 2 (Claude app hidden and visible):
+   fps, `vk: drawable: SUMMARY` (next_pct, away_us_avg, pres_us_avg), WindowServer's
+   `vk: ws frame: SUMMARY` (ups, up_kb, in_us_avg), CPU of WindowServer and the game.
+3. `sudo sysctl -w debug.rdna3accel_a3share=1`, quit and restart the game, Leg B (on), the same numbers, plus:
+   - the game's log: `vk: a3share: surface S plane 0 shared (allocation #G)`; app SUMMARY `pr_shared` > 0,
+     the other `pr_*` 0;
+   - WindowServer: `item 7: surface S WxH -> read-only shared VRAM (allocation #G)` with the same G;
+     `ws frame: SUMMARY` `sh_imp` > 0, `sh_skip` growing with frames, and **0** for `sh_war`,
+     `sh_wr`, `sh_rw`, `sh_refused`, `sh_pdem`, `sh_off`; `ups` for the game ~0;
+   - `sysctl -a | grep a3share`: `recorded` and `imported` > 0, `fault_off` 0, `noaccept` 0;
+   - no `item 7: ... -> the family's VRAM` line in WindowServer, no `surfshare: VM fault`, no
+     `GEM: VM fault at VA ... inside the read-only shared import`, no `[gfxhub] page fault`;
+   - the owner: the game window shows the live frame (no old frames, no flicker, no black), the
+     desktop and other windows are normal; drag and resize the game window.
+   Expected: next_pct well below round 3's 34-36 %, fps above ~400 with the Claude app hidden,
+   WindowServer CPU down.
+4. If `sh_inelig` is large and `sh_imp` 0: copy the `shared by its producer but this texture
+   stays private: <reason> (usage 0x..)` lines (WindowServer's real texture usage).
+5. **Stop at once** and set `debug.rdna3accel_a3share=0` if the desktop or a window shows stale or
+   torn content, WindowServer stalls, or any fault line appears; take a report first (`report.sh`).
+6. Back to 0 at the end (it is 0 again after a reboot anyway).
+
+**N70 (submit ahead past an empty last part)**: in the Leg A run, the game's log has
+`commit: N70 G-SUB an empty LAST part is retired by the ahead pass ...` and
+`commit: N70 G-SUB <n> empty LAST parts retired ...` growing with commits; one more 35 s run with
+`NVMTL_GSUB_LAST_EMPTY=0` in the game's environment (rdna3mtl.conf for that app, or the app's env)
+for the A/B: the plugin's execution thread CPU and pres_us_avg, on vs off.
+
+Write "## Round 4b findings" below and push to Forgejo.
