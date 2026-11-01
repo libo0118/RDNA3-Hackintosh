@@ -603,3 +603,41 @@ Installed from run 117 (all jobs green): tarball, RDNA3MTL, radv-macos-logs; the
    Bluetooth reboots. The boot-arg path itself is not yet seen on a boot (check
    `sysctl debug.rdna3accel_iop_latch` = 1 after the next restart). config-metal.plist /
    config-driver.plist do not carry it.
+13. **The secondary display's top tenth flashes black whenever the main display changes: UCLK
+   p-state switching, not the copy path.** The owner: only the secondary monitor, only its top
+   ~1/10, only while something changes on the main one (most of all while the Claude app
+   streams text), never the other way round. Ruled out: the copy (the secondary got 0 IOP
+   copies in a 25 s window while it flashed; `iop_blank` did not move) and `iop_latch` (it
+   flashes with 0 and with 1). The A/B (boot-arg `rdna3pmctl=1` added for it, backup
+   `config-before-pmctl.plist`): `rdna3_pmctl levels mclk 8` (UCLK pinned at 1218 MHz, +20 W
+   idle) - no flash during a long streamed reply; `levels mclk 15` (back to 96 MHz idle) - the
+   flash at once. With `rdna3mall` 0 (the default) the driver programs no DC p-state decision
+   (no `RDNA3,DCNPower` property), yet the PMFW switches UCLK: the switch is hidden in the
+   main head's blank, not the secondary's, which is in its active top lines then and
+   underflows. Fix (Linux session): port what amdgpu does for two unsynchronised heads -
+   DC's p-state support decision (`dcn32_validate_bandwidth` -> `p_state_change_support`
+   false -> `dcn32_update_clocks` hard-min UCLK at max), i.e. make the `rdna3mall` path (or
+   at least its UCLK hard minimum when the lit heads cannot switch in vblank) the default for
+   two heads; check `RDNA3,DCNPower` then says "UCLK pinned" with two displays.
+   Left: UCLK unpinned (the flash is back until the fix), `rdna3pmctl=1` stays in boot-args.
+14. Arctis Nova 7: no sound after some reboots until the headset or its dongle is power-cycled
+   (unplugging the dongle fixes it; macOS opens the USB stream without errors either way).
+   Not every reboot (one right after a re-enumeration worked). `~/usb_reenum` on the Mac (a
+   small IOKit tool, `sudo ~/usb_reenum 0x1038 0x22a1`, re-enumerates the dongle; source in
+   the Pi session's scratchpad, not in git) did re-enumerate it; not installed as a boot job.
+
+### Mac state after round 3
+
+Run 117 (02b2210): kexts, core, plugin, RADV. Stick config.plist boot-args `-v keepsyms=1
+debug=0x100 msgbuf=1048576 alcid=13 amfi=0x80 rdna3agdc=3 rdna3ioplatch=1 rdna3pmctl=1`,
+ResizeAppleGpuBars 10 (all three configs), Bluetooth kexts + NVRAM values (item 11). No
+rdna3mtl.conf. Backups in EFI/OC: config-before-bt / -btnvram / -ioplatch / -pmctl /
+-r3bar (metal, driver).
+
+### For the Linux session (round 3 open work)
+
+1. Two-head UCLK p-state (item 13): the secondary's top flashes; amdgpu's p-state decision.
+2. `iop_latch` 1 as the default (item 9; the boot-arg carries it on the stick now).
+3. Geekbench: the `%metal2vulkan.ct.slot.48` loop phi in the function-constant path (item 6).
+4. The game's next cap: WindowServer's CPU upload of every app frame (item 3, N71 (b)/(c)).
+5. N70 keep/drop (item 4).
