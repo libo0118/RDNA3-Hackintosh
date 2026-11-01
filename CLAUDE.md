@@ -50,8 +50,10 @@ to it. All other docs are converted to proper HTML. When a `.md` file becomes `.
 update in the same commit every tool, test and link that reads or names it
 (`tools/progress.py`, the triage scripts, `CLAUDE_SUBAGENT.md`, other docs).
 Every HTML doc uses the style and header layout of
-[docs/doc-template.html](docs/doc-template.html) (copy its `<style>` block
-verbatim) and is listed in `docs/index.html`. Brief every agent that writes
+[docs/doc-template.html](docs/doc-template.html) (copy its `<style>` block and
+its `<script id="forgejo-links">` verbatim: Forgejo renders `.html` in an iframe
+whose URL encodes the path's last slash, and the script keeps relative links
+working there) and is listed in `docs/index.html`. Brief every agent that writes
 docs accordingly.
 
 ## How we work: a company

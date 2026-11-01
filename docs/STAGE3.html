@@ -305,5 +305,26 @@ resolution or refresh rate, no gamma;</li>
 </ul>
 <footer class="doc">RDNA3-Hackintosh documentation.</footer>
 </main>
+<script id="forgejo-links">
+/* Forgejo renders an .html file in an iframe at .../render/<ref>/docs%2Fname.html: the encoded slash makes
+   the browser resolve relative links against the ref root (404). Inside that iframe only, resolve them against
+   the file's real directory. Does nothing when the page is opened from a checkout or anywhere else. */
+(function () {
+  var p = location.pathname;
+  if (p.indexOf('/render/') < 0 || p.indexOf('%2F') < 0) return;
+  var dir = decodeURIComponent(p);
+  dir = dir.slice(0, dir.lastIndexOf('/') + 1);
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var h = a.getAttribute('href');
+    if (!h || /^([a-z][a-z0-9+.-]*:|#|\/)/i.test(h)) return;
+    e.preventDefault();
+    var u = new URL(h, location.origin + dir);
+    if (!/\.html?$/i.test(u.pathname)) u.pathname = u.pathname.replace('/render/', '/src/');
+    location.href = u.href;
+  });
+})();
+</script>
 </body>
 </html>
