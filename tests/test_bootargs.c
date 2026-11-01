@@ -121,6 +121,24 @@ int main(void)
         CHECK(rd3_iop_latch_on());
     }
 
+    /* N68 (a), bare-metal round 4: the latched copy's mailbox on by default
+     * (independent of rdna3ioplatch); rdna3iopmbox=0 is the two-buffer scheme */
+    {
+        static const struct test_bootarg mboff[] = { { "rdna3iopmbox", 0 }, { NULL, 0 } };
+        static const struct test_bootarg mbon[] = { { "rdna3iopmbox", 1 }, { NULL, 0 } };
+        static const struct test_bootarg iloffmb[] = { { "rdna3ioplatch", 0 }, { NULL, 0 } };
+        test_bootargs = none;
+        CHECK(rd3_iop_mbox_on());
+        test_bootargs = ladder;
+        CHECK(rd3_iop_mbox_on());
+        test_bootargs = mboff;
+        CHECK(!rd3_iop_mbox_on() && rd3_iop_latch_on());
+        test_bootargs = mbon;
+        CHECK(rd3_iop_mbox_on());
+        test_bootargs = iloffmb;
+        CHECK(rd3_iop_mbox_on() && !rd3_iop_latch_on());
+    }
+
     if (fails) {
         printf("test_bootargs: %d check(s) failed\n", fails);
         return 1;

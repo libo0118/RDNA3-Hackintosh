@@ -31,6 +31,7 @@
 #define RDNA3_IOP_LATCH_H
 
 #include <stdint.h>
+#include "rdna3_flip_queue.h"   /* RD3_FQ_FOREIGN: a pending flip the present queue does not know the target of */
 
 /* ---- K1: a transaction over this held WindowServer's thread for half a 60 Hz refresh ---- */
 #define RD3_IL_SLOW_US 8000u
@@ -87,6 +88,8 @@ struct rd3_il_state {
     int scan_known;
     uint64_t scan;
     uint64_t last;
+    uint64_t e;      /* the mailbox's third buffer (0: none; rd3_il_mb_pick) - rd3_il_pick ignores it */
+    int queued_lb;   /* the queued present is a frame of this path (one of home / D / E, never programmed) */
 };
 /* the panel reads x now or will: queued, or scanned (the HUBP's address when it is known; else the queue's
  * record and the latched path's own) */
@@ -127,6 +130,84 @@ static inline int rd3_il_d_freeable(const struct rd3_il_state *s)
     if (s->inflight || s->queued || s->d == s->shown)
         return 0;
     return s->scan_known && s->scan != s->d;
+}
+
+/* ---- N68 OPEN (a): the mailbox - a third buffer E, the transaction complete once its frame is queued ----
+ *
+ * Bare-metal round 4 (2026-11-01): with rd3_il_pick above a windowed game ran at a flat 119-120 fps (300-400 with
+ * the latch off): each transaction waited for the flip before it to latch (rd3AccelIopLbWait) and completed only at
+ * its own latch, so WindowServer's transaction thread - and through it the game's drawables - ran at the panel's
+ * rate. With two buffers that wait cannot go: one is scanned, the other is pending until the vblank.
+ *
+ * amdgpu does not let a vsync flip get ahead of the one pending either: a nonblocking commit while the CRTC's last
+ * commit has not flipped is refused (drm_atomic_helper_setup_commit -> stall_checks: -EBUSY), a blocking one stalls
+ * only on the commit two back (stall_checks waits for its cleanup_done: one commit flipping, one waiting in its
+ * commit work for that flip - drm_atomic_helper_wait_for_dependencies), and DC reprograms a HUBP's address only
+ * after the flip before it is done (hubp2_is_flip_pending: SURFACE_FLIP_PENDING, or SURFACE_EARLIEST_INUSE not yet
+ * the requested address; hubp2_program_surface_flip_and_addr writes the address registers high then low, the low
+ * write arming the flip). A pending flip is never re-targeted (only an immediate flip, which tears). The newest-wins
+ * part lives above KMS: the compositor keeps the newest client buffer and commits it at the page-flip event, the
+ * buffer it replaced is released unshown. Here the kernel is that compositor for WindowServer's display pipe, and
+ * the head's present queue (rdna3_flip_queue.h, N38) already has the slot: one flip in flight, one queued present
+ * programmed by the flip-done worker at the latch, a newer present replacing the queued one.
+ *
+ * So each head gets a third buffer E and the frame goes into a buffer that is neither scanned, in flight nor
+ * queued (with three there always is one, or the queued one is taken back first: it was never programmed, the HUBP
+ * never saw it), then into the queue; the transaction completes when the copy is done, never at a latch. At most
+ * one flip per vblank latches (the queue's one in flight), the newest frame wins (each frame replaces the queued
+ * one), no buffer is written while the HUBP scans it or has it pending, and nothing waits for a vblank. A flip
+ * of unknown target in flight (RD3_FQ_FOREIGN: a mode set's, the framebuffer's own) is waited for as before. Without
+ * E (its VRAM refused) the head keeps the two-buffer scheme above. */
+#define RD3_IL_NBUF 3u   /* home, D, E */
+enum rd3_il_mb {
+    RD3_IL_MB_NONE = 0,   /* no buffers to choose from (no E, or two of the same address): the caller decides */
+    RD3_IL_MB_COPY = 1,   /* copy into buf[*idx]: not scanned, not in flight, not queued */
+    RD3_IL_MB_TAKE = 2,   /* all three in use, buf[*idx] is the queued frame of this path: take it back out of the
+                           * queue (rd3_fq_take_queued; newest wins), then copy into it */
+    RD3_IL_MB_WAIT = 3    /* a flip of unknown target in flight, or no buffer free with nothing to take: wait for
+                           * the latch, then ask again */
+};
+/* the three buffers in rd3_il_state's order: 0 home, 1 D, 2 E */
+static inline uint64_t rd3_il_mb_buf(const struct rd3_il_state *s, unsigned i)
+{
+    return i == 0 ? s->home : i == 1 ? s->d : i == 2 ? s->e : 0;
+}
+/* rd3_il_in_use for the mailbox: with three buffers 'last' is the one written last (often queued), not the one the
+ * panel shows, so with the HUBP unreadable and no latch of ours on the queue's record (the boot, a mode set,
+ * another path's flip home) home counts as scanned: the panel is on home or on a surface not ours */
+static inline int rd3_il_mb_in_use(const struct rd3_il_state *s, uint64_t x)
+{
+    if (rd3_il_in_use(s, x))
+        return 1;
+    return !s->scan_known && !s->shown && x == s->home;
+}
+static inline enum rd3_il_mb rd3_il_mb_pick(const struct rd3_il_state *s, unsigned *idx)
+{
+    unsigned i, k, start = 0;
+    *idx = 0;
+    if (!s->home || !s->d || !s->e || s->home == s->d || s->home == s->e || s->d == s->e)
+        return RD3_IL_MB_NONE;
+    if (s->inflight == RD3_FQ_FOREIGN)   /* its target may be any of the three */
+        return RD3_IL_MB_WAIT;
+    for (i = 0; i < RD3_IL_NBUF; i++)    /* round robin from the buffer the path wrote last */
+        if (s->last && rd3_il_mb_buf(s, i) == s->last)
+            start = i + 1;
+    for (k = 0; k < RD3_IL_NBUF; k++) {
+        i = (start + k) % RD3_IL_NBUF;
+        if (!rd3_il_mb_in_use(s, rd3_il_mb_buf(s, i))) {
+            *idx = i;
+            return RD3_IL_MB_COPY;
+        }
+    }
+    /* all three in use: one scanned, one in flight, one queued - the queued one was never programmed. Taken back
+     * only when the HUBP is not on it (it cannot be: it was free when it was written) and it is this path's frame */
+    for (i = 0; s->queued && s->queued_lb && i < RD3_IL_NBUF; i++)
+        if (rd3_il_mb_buf(s, i) == s->queued && s->queued != s->inflight &&
+            (s->scan_known ? s->scan != s->queued : s->shown != s->queued)) {
+            *idx = i;
+            return RD3_IL_MB_TAKE;
+        }
+    return RD3_IL_MB_WAIT;
 }
 
 /* why a frame of the latched path went to the direct copy instead (debug.rdna3accel_iop_latch_fb_<name>) */

@@ -203,6 +203,25 @@ r = triage_present_cost.iop_latch_rows(kernel_counters(OK))
 check([x[0] for x in r if x[1] == "IOP timing"][0] == "INFO", "latched, even: timing INFO: %r" % r)
 lat = [x for x in r if x[1] == "IOP latch"]
 check(lat[0][0] == "INFO" and "head 0: 1000 latched (500 into D" in lat[0][2] and "16 MiB held" in lat[0][2], "latched ok: %r" % lat)
+check("mailbox: not in this kernel" in lat[0][2], "pre-mailbox kernel said: %r" % lat)
+# N68 (a): the mailbox - a fast producer through three buffers is INFO; two buffers / refused E / waits are WARNs
+MB = OK + ("debug.rdna3accel_iop_latch_mbox: 1\ndebug.rdna3accel_iop_latch_mbox_h0: 1000\ndebug.rdna3accel_iop_latch_e_h0: 333\n"
+           "debug.rdna3accel_iop_latch_replaced_h0: 700\ndebug.rdna3accel_iop_latch_two_h0: 0\n"
+           "debug.rdna3accel_iop_latch_e_allocs: 1\ndebug.rdna3accel_iop_latch_e_refused: 0\n"
+           "debug.rdna3accel_iop_latch_take_miss: 3\ndebug.rdna3accel_iop_latch_wait_h0: 0\n")
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(MB)) if x[1] == "IOP latch"]
+check(lat[0][0] == "INFO" and "mailbox ON" in lat[0][2] and "333 into E, 1000 through the mailbox, 700 replaced before the "
+      "latch, 0 with two buffers" in lat[0][2] and "1 allocated, 0 refused; 3 take-back" in lat[0][2], "mailbox ok: %r" % lat)
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(
+    MB.replace("latch_mbox_h0: 1000", "latch_mbox_h0: 0").replace("two_h0: 0", "two_h0: 1000").replace(
+        "e_refused: 0", "e_refused: 2"))) if x[1] == "IOP latch"]
+check(lat[0][0] == "WARN" and "only two buffers" in lat[0][2] and "refused the third buffer 2" in lat[0][2], "mailbox, no E: %r" % lat)
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(MB.replace("latch_wait_h0: 0", "latch_wait_h0: 400")))
+       if x[1] == "IOP latch"]
+check(lat[0][0] == "WARN" and "still waited for 400 latch(es)" in lat[0][2], "mailbox waits: %r" % lat)
+lat = [x for x in triage_present_cost.iop_latch_rows(kernel_counters(MB.replace("iop_latch_mbox: 1", "iop_latch_mbox: 0")))
+       if x[1] == "IOP latch"]
+check(lat[0][0] == "INFO" and "mailbox off (rdna3iopmbox=0" in lat[0][2], "mailbox off: %r" % lat)
 r = triage_present_cost.iop_latch_rows(kernel_counters(N68.replace("debug.rdna3accel_iop_latch: 0\n", "")))
 check(any(x[0] == "WARN" and "misses it" in x[2] for x in r), "iop_latch missing: %r" % r)
 

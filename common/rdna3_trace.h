@@ -210,6 +210,7 @@ enum rd3_trace_iop {
 #define RD3_TRI_OVERLAP   0x10u   /* another head's transaction was inside performTransaction at the same time */
 #define RD3_TRI_VBL       0x20u   /* the head's frame / scanline were read at the copy's end (v4, pb) */
 #define RD3_TRI_FALLBACK  0x40u   /* the latched path was on but this frame took the direct copy (ba[0] why) */
+#define RD3_TRI_MBOX      0x80u   /* latched through the mailbox (N68 a: three buffers, complete at the copy) */
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 

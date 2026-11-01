@@ -162,6 +162,7 @@ def iop_format_rows(c):
 SAME_WARN, SKIP_WARN = 0.02, 0.05   # N68: of the placed copies, two in one refresh / refreshes repeated
 VBL_PLACED_MIN = 0.9                # N68 K2: fewer copies placed than this share of the head's copies: data missing
 LATCH_FB_WARN = 0.01                # N68: the latched path's frames that took the direct copy
+LATCH_PACED_WARN = 0.05             # N68 (a): with the mailbox on, latched frames still paced by a latch
 
 
 def iop_latch_rows(c):
@@ -223,17 +224,49 @@ def iop_latch_rows(c):
     on = c.get("iop_latch", 0)
     fbs = ", ".join("%s %d" % (k, c.get("iop_latch_fb_" + k, 0)) for k in
                     ("queue", "vram", "resize", "busy", "refused", "geom") if c.get("iop_latch_fb_" + k, 0))
-    per = "; ".join("head %d: %d latched (%d into D, %d waited avg %.2f ms), %d direct instead" % (
-        h, c.get("iop_latch_n_h%d" % h, 0), c.get("iop_latch_d_h%d" % h, 0), c.get("iop_latch_wait_h%d" % h, 0),
+    mbox = c.get("iop_latch_mbox")   # N68 (a): the mailbox switch; None: a kernel before it
+
+    def mb_head(h):
+        if "iop_latch_mbox_h%d" % h not in c:
+            return ""
+        return ", %d into E, %d through the mailbox, %d replaced before the latch, %d with two buffers" % (
+            c.get("iop_latch_e_h%d" % h, 0), c.get("iop_latch_mbox_h%d" % h, 0), c.get("iop_latch_replaced_h%d" % h, 0),
+            c.get("iop_latch_two_h%d" % h, 0))
+    per = "; ".join("head %d: %d latched (%d into D%s, %d waited avg %.2f ms), %d direct instead" % (
+        h, c.get("iop_latch_n_h%d" % h, 0), c.get("iop_latch_d_h%d" % h, 0), mb_head(h), c.get("iop_latch_wait_h%d" % h, 0),
         c.get("iop_latch_wait_us_h%d" % h, 0) / 1000.0 / max(1, c.get("iop_latch_wait_h%d" % h, 0)),
         c.get("iop_latch_fb_h%d" % h, 0)) for h in heads)
     latched = sum(c.get("iop_latch_n_h%d" % h, 0) for h in range(4))
-    text = ("debug.rdna3accel_iop_latch %s; %s; fallbacks: %s; second buffers: %d MiB held, %d allocated, %d freed, "
-            "%d refused, %d free(s) put off" % (
-                "ON (copied frames flipped at the latch)" if on else "off (copied into the live scanout)", per or "-",
-                fbs or "none", c.get("iop_latch_vram_bytes", 0) >> 20, c.get("iop_latch_vram_allocs", 0),
+    if mbox is None:
+        mtext = "mailbox: not in this kernel (before N68 a: each latched transaction waits for a latch)"
+    else:
+        mtext = ("mailbox %s; third buffers: %d allocated, %d refused; %d take-back(s) found the frame programmed" % (
+            "ON (three buffers, the transaction complete at the copy)" if mbox
+            else "off (rdna3iopmbox=0 / debug.rdna3accel_iop_latch_mbox 0: two buffers, paced by the latch)",
+            c.get("iop_latch_e_allocs", 0), c.get("iop_latch_e_refused", 0), c.get("iop_latch_take_miss", 0)))
+    text = ("debug.rdna3accel_iop_latch %s; %s; %s; fallbacks: %s; extra buffers: %d MiB held, %d allocated, %d freed, "
+            "%d second refused, %d free(s) put off" % (
+                "ON (copied frames flipped at the latch)" if on else "off (copied into the live scanout)", mtext,
+                per or "-", fbs or "none", c.get("iop_latch_vram_bytes", 0) >> 20, c.get("iop_latch_vram_allocs", 0),
                 c.get("iop_latch_vram_frees", 0), c.get("iop_latch_vram_refused", 0), c.get("iop_latch_freewait", 0)))
     why = []
+    if on and mbox:
+        two = sum(c.get("iop_latch_two_h%d" % h, 0) for h in range(4))
+        via = sum(c.get("iop_latch_mbox_h%d" % h, 0) for h in range(4))
+        waits = sum(c.get("iop_latch_wait_h%d" % h, 0) for h in range(4))
+        if two > LATCH_PACED_WARN * max(1, latched):
+            why.append("%d of %d latched frames had only two buffers with the mailbox on (the third refused or retried: "
+                       "`iop latch: ... no VRAM for the third scanout buffer` lines): those were paced by the latch - "
+                       "the round 4 120 fps cap" % (two, latched))
+        if c.get("iop_latch_e_refused", 0):
+            why.append("the visible VRAM heap refused the third buffer %d time(s) (8 MiB a head; debug.rdna3_vram)"
+                       % c["iop_latch_e_refused"])
+        if via and waits > LATCH_PACED_WARN * via:
+            why.append("the mailbox still waited for %d latch(es) over %d frames: flips of unknown target in flight "
+                       "(a mode set, the framebuffer's own; the `iop latch: ... busy` lines)" % (waits, via))
+        if latched and not via and not two:
+            why.append("the mailbox is ON but no latched frame went through it or counted two buffers "
+                       "(iop_latch_mbox_h<N> / iop_latch_two_h<N> missing from the dump?)")
     fb_all = sum(c.get("iop_latch_fb_" + k, 0) for k in ("queue", "vram", "resize", "busy", "refused", "geom"))
     if on and fb_all > LATCH_FB_WARN * max(1, latched + fb_all):
         why.append("%d of %d frames of the latched path took the direct copy (over %.0f %%: the reasons above, the "
