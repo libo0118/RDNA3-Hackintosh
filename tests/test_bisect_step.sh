@@ -26,16 +26,22 @@
 #    boot value, a kernel without iop (or swap_gen) skipping it, the opt-in per-step plugin
 #    snapshot, the boot-args / flag / step lists, the table
 # plus bash -n / dash -n of the scripts the step touches.
+# Runs in parts (tests/split_parts.sh): `tests/test_bisect_step.sh --parts` lists them, `... PART` runs one, no argument runs all; `make test`
+# has a target per part. Each part has its own mktemp dir and the shared set-up (stubs, helpers) below.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PARTS="timer-sh timer-bash tty refuse-absent plugin agdc-steps agdc-flip agdc-gen wiring"
+. "$ROOT/tests/split_parts.sh"
 T=$(mktemp -d)
 trap '[ -n "${KEEP:-}" ] || rm -rf -- "$T"' EXIT
 fail() { echo "test_bisect_step: FAIL $*"; exit 1; }
 
+if in_part wiring; then
 for f in tools/vm/macos/autoreport.sh tools/macos/collect.sh; do bash -n "$ROOT/$f" || fail "bash -n $f"; done
 bash -n "$ROOT/tools/vm/rdna3vm" || fail "bash -n rdna3vm"
 if command -v dash >/dev/null 2>&1; then
     for f in tools/vm/macos/autoreport.sh tools/macos/collect.sh; do dash -n "$ROOT/$f" || fail "dash -n $f"; done
+fi
 fi
 
 # the block, cut out of the script that runs on the card
@@ -130,7 +136,8 @@ sw() {   # sw <file> <step> <knob>: the value read back after the step
 }
 
 # ----------------------------------------------------------------- timer mode
-for SH in sh bash; do
+case $PART in timer-sh) SHELLS=sh ;; timer-bash) SHELLS=bash ;; *) SHELLS= ;; esac
+for SH in $SHELLS; do
     command -v "$SH" >/dev/null 2>&1 || continue
     export SH
     # one second per step under sh (the timetable is checked), none under bash (the steps only)
@@ -210,10 +217,13 @@ for SH in sh bash; do
 done
 unset SH HOLDV
 
+if in_part timer-bash; then
 # the same file through the triage's table
 python3 -I "$ROOT/tools/triage_bisect.py" "$T/timer/bisect.txt" "$T/nothing" > "$T/table.out" || true
 [ "$(grep -cE '^ *[0-9]+ (ref|off|on|extra|final) ' "$T/table.out")" = 13 ] || fail "triage_bisect table: $(cat "$T/table.out")"
+fi
 
+if in_part tty; then
 # ------------------------------------------------------------------- tty mode
 mkoids "$T/sys"
 printf 'y\nn\n\n-\ny\ny\ny\ny\nn\n-\n-\n-\n-\n' > "$T/keys"
@@ -226,7 +236,9 @@ grep -q '^mode: tty$' "$B" || fail "tty: mode is not tty"
 [ "$(val "$B" 3 answer)" = none ] || fail "tty: step 3 answer [$(val "$B" 3 answer)]"
 [ "$(val "$B" 8 answer)" = n ] || fail "tty: step 8 answer [$(val "$B" 8 answer)]"
 echo "test_bisect_step: ok tty answers"
+fi
 
+if in_part refuse-absent; then
 # ----------------------------------------------- a switch that does not take
 mkoids "$T/sys"; touch "$T/sys/refuse.debug.rdna3accel_swap_latch"
 run 1 refuse
@@ -252,7 +264,9 @@ grep -q '^ABORT: no debug.rdna3accel_swap_mode' "$T/nomode/bisect.txt" || fail "
 grep -q '^rc=1$' "$T/nomode.out" || fail "no swap_mode: rc"
 python3 -I "$ROOT/tools/triage_bisect.py" "$T/nomode/bisect.txt" > "$T/nomode.table" 2>&1 || true
 grep -q 'FAIL bisect.txt has no step block' "$T/nomode.table" || fail "triage_bisect on an aborted run: $(cat "$T/nomode.table")"
+fi
 
+if in_part plugin; then
 # ------------------------------------------------------------ plugin variant
 mkoids "$T/sys"
 cat > "$T/conf.orig" <<'EOF'
@@ -301,7 +315,9 @@ cp "$T/allow.orig" "$T/allow.bak"; grep -v '%apps' "$T/allow.orig" > "$T/allow"
 ( set +e; . "$T/block.sh"; BISECT_CONF="$T/conf" BISECT_ALLOW="$T/allow" BISECT_CONFBAK="$T/conf.bak" BISECT_ALLOWBAK="$T/allow.bak"; bisect_plugin_restore )
 cmp -s "$T/conf" "$T/conf.orig" && cmp -s "$T/allow" "$T/allow.orig" || fail "bisect_plugin_restore after a dead run"
 echo "test_bisect_step: ok plugin variant"
+fi
 
+if in_part agdc-steps; then
 # ------------------------------------------------------- bisect-agdc (plan 4)
 # 13 steps, NOT cumulative: every step sets its whole combination from the boot's values (card run 2026-10-17d: the
 # write generations' swap_gen and the flip-buffer present's flipbuf_present are switched too)
@@ -374,7 +390,9 @@ awk '/^== step 0$/ { on = 1 } /^== step 1$/ { on = 0 } on' "$B" | grep -q '^debu
 python3 -I "$ROOT/tools/triage_bisect.py" "$B" "$T/nothing" > "$T/agdc.table" || true
 [ "$(grep -cE '^ *[0-9]+ (ref|var|final) ' "$T/agdc.table")" = 13 ] || fail "agdc: triage_bisect table: $(cat "$T/agdc.table")"
 echo "test_bisect_step: ok bisect-agdc steps"
+fi
 
+if in_part agdc-flip; then
 # iop_flip toggled from its boot value (1 -> 0); the opt-in plugin snapshot after every step
 mkoids "$T/sys"; echo 1 > "$T/sys/debug.rdna3accel_iop_flip"
 run 4 agdcflip BISECT_PLUGIN_SNAP=1
@@ -393,6 +411,9 @@ grep -q '^absent: iop iop_flip$' "$B" || fail "agdc: absent line: $(grep '^absen
 ! grep -q '^failed:' "$B" || fail "agdc: an absent switch is not a failure: $(grep '^failed' "$B")"
 grep -q '^rc=0$' "$T/agdcabsent.out" || fail "agdc: absent iop: rc"
 [ "$(grep -c '^== end step ' "$B")" = 13 ] || fail "agdc: absent iop stopped the run"
+fi
+
+if in_part agdc-gen; then
 # a kext before the write generations (no swap_gen / flipbuf_present): skipped, said in absent:, no failure
 mkoids "$T/sys" flipbuf_present swap_gen
 run 4 agdcnogen
@@ -409,7 +430,9 @@ grep -q '^failed: .*debug.rdna3accel_iop:set-failed' "$B" || fail "agdc: refusal
 grep -q '^rc=1$' "$T/agdcrefuse.out" || fail "agdc: a refused switch should make bisect_run return 1"
 [ "$(grep -c '^== step ' "$B")" = 13 ] || fail "agdc: a refused switch stopped the run"
 echo "test_bisect_step: ok bisect-agdc"
+fi
 
+if in_part wiring; then
 # the top of autoreport.sh puts a dead bisect-plugin run's conf back, and the flags / boot-args reach the group
 grep -q 'rdna3-bisect-conf.bak' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh does not restore a dead run's conf"
 grep -q -- '--bisect-plugin) BISECT=2' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh: --bisect-plugin"
@@ -427,4 +450,5 @@ bagdc=$(awk '$1 == "bisect-agdc" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tool
 sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
 m=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$bagdc")
 [ "$m" -ge 20 ] && [ "$m" -lt 30 ] || fail "rdna3vm: auto_limit of bisect-agdc is [$m] min, expected 20..29 (13 steps of 30 s + the report)"
-echo "test_bisect_step: ok"
+fi
+echo "test_bisect_step: ok ($PART)"

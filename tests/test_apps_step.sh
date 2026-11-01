@@ -11,17 +11,25 @@
 #    desktop coming back), a plugin that is not loaded, notable log lines: each reaches ladder.txt and the triage rows
 #  - tools/triage_apps.py reads what the block wrote (parse_ladder + apps_rows)
 #  - the wiring: --apps, rdna3ladder=5, the step line, both step lists, the auto limit, the triage dispatch, the Makefile
+# Runs in parts (tests/split_parts.sh): `tests/test_apps_step.sh --parts` lists them, `... PART` runs one, no argument runs all; `make test`
+# has a target per part. Each part has its own mktemp dir and the shared set-up (stubs, helpers) below.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PARTS=""
+for _s in survey failures windowserver quit; do for _sh in sh bash dash; do PARTS="$PARTS $_s-$_sh"; done; done
+PARTS="${PARTS# } wiring"
+. "$ROOT/tests/split_parts.sh"
 T=$(mktemp -d)
 trap '[ -n "${KEEP:-}" ] || rm -rf -- "${T:?}"' EXIT
 fail() { echo "test_apps_step: FAIL $*"; exit 1; }
 AR=$ROOT/tools/vm/macos/autoreport.sh
 export ROOT
 
+if in_part wiring; then
 for f in tools/vm/macos/autoreport.sh tools/vm/rdna3vm; do bash -n "$ROOT/$f" || fail "bash -n $f"; done
 if command -v dash >/dev/null 2>&1; then dash -n "$AR" || fail "dash -n autoreport.sh"; fi
 sh -n "$AR" || fail "sh -n autoreport.sh"
+fi
 
 sed -n '/^# BISECT-BEGIN/,/^# BISECT-END/p' "$AR" > "$T/bisect.sh"
 sed -n '/^# LADDER-BEGIN/,/^# LADDER-END/p' "$AR" > "$T/ladder.sh"
@@ -198,9 +206,12 @@ fresh() { cp "$T/conf.orig" "$T/conf"; cp "$T/allow.orig" "$T/allow"; rm -f "$T/
 # stages per app, the looks per stage: the names the owner reads
 STAGES="chess:main terminal:main textedit:main calculator:main notes:main safari:text safari:canvas safari:webgl safari:frames preview:pdf preview:image maps:main settings:appearance settings:wallpaper settings:displays appstore:main photos:main imagecapture:main quicktime:play quicktime:later mission-control:windows mission-control:mc mission-control:closed launchpad:apps launchpad:closed"
 
-for SH in sh bash dash; do
-    command -v "$SH" >/dev/null 2>&1 || continue
+# one part = one section of one shell (survey-sh, quit-bash, ...): the loop runs once, for the part's shell
+case $PART in wiring) SHELLS= ;; *) SHELLS=${PART##*-} ;; esac
+for SH in $SHELLS; do
+    command -v "$SH" >/dev/null 2>&1 || { echo "test_apps_step: skip $SH (not installed)"; continue; }
     export SH
+    if in_part survey-$SH; then
     # ------------------------------------------------------------ the survey, nothing goes wrong
     fresh
     run ok
@@ -298,7 +309,9 @@ assert "glyphs (automatic" in d["app terminal"] and "CLEAN" in d["app terminal"]
 assert "15 ran, 0 crashed" in d["apps survey"], d["apps survey"]
 PYEOF
     echo "test_apps_step: ok survey ($SH)"
+    fi
 
+    if in_part failures-$SH; then
     # ------------------------------------------------------------ what can go wrong, app by app
     fresh
     OWNER_MAPS=1 run bad FAIL_APP=Notes DIE_APP=Preview DIE_CRASH=1 NOPLUGIN_APP=Calculator NOTABLE=1
@@ -331,7 +344,9 @@ assert d["app chess"][0] == "WARN" and "Metal/NVMTL error: 1 line(s)" in d["app 
 assert "1 crashed" in d["apps survey"][1] and "1 did not open" in d["apps survey"][1], d["apps survey"]
 PYEOF
     echo "test_apps_step: ok failures ($SH)"
+    fi
 
+    if in_part windowserver-$SH; then
     # ------------------------------------------------------------ WindowServer restarts under an app
     fresh
     run ws WS_APP=Maps
@@ -369,7 +384,9 @@ assert any(r[1] == "apps" and "NOBODY" in r[2] for r in rows), rows
 assert "7 missing" in d["apps survey"][1], d["apps survey"]
 PYEOF
     echo "test_apps_step: ok WindowServer ($SH)"
+    fi
 
+    if in_part quit-$SH; then
     # ------------------------------------------------------------ an app that ignores SIGINT is TERMed, then KILLed; a sips that makes no JPEG is said
     fresh
     run stubborn IGNORE_INT=1 IGNORE_TERM=1 NO_SIPS=1
@@ -377,8 +394,10 @@ PYEOF
     grep -q '^quit: pid [0-9]* ended by SIGKILL after ' "$L" && ! grep -q 'SURVIVED' "$L" || fail "$SH: SIGKILL: $(grep '^quit' "$L" | sort | uniq -c | head -4)"
     grep -q '^WARN: apps: sips made no JPEG from the PDF' "$L" || fail "$SH: no sips warning"
     echo "test_apps_step: ok quit / assets ($SH)"
+    fi
 done
 
+if in_part wiring; then
 # ---- the wiring
 grep -q -- '--apps) LADDER=5' "$AR" && grep -q 'rdna3ladder=5 "\*) \[ -n "\$LADDER" \] || LADDER=5' "$AR" || fail "autoreport.sh: --apps / rdna3ladder=5"
 grep -q 'ladder_run "\$LADDER"' "$AR" && grep -q 'apps_rung "\$_lr"' "$AR" && grep -q 'apps_assets' "$AR" || fail "autoreport.sh: the survey is not started by ladder_run"
@@ -392,4 +411,5 @@ ma=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$st")
 [ "$ma" -ge 40 ] && [ "$ma" -lt 70 ] || fail "rdna3vm: auto_limit apps $ma (15 apps of 50-130 s need ~25 min and the report: expected 40..69)"
 grep -q 'apps_rows' "$ROOT/tools/triage_reports.py" && grep -q 'lv_ == 5' "$ROOT/tools/triage_reports.py" || fail "triage_reports.py: the app survey is not read"
 grep -qw 'test_apps_step' "$ROOT/Makefile" && grep -qw 'test_triage_apps' "$ROOT/Makefile" || fail "Makefile: the survey's tests are not in make test"
-echo "test_apps_step: ok"
+fi
+echo "test_apps_step: ok ($PART)"
