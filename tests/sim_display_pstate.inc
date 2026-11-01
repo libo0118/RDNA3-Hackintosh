@@ -723,6 +723,17 @@ static void test_uclk_pin(rdna3_dev *dev)
     CHECK(dcn32_uclk_pin_decide(2, 1, 0, &why) == 1 && why == RD_UCLK_WHY_SYNC);
     CHECK(dcn32_uclk_pin_decide(2, 0, 1, &why) == 1 && why == RD_UCLK_WHY_OFF);
     CHECK(dcn32_uclk_pin_decide(2, 0, 0, NULL) == 0);
+    /* the lit count: two heads; head 1 in standby (rdna3dpms) -> one; the
+     * raise before its unblank counts it; a failed unblank does not; the
+     * rdna3mirror=1 pipe adds one */
+    CHECK(dcn32_uclk_pin_lit(2, 0, 0, 0, 0) == 2);
+    CHECK(dcn32_uclk_pin_lit(2, 0x2, 0, 0, 0) == 1);
+    CHECK(dcn32_uclk_pin_lit(2, 0x2, 0x2, 0, 0) == 2);
+    CHECK(dcn32_uclk_pin_lit(2, 0x2, 0x2, 0x2, 0) == 1);
+    CHECK(dcn32_uclk_pin_lit(2, 0, 0, 0x2, 0) == 1);
+    CHECK(dcn32_uclk_pin_lit(1, 0, 0, 0, 1) == 2);
+    CHECK(dcn32_uclk_pin_lit(0, 0, 0, 0, 0) == 0);
+    CHECK(dcn32_uclk_pin_decide(dcn32_uclk_pin_lit(2, 0x2, 0x2, 0, 0), 0, 0, NULL) == 0);
     for (why = 0; why < RD_UCLK_WHY_COUNT; why++)
         CHECK(strcmp(dcn32_uclk_pin_why_name(why), "?") != 0);
     CHECK(strcmp(dcn32_uclk_pin_why_name(RD_UCLK_WHY_COUNT), "?") == 0);
@@ -815,11 +826,18 @@ static void test_uclk_pin(rdna3_dev *dev)
     CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
     CHECK(!u.p_state_change_support && u.unconfirmed == 1 && u.last_unconfirmed && !u.resync && u.fails == 2 &&
           u.consecutive_fails == 0 && u.last_err == RDNA3_ETIME);
+    CHECK(u.status_unreliable);
     msgs = S.dal_msgs;
     CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && sent == 0 && S.dal_msgs == msgs);
+    /* from now on no status wait: one message per transition, taken
+     * unconfirmed (no 2 s under the display lock each time) */
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1 && S.dal_msgs == msgs + 1 &&
+          u.last_unconfirmed && u.last_err == 0 && S.dal_hard_min[RD_PPCLK_UCLK] == 96 && u.unconfirmed == 1);
     S.dal_status_omit = 0;
-    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && sent == 1 && !u.last_unconfirmed &&
-          u.last_err == 0 && S.dal_hard_min[RD_PPCLK_UCLK] == 96);
+    msgs = S.dal_msgs;
+    CHECK(dcn32_uclk_pin_update(dev, &u, 2, 0, 0, &sent) == RDNA3_OK && S.dal_msgs == msgs + 1 && u.last_unconfirmed &&
+          S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
+    CHECK(dcn32_uclk_pin_update(dev, &u, 1, 0, 0, &sent) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_UCLK] == 96);
 
     /* SetHardMinByFreq never answered (the mailbox wait times out): a
      * failure each; RD_UCLK_PIN_MAX_FAILS in a row and the pin gives up */

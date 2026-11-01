@@ -520,6 +520,14 @@ enum {
     RD_UCLK_WHY_COUNT
 };
 
+/* the heads that fetch for the decision: of 'nheads' (at most 32) those not
+ * in 'down_mask' (blanked or link down by a power request), plus the ones
+ * of 'up_mask' even when down (a change about to light them: the raise
+ * before an unblank), minus 'gone_mask' (a change that failed to light
+ * them), plus 'mirror_pipe' (rdna3mirror=1's pipe, not a head) */
+uint32_t dcn32_uclk_pin_lit(uint32_t nheads, uint32_t down_mask, uint32_t up_mask, uint32_t gone_mask,
+                            int mirror_pipe);
+
 /* the p-state support decision for 'lit' heads: 1 = UCLK may switch, 0 =
  * pinned at the top; '*why' an RD_UCLK_WHY_* (may be NULL) */
 int  dcn32_uclk_pin_decide(uint32_t lit, int synchronized, int off, uint32_t *why);
@@ -542,6 +550,8 @@ typedef struct rdna3_uclk_pin {
      * prints "SMU Hard Min not set within 2s" then) */
     uint32_t unconfirmed;
     int      last_unconfirmed;               /* the last message was such a one */
+    int      status_unreliable;              /* after the first unconfirmed one: no status wait any more (each
+                                              * would hold the display lock 2 s) - pins taken unconfirmed */
     uint32_t consecutive_fails;              /* refused / unanswered in a row */
     int      gave_up;                        /* RD_UCLK_PIN_MAX_FAILS in a row: 'ready' 0 until the next init */
 } rdna3_uclk_pin;

@@ -74,6 +74,15 @@ check(r[0] == "FAIL" and "did not answer" in r[2] and "refused SetHardMin" not i
 r = uclk_pin_rows({"DCNPower": FAILED})[0]
 check(r[0] == "FAIL" and "the PMFW refused" in r[2], "a refusal is called one")
 check(level({"DCNPower": RELEASED.replace("fails 0", "fails 1")}) == "WARN", "a release after a failure is a WARN")
+check(level({"DCNPower": PINNED, "UclkPinned": 1}) == "INFO", "RDNA3,UclkPinned 1 (confirmed) is INFO")
+r = uclk_pin_rows({"DCNPower": PINNED, "UclkPinned": 2})[0]
+check(r[0] == "WARN" and "UclkPinned 2" in r[2], "RDNA3,UclkPinned 2 (unconfirmed) is a WARN")
+check(level({"DCNPower": PINNED.replace(")", ", status wait skipped (ReturnHardMinStatus unreliable))")}) == "WARN",
+      "the skipped status wait is a WARN")
+GAVE_UP_FIRST = ("UCLK pin GAVE UP (mode set): 3 refused / unanswered SetHardMinByFreq in a row (last -5): no DAL message "
+                 "until the next bring-up, UCLK as the PMFW has it (last minimum 0 MHz); two heads lit (decision 3, "
+                 "pins 0, releases 0, fails 3, unconfirmed 0)")
+check(level({"DCNPower": GAVE_UP_FIRST}) == "FAIL", "the giving-up call itself reads GAVE UP")
 
 if FAILS:
     print("test_triage_uclk_pin: %d check(s) failed" % len(FAILS))

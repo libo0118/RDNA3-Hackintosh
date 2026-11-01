@@ -833,7 +833,9 @@ then one per decision: `display power: UCLK pinned (two heads,
 unsynchronised, no FPO / SubVP: no shared vblank) at 1218 MHz: hard min
 sent now (<why>, decision n, pins p, releases r, fails f)` or `UCLK
 switching (one head: ...)`; the same text in ioreg `RDNA3,DCNPower`,
-`RDNA3,UclkPinned` 0/1. Switch: boot-arg `rdna3uclkpin=0`, live
+`RDNA3,UclkPinned` 0 (switching) / 1 (pinned) / 2 (pinned, accepted but not
+confirmed by ReturnHardMinStatus; after the first such one the status wait
+is skipped: `status wait skipped` in the text). Switch: boot-arg `rdna3uclkpin=0`, live
 `sudo sysctl -w debug.rdna3_uclk_pin=0|1`. Triage row `UCLK pin (N74)`.
 
 | Symptom | Likely cause | Action |

@@ -598,7 +598,7 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe, bool reinit)
         if (ret == RDNA3_OK) {
             /* N74: UCLK pinned before the second head fetches
              * (dcn32_prepare_bandwidth raises clocks before the plane) */
-            displayUclkPinRaise("mirror on (before the clone)", 1);
+            displayUclkPinRaise("mirror on (before the clone)", 0, 1);
             ret = dcn32_clone_enable(fDispDev, dm, fMirror);
         }
         if (ret == RDNA3_OK) {
@@ -1103,8 +1103,11 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
     IOLockLock(fDispLock);
     int r;
     displayNoteBlank(head, blank);   /* D4: what a restore brings back */
-    if (!blank && !fDispAsleep)
-        displayUclkPinRaise("display wake (before the unblank)", 0);   /* N74: pinned before the head fetches */
+    /* N74: pinned before the head fetches; a head in standby still has
+     * fHeadLinkDown set here (cleared after its link is up), so it is
+     * named as coming up */
+    if (!blank && !fDispAsleep && head < 4)
+        displayUclkPinRaise("display wake (before the unblank)", 1u << head, 0);
     /* rdna3dpms=2: the head we lit ourselves also takes its link down, so
      * the monitor goes to standby (dcn32_clone_link) */
     if (fDispAsleep)
@@ -1124,6 +1127,8 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
         r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
     if (r == RDNA3_OK && !fDispAsleep)
         displayPowerUpdate(blank ? "display sleep" : "display wake");   /* item O: the CAB without requests */
+    else if (r != RDNA3_OK && !blank && !fDispAsleep && head < 4 && !fPowerOn)
+        displayUclkPinUpdate("display wake FAILED", 1u << head);   /* N74: the raise taken back without that head */
     IOLockUnlock(fDispLock);
     LOG("display: head %u %s (%d)", head, blank ? "blanked (display sleep)" : "unblanked", r);
     return r ? kIOReturnError : kIOReturnSuccess;

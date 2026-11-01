@@ -60,6 +60,11 @@ def uclk_pin_rows(props, log=""):
                      "that UCLK really sits where it should" % unconf)
     if "UCLK pin (N74) unavailable" in v or "UCLK pin (N74) not set up" in v:
         return [("WARN", NAME, v + ": UCLK is the PMFW's (two heads may flash); the `uclk pin:` lines" + seen)]
+    pinned = props.get("UclkPinned")
+    if pinned == 2:
+        extra.append("RDNA3,UclkPinned 2: the pin was accepted but NOT confirmed by ReturnHardMinStatus")
+    if "status wait skipped" in v:
+        extra.append("ReturnHardMinStatus proved unreliable: later minimums are sent without the status wait")
     if v.startswith("UCLK pinned"):
         if extra:
             return [("WARN", NAME, v + ": " + "; ".join(extra) + seen)]

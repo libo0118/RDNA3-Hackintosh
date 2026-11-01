@@ -483,9 +483,9 @@ private:
     bool          fUclkPinEver = false;         /* a pin went through since the start */
     bool          fUclkPinSysctl = false;
     bool          fUclkPinNoDevLogged = false;
-    uint32_t      displayUclkPinLit(int *mirrorPipe);
-    void          displayUclkPinUpdate(const char *why);
-    void          displayUclkPinRaise(const char *why, uint32_t extra);
+    uint32_t      displayUclkPinLit(int *mirrorPipe, uint32_t upMask, uint32_t goneMask);
+    void          displayUclkPinUpdate(const char *why, uint32_t goneMask = 0);
+    void          displayUclkPinRaise(const char *why, uint32_t upMask, uint32_t extra);
     void          displayUclkPinApply(const char *why, uint32_t lit, int mirror);
     void          displayUclkPinStop(const char *why);
     void          displayUclkPinFree();

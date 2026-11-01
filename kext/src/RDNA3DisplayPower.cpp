@@ -459,44 +459,45 @@ void RDNA3Accel::displayUclkPinInit(rdna3_dev *d)
 
 /* the heads that fetch: lit (dcn32_read_state's heads, the clone head),
  * not blanked or with their link down by a power request (rdna3dpms), and
- * the mirror's pipe when it is not a head of its own (rdna3mirror=1) */
-uint32_t RDNA3Accel::displayUclkPinLit(int *mirrorPipe)
+ * the mirror's pipe when it is not a head of its own (rdna3mirror=1);
+ * 'upMask' heads about to be lit count even when down, 'goneMask' heads a
+ * change failed to light do not (dcn32_uclk_pin_lit) */
+uint32_t RDNA3Accel::displayUclkPinLit(int *mirrorPipe, uint32_t upMask, uint32_t goneMask)
 {
-    uint32_t n = 0;
-    *mirrorPipe = 0;
-    for (uint32_t i = 0; fDcn && i < fDcn->nheads && i < RD_DCN_MAX_PIPES; i++) {
-        if (i < 4 && (fHeadBlank[i] || fHeadLinkDown[i]))
-            continue;
-        n++;
-    }
-    if (fMirrorOn && fCloneHead < 0) {
-        n++;
-        *mirrorPipe = 1;
-    }
-    return n;
+    uint32_t down = 0, n = fDcn ? fDcn->nheads : 0;
+    if (n > RD_DCN_MAX_PIPES)
+        n = RD_DCN_MAX_PIPES;
+    for (uint32_t i = 0; i < n && i < 4; i++)
+        if (fHeadBlank[i] || fHeadLinkDown[i])
+            down |= 1u << i;
+    *mirrorPipe = fMirrorOn && fCloneHead < 0;
+    return dcn32_uclk_pin_lit(n, down, upMask, goneMask, *mirrorPipe);
 }
 
-/* one decision (fDispLock held): every one is logged and published */
-void RDNA3Accel::displayUclkPinUpdate(const char *why)
+/* one decision (fDispLock held): every one is logged and published.
+ * 'goneMask': heads a change just failed to light (an unblank that did
+ * not go through) */
+void RDNA3Accel::displayUclkPinUpdate(const char *why, uint32_t goneMask)
 {
     if (!fUclkPin || fDispAsleep)
         return;
     int mirror = 0;
-    uint32_t lit = displayUclkPinLit(&mirror);
+    uint32_t lit = displayUclkPinLit(&mirror, 0, goneMask);
     displayUclkPinApply(why, lit, mirror);
 }
 
 /* before a change that lights a head (fDispLock held): the pin first when
  * the heads lit after it cannot share a vblank - dcn32_prepare_bandwidth's
  * update_clocks(safe_to_lower false) before the plane is enabled. Raises
- * only; the update after the change decides the rest. 'extra': the heads
- * the change adds that displayUclkPinLit does not count yet. */
-void RDNA3Accel::displayUclkPinRaise(const char *why, uint32_t extra)
+ * only; the update after the change decides the rest. 'upMask': heads the
+ * change brings up (counted although still blanked / link down); 'extra':
+ * pipes it adds that are not heads yet (the clone) */
+void RDNA3Accel::displayUclkPinRaise(const char *why, uint32_t upMask, uint32_t extra)
 {
     if (!fUclkPin || !fUclkPin->ready || !fUclkPinOn || fDispAsleep)
         return;
     int mirror = 0;
-    uint32_t lit = displayUclkPinLit(&mirror) + extra;
+    uint32_t lit = displayUclkPinLit(&mirror, upMask, 0) + extra;
     if (dcn32_uclk_pin_decide(lit, 0, 0, nullptr) || !fUclkPin->p_state_change_support)
         return;
     displayUclkPinApply(why, lit, mirror);
@@ -517,7 +518,7 @@ void RDNA3Accel::displayUclkPinApply(const char *why, uint32_t lit, int mirror)
     int r = dcn32_uclk_pin_update(fDispDev, fUclkPin, lit, 0, off, &sent);
     const rdna3_uclk_pin *u = fUclkPin;
     const char *reason = dcn32_uclk_pin_why_name(u->why);
-    char heads[24], val[360], tail[96];
+    char heads[24], val[400], tail[144];
     if (lit == 2)
         snprintf(heads, sizeof(heads), "two heads");
     else
@@ -526,9 +527,10 @@ void RDNA3Accel::displayUclkPinApply(const char *why, uint32_t lit, int mirror)
      * the answer did not come (the next bring-up sends its decision) */
     if (sent && pin)
         fUclkPinEver = true;
-    snprintf(tail, sizeof(tail), "decision %u, pins %u, releases %u, fails %u, unconfirmed %u", u->decisions, u->pins,
-             u->releases, u->fails, u->unconfirmed);
-    if (r == RDNA3_ENODEV && u->gave_up)
+    snprintf(tail, sizeof(tail), "decision %u, pins %u, releases %u, fails %u, unconfirmed %u%s", u->decisions,
+             u->pins, u->releases, u->fails, u->unconfirmed,
+             u->status_unreliable ? ", status wait skipped (ReturnHardMinStatus unreliable)" : "");
+    if (u->gave_up)
         snprintf(val, sizeof(val), "UCLK pin GAVE UP (%s): %u refused / unanswered SetHardMinByFreq in a row (last %d): "
                  "no DAL message until the next bring-up, UCLK as the PMFW has it (last minimum %u MHz); %s lit (%s)",
                  why, u->consecutive_fails, u->last_err, u->hard_min_mhz, heads, tail);
@@ -547,8 +549,8 @@ void RDNA3Accel::displayUclkPinApply(const char *why, uint32_t lit, int mirror)
     else if (!u->p_state_change_support)
         snprintf(val, sizeof(val), "UCLK pinned (%s, %s%s) at %u MHz: hard min %s (%s, %s)", heads, reason,
                  mirror ? ", the mirror's pipe counted" : "", u->hard_min_mhz,
-                 !sent ? "kept" : u->last_unconfirmed ? "sent now, accepted, NOT confirmed by ReturnHardMinStatus"
-                                                      : "sent now",
+                 !sent ? (u->last_unconfirmed ? "kept, NOT confirmed" : "kept")
+                 : u->last_unconfirmed ? "sent now, accepted, NOT confirmed by ReturnHardMinStatus" : "sent now",
                  why, tail);
     else
         snprintf(val, sizeof(val), "UCLK switching (%s%s; %s lit): %s (%s, %s)", reason,
@@ -558,7 +560,10 @@ void RDNA3Accel::displayUclkPinApply(const char *why, uint32_t lit, int mirror)
                  : u->hard_min_mhz ? "hard min at the lowest level" : "no hard min sent, the PMFW's own",
                  why, tail);
     setProperty("RDNA3,DCNPower", val);
-    setNumber("RDNA3,UclkPinned", (uint64_t)(r == RDNA3_OK && !u->p_state_change_support ? 1 : 0));
+    /* 0 switching / not pinned, 1 pinned and confirmed (or no status to
+     * ask), 2 pinned, accepted but not confirmed by ReturnHardMinStatus */
+    setNumber("RDNA3,UclkPinned", (uint64_t)(r != RDNA3_OK || u->p_state_change_support ? 0
+                                             : u->last_unconfirmed ? 2 : 1));
     LOG("display power: %s", val);
 }
 

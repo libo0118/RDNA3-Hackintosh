@@ -1849,6 +1849,19 @@ int dcn32_power_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn32_power *pw, rdna3
  * DRIVER-PLAN N74: the UCLK hard minimum of the default path (rdna3mall 0)
  * ====================================================================== */
 
+uint32_t dcn32_uclk_pin_lit(uint32_t nheads, uint32_t down_mask, uint32_t up_mask, uint32_t gone_mask,
+                            int mirror_pipe)
+{
+    uint32_t i, n = 0;
+    for (i = 0; i < nheads && i < 32; i++) {
+        uint32_t b = 1u << i;
+        if ((gone_mask & b) || ((down_mask & b) && !(up_mask & b)))
+            continue;
+        n++;
+    }
+    return n + (mirror_pipe ? 1u : 0u);
+}
+
 int dcn32_uclk_pin_decide(uint32_t lit, int synchronized, int off, uint32_t *why)
 {
     uint32_t w;
@@ -1939,20 +1952,23 @@ int dcn32_uclk_pin_update(rdna3_dev *d, rdna3_uclk_pin *u, uint32_t lit, int syn
      * switching again: the hard minimum at the state's DRAM clock (the lowest
      * level: dcn32_initialize_min_clocks') */
     mhz = support ? u->min_mhz : u->max_mhz;
-    r = dcn32_smu_set_hard_min_ex(d, RD_PPCLK_UCLK, mhz, u->pmfw, NULL, &taken);
+    /* pmfw 0: dcn32_smu_set_hard_min skips the status wait (the PMFW
+     * versions without it) - once the status proved unreliable */
+    r = dcn32_smu_set_hard_min_ex(d, RD_PPCLK_UCLK, mhz, u->status_unreliable ? 0 : u->pmfw, NULL, &taken);
     if (sent)
         *sent = 1;
     u->last_err = r;
-    u->last_unconfirmed = 0;
+    u->last_unconfirmed = u->status_unreliable && r == RDNA3_OK;
     if (r == RDNA3_ETIME && taken) {
         /* accepted, ReturnHardMinStatus did not confirm it within 2 s:
          * dcn32_smu_set_hard_min_by_freq prints and goes on; resending
-         * would only wait the 2 s again */
+         * would only wait the 2 s again, and so would every later
+         * transition: no status wait from now on */
         u->unconfirmed++;
         u->last_unconfirmed = 1;
-        if (u->unconfirmed == 1 || (u->unconfirmed & 63) == 0)
-            RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) accepted but not confirmed by ReturnHardMinStatus in "
-                 "2 s (%u such): taken as set, not sent again", mhz, u->unconfirmed);
+        u->status_unreliable = 1;
+        RERR(d, "uclk pin: SetHardMinByFreq(UCLK, %u MHz) accepted but not confirmed by ReturnHardMinStatus in 2 s: "
+             "taken as set; the status wait is skipped from now on (each would hold the display lock 2 s)", mhz);
         r = RDNA3_OK;
     }
     if (r) {
