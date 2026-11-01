@@ -15,16 +15,24 @@
 #  - an app that does not start is reported; tty mode: the owner's y / n per rung reaches ladder.txt
 #  - tools/triage_glyphs.py reads what the block wrote (parse_ladder + ladder_rows)
 #  - the wiring: flags, boot-args, step lists, auto limit, collect.sh, triage_reports.py; the default `play` step is unchanged
+# Runs in parts (tests/split_parts.sh): `tests/test_ladder_step.sh --parts` lists them, `... PART` runs one, no argument runs all; `make test`
+# has a target per part. Each part has its own mktemp dir and the shared set-up (stubs, helpers) below.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PARTS=""
+for _s in apps ws sig glyphs misc; do for _sh in sh bash dash; do PARTS="$PARTS $_s-$_sh"; done; done
+PARTS="${PARTS# } wiring"
+. "$ROOT/tests/split_parts.sh"
 T=$(mktemp -d)
 trap '[ -n "${KEEP:-}" ] || rm -rf -- "${T:?}"' EXIT
 fail() { echo "test_ladder_step: FAIL $*"; exit 1; }
 AR=$ROOT/tools/vm/macos/autoreport.sh
 export ROOT
 
+if in_part wiring; then
 for f in tools/vm/macos/autoreport.sh tools/macos/collect.sh tools/vm/rdna3vm; do bash -n "$ROOT/$f" || fail "bash -n $f"; done
 if command -v dash >/dev/null 2>&1; then dash -n "$AR" || fail "dash -n autoreport.sh"; fi
+fi
 
 sed -n '/^# BISECT-BEGIN/,/^# BISECT-END/p' "$AR" > "$T/bisect.sh"
 sed -n '/^# LADDER-BEGIN/,/^# LADDER-END/p' "$AR" > "$T/ladder.sh"
@@ -208,9 +216,12 @@ envs_of() {   # the two open calls (Terminal, Chess) of rung N
     grep -E "^open -n -a (Terminal|Chess)( |$)" "$T/stub.log" | sed -n "$(($1 * 2 - 1)),$(($1 * 2))p"
 }
 
-for SH in sh bash dash; do
-    command -v "$SH" >/dev/null 2>&1 || continue
+# one part = one section of one shell (apps-sh, ws-bash, ...): the loop runs once, for the part's shell
+case $PART in wiring) SHELLS= ;; *) SHELLS=${PART##*-} ;; esac
+for SH in $SHELLS; do
+    command -v "$SH" >/dev/null 2>&1 || { echo "test_ladder_step: skip $SH (not installed)"; continue; }
     export SH
+    if in_part apps-$SH; then
     # ------------------------------------------------------------ variant 1: the app rungs
     fresh
     run 1 apps
@@ -282,7 +293,35 @@ assert not bad, bad
 assert any(r[1] == "ladder radv" and "NVMTL_RADV_DEBUG" in r[2] for r in rows), rows
 PYEOF
     echo "test_ladder_step: ok app rungs ($SH)"
+    # an instance that shrugs off SIGINT is TERMed, one that shrugs off both is KILLed, one that survives even that is reported; each line says how it ended
+    fresh
+    run 1 stubborn IGNORE_INT=1
+    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1001 1000$' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores SIGINT is not TERMed"
+    [ "$(grep -c '^quit: pid [0-9]* ended by SIGTERM after ' "$T/stubborn/ladder.txt")" = 16 ] && ! grep -q 'ended by SIGINT' "$T/stubborn/ladder.txt" || fail "$SH: how the instances ended (TERM): $(grep '^quit' "$T/stubborn/ladder.txt" | sort | uniq -c | head -3)"
+    fresh
+    run 1 killed IGNORE_INT=1 IGNORE_TERM=1
+    [ "$(grep -c '^quit: pid [0-9]* ended by SIGKILL after ' "$T/killed/ladder.txt")" = 16 ] && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores INT and TERM is not KILLed: $(grep '^quit' "$T/killed/ladder.txt" | head -3)"
+    fresh
+    run 1 immortal IGNORE_INT=1 IGNORE_TERM=1 IGNORE_KILL=1
+    grep -q '^quit: pid(s) .* SURVIVED SIGKILL$' "$T/immortal/ladder.txt" || fail "$SH: an instance that survives SIGKILL is not reported: $(grep '^quit' "$T/immortal/ladder.txt" | head -3)"
+    python3 -I - "$T/immortal/ladder.txt" "$T/killed/ladder.txt" "$T/apps/ladder.txt" "$T/stubborn/ladder.txt" <<'PYEOF' || fail "$SH: the triage does not read how the instances ended"
+import sys, os
+sys.path.insert(0, os.environ["ROOT"] + "/tools")
+import triage_glyphs as t
+def quit_row(path):
+    v, rungs, probs = t.parse_ladder(open(path).read(), {})
+    return [r for r in t.ladder_rows(rungs, v, probs) if r[1] == "ladder quit"]
+imm, kil, ok, stub = (quit_row(a) for a in sys.argv[1:5])
+assert imm and imm[0][0] == "WARN" and "STILL ALIVE after SIGKILL" in imm[0][2], imm
+assert kil and kil[0][0] == "INFO" and "ended by SIGKILL" in kil[0][2], kil
+assert ok and ok[0][0] == "INFO" and "16 instance(s) ended by SIGINT" in ok[0][2], ok
+assert stub and "ended by SIGTERM" in stub[0][2], stub
+PYEOF
+    # the default ladder takes ONE hires look per rung (unchanged), only the glyph hunt takes the second
+    [ "$(grep -c 'h2$' "$T/apps/ladder.txt")" = 0 ] || fail "$SH: variant 1 took a second hires look"
+    fi
 
+    if in_part ws-$SH; then
     # ------------------------------------------------------------ variant 2: the WindowServer rungs
     fresh
     run 2 ws
@@ -330,46 +369,6 @@ PYEOF
     cmp -s "$T/conf" "$T/conf.orig" && [ ! -e "$T/conf.bak" ] || fail "$SH: after a failed WindowServer restart the conf is not as it was: $(cat "$T/conf")"
     grep -q '^failed: WindowServer did not come back' "$T/wsfail/ladder.txt" && grep -q '^ws_restart: final' "$T/wsfail/ladder.txt" || fail "$SH: a failed restart: no note, or no final restart: $(grep -e failed -e ws_restart "$T/wsfail/ladder.txt")"
     [ "$(grep -c '^bisect_restart_ws FAILED' "$T/stub.log")" = 2 ] || fail "$SH: expected the rung's restart and the final one: $(grep -c FAILED "$T/stub.log")"
-    # instances of the owner's that were there before the run are never quit; one the pid capture missed is (sweep), only without a WindowServer restart
-    fresh
-    OWNER_CHESS=1
-    run 1 base STOP_AT=2 STRAY=1
-    OWNER_CHESS=
-    grep -q '^rc=143$' "$T/base.out" && grep -q '^baseline_pids: Terminal=500 Chess=600 *$' "$T/base/ladder.txt" || fail "$SH: baseline_pids: $(grep baseline "$T/base/ladder.txt"; tail -2 "$T/base.out")"
-    grep -q '^kill -TERM 1999' "$T/stub.log" && grep -q '^sweep: Chess instance(s) 1999' "$T/base/ladder.txt" || fail "$SH: a missed instance was not swept"
-    ! grep -q '^kill .*\b600\b' "$T/stub.log" && ! grep -q 'unix id is 600' "$T/stub.log" && [ "$(cat "$T/sys/pids-Chess")" = 600 ] || fail "$SH: the owner's Chess was touched: $(cat "$T/sys/pids-Chess")"
-    # an instance that shrugs off SIGINT is TERMed, one that shrugs off both is KILLed, one that survives even that is reported; each line says how it ended
-    fresh
-    run 1 stubborn IGNORE_INT=1
-    grep -q '^rc=0$' "$T/stubborn.out" && grep -q '^kill -TERM 1001 1000$' "$T/stub.log" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores SIGINT is not TERMed"
-    [ "$(grep -c '^quit: pid [0-9]* ended by SIGTERM after ' "$T/stubborn/ladder.txt")" = 16 ] && ! grep -q 'ended by SIGINT' "$T/stubborn/ladder.txt" || fail "$SH: how the instances ended (TERM): $(grep '^quit' "$T/stubborn/ladder.txt" | sort | uniq -c | head -3)"
-    fresh
-    run 1 killed IGNORE_INT=1 IGNORE_TERM=1
-    [ "$(grep -c '^quit: pid [0-9]* ended by SIGKILL after ' "$T/killed/ladder.txt")" = 16 ] && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: an app that ignores INT and TERM is not KILLed: $(grep '^quit' "$T/killed/ladder.txt" | head -3)"
-    fresh
-    run 1 immortal IGNORE_INT=1 IGNORE_TERM=1 IGNORE_KILL=1
-    grep -q '^quit: pid(s) .* SURVIVED SIGKILL$' "$T/immortal/ladder.txt" || fail "$SH: an instance that survives SIGKILL is not reported: $(grep '^quit' "$T/immortal/ladder.txt" | head -3)"
-    python3 -I - "$T/immortal/ladder.txt" "$T/killed/ladder.txt" "$T/apps/ladder.txt" "$T/stubborn/ladder.txt" <<'PYEOF' || fail "$SH: the triage does not read how the instances ended"
-import sys, os
-sys.path.insert(0, os.environ["ROOT"] + "/tools")
-import triage_glyphs as t
-def quit_row(path):
-    v, rungs, probs = t.parse_ladder(open(path).read(), {})
-    return [r for r in t.ladder_rows(rungs, v, probs) if r[1] == "ladder quit"]
-imm, kil, ok, stub = (quit_row(a) for a in sys.argv[1:5])
-assert imm and imm[0][0] == "WARN" and "STILL ALIVE after SIGKILL" in imm[0][2], imm
-assert kil and kil[0][0] == "INFO" and "ended by SIGKILL" in kil[0][2], kil
-assert ok and ok[0][0] == "INFO" and "16 instance(s) ended by SIGINT" in ok[0][2], ok
-assert stub and "ended by SIGTERM" in stub[0][2], stub
-PYEOF
-    # a log slice over 600000 bytes keeps its END (the SUMMARY lines) and says it was truncated
-    fresh
-    run 1 big BIGLOG=1
-    grep -q '^rc=0$' "$T/big.out" && grep -q 'slice truncated: kept the last 600000 of [0-9]* bytes' "$T/big/ladder.txt" && grep -q 'census: SUMMARY' "$T/big/baseline.log" && [ "$(wc -c < "$T/big/baseline.log" | tr -d ' ')" -le 600000 ] || fail "$SH: a large log slice: $(grep '^log: baseline' "$T/big/ladder.txt")"
-    # a tick window of an earlier run is said before the first rung
-    fresh
-    run 1 oldtick OLDTICK=1
-    grep -q '^WARN: the text script of an earlier run is still running (pids 4242 )' "$T/oldtick/ladder.txt" || fail "$SH: an earlier run's text script is not warned about: $(grep '^WARN' "$T/oldtick/ladder.txt")"
     # a signal ends the run with a line that names it and the rung, and the triage shows it
     grep -q '^ABORTED by SIGTERM at rung ' "$T/intr1/ladder.txt" && grep -q '^ABORTED by SIGTERM at rung ' "$T/intr/ladder.txt" || fail "$SH: an interrupted run left no ABORTED line: $(tail -3 "$T/intr1/ladder.txt")"
     python3 -I - "$T/intr1/ladder.txt" <<'PYEOF' || fail "$SH: the triage does not show the abort"
@@ -380,6 +379,25 @@ v, rungs, probs = t.parse_ladder(open(sys.argv[1]).read(), {})
 assert any(p.startswith("ABORTED by SIGTERM") for p in probs), probs
 assert any(r[1] == "ladder" and r[2].startswith("ABORTED") for r in t.ladder_rows(rungs, v, probs, {})), probs
 PYEOF
+    fi
+
+    if in_part sig-$SH; then
+    # instances of the owner's that were there before the run are never quit; one the pid capture missed is (sweep), only without a WindowServer restart
+    fresh
+    OWNER_CHESS=1
+    run 1 base STOP_AT=2 STRAY=1
+    OWNER_CHESS=
+    grep -q '^rc=143$' "$T/base.out" && grep -q '^baseline_pids: Terminal=500 Chess=600 *$' "$T/base/ladder.txt" || fail "$SH: baseline_pids: $(grep baseline "$T/base/ladder.txt"; tail -2 "$T/base.out")"
+    grep -q '^kill -TERM 1999' "$T/stub.log" && grep -q '^sweep: Chess instance(s) 1999' "$T/base/ladder.txt" || fail "$SH: a missed instance was not swept"
+    ! grep -q '^kill .*\b600\b' "$T/stub.log" && ! grep -q 'unix id is 600' "$T/stub.log" && [ "$(cat "$T/sys/pids-Chess")" = 600 ] || fail "$SH: the owner's Chess was touched: $(cat "$T/sys/pids-Chess")"
+    # a log slice over 600000 bytes keeps its END (the SUMMARY lines) and says it was truncated
+    fresh
+    run 1 big BIGLOG=1
+    grep -q '^rc=0$' "$T/big.out" && grep -q 'slice truncated: kept the last 600000 of [0-9]* bytes' "$T/big/ladder.txt" && grep -q 'census: SUMMARY' "$T/big/baseline.log" && [ "$(wc -c < "$T/big/baseline.log" | tr -d ' ')" -le 600000 ] || fail "$SH: a large log slice: $(grep '^log: baseline' "$T/big/ladder.txt")"
+    # a tick window of an earlier run is said before the first rung
+    fresh
+    run 1 oldtick OLDTICK=1
+    grep -q '^WARN: the text script of an earlier run is still running (pids 4242 )' "$T/oldtick/ladder.txt" || fail "$SH: an earlier run's text script is not warned about: $(grep '^WARN' "$T/oldtick/ladder.txt")"
     fresh
     run 1 hup1 STOP_AT=2 STOP_SIG=HUP
     grep -q '^rc=129$' "$T/hup1.out" && grep -q '^ABORTED by SIGHUP at rung ' "$T/hup1/ladder.txt" && cmp -s "$T/conf" "$T/conf.orig" && [ -z "$(cat "$T/sys/pids-Chess" 2>/dev/null)" ] || fail "$SH: SIGHUP in an app rung: $(tail -3 "$T/hup1.out")"
@@ -395,7 +413,9 @@ PYEOF
     grep -q '^rc=0$' "$T/mk.out" && grep -q '^mktemp ' "$T/stub.log" && grep -q "^open -n -a Terminal .*/textdir\.[0-9]*/text.command --args -ApplePersistenceIgnoreState YES\$" "$T/stub.log" || fail "$SH: the text script's directory: $(grep -e mktemp -e 'open -n -a Terminal' "$T/stub.log" | head -3)"
     [ -z "$(ls -d "$T"/sys/textdir.* 2>/dev/null)" ] || fail "$SH: the text script's directory was left behind"
     ! grep -q 'Users/Shared' "$T/stub.log" || fail "$SH: a fixed /Users/Shared name is used"
+    fi
 
+    if in_part glyphs-$SH; then
     # ------------------------------------------------------------ variant 3: the glyph hunt, one knob per rung, two hi-res looks per rung
     fresh
     run 3 par
@@ -431,8 +451,6 @@ PYEOF
         [ -f "$T/home/rdna3-scanout/ladder-${r}h/scanout-pipe0.ppm" ] && [ -f "$T/home/rdna3-scanout/ladder-${r}h2/scanout-pipe0.ppm" ] || fail "$SH: variant 3 rung $r: the two hires pictures"
     done
     cmp -s "$T/conf" "$T/conf.orig" && [ ! -e "$T/conf.bak" ] && ! grep -q '^killall' "$T/stub.log" || fail "$SH: variant 3 touched rdna3mtl.conf or WindowServer"
-    # the default ladder takes ONE hires look per rung (unchanged), only the glyph hunt takes the second
-    [ "$(grep -c 'h2$' "$T/apps/ladder.txt")" = 0 ] || fail "$SH: variant 1 took a second hires look"
     # every knob of a rung is one the plugin reads, with the value it reads (the plugin's source is the authority), and is on the list `vk: ab switches` shows
     python3 -I - "$L" "$ROOT" <<'PYEOF' || fail "$SH: variant 3: the knobs against the plugin's source"
 import re, sys, glob
@@ -479,7 +497,9 @@ m2 = [r for r in rows2 if r[1] == "ladder managed-pages"][0]
 assert m2[0] == "WARN" and "did not reach the plugin" in m2[2] and "Terminal pid" in m2[2] and "engagement could not be shown" in m2[2], m2
 PYEOF
     echo "test_ladder_step: ok glyph hunt ($SH)"
+    fi
 
+    if in_part misc-$SH; then
     # ------------------------------------------------------------ nobody logged in; an app that does not start; tty answers
     fresh
     run 1 nobody BISECT_USER=root
@@ -503,8 +523,10 @@ rows = t.ladder_rows(rungs, v, probs)
 assert any(r[1] == "ladder" and "RIGHT with: radv, sync, loadbarrier" in r[2] for r in rows), rows
 PYEOF
     echo "test_ladder_step: ok abort / no app / tty ($SH)"
+    fi
 done
 
+if in_part wiring; then
 # ---- the wiring
 grep -q -- '--ladder) LADDER=1' "$AR" && grep -q -- '--ladder-ws) LADDER=2' "$AR" && grep -q -- '--ladder-glyphs) LADDER=3' "$AR" || fail "autoreport.sh: --ladder / --ladder-ws / --ladder-glyphs"
 grep -q 'rdna3ladder=1 "\*) \[ -n "\$LADDER" \] || LADDER=1' "$AR" && grep -q 'rdna3ladder=2 "\*) \[ -n "\$LADDER" \] || LADDER=2' "$AR" && grep -q 'rdna3ladder=3 "\*) \[ -n "\$LADDER" \] || LADDER=3' "$AR" || fail "autoreport.sh: boot-args rdna3ladder=1 / 2 / 3"
@@ -527,4 +549,5 @@ mp=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$play
 [ "$m1" -ge 20 ] && [ "$m1" -lt 40 ] && [ "$m2" -ge 40 ] && [ "$m2" -lt 60 ] && [ "$mp" = 30 ] || fail "rdna3vm: auto_limit ladder $m1, ladder-ws $m2, play $mp (expected 20..39, 40..59, 30)"
 [ "$m3" -ge 35 ] && [ "$m3" -lt 60 ] || fail "rdna3vm: auto_limit ladder-glyphs $m3 (13 rungs of ~95 s need 21 min of rungs: expected 35..59)"
 grep -q '41-ladder.txt' "$ROOT/tools/triage_reports.py" && grep -q 'parse_ladder' "$ROOT/tools/triage_reports.py" || fail "triage_reports.py: the ladder is not read"
-echo "test_ladder_step: ok"
+fi
+echo "test_ladder_step: ok ($PART)"

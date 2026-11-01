@@ -270,7 +270,10 @@ thread unless `-jN` or `JOBS=N` says otherwise (`make -j1 test` / `JOBS=1` is se
 `build/test-logs/<name>.log` (`tests/run_one.sh`); failed logs and one summary line come last
 (`tests/test_summary.sh`). A test must use its own `mktemp -d` (or a `build/host` name only it uses): tests run
 in any order beside each other; steps that depend on each other are one target (`tests/test_scanout.sh`,
-`tests/test_capture_decode.sh`). It runs, by area:
+`tests/test_capture_decode.sh`). The three slow step tests (`test_bisect_step.sh`, `test_ladder_step.sh`,
+`test_apps_step.sh`) run in parts, one target `t.<script>.<part>` each (`PARTS` in the script, sourced helper
+`tests/split_parts.sh`; `tests/test_x.sh --parts` lists them, `tests/test_x.sh PART` runs one, no argument runs
+all); a new scenario goes into an existing part or a new part name. It runs, by area:
 
 | Area | Tests |
 |---|---|
