@@ -941,6 +941,51 @@ def n41_lines(path, args=""):
     return n41_rows(sv, log, pl, cd)
 
 
+def a3_shared_ids(text):
+    """DRIVER-PLAN N71 (c): the surfaces the kernel gave WindowServer READ-ONLY
+    (accel rd3AccelSurfGem: 'surfshare: WindowServer (pid P) imports surface S
+    plane N READ-ONLY')"""
+    return set(re.findall(r"surfshare: WindowServer \(pid \d+\) imports surface (\d+) plane \d+ READ-ONLY", text))
+
+
+def a3_share_verdict(log, sv, c):
+    """DRIVER-PLAN N71 (c): WindowServer's read-only imports of applications'
+    shared VRAM drawables (debug.rdna3accel_a3share). Prints the verdict;
+    True when it failed (a GPU VM fault inside a read-only shared import)."""
+    on = re.search(r"A3 share: (ON|off)", log)
+    names = ("recorded", "imported", "stale", "norecord", "ws_record_refused", "record_refused", "fault_off")
+    have = any(("a3share_" + n) in c for n in names)
+    if not on and not have:
+        return False   # an accelerator before N71 (c)
+    if on and not have:
+        print("   WARN %-20s the kernel has the read-only share (its 'A3 share:' line) but no "
+              "debug.rdna3accel_a3share_* counters reached the report (the collectors' sysctl grep)" % "A3 share")
+        return False
+    v = dict((n, c.get("a3share_" + n, 0)) for n in names)
+    sw = c.get("a3share")
+    state = ("on" if sw else "off") if sw is not None else (on.group(1).lower() if on else "?")
+    text = ("switch %s; recorded %d, WindowServer read-only imports %d, stale %d, no record %d, record refused %d "
+            "(WindowServer %d), VM faults %d" % (state, v["recorded"], v["imported"], v["stale"], v["norecord"],
+                                                v["record_refused"], v["ws_record_refused"], v["fault_off"]))
+    failed = False
+    if v["fault_off"]:
+        fl = re.findall(r"surfshare: VM fault at VA 0x[0-9a-f]+ in a read-only shared import[^\n]*", log)
+        print("   FAIL %-20s %s: a GPU VM fault inside a read-only shared import turned sharing OFF (R2: a write into "
+              "memory WindowServer must only sample)%s" % ("A3 share", text, (" - " + fl[0][:200]) if fl else ""))
+        failed = True
+    elif v["ws_record_refused"]:
+        print("   WARN %-20s %s: WindowServer tried to record a share (the plugin's producer path ran in "
+              "WindowServer)" % ("A3 share", text))
+    elif state == "on" and v["recorded"] and not v["imported"]:
+        print("   WARN %-20s %s: applications shared, WindowServer never imported read-only (the plugin's "
+              "consumer path, step 4)" % ("A3 share", text))
+    else:
+        print("   INFO %-20s %s" % ("A3 share", text))
+    for l in sorted(set(re.findall(r"surfshare: [^\n]*(?:REFUSED|stale)[^\n]*", log)))[:3]:
+        print("     " + l[:220])
+    return failed
+
+
 def a3_display_verdict(log, sv):
     """card run 58: WindowServer's display framebuffers and A3 - kept out
     (the refusal lines), the refusal that never fired (display-size BOs in
@@ -962,8 +1007,12 @@ def a3_display_verdict(log, sv):
     # the heads' scanout sizes, and the plugin's display-size BOs in WindowServer
     sizes = scanout_sizes(log)
     cd = sv.split("== 24-log-coredisplay.txt", 1)[1] if "== 24-log-coredisplay.txt" in sv else ""
+    # DRIVER-PLAN N71 (c): WindowServer's READ-ONLY imports of applications' shared drawables are not leaks
+    shared = a3_shared_ids(log + "\n" + sv)
     ws_bos = set(sid for sid, w, h in re.findall(r"item 7: surface (\d+) (\d+)x(\d+) pitch \d+ -> the family's VRAM", cd)
-                 if (w, h) in sizes)
+                 if (w, h) in sizes) - shared
+    # the kernel's share lines are rate limited: with read-only imports counted, an unnamed one may be one of them
+    share_maybe = c.get("a3share_imported", 0) > 0
     apart = [l for l in a3lines.values() if "DOES NOT READ" in l]
     # the marker counts only when the rule looked at something (kernels of
     # aa913df printed it with "0 other WindowServer surfaces, 0 unchecked" too)
@@ -983,6 +1032,12 @@ def a3_display_verdict(log, sv):
     elif iop_flip and not refused:
         print("   INFO %-20s debug.rdna3accel_iop_flip=1: display surfaces may be BOs (that path flips the "
               "IOSurface's own VRAM)" % "A3 display")
+    elif kept_mode and not never and ws_bos and not refused and share_maybe:
+        print("   WARN %-20s %d WindowServer surface(s) of a scanout size became BOs (%s) with no refusal, but %d "
+              "read-only shared import(s) were counted (N71 (c)) and their log lines are rate limited: check the "
+              "plugin's a3share lines for these surfaces" % ("A3 display", len(ws_bos),
+                                                            ", ".join(sorted(ws_bos, key=int)[:6]),
+                                                            c.get("a3share_imported", 0)))
     elif kept_mode and (never or (ws_bos and not refused)):
         print("   FAIL %-20s the refusal never fired: %d WindowServer surface(s) of a scanout size became BOs (%s), "
               "0 refused - the check missed them (the 'surfgem: WindowServer surface ... is not a display "
@@ -1009,10 +1064,18 @@ def a3_display_verdict(log, sv):
         # every WindowServer import is refused in this mode: one that went
         # into the family's VRAM all the same, or more non-display imports
         # than refusals, is a leak (an unnamed caller is refused too)
-        ws_in = re.findall(r"item 7: surface (\d+) \d+x\d+ pitch \d+ -> the family's VRAM", cd)
-        other = c.get("a3display_other", 0)
+        ws_in = [sid for sid in re.findall(r"item 7: surface (\d+) \d+x\d+ pitch \d+ -> the family's VRAM", cd)
+                 if sid not in shared]
+        # N71 (c): read-only shared imports are WindowServer imports that are neither refused nor leaks
+        other = max(0, c.get("a3display_other", 0) - c.get("a3share_imported", 0))
         unknown = c.get("a3display_task_mismatch", 0) + c.get("a3display_noname", 0)
-        if ws_in:
+        if ws_in and share_maybe:
+            print("   WARN %-20s %d WindowServer surface(s) in the family's VRAM (%s) not named by a kernel "
+                  "'surfshare: WindowServer ... READ-ONLY' line, with %d read-only shared import(s) counted (the "
+                  "lines are rate limited): check the plugin's a3share lines" % (
+                      "A3 WindowServer", len(set(ws_in)), ", ".join(sorted(set(ws_in), key=int)[:6]),
+                      c.get("a3share_imported", 0)))
+        elif ws_in:
             print("   FAIL %-20s WindowServer input leaked into A3: %d surface(s) in the family's VRAM in WindowServer "
                   "(%s) although its inputs are kept out" % ("A3 WindowServer", len(set(ws_in)),
                                                              ", ".join(sorted(set(ws_in), key=int)[:6])))
@@ -1025,6 +1088,7 @@ def a3_display_verdict(log, sv):
             print("   INFO %-20s WindowServer's inputs kept out of A3: %d refused (card run 58, 2026-10-15d)%s" %
                   ("A3 WindowServer", ws_kept, "; %d import(s) by a process the kernel could not name, refused" %
                    unknown if unknown else ""))
+    failed = a3_share_verdict(log, sv, c) or failed
     for h in sorted(a3lines):
         print("     " + a3lines[h][:300])
     for l in sorted(set(re.findall(r"flicker: head \d+: [^\n]*", log)))[-4:]:
@@ -1035,7 +1099,7 @@ def a3_display_verdict(log, sv):
     return failed
 
 
-A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
+A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3share(?:_\w+)?|a3|flicker|"
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
                        r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|_latchsame|"
@@ -5394,9 +5458,10 @@ def summary(path, serial=None):
                                    "the hashed swaps" % (FLICKER_SHARE * 100)))
         for lv, t in copy_forward_verdict(a3c):
             out.append(("copy forward", "%s %s" % (lv, t)))
-        out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s); swaps %s" % (
+        out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s; read-only shared %s); "
+                    "swaps %s" % (
             a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
-            a3c.get("a3ws_refused", "?"),
+            a3c.get("a3ws_refused", "?"), a3c.get("a3share_imported", "-"),
             ", ".join("h%s %d (A3 %d)" % (k[-1], v, a3c.get("swaps_a3_h" + k[-1], 0))
                       for k, v in sorted(a3c.items()) if re.match(r"swaps_h\d$", k) and v))))
     # DRIVER-PLAN N62: BAR0, the kernel window of it, the visible heap (tools/triage_bar.py); INFO too: the window is the fact

@@ -80,16 +80,59 @@ static inline unsigned rd3_a3_display_heads(const char *proc, uint64_t w, uint64
     return rd3_a3_size_heads(w, h, head_w, head_h, heads);
 }
 
+/* DRIVER-PLAN N71 (c): an application's VRAM drawable that WindowServer
+ * imports READ-ONLY and samples directly. Card run 58 / 58b went wrong
+ * because WindowServer WROTE into shared VRAM (its CPU surface-in uploaded
+ * stale system memory over what other processes drew); reading it never
+ * was the problem. The producer (an application holding an A3 import of
+ * the surface) records a share of one allocation generation after its GPU
+ * finished the frame; WindowServer's import of that same generation is
+ * then a read-only BO (no CPU mapping, no writable GPU page) instead of a
+ * refusal. Generations (RD3VidMemory::fAllocGen) are never 0 and never
+ * reused, so a record outlives nothing: a freed or re-backed allocation has
+ * another generation and the record no longer matches. */
+#define RD3_A3_WS_UID 88u   /* _windowserver */
+
+/* WindowServer for the shared import: its name AND uid 88 (a process that
+ * is merely named WindowServer gets the old refusal) */
+static inline int rd3_a3_ws_identity(int name_is_ws, uint32_t uid)
+{
+    return name_is_ws && uid == RD3_A3_WS_UID;
+}
+
+/* a record matches the live allocation: the same generation, never 0 */
+static inline int rd3_a3_share_matches(uint64_t share_gen, uint64_t cur_gen)
+{
+    return share_gen != 0 && share_gen == cur_gen;
+}
+
+/* may the caller record a share: not WindowServer (is_ws: the name OR uid
+ * 88, the stricter test), and its own A3 import (import_gen, the
+ * generation its BO was made over) is of the allocation the surface has
+ * now (cur_gen) */
+static inline int rd3_a3_share_may_record(int is_ws, uint64_t import_gen, uint64_t cur_gen)
+{
+    return !is_ws && rd3_a3_share_matches(import_gen, cur_gen);
+}
+
 /* What A3 does with an import (card run 58): RD3_A3_ALLOW, or the reason it
  * stays out. is_ws: the importer is WindowServer; display_heads: the heads
  * whose display framebuffer the surface may be (rd3_a3_display_heads);
  * display_on: rdna3a3display=1 (or a display-pipe flip of the surface's own
- * VRAM); ws_on: rdna3a3ws=1. Only WindowServer's imports are ever refused. */
-enum { RD3_A3_ALLOW = 0, RD3_A3_REFUSE_DISPLAY = 1, RD3_A3_REFUSE_WS = 2 };
-static inline int rd3_a3_ws_policy(int is_ws, unsigned display_heads, int display_on, int ws_on)
+ * VRAM); ws_on: rdna3a3ws=1. Only WindowServer's imports are ever refused.
+ * N71 (c): share_on (debug.rdna3accel_a3share, a caller that can make the
+ * BO read-only, WindowServer by name and uid): a share record of the
+ * current allocation (share_gen == cur_gen) gives RD3_A3_ALLOW_SHARED, a
+ * read-only import, before the display / ws refusals; share_on 0 is the
+ * card run 58 table exactly. */
+enum { RD3_A3_ALLOW = 0, RD3_A3_REFUSE_DISPLAY = 1, RD3_A3_REFUSE_WS = 2, RD3_A3_ALLOW_SHARED = 3 };
+static inline int rd3_a3_ws_policy(int is_ws, unsigned display_heads, int display_on, int ws_on, int share_on,
+                                   uint64_t share_gen, uint64_t cur_gen)
 {
     if (!is_ws)
         return RD3_A3_ALLOW;
+    if (share_on && rd3_a3_share_matches(share_gen, cur_gen))
+        return RD3_A3_ALLOW_SHARED;
     if (display_heads)
         return display_on ? RD3_A3_ALLOW : RD3_A3_REFUSE_DISPLAY;
     return ws_on ? RD3_A3_ALLOW : RD3_A3_REFUSE_WS;

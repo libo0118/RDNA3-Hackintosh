@@ -100,5 +100,13 @@ static inline int rd3_a3_on(void)
 {
     return rd3_arg("rdna3a3", 1) != 0;
 }
+/* DRIVER-PLAN N71 (c): WindowServer imports an application's shared VRAM
+ * drawable read-only (rdna3_a3_display.h, rd3_a3_ws_policy share_on).
+ * Off unless rdna3a3share=1 for the first card round; the sysctl
+ * debug.rdna3accel_a3share switches it live */
+static inline int rd3_a3_share_on(void)
+{
+    return rd3_arg("rdna3a3share", 0) != 0;
+}
 
 #endif

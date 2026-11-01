@@ -144,7 +144,7 @@ VidMemory / Surface / DisplayPipe / contexts are generated vendor subclasses
 | `Pq` | present queue (N38): off-thread flips, `rd3AccelInstallSysctlPq` |
 | `Latch`, `Wg`, `Swap`, `Cf`, `Copy` | flip latch, write generation, legacy swap, copy forward, SDMA copy of surfaces |
 | `Iop` | IOPresentment flip path (`rdna3accel_iop*`) |
-| `Surf`, `Res`, `Vm` (`rd3Vm*`) | surfaces / resources, VRAM parking (N41) |
+| `Surf`, `Res`, `Vm` (`rd3Vm*`), `Share` | surfaces / resources, VRAM parking (N41); N71 (c) WindowServer's read-only shared import: `rd3AccelShareRecord` (the producer's record, plane flag `RD3K_SS_PLANE_SHARE`), `rd3AccelShareFault` (`RD3K_SS_PLANE_SHARE_FAULT`), `rd3AccelSurfGem` (RD3KSurfGem v2, `RD3K_SG_SHARED_RO`); decisions in `common/rdna3_a3_display.h` |
 | `Perf` | GPU busy credit: `rd3AccelPerfUpdate` writes PerformanceStatistics (Device Utilization %), `rd3AccelPerfCreditOne` adds GPU time to each process's `IOAccelSubmitter2` `accumulatedGPUTime` (N38, N49) |
 | `Trace`, `Sc` (`ScPost`/`ScApply`), `Scan` | per-frame trace (`debug.rdna3accel_trace*`); the swap-as-copy head state posted by non-swap paths and applied under the family lock; scans of other surfaces |
 | `rd3AccelInstallSysctl*` | registers the `debug.rdna3accel_*` counters (`RD3ACCEL_CNT`) |
@@ -241,7 +241,8 @@ Counters and state:
 - Core: `debug.rdna3_coh*` (N54 switches + counters), `debug.rdna3_vram` (visible-VRAM heap),
   `debug.rdna3_dispirq`, `debug.rdna3_vblirq`, `debug.rdna3_drmtrace[_stream]` (binary), `debug.rdna3_uclk_pin` (N74 switch).
 - Accelerator: `debug.rdna3accel_*` (`swap*`, `swaps_*`, `perf_*`, `vm_*`, `surface_wait*`, `iop_*`,
-  `cf_*`, `present_*`, `flipbuf*`, `trace[_sec|_stream]`); AGDC: `debug.rdna3agdc*`.
+  `cf_*`, `present_*`, `flipbuf*`, `trace[_sec|_stream]`, `a3*`; N71 (c): switch `a3share` + `a3share_*`, triage
+  `A3 share`); AGDC: `debug.rdna3agdc*`.
 - IORegistry: `RDNA3,*` properties on the core, `RDNA3,FBStats` on the framebuffer.
 - Plugin SUMMARY lines (`nvlog_uncapped`, key=value, newest line per process counts): `managed: SUMMARY`,
   `census: SUMMARY`, `vk: ab: SUMMARY`, `vk: fbfetch: SUMMARY`, `vk: surfin: SUMMARY[2]`, `msdl: SUMMARY`,

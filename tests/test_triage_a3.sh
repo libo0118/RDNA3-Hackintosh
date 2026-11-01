@@ -336,6 +336,23 @@ grep -q 'WARN swap/flicker  *head(s) 1: two back buffers took turns' <<<"$o" || 
 grep -q 'copy forward  *WARN .*2 pending-rect list(s) dropped' <<<"$o" || fail "r48 evicted: $o"
 o=$(run r47)
 grep -q 'the report.s counters decide head(s) 1' <<<"$o" || fail "r47 header: $o"
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45 r46 r47 r48; do all="$all$(run $r)"; done
+# DRIVER-PLAN N71 (c): WindowServer's READ-ONLY imports of applications' shared drawables are not leaks;
+# a VM fault inside one is a FAIL; the share's counters missing from the report a WARN
+for r in r49 r50 r51; do mkdir -p "$T/$r"; done
+SHBOOT="RDNA3Accelerator: A3 share: ON: WindowServer may import an application's VRAM drawable READ-ONLY once the application recorded a share of that allocation (DRIVER-PLAN N71 (c); boot-arg rdna3a3share, sysctl debug.rdna3accel_a3share, live)"
+SHIMP="RDNA3Accelerator: surfshare: WindowServer (pid 150) imports surface 2 plane 0 READ-ONLY: allocation #77 (8294400 B) shared by pid 812 (a3share_imported 1)"
+SHFAULT="RDNA3Accelerator: surfshare: VM fault at VA 0x7003000 in a read-only shared import of surface 2 plane 0 (importer pid 150, producer pid 812): sharing turned OFF (a3share_fault_off 1; sysctl debug.rdna3accel_a3share=1 turns it on again)"
+SHCNT="debug.rdna3accel_a3share: 1\\ndebug.rdna3accel_a3share_recorded: 3\\ndebug.rdna3accel_a3share_imported: 6\\ndebug.rdna3accel_a3share_stale: 0\\ndebug.rdna3accel_a3share_norecord: 4\\ndebug.rdna3accel_a3share_ws_record_refused: 0\\ndebug.rdna3accel_a3share_record_refused: 0"
+mk58 r49/rdna3-report-share "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN\\n$SHIMP" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\nNVMTL: item 7: surface 2 1920x24 pitch 7680 -> the family's VRAM (vram 1, private 0)\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3display_other: 10\\ndebug.rdna3accel_a3ws_refused: 4\\n$SHCNT\\ndebug.rdna3accel_a3share_fault_off: 0" none
+mk58 r50/rdna3-report-sharefault "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN\\n$SHIMP\\n$SHFAULT" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n== sysctl (card run 58)\\n$SHCNT\\ndebug.rdna3accel_a3share_fault_off: 1" none
+mk58 r51/rdna3-report-sharenoctr "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SHBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3ws_refused: 4" none
+o=$(run r49)
+! grep -q 'FAIL A3 WindowServer' <<<"$o" || fail "r49: a read-only shared import is no leak: $o"
+grep -q 'INFO A3 share  *switch on; recorded 3, WindowServer read-only imports 6, stale 0, no record 4' <<<"$o" || fail "r49 share: $o"
+o=$(run r50)
+grep -q 'FAIL A3 share  *.*VM faults 1: a GPU VM fault inside a read-only shared import turned sharing OFF' <<<"$o" || fail "r50: $o"
+o=$(run r51)
+grep -q 'WARN A3 share  *the kernel has the read-only share' <<<"$o" || fail "r51: $o"
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45 r46 r47 r48 r49 r50 r51; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"
