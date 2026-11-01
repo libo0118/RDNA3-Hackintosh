@@ -598,3 +598,8 @@ Installed from run 117 (all jobs green): tarball, RDNA3MTL, radv-macos-logs; the
    address, firmware v55586 c57286 (= 0xdfc6d922); the owner paired a phone, a speaker
    (A2DP audio fine) and a Magic Mouse. Backups `config-before-bt.plist` (before any BT change)
    and `config-before-btnvram.plist`. The sources stay out of this repository (GPL-2.0, not ours).
+12. **`rdna3ioplatch=1` is now in the stick's config.plist boot-args** (the owner: keep what fixed
+   the tear; backup `config-before-ioplatch.plist`), and the sysctl was set live again after the
+   Bluetooth reboots. The boot-arg path itself is not yet seen on a boot (check
+   `sysctl debug.rdna3accel_iop_latch` = 1 after the next restart). config-metal.plist /
+   config-driver.plist do not carry it.
