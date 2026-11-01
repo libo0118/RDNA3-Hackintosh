@@ -151,6 +151,15 @@ fn emit_vulkan_spirv_inner(
         }
         source = spliced;
     }
+    if first_failure
+        .as_deref()
+        .is_some_and(|error| error.contains("(N76)"))
+    {
+        return Err(crate::emit_sidecar::EmissionFailure::from_error(format!(
+            "native emitter: more than {MAX_CURSOR_CALL_SPLICES} levels of calls hand a local \
+             struct of pointers on to a function that loads them; not supported (N76)"
+        )));
+    }
     Err(crate::emit_sidecar::EmissionFailure::from_error(format!(
         "native emitter: more than {MAX_CURSOR_CALL_SPLICES} helper calls carry a \
          descriptor-relative byte cursor that cannot cross the call"

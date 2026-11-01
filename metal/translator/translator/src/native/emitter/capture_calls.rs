@@ -13,29 +13,114 @@
 //! once as cursor call sites, so the emission retries once with them spliced
 //! into their callers (emit_tiers.rs, inline.rs), where the loads are
 //! forwarded like any other. The callee is followed into the module
-//! functions it hands the struct on to. A call the splice cannot make right
-//! is refused by name instead of reading the placeholder: a callee that
-//! stores a pointer into the struct (the caller's forwarding binds loads to
-//! one store, flow-insensitively), a struct merged by a select or phi
-//! before the call, a callee that passes it to a function outside the
-//! module, merges, returns or stores it, or recurses with it.
+//! functions it hands the struct (or a field address of it) on to, and
+//! every access is kept as a field path of the caller's variable. Only a
+//! struct some callee loads a pointer out of needs the splice; for it, a
+//! use the splice cannot make right is refused by name instead of reading
+//! the placeholder: a callee that stores a pointer into the struct (the
+//! caller's forwarding binds loads to one store, flow-insensitively), an
+//! integer, vector or aggregate store over one of its pointer fields, a
+//! pointer loaded through a struct nested inside it (two GEP levels), a
+//! struct chosen by a select or phi of different variables, a callee that
+//! passes it outside the module, merges, returns or stores it, or recurses
+//! with it.
 
 use super::*;
 use crate::native::ir::LlFunction;
 use crate::native::tir::{TirInst, TirOpcode, TirOperand, TirTerminator};
 
-/// What a function does with a pointer parameter into a struct of
-/// pointers, worst first in `Ord` (a call's uses combine by `max`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum StructUse {
-    /// Reads or writes integers, floats and vectors through it only.
-    Scalars,
-    /// Loads an address-space-0 pointer out of it: splice the call.
-    LoadsPointer,
-    /// Stores a pointer into it.
-    StoresPointer,
-    /// Hands it somewhere the analysis does not follow.
-    Untracked,
+/// A pointer into one of the caller's variables: the variable, the GEP
+/// type the field path is in (None for the variable itself), the constant
+/// field path (None when dynamic or below a nested struct) and how many GEP
+/// levels it is below the variable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Address {
+    root: String,
+    gep_type: Option<String>,
+    key: Option<Vec<u64>>,
+    depth: usize,
+}
+
+impl Address {
+    fn root(root: &str) -> Self {
+        Address {
+            root: root.to_string(),
+            gep_type: None,
+            key: Some(Vec::new()),
+            depth: 0,
+        }
+    }
+
+    fn field(&self, gep: &crate::native::ir::LlGep) -> Self {
+        let indices = gep
+            .indices
+            .iter()
+            .map(|index| match index.value {
+                LlValue::Int(v) | LlValue::Hex(v) => Some(v),
+                LlValue::SignedInt(v) if v >= 0 => Some(v as u64),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let local = indices.map(|mut key| {
+            if key.len() > 1 && key.first() == Some(&0) {
+                key.remove(0);
+            }
+            key
+        });
+        if self.depth == 0 {
+            Address {
+                root: self.root.clone(),
+                gep_type: Some(format!("{:?}", gep.source_ty)),
+                key: local,
+                depth: 1,
+            }
+        } else {
+            Address {
+                root: self.root.clone(),
+                gep_type: self.gep_type.clone(),
+                key: None,
+                depth: self.depth + 1,
+            }
+        }
+    }
+
+    /// Whether two accesses can touch the same bytes (conservative).
+    fn overlaps(&self, other: &Address) -> bool {
+        if self.root != other.root {
+            return false;
+        }
+        match (&self.key, &other.key) {
+            (Some(a), Some(b)) if a.is_empty() || b.is_empty() => true,
+            (Some(a), Some(b)) => {
+                self.gep_type != other.gep_type || a.starts_with(b) || b.starts_with(a)
+            }
+            _ => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Access {
+    PointerLoad,
+    PointerStore,
+    OtherStore,
+}
+
+/// Everything a function (and what it calls) does with the caller's
+/// variables, as field paths of them.
+#[derive(Default, Debug)]
+struct Uses {
+    accesses: Vec<(Address, Access)>,
+    /// Why some use cannot be followed (the first reason).
+    untracked: Option<String>,
+}
+
+impl Uses {
+    fn untrack(&mut self, why: impl Into<String>) {
+        if self.untracked.is_none() {
+            self.untracked = Some(why.into());
+        }
+    }
 }
 
 fn operand_name(operand: Option<&TirOperand>) -> Option<&str> {
@@ -56,30 +141,15 @@ fn is_lifetime_marker(inst: &TirInst) -> bool {
         .is_some_and(|line| line.contains("@llvm.lifetime."))
 }
 
-/// The pointers derived from `seeds` in `function` (GEPs, identity copies,
-/// inlined-parameter copies, freezes), seeds included, each with its seed;
-/// and the selects and phis that merge one of them.
+/// The addresses derived in `function` from `seeds` (GEPs, identity
+/// copies, inlined-parameter copies, freezes, and selects/phis of one
+/// address), and the selects/phis that merge different ones (by variable).
 fn derived_addresses(
     function: &LlFunction,
-    seeds: &[String],
-) -> (HashMap<String, String>, HashMap<String, String>) {
-    let mut addresses = seeds
-        .iter()
-        .map(|seed| (seed.clone(), seed.clone()))
-        .collect::<HashMap<_, _>>();
-    let mut merged = HashMap::new();
-    let base_of = |inst: &TirInst| -> Option<String> {
-        match inst.opcode {
-            TirOpcode::GetElementPtr => match &inst.gep().as_ref()?.base.value {
-                LlValue::Local(base) => Some(base.clone()),
-                _ => None,
-            },
-            TirOpcode::Bitcast | TirOpcode::Freeze | TirOpcode::Metal2VulkanInlineParameter => {
-                operand_name(inst.operands.first()).map(str::to_string)
-            }
-            _ => None,
-        }
-    };
+    seeds: Vec<(String, Address)>,
+) -> (HashMap<String, Address>, HashMap<String, String>) {
+    let mut addresses = seeds.into_iter().collect::<HashMap<_, _>>();
+    let mut merged: HashMap<String, String> = HashMap::new();
     let mut changed = true;
     while changed {
         changed = false;
@@ -93,27 +163,89 @@ fn derived_addresses(
             {
                 continue;
             }
-            if matches!(inst.opcode, TirOpcode::Select | TirOpcode::Phi) {
-                let mut seed = None;
-                inst.visit_uses(|name| {
-                    if seed.is_none() {
-                        seed = addresses.get(name).or_else(|| merged.get(name)).cloned();
-                    }
-                });
-                if let Some(seed) = seed {
-                    merged.insert(result.clone(), seed);
-                    changed = true;
+            let derived = match inst.opcode {
+                TirOpcode::GetElementPtr => inst.gep().as_ref().and_then(|gep| match &gep.base.value {
+                    LlValue::Local(base) => addresses.get(base).map(|a| a.field(gep)),
+                    _ => None,
+                }),
+                TirOpcode::Bitcast
+                | TirOpcode::Freeze
+                | TirOpcode::Metal2VulkanInlineParameter => {
+                    operand_name(inst.operands.first()).and_then(|n| addresses.get(n).cloned())
                 }
+                TirOpcode::Select | TirOpcode::Phi => {
+                    let mut operands = Vec::new();
+                    let mut other = false;
+                    let values = inst
+                        .phi_values()
+                        .map(|values| values.cloned().collect::<Vec<_>>())
+                        .or_else(|| {
+                            inst.select_arms()
+                                .as_deref()
+                                .map(|(t, f)| vec![t.value.clone(), f.value.clone()])
+                        })
+                        .unwrap_or_default();
+                    for value in &values {
+                        match value {
+                            LlValue::Local(name) if name == result => {}
+                            LlValue::Local(name) => match addresses.get(name) {
+                                Some(address) => operands.push(address.clone()),
+                                None => other |= true,
+                            },
+                            _ => other = true,
+                        }
+                    }
+                    let merges = values.iter().any(|value| {
+                        matches!(value, LlValue::Local(name) if merged.contains_key(name))
+                    });
+                    match operands.first() {
+                        Some(first)
+                            if !other && !merges && operands.iter().all(|a| a == first) =>
+                        {
+                            Some(first.clone())
+                        }
+                        Some(first) => {
+                            merged.insert(result.clone(), first.root.clone());
+                            changed = true;
+                            None
+                        }
+                        None => {
+                            if merges {
+                                let root = values.iter().find_map(|value| match value {
+                                    LlValue::Local(name) => merged.get(name).cloned(),
+                                    _ => None,
+                                });
+                                if let Some(root) = root {
+                                    merged.insert(result.clone(), root);
+                                    changed = true;
+                                }
+                            }
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            if let Some(address) = derived {
+                addresses.insert(result.clone(), address);
+                changed = true;
                 continue;
             }
-            let Some(base) = base_of(inst) else {
-                continue;
+            // A field of a merged struct is merged too.
+            let merged_base = match inst.opcode {
+                TirOpcode::GetElementPtr => inst.gep().as_ref().and_then(|gep| match &gep.base.value {
+                    LlValue::Local(base) => merged.get(base).cloned(),
+                    _ => None,
+                }),
+                TirOpcode::Bitcast
+                | TirOpcode::Freeze
+                | TirOpcode::Metal2VulkanInlineParameter => {
+                    operand_name(inst.operands.first()).and_then(|n| merged.get(n).cloned())
+                }
+                _ => None,
             };
-            if let Some(seed) = addresses.get(&base).cloned() {
-                addresses.insert(result.clone(), seed);
-                changed = true;
-            } else if let Some(seed) = merged.get(&base).cloned() {
-                merged.insert(result.clone(), seed);
+            if let Some(root) = merged_base {
+                merged.insert(result.clone(), root);
                 changed = true;
             }
         }
@@ -121,131 +253,123 @@ fn derived_addresses(
     (addresses, merged)
 }
 
-/// What `callee` does with its parameter `index` (see `StructUse`),
-/// following the module functions it passes the parameter on to.
-fn struct_use(
+/// Collects into `uses` what `function` does with `addresses` (its seeds
+/// are pointers into the caller's variables), following module callees.
+fn collect_uses(
     functions: &[LlFunction],
-    callee: &LlFunction,
-    index: usize,
-    visiting: &mut HashSet<(String, usize)>,
-) -> StructUse {
-    let Some((param, LlType::Ptr(_))) = callee.params.get(index) else {
-        return StructUse::Scalars;
-    };
-    if !visiting.insert((callee.name.clone(), index)) {
-        // Recursion with the struct: the splice cannot end.
-        return StructUse::Untracked;
+    function: &LlFunction,
+    seeds: Vec<(String, Address)>,
+    visiting: &mut Vec<String>,
+    uses: &mut Uses,
+) {
+    if visiting.contains(&function.name) {
+        uses.untrack(format!("@{} recurses with it", function.name));
+        return;
     }
-    let (addresses, merged) = derived_addresses(callee, std::slice::from_ref(param));
-    let is_address = |name: &str| addresses.contains_key(name);
-    let mut worst = if merged.is_empty() {
-        StructUse::Scalars
-    } else {
-        StructUse::Untracked
-    };
-    for inst in callee.carrier_insts() {
-        let defines_address = inst
+    visiting.push(function.name.clone());
+    let (addresses, merged) = derived_addresses(function, seeds);
+    for name in merged.keys() {
+        uses.untrack(format!("@{} merges it with another struct ({name})", function.name));
+    }
+    for inst in function.carrier_insts() {
+        let defines = inst
             .result
-            .as_deref()
-            .is_some_and(|result| is_address(result) && result != param);
-        if defines_address || is_lifetime_marker(inst) {
+            .as_ref()
+            .is_some_and(|r| addresses.contains_key(r) || merged.contains_key(r));
+        if defines || is_lifetime_marker(inst) {
             continue;
         }
-        let found = match inst.opcode {
-            TirOpcode::Load if operand_name(inst.operands.first()).is_some_and(is_address) => {
-                if inst.result_ty == Some(LlType::Ptr(0)) {
-                    StructUse::LoadsPointer
-                } else {
-                    StructUse::Scalars
+        match inst.opcode {
+            TirOpcode::Load => {
+                if let Some(address) = operand_name(inst.operands.first()).and_then(|n| addresses.get(n)) {
+                    if inst.result_ty == Some(LlType::Ptr(0)) {
+                        uses.accesses.push((address.clone(), Access::PointerLoad));
+                    }
+                    continue;
                 }
             }
-            TirOpcode::Store => match inst.store().as_deref() {
-                Some((value, ptr)) => {
-                    let into = matches!(&ptr.value, LlValue::Local(name) if is_address(name));
-                    let stores_address =
-                        matches!(&value.value, LlValue::Local(name) if is_address(name));
-                    if stores_address {
-                        StructUse::Untracked
-                    } else if into && matches!(value.ty, LlType::Ptr(_)) {
-                        StructUse::StoresPointer
-                    } else {
-                        StructUse::Scalars
+            TirOpcode::Store => {
+                if let Some((value, ptr)) = inst.store().as_deref() {
+                    if matches!(&value.value, LlValue::Local(n) if addresses.contains_key(n) || merged.contains_key(n)) {
+                        uses.untrack(format!("@{} stores its address", function.name));
+                    }
+                    let into = match &ptr.value {
+                        LlValue::Local(n) => addresses.get(n),
+                        _ => None,
+                    };
+                    if let Some(address) = into {
+                        let access = if matches!(value.ty, LlType::Ptr(_)) {
+                            Access::PointerStore
+                        } else {
+                            Access::OtherStore
+                        };
+                        uses.accesses.push((address.clone(), access));
+                        continue;
                     }
                 }
-                None => StructUse::Untracked,
-            },
-            TirOpcode::Call => match inst.call().as_ref() {
-                Some(call) => {
-                    let next = functions.iter().find(|f| f.name == call.callee);
-                    let mut used = StructUse::Scalars;
-                    for (position, argument) in call.args.iter().enumerate() {
-                        let LlValue::Local(name) = &argument.value else {
-                            continue;
-                        };
-                        if !is_address(name) {
-                            continue;
+            }
+            TirOpcode::Call => {
+                if let Some(call) = inst.call() {
+                    let mut handed = Vec::new();
+                    for (index, argument) in call.args.iter().enumerate() {
+                        if let LlValue::Local(name) = &argument.value {
+                            if let Some(address) = addresses.get(name) {
+                                handed.push((index, name.clone(), address.clone()));
+                            } else if merged.contains_key(name) {
+                                uses.untrack(format!("@{} passes a merged struct on", function.name));
+                            }
                         }
-                        used = used.max(match next {
-                            Some(next) => struct_use(functions, next, position, visiting),
-                            None => StructUse::Untracked,
-                        });
                     }
                     let mut nested = false;
                     inst.visit_uses(|name| {
-                        nested |= is_address(name)
-                            && !call
-                                .args
-                                .iter()
-                                .any(|a| matches!(&a.value, LlValue::Local(n) if n == name));
+                        nested |= (addresses.contains_key(name) || merged.contains_key(name))
+                            && !call.args.iter().any(|a| matches!(&a.value, LlValue::Local(n) if n == name));
                     });
                     if nested {
-                        StructUse::Untracked
-                    } else {
-                        used
+                        uses.untrack(format!("@{} uses it inside a call operand", function.name));
                     }
-                }
-                None => {
-                    let mut uses = false;
-                    inst.visit_uses(|name| uses |= is_address(name));
-                    if uses {
-                        StructUse::Untracked
-                    } else {
-                        StructUse::Scalars
+                    if handed.is_empty() {
+                        continue;
                     }
-                }
-            },
-            _ => {
-                let mut uses = false;
-                inst.visit_uses(|name| uses |= is_address(name));
-                if uses {
-                    StructUse::Untracked
-                } else {
-                    StructUse::Scalars
+                    let Some(next) = functions.iter().find(|f| f.name == call.callee) else {
+                        uses.untrack(format!("@{} passes it to @{}, outside the module", function.name, call.callee));
+                        continue;
+                    };
+                    let seeds = handed
+                        .into_iter()
+                        .filter_map(|(index, _, address)| {
+                            next.params.get(index).map(|(param, _)| (param.clone(), address))
+                        })
+                        .collect::<Vec<_>>();
+                    collect_uses(functions, next, seeds, visiting, uses);
+                    continue;
                 }
             }
-        };
-        worst = worst.max(found);
+            _ => {}
+        }
+        let mut touches = false;
+        inst.visit_uses(|name| touches |= addresses.contains_key(name) || merged.contains_key(name));
+        if touches {
+            uses.untrack(format!("@{} uses it in a {:?}", function.name, inst.opcode));
+        }
     }
-    let returned = callee.blocks.iter().any(|block| {
+    let returned = function.blocks.iter().any(|block| {
         block.typed.as_ref().is_some_and(|typed| {
-            matches!(&typed.terminator, TirTerminator::Ret(Some(name)) if is_address(name))
+            matches!(&typed.terminator, TirTerminator::Ret(Some(name)) if addresses.contains_key(name) || merged.contains_key(name))
         })
     });
     if returned {
-        worst = StructUse::Untracked;
+        uses.untrack(format!("@{} returns its address", function.name));
     }
-    visiting.remove(&(callee.name.clone(), index));
-    worst
+    visiting.pop();
 }
 
-/// Every `(callee, argument)` where a function passes a pointer into one of
-/// its variables that holds a stored address-space-0 pointer (a Function or
-/// Private pointer, which only the caller's forwarding knows) to a function
-/// of the module that loads such a pointer through that parameter, directly
-/// or in a function it hands it on to. Err names a call the splice cannot
-/// make right (see the module comment). Device pointers in a struct have
-/// their own paths (raw buffers, BDA); calls outside the module are left to
-/// them too.
+/// Every `(callee, argument)` to splice (see the module comment): a call
+/// that hands a function a pointer into one of the caller's variables when
+/// that function, or one it hands it on to, loads an address-space-0
+/// pointer out of the variable. Err names a use of such a variable the
+/// splice cannot make right. Variables no callee loads a pointer out of are
+/// left as they are; device pointers in a struct have their own paths.
 pub(super) fn pointer_struct_call_sites(
     functions: &[LlFunction],
 ) -> Result<Vec<(String, String)>, String> {
@@ -259,41 +383,53 @@ pub(super) fn pointer_struct_call_sites(
         if roots.is_empty() {
             continue;
         }
-        let (addresses, merged) = derived_addresses(function, &roots);
-        let tables = function
-            .carrier_insts()
-            .filter_map(|inst| {
-                let store = inst.store().as_ref()?;
-                let (value, ptr) = store.as_ref();
-                let LlValue::Local(ptr) = &ptr.value else {
-                    return None;
-                };
-                (value.ty == LlType::Ptr(0))
-                    .then(|| addresses.get(ptr).cloned())
-                    .flatten()
-            })
-            .collect::<HashSet<_>>();
-        if tables.is_empty() {
-            continue;
-        }
-        // A pointer loaded out of a struct chosen by a select or phi (a
-        // select-consuming call spliced earlier, inline.rs, makes one): the
-        // forwarding is per variable, so it would read the placeholder.
+        let (addresses, merged) = derived_addresses(
+            function,
+            roots.iter().map(|root| (root.clone(), Address::root(root))).collect(),
+        );
+        // The caller's own accesses, then each call's.
+        let mut own = Uses::default();
         for inst in function.carrier_insts() {
-            if inst.opcode != TirOpcode::Load || inst.result_ty != Some(LlType::Ptr(0)) {
-                continue;
-            }
-            let Some(address) = operand_name(inst.operands.first()) else {
-                continue;
-            };
-            if merged.get(address).is_some_and(|root| tables.contains(root)) {
-                return Err(format!(
-                    "native emitter: {} in @{} loads a pointer out of a local struct of pointers chosen by a select or phi ({address}); not supported (N76)",
-                    inst.result.as_deref().unwrap_or("a load"),
-                    function.name
-                ));
+            match inst.opcode {
+                TirOpcode::Load if inst.result_ty == Some(LlType::Ptr(0)) => {
+                    match operand_name(inst.operands.first()) {
+                        Some(name) if merged.contains_key(name) => {
+                            own.accesses.push((
+                                Address {
+                                    root: merged[name].clone(),
+                                    gep_type: None,
+                                    key: None,
+                                    depth: 1,
+                                },
+                                Access::PointerLoad,
+                            ));
+                            own.untrack(format!(
+                                "{} in @{} loads a pointer out of a local struct of pointers chosen by a select or phi ({name})",
+                                inst.result.as_deref().unwrap_or("a load"),
+                                function.name
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                TirOpcode::Store => {
+                    if let Some((value, ptr)) = inst.store().as_deref() {
+                        if let LlValue::Local(name) = &ptr.value {
+                            if let Some(address) = addresses.get(name) {
+                                let access = if value.ty == LlType::Ptr(0) {
+                                    Access::PointerStore
+                                } else {
+                                    Access::OtherStore
+                                };
+                                own.accesses.push((address.clone(), access));
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
+        let mut calls: Vec<(String, String, String, Uses)> = Vec::new();
         for inst in function.carrier_insts() {
             let Some(call) = inst.call().as_ref() else {
                 continue;
@@ -305,42 +441,108 @@ pub(super) fn pointer_struct_call_sites(
                 let LlValue::Local(name) = &argument.value else {
                     continue;
                 };
-                let (root, is_merged) = match (addresses.get(name), merged.get(name)) {
-                    (Some(root), _) => (root, false),
-                    (None, Some(root)) => (root, true),
-                    (None, None) => continue,
-                };
-                if !tables.contains(root) {
+                let mut uses = Uses::default();
+                let root = if let Some(address) = addresses.get(name) {
+                    let Some((param, _)) = callee.params.get(index) else {
+                        continue;
+                    };
+                    collect_uses(
+                        functions,
+                        callee,
+                        vec![(param.clone(), address.clone())],
+                        &mut vec![function.name.clone()],
+                        &mut uses,
+                    );
+                    address.root.clone()
+                } else if let Some(root) = merged.get(name) {
+                    uses.accesses.push((
+                        Address { root: root.clone(), gep_type: None, key: None, depth: 1 },
+                        Access::PointerLoad,
+                    ));
+                    uses.untrack(format!("the struct is chosen by a select or phi ({name})"));
+                    root.clone()
+                } else {
                     continue;
-                }
-                let used = struct_use(functions, callee, index, &mut HashSet::new());
-                let refuse = |why: &str| {
-                    Err(format!(
-                        "native emitter: @{} is handed {name}, a local struct holding pointers (in @{}), and {why}; not supported (N76)",
-                        callee.name, function.name
-                    ))
                 };
-                match used {
-                    StructUse::Scalars => {}
-                    StructUse::LoadsPointer if is_merged => {
-                        return refuse(
-                            "loads a pointer through it, but the struct is chosen by a select or phi",
-                        );
+                calls.push((callee.name.clone(), name.clone(), root, uses));
+            }
+        }
+        for root in &roots {
+            let loads_pointer = |uses: &Uses| {
+                uses.accesses
+                    .iter()
+                    .any(|(a, access)| a.root == *root && *access == Access::PointerLoad)
+            };
+            let needed = calls
+                .iter()
+                .filter(|(_, _, r, uses)| r == root && loads_pointer(uses))
+                .collect::<Vec<_>>();
+            let merged_load = own.untracked.is_some() && loads_pointer(&own);
+            if needed.is_empty() && !merged_load {
+                continue;
+            }
+            let (callee, argument) = needed
+                .first()
+                .map(|(c, a, _, _)| (c.clone(), a.clone()))
+                .unwrap_or_default();
+            let refuse = |why: &str| {
+                Err(format!(
+                    "native emitter: @{callee} is handed {argument}, a local struct holding pointers (in @{}), and {why}; not supported (N76)",
+                    function.name
+                ))
+            };
+            if merged_load {
+                return Err(format!(
+                    "native emitter: {}; not supported (N76)",
+                    own.untracked.clone().unwrap_or_default()
+                ));
+            }
+            let all = calls
+                .iter()
+                .filter(|(_, _, r, _)| r == root)
+                .map(|(_, _, _, uses)| uses)
+                .chain(std::iter::once(&own));
+            let mut pointer_fields = Vec::new();
+            let mut other_stores = Vec::new();
+            let mut pointer_stores_by_callees = false;
+            for uses in all.clone() {
+                if let Some(why) = &uses.untracked {
+                    if !std::ptr::eq(uses, &own) {
+                        return refuse(&format!("cannot be followed: {why}"));
                     }
-                    StructUse::LoadsPointer => {
-                        let site = (callee.name.clone(), name.clone());
-                        if !sites.contains(&site) {
-                            sites.push(site);
+                }
+                for (address, access) in &uses.accesses {
+                    if address.root != *root {
+                        continue;
+                    }
+                    match access {
+                        Access::PointerLoad if address.depth > 1 => {
+                            return refuse("loads a pointer through a struct nested inside it");
                         }
+                        Access::PointerLoad => pointer_fields.push(address.clone()),
+                        Access::PointerStore => {
+                            if !std::ptr::eq(uses, &own) {
+                                pointer_stores_by_callees = true;
+                            }
+                            pointer_fields.push(address.clone());
+                        }
+                        Access::OtherStore => other_stores.push(address.clone()),
                     }
-                    StructUse::StoresPointer => {
-                        return refuse("stores a pointer into it");
-                    }
-                    StructUse::Untracked => {
-                        return refuse(
-                            "hands it on where the translator cannot follow it (recursion, a function outside the module, a merge, a return or a store of the address)",
-                        );
-                    }
+                }
+            }
+            if pointer_stores_by_callees {
+                return refuse("a callee stores a pointer into it");
+            }
+            if other_stores
+                .iter()
+                .any(|store| pointer_fields.iter().any(|field| field.overlaps(store)))
+            {
+                return refuse("an integer, vector or aggregate store overlaps one of its pointer fields");
+            }
+            for (callee, argument, _, _) in needed {
+                let site = (callee.clone(), argument.clone());
+                if !sites.contains(&site) {
+                    sites.push(site);
                 }
             }
         }

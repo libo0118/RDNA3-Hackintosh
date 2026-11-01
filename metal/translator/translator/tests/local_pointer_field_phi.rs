@@ -692,7 +692,7 @@ write:
     );
     assert_refused(
         &ll,
-        "native emitter: @rebind is handed %cap, a local struct holding pointers (in @rebind_k), and stores a pointer into it; not supported (N76)",
+        "native emitter: @rebind is handed %cap, a local struct holding pointers (in @rebind_k), and a callee stores a pointer into it; not supported (N76)",
     );
 }
 
@@ -718,7 +718,7 @@ read:
     let _ = notes::take();
     assert_refused(
         &ll,
-        "@deep is handed %cap, a local struct holding pointers (in @rec_k), and hands it on where the translator cannot follow it",
+        "native emitter: @deep is handed %cap, a local struct holding pointers (in @rec_k), and cannot be followed: @deep recurses with it; not supported (N76)",
     );
     assert!(
         !notes::take().iter().any(|note| note.contains("spliced")),
@@ -726,3 +726,153 @@ read:
     );
 }
 
+
+// ECC review round 2 of aa99970 (rust-reviewer probes, rewritten here).
+
+#[test]
+fn a_writer_callee_without_a_pointer_reader_is_left_alone() {
+    // Nobody loads a pointer through the struct in a callee: no splice is
+    // needed, so the writer is not refused (d7080b0 translated it).
+    let writer = r#"
+define internal fastcc float @setter(ptr %c, ptr %q) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  store ptr %q, ptr %cf, align 8
+  br label %out
+out:
+  ret float 1.0
+}
+"#;
+    let ll = calling_kernel(
+        "setter_k",
+        writer,
+        "  %t = call fastcc float @setter(ptr %cap, ptr %g0)\n  %p = load ptr, ptr %field, align 8\n  %pv = load float, ptr %p, align 4\n  %r = fadd float %pv, %t\n",
+    );
+    let spv = translate_sanitized_native(&ll, Stage::Kernel, &tmp())
+        .unwrap_or_else(|error| panic!("must translate as before: {error}"));
+    tools::spirv_val_bytes(&spv, &tmp()).expect("spirv-val");
+}
+
+#[test]
+fn a_phi_of_one_struct_is_not_a_merge() {
+    // `phi [%cap, %a], [%cap, %b]` is the struct itself.
+    let ll = calling_kernel(
+        "samephi_k",
+        "",
+        "  br i1 %c, label %a, label %b\na:\n  br label %j\nb:\n  br label %j\nj:\n  %cs = phi ptr [ %cap, %a ], [ %cap, %b ]\n  %cf = getelementptr inbounds %Captures, ptr %cs, i64 0, i32 0\n  %p = load ptr, ptr %cf, align 8\n  %r = load float, ptr %p, align 4\n",
+    );
+    translate(&ll);
+}
+
+#[test]
+fn a_struct_only_a_callee_fills_is_refused_by_name() {
+    // The caller never stores the pointer; `@fill` does and `@use_it`
+    // loads it. Before: the load read the placeholder (a constant 0.0, no
+    // note).
+    let callees = r#"
+define internal fastcc void @fill(ptr %c, ptr %q) {
+entry:
+  br label %w
+w:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  store ptr %q, ptr %cf, align 8
+  ret void
+}
+define internal fastcc float @use_it(ptr %c) {
+entry:
+  br label %r
+r:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+"#;
+    let ll = calling_kernel(
+        "fill_k",
+        callees,
+        "  call fastcc void @fill(ptr %cap, ptr %slot)\n  %r = call fastcc float @use_it(ptr %cap)\n",
+    )
+    .replace("  store ptr %slot, ptr %field, align 8\n", "");
+    assert_refused(
+        &ll,
+        "native emitter: @use_it is handed %cap, a local struct holding pointers (in @fill_k), and a callee stores a pointer into it; not supported (N76)",
+    );
+}
+
+#[test]
+fn a_pointer_loaded_through_a_nested_struct_is_refused_by_name() {
+    // The callee takes the outer struct and GEPs twice into the capture
+    // nested in it. Before: OpConstantNull, with a "spliced" note.
+    let reader = r#"
+define internal fastcc float @through(ptr %n) {
+entry:
+  br label %r
+r:
+  %inner = getelementptr inbounds %Nest, ptr %n, i64 0, i32 1
+  %cf = getelementptr inbounds %Captures, ptr %inner, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+"#;
+    let ll = calling_kernel(
+        "nested_k",
+        reader,
+        "  %nest = alloca %Nest, align 8\n  %ni = getelementptr inbounds %Nest, ptr %nest, i64 0, i32 1\n  %nf = getelementptr inbounds %Captures, ptr %ni, i64 0, i32 0\n  store ptr %slot, ptr %nf, align 8\n  %r = call fastcc float @through(ptr %nest)\n",
+    )
+    .replacen("%Captures = type { ptr, i32, ptr }\n", "%Captures = type { ptr, i32, ptr }\n%Nest = type { i32, %Captures }\n", 1);
+    assert_refused(
+        &ll,
+        "native emitter: @through is handed %nest, a local struct holding pointers (in @nested_k), and loads a pointer through a struct nested inside it; not supported (N76)",
+    );
+}
+
+#[test]
+fn a_callee_integer_store_over_a_pointer_field_is_refused_by_name() {
+    // `@clear` stores an i64 over the pointer field `@peek` loads: after a
+    // splice the field would have a pointer and an integer store, and the
+    // caller's null test was folded to false.
+    let callees = r#"
+define internal fastcc float @peek(ptr %c) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  br label %r
+r:
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+define internal fastcc float @clear(ptr %c) {
+entry:
+  %cf = getelementptr inbounds %Captures, ptr %c, i64 0, i32 0
+  store i64 0, ptr %cf, align 8
+  br label %r
+r:
+  ret float 1.0
+}
+"#;
+    let ll = calling_kernel(
+        "clear_k",
+        callees,
+        "  %x = call fastcc float @peek(ptr %cap)\n  %y = call fastcc float @clear(ptr %cap)\n  %r = fadd float %x, %y\n",
+    );
+    assert_refused(
+        &ll,
+        "an integer, vector or aggregate store overlaps one of its pointer fields; not supported (N76)",
+    );
+}
+
+#[test]
+fn a_second_translation_logs_the_notes_again() {
+    // The plugin translates a kernel again for a later pipeline or
+    // specialisation: its notes must come back each time.
+    let ll = field_loop("twice_k", "%acc0", "%g0", "%field");
+    for round in 0..2 {
+        let (_, notes) = translate(&ll);
+        assert!(
+            notes.iter().any(|note| note.starts_with("metal2vulkan: kernel twice_k:") && note.contains("forwarded")),
+            "round {round}: {notes:?}"
+        );
+    }
+}
