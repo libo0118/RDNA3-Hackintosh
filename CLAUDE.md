@@ -44,9 +44,11 @@ real images. Every new document is a self-contained `.html` file (inline CSS
 and SVG, no external fetches, readable from a local checkout), and a document
 that is rewritten moves to `.html`. The exceptions stay Markdown: this
 `CLAUDE.md` (Claude Code reads it only as Markdown), `CLAUDE_SUBAGENT.md` (the
-agents' rules) and a short `README.md` (GitHub and Forgejo render only that on
-the repository page), which carries excerpts of the full HTML status and links
-to it. All other docs are converted to proper HTML. When a `.md` file becomes `.html`,
+agents' rules). The front page is `README.html` (no `README.md`: the owner's
+Forgejo renders `.html` through `[markup.html]`, `RENDER_CONTENT_MODE = iframe`,
+and a `README.md` would take precedence there; GitHub shows no rendered README,
+accepted), with the status block `tools/progress.py` generates. All other docs
+are proper HTML. When a `.md` file becomes `.html`,
 update in the same commit every tool, test and link that reads or names it
 (`tools/progress.py`, the triage scripts, `CLAUDE_SUBAGENT.md`, other docs).
 Every HTML doc uses the style and header layout of
