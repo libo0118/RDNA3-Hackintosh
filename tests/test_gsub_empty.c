@@ -17,8 +17,10 @@ int main(void)
     /* N70: the last part is retired too (default); NVMTL_GSUB_LAST_EMPTY=0 restores the old stop */
     CHECK(nvmtl_gsub_empty_verdict(1, 1, 1) == NVMTL_GSUB_EMPTY_RETIRE_LAST);
     CHECK(nvmtl_gsub_empty_verdict(1, 1, 0) == NVMTL_GSUB_EMPTY_STOP_LAST);
-    /* the verdicts that let the pass go on are exactly the two RETIRE ones (callers test `<= RETIRE_LAST`) */
-    CHECK(NVMTL_GSUB_EMPTY_RETIRE < NVMTL_GSUB_EMPTY_RETIRE_LAST && NVMTL_GSUB_EMPTY_RETIRE_LAST < NVMTL_GSUB_EMPTY_STOP_EVFOLD);
+    /* the four verdicts are distinct (the call site compares each with ==) */
+    CHECK(NVMTL_GSUB_EMPTY_RETIRE != NVMTL_GSUB_EMPTY_RETIRE_LAST && NVMTL_GSUB_EMPTY_STOP_EVFOLD != NVMTL_GSUB_EMPTY_STOP_LAST);
+    CHECK(NVMTL_GSUB_EMPTY_RETIRE != NVMTL_GSUB_EMPTY_STOP_EVFOLD && NVMTL_GSUB_EMPTY_RETIRE != NVMTL_GSUB_EMPTY_STOP_LAST);
+    CHECK(NVMTL_GSUB_EMPTY_RETIRE_LAST != NVMTL_GSUB_EMPTY_STOP_EVFOLD && NVMTL_GSUB_EMPTY_RETIRE_LAST != NVMTL_GSUB_EMPTY_STOP_LAST);
     if (failures) { fprintf(stderr, "%d failures\n", failures); return 1; }
     puts("gsub empty: ok");
     return 0;
