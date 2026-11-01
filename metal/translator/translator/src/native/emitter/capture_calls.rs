@@ -33,12 +33,14 @@ use crate::native::tir::{TirInst, TirOpcode, TirOperand, TirTerminator};
 /// type the field path is in (None for the variable itself), the constant
 /// field path (None when dynamic or below a nested struct) and how many GEP
 /// levels it is below the variable.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Address {
     root: String,
     gep_type: Option<String>,
     key: Option<Vec<u64>>,
     depth: usize,
+    /// Some GEP on the way has a non-constant index (an array of structs).
+    dynamic: bool,
 }
 
 impl Address {
@@ -48,6 +50,7 @@ impl Address {
             gep_type: None,
             key: Some(Vec::new()),
             depth: 0,
+            dynamic: false,
         }
     }
 
@@ -61,6 +64,7 @@ impl Address {
                 _ => None,
             })
             .collect::<Option<Vec<_>>>();
+        let dynamic = self.dynamic || indices.is_none();
         let local = indices.map(|mut key| {
             if key.len() > 1 && key.first() == Some(&0) {
                 key.remove(0);
@@ -73,6 +77,7 @@ impl Address {
                 gep_type: Some(format!("{:?}", gep.source_ty)),
                 key: local,
                 depth: 1,
+                dynamic,
             }
         } else {
             Address {
@@ -80,6 +85,7 @@ impl Address {
                 gep_type: self.gep_type.clone(),
                 key: None,
                 depth: self.depth + 1,
+                dynamic,
             }
         }
     }
@@ -108,7 +114,7 @@ enum Access {
 
 /// Everything a function (and what it calls) does with the caller's
 /// variables, as field paths of them.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 struct Uses {
     accesses: Vec<(Address, Access)>,
     /// Why some use cannot be followed (the first reason).
@@ -121,6 +127,34 @@ impl Uses {
             self.untracked = Some(why.into());
         }
     }
+
+    fn absorb(&mut self, other: Uses) {
+        self.accesses.extend(other.accesses);
+        if let Some(why) = other.untracked {
+            self.untrack(why);
+        }
+    }
+}
+
+/// `collect_uses` results by function and seeds: a call ladder reaches a
+/// callee along many paths, and its uses do not depend on the path.
+type UsesMemo = HashMap<(String, Vec<(String, Address)>), Uses>;
+
+fn uses_of(
+    functions: &[LlFunction],
+    function: &LlFunction,
+    seeds: Vec<(String, Address)>,
+    visiting: &mut Vec<String>,
+    memo: &mut UsesMemo,
+) -> Uses {
+    let key = (function.name.clone(), seeds.clone());
+    if let Some(found) = memo.get(&key) {
+        return found.clone();
+    }
+    let mut uses = Uses::default();
+    collect_uses(functions, function, seeds, visiting, memo, &mut uses);
+    memo.insert(key, uses.clone());
+    uses
 }
 
 fn operand_name(operand: Option<&TirOperand>) -> Option<&str> {
@@ -260,6 +294,7 @@ fn collect_uses(
     function: &LlFunction,
     seeds: Vec<(String, Address)>,
     visiting: &mut Vec<String>,
+    memo: &mut UsesMemo,
     uses: &mut Uses,
 ) {
     if visiting.contains(&function.name) {
@@ -268,7 +303,12 @@ fn collect_uses(
     }
     visiting.push(function.name.clone());
     let (addresses, merged) = derived_addresses(function, seeds);
-    for name in merged.keys() {
+    // In function order, so the reason is the same on every run.
+    if let Some(name) = function
+        .carrier_insts()
+        .filter_map(|inst| inst.result.as_ref())
+        .find(|result| merged.contains_key(*result))
+    {
         uses.untrack(format!("@{} merges it with another struct ({name})", function.name));
     }
     for inst in function.carrier_insts() {
@@ -284,6 +324,21 @@ fn collect_uses(
                 if let Some(address) = operand_name(inst.operands.first()).and_then(|n| addresses.get(n)) {
                     if inst.result_ty == Some(LlType::Ptr(0)) {
                         uses.accesses.push((address.clone(), Access::PointerLoad));
+                    }
+                    continue;
+                }
+                if let Some(root) = operand_name(inst.operands.first()).and_then(|n| merged.get(n)) {
+                    if inst.result_ty == Some(LlType::Ptr(0)) {
+                        uses.accesses.push((
+                            Address {
+                                root: root.clone(),
+                                gep_type: None,
+                                key: None,
+                                depth: 1,
+                                dynamic: true,
+                            },
+                            Access::PointerLoad,
+                        ));
                     }
                     continue;
                 }
@@ -341,7 +396,8 @@ fn collect_uses(
                             next.params.get(index).map(|(param, _)| (param.clone(), address))
                         })
                         .collect::<Vec<_>>();
-                    collect_uses(functions, next, seeds, visiting, uses);
+                    let child = uses_of(functions, next, seeds, visiting, memo);
+                    uses.absorb(child);
                     continue;
                 }
             }
@@ -374,6 +430,7 @@ pub(super) fn pointer_struct_call_sites(
     functions: &[LlFunction],
 ) -> Result<Vec<(String, String)>, String> {
     let mut sites = Vec::new();
+    let mut memo = UsesMemo::new();
     for function in functions {
         let roots = function
             .carrier_insts()
@@ -400,6 +457,7 @@ pub(super) fn pointer_struct_call_sites(
                                     gep_type: None,
                                     key: None,
                                     depth: 1,
+                                    dynamic: true,
                                 },
                                 Access::PointerLoad,
                             ));
@@ -409,7 +467,12 @@ pub(super) fn pointer_struct_call_sites(
                                 function.name
                             ));
                         }
-                        _ => {}
+                        Some(name) => {
+                            if let Some(address) = addresses.get(name) {
+                                own.accesses.push((address.clone(), Access::PointerLoad));
+                            }
+                        }
+                        None => {}
                     }
                 }
                 TirOpcode::Store => {
@@ -446,17 +509,17 @@ pub(super) fn pointer_struct_call_sites(
                     let Some((param, _)) = callee.params.get(index) else {
                         continue;
                     };
-                    collect_uses(
+                    uses = uses_of(
                         functions,
                         callee,
                         vec![(param.clone(), address.clone())],
                         &mut vec![function.name.clone()],
-                        &mut uses,
+                        &mut memo,
                     );
                     address.root.clone()
                 } else if let Some(root) = merged.get(name) {
                     uses.accesses.push((
-                        Address { root: root.clone(), gep_type: None, key: None, depth: 1 },
+                        Address { root: root.clone(), gep_type: None, key: None, depth: 1, dynamic: true },
                         Access::PointerLoad,
                     ));
                     uses.untrack(format!("the struct is chosen by a select or phi ({name})"));
@@ -473,6 +536,25 @@ pub(super) fn pointer_struct_call_sites(
                     .iter()
                     .any(|(a, access)| a.root == *root && *access == Access::PointerLoad)
             };
+            let of_root = || {
+                calls
+                    .iter()
+                    .filter(|(_, _, r, _)| r == root)
+                    .map(|(_, _, _, uses)| uses)
+                    .chain(std::iter::once(&own))
+            };
+            let any_pointer_load = of_root().any(|uses| loads_pointer(uses));
+            let dynamic_store = of_root().any(|uses| {
+                uses.accesses.iter().any(|(a, access)| {
+                    a.root == *root && a.dynamic && *access == Access::PointerStore
+                })
+            });
+            if dynamic_store && any_pointer_load {
+                return Err(format!(
+                    "native emitter: {root} in @{} has a pointer stored into it at a dynamic index (an array of structs of pointers) and loaded back; the forwarding is per constant field, so the load would read a placeholder; not supported (N76)",
+                    function.name
+                ));
+            }
             let needed = calls
                 .iter()
                 .filter(|(_, _, r, uses)| r == root && loads_pointer(uses))
@@ -517,7 +599,9 @@ pub(super) fn pointer_struct_call_sites(
                     }
                     match access {
                         Access::PointerLoad if address.depth > 1 => {
-                            return refuse("loads a pointer through a struct nested inside it");
+                            return refuse(
+                                "loads a pointer two GEP levels below it (a struct nested in it, or an element past the first)",
+                            );
                         }
                         Access::PointerLoad => pointer_fields.push(address.clone()),
                         Access::PointerStore => {

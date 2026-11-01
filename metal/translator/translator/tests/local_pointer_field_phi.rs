@@ -824,7 +824,7 @@ r:
     .replacen("%Captures = type { ptr, i32, ptr }\n", "%Captures = type { ptr, i32, ptr }\n%Nest = type { i32, %Captures }\n", 1);
     assert_refused(
         &ll,
-        "native emitter: @through is handed %nest, a local struct holding pointers (in @nested_k), and loads a pointer through a struct nested inside it; not supported (N76)",
+        "native emitter: @through is handed %nest, a local struct holding pointers (in @nested_k), and loads a pointer two GEP levels below it (a struct nested in it, or an element past the first); not supported (N76)",
     );
 }
 
@@ -875,4 +875,102 @@ fn a_second_translation_logs_the_notes_again() {
             "round {round}: {notes:?}"
         );
     }
+}
+
+// ECC review round 3 of 660ec58 (rust-reviewer probes, rewritten here).
+
+/// A multi-block callee that merges its two struct parameters with a phi
+/// and loads the pointer out of the merged one.
+const MERGING_READER: &str = r#"
+define internal fastcc float @either(ptr %a, ptr %b, i1 %k) {
+entry:
+  %fa = getelementptr inbounds %Captures, ptr %a, i64 0, i32 1
+  %na = load i32, ptr %fa, align 4
+  br i1 %k, label %left, label %right
+left:
+  br label %join
+right:
+  %one = select i1 %k, ptr %a, ptr %b
+  br label %join
+join:
+  %cs = phi ptr [ %a, %left ], [ %one, %right ]
+  %cf = getelementptr inbounds %Captures, ptr %cs, i64 0, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  %v = load float, ptr %cp, align 4
+  %w = sitofp i32 %na to float
+  %s = fadd float %v, %w
+  ret float %s
+}
+"#;
+
+fn merging_kernel(kernel: &str) -> String {
+    calling_kernel(
+        kernel,
+        MERGING_READER,
+        "  %cap2 = alloca %Captures, align 8\n  %f2 = getelementptr inbounds %Captures, ptr %cap2, i64 0, i32 0\n  store ptr %g0, ptr %f2, align 8\n  %r = call fastcc float @either(ptr %cap, ptr %cap2, i1 %c)\n",
+    )
+}
+
+#[test]
+fn a_callee_merging_two_structs_before_its_load_is_refused_by_name() {
+    // Before: the load through the merged struct counted as no pointer load,
+    // nothing was spliced or refused, and it read the placeholder (0.0).
+    assert_refused(
+        &merging_kernel("merge_k"),
+        "native emitter: @either is handed %cap, a local struct holding pointers (in @merge_k), and cannot be followed: @either merges it with another struct (%one); not supported (N76)",
+    );
+}
+
+#[test]
+fn the_merge_refusal_names_the_same_value_every_time() {
+    // The reason was taken from a HashMap: three different texts in twelve
+    // runs. It is the first merge in function order now.
+    let ll = merging_kernel("merge_det_k");
+    let first = translate_sanitized_native(&ll, Stage::Kernel, &tmp()).expect_err("refused");
+    for _ in 0..12 {
+        let again = translate_sanitized_native(&ll, Stage::Kernel, &tmp()).expect_err("refused");
+        assert_eq!(again, first);
+    }
+}
+
+/// An array of capture structs, element `%j` (a dynamic index) given the
+/// pointer, then read back by `read`.
+fn struct_array(kernel: &str, functions: &str, read: &str) -> String {
+    calling_kernel(
+        kernel,
+        functions,
+        &format!(
+            "  %arr = alloca [4 x %Captures], align 8\n  %j = and i32 %i, 3\n  %e = getelementptr inbounds [4 x %Captures], ptr %arr, i64 0, i32 %j\n  %ef = getelementptr inbounds %Captures, ptr %e, i64 0, i32 0\n  store ptr %slot, ptr %ef, align 8\n{read}"
+        ),
+    )
+}
+
+#[test]
+fn a_pointer_stored_at_a_dynamic_index_and_loaded_back_is_refused_by_name() {
+    // The forwarding is per constant field: before, the load read the
+    // placeholder (0.0) without a word.
+    let reason = "has a pointer stored into it at a dynamic index (an array of structs of pointers) and loaded back; the forwarding is per constant field, so the load would read a placeholder; not supported (N76)";
+    assert_refused(
+        &struct_array(
+            "aos_k",
+            "",
+            "  %pp = load ptr, ptr %ef, align 8\n  %r = load float, ptr %pp, align 4\n",
+        ),
+        &format!("native emitter: %arr in @aos_k {reason}"),
+    );
+    let reader = r#"
+define internal fastcc float @element(ptr %c, i32 %j) {
+entry:
+  br label %r
+r:
+  %cf = getelementptr inbounds [4 x %Captures], ptr %c, i64 0, i32 %j, i32 0
+  %cp = load ptr, ptr %cf, align 8
+  %v = load float, ptr %cp, align 4
+  ret float %v
+}
+"#;
+    assert_refused(
+        &struct_array("aos_call_k", reader, "  %r = call fastcc float @element(ptr %arr, i32 %j)\n"),
+        &format!("native emitter: %arr in @aos_call_k {reason}"),
+    );
 }
