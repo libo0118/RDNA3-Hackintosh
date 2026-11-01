@@ -941,13 +941,6 @@ def n41_lines(path, args=""):
     return n41_rows(sv, log, pl, cd)
 
 
-def a3_shared_ids(text):
-    """DRIVER-PLAN N71 (c): the surfaces the kernel gave WindowServer READ-ONLY
-    (accel rd3AccelSurfGem: 'surfshare: WindowServer (pid P) imports surface S
-    plane N READ-ONLY')"""
-    return set(re.findall(r"surfshare: WindowServer \(pid \d+\) imports surface (\d+) plane \d+ READ-ONLY", text))
-
-
 def a3_share_verdict(log, sv, c):
     """DRIVER-PLAN N71 (c): WindowServer's read-only imports of applications'
     shared VRAM drawables (debug.rdna3accel_a3share). Prints the verdict;
@@ -955,9 +948,9 @@ def a3_share_verdict(log, sv, c):
     on = re.search(r"A3 share: (ON|off)", log)
     names = ("recorded", "imported", "stale", "norecord", "ws_record_refused", "record_refused", "fault_off")
     have = any(("a3share_" + n) in c for n in names)
-    if not on and not have:
+    if not on and not have and "read-only shared import" not in log:
         return False   # an accelerator before N71 (c)
-    if on and not have:
+    if on and not have and "read-only shared import" not in log:
         print("   WARN %-20s the kernel has the read-only share (its 'A3 share:' line) but no "
               "debug.rdna3accel_a3share_* counters reached the report (the collectors' sysctl grep)" % "A3 share")
         return False
@@ -968,8 +961,15 @@ def a3_share_verdict(log, sv, c):
             "(WindowServer %d), VM faults %d" % (state, v["recorded"], v["imported"], v["stale"], v["norecord"],
                                                 v["record_refused"], v["ws_record_refused"], v["fault_off"]))
     failed = False
-    if v["fault_off"]:
-        fl = re.findall(r"surfshare: VM fault at VA 0x[0-9a-f]+ in a read-only shared import[^\n]*", log)
+    # the core's side of a fault (kext drmSurfaceFault): seen even when the accelerator's line or counter is not
+    core_fault = re.findall(r"GEM: VM fault at VA 0x[0-9a-f]+ inside the read-only shared import[^\n]*", log)
+    core_lost = re.findall(r"GEM: the accelerator did not take the shared-import fault[^\n]*", log)
+    if core_lost:
+        print("   FAIL %-20s %s: a GPU VM fault inside a read-only shared import was NOT taken by the accelerator: "
+              "sharing may still be on (R2) - %s" % ("A3 share", text, core_lost[0][:200]))
+        failed = True
+    elif v["fault_off"] or core_fault:
+        fl = re.findall(r"surfshare: VM fault at VA 0x[0-9a-f]+ in a read-only shared import[^\n]*", log) or core_fault
         print("   FAIL %-20s %s: a GPU VM fault inside a read-only shared import turned sharing OFF (R2: a write into "
               "memory WindowServer must only sample)%s" % ("A3 share", text, (" - " + fl[0][:200]) if fl else ""))
         failed = True
@@ -1007,12 +1007,11 @@ def a3_display_verdict(log, sv):
     # the heads' scanout sizes, and the plugin's display-size BOs in WindowServer
     sizes = scanout_sizes(log)
     cd = sv.split("== 24-log-coredisplay.txt", 1)[1] if "== 24-log-coredisplay.txt" in sv else ""
-    # DRIVER-PLAN N71 (c): WindowServer's READ-ONLY imports of applications' shared drawables are not leaks
-    shared = a3_shared_ids(log + "\n" + sv)
+    # DRIVER-PLAN N71 (c): WindowServer's READ-ONLY imports of applications' shared drawables log
+    # `item 7: surface S WxH -> read-only shared VRAM (allocation #G)`, never `-> the family's VRAM`: a
+    # `family's VRAM` line stays a writable import (no surface id is excused by a kernel share line)
     ws_bos = set(sid for sid, w, h in re.findall(r"item 7: surface (\d+) (\d+)x(\d+) pitch \d+ -> the family's VRAM", cd)
-                 if (w, h) in sizes) - shared
-    # the kernel's share lines are rate limited: with read-only imports counted, an unnamed one may be one of them
-    share_maybe = c.get("a3share_imported", 0) > 0
+                 if (w, h) in sizes)
     apart = [l for l in a3lines.values() if "DOES NOT READ" in l]
     # the marker counts only when the rule looked at something (kernels of
     # aa913df printed it with "0 other WindowServer surfaces, 0 unchecked" too)
@@ -1032,12 +1031,6 @@ def a3_display_verdict(log, sv):
     elif iop_flip and not refused:
         print("   INFO %-20s debug.rdna3accel_iop_flip=1: display surfaces may be BOs (that path flips the "
               "IOSurface's own VRAM)" % "A3 display")
-    elif kept_mode and not never and ws_bos and not refused and share_maybe:
-        print("   WARN %-20s %d WindowServer surface(s) of a scanout size became BOs (%s) with no refusal, but %d "
-              "read-only shared import(s) were counted (N71 (c)) and their log lines are rate limited: check the "
-              "plugin's a3share lines for these surfaces" % ("A3 display", len(ws_bos),
-                                                            ", ".join(sorted(ws_bos, key=int)[:6]),
-                                                            c.get("a3share_imported", 0)))
     elif kept_mode and (never or (ws_bos and not refused)):
         print("   FAIL %-20s the refusal never fired: %d WindowServer surface(s) of a scanout size became BOs (%s), "
               "0 refused - the check missed them (the 'surfgem: WindowServer surface ... is not a display "
@@ -1064,18 +1057,11 @@ def a3_display_verdict(log, sv):
         # every WindowServer import is refused in this mode: one that went
         # into the family's VRAM all the same, or more non-display imports
         # than refusals, is a leak (an unnamed caller is refused too)
-        ws_in = [sid for sid in re.findall(r"item 7: surface (\d+) \d+x\d+ pitch \d+ -> the family's VRAM", cd)
-                 if sid not in shared]
+        ws_in = re.findall(r"item 7: surface (\d+) \d+x\d+ pitch \d+ -> the family's VRAM", cd)
         # N71 (c): read-only shared imports are WindowServer imports that are neither refused nor leaks
         other = max(0, c.get("a3display_other", 0) - c.get("a3share_imported", 0))
         unknown = c.get("a3display_task_mismatch", 0) + c.get("a3display_noname", 0)
-        if ws_in and share_maybe:
-            print("   WARN %-20s %d WindowServer surface(s) in the family's VRAM (%s) not named by a kernel "
-                  "'surfshare: WindowServer ... READ-ONLY' line, with %d read-only shared import(s) counted (the "
-                  "lines are rate limited): check the plugin's a3share lines" % (
-                      "A3 WindowServer", len(set(ws_in)), ", ".join(sorted(set(ws_in), key=int)[:6]),
-                      c.get("a3share_imported", 0)))
-        elif ws_in:
+        if ws_in:
             print("   FAIL %-20s WindowServer input leaked into A3: %d surface(s) in the family's VRAM in WindowServer "
                   "(%s) although its inputs are kept out" % ("A3 WindowServer", len(set(ws_in)),
                                                              ", ".join(sorted(set(ws_in), key=int)[:6])))

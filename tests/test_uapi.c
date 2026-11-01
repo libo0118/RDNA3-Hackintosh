@@ -90,6 +90,11 @@ static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t p
         bo->vram_offset = 0x100000; bo->size = 0x10000;
         bo->surf_gen = 3; bo->gpu_ro = 1; bo->surf_pid = 4242;
         id = 7;   /* the same allocation: the same hold */
+    } else if (id == 15 || id == 14) {
+        /* N71 (c) review: one page of the accelerator's VRAM, 15 imported READ-ONLY (shared), 14 writable */
+        bo->vram_offset = 0x200000; bo->size = 0x1000;
+        bo->surf_gen = 8;
+        if (id == 15) { bo->gpu_ro = 1; bo->surf_pid = 4242; }
     } else if (id == 11) {
         bo->vram_offset = 0x10000000; bo->size = 100u << 20;
     } else {
@@ -1587,6 +1592,59 @@ int main(void)
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
             g_uf.handle = 9999; g_uf.offset = 0;
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            /* N71 (c) review (SEC-MEDIUM): the user fence is written through VMID0, past the VM's read-only
+             * page: never into a surface BO (a read-only shared import, nor a writable one) */
+            {
+                struct rd_xnu_surface_bo sro, srw;
+                struct drm_amdgpu_gem_va fva;
+                void *os0 = f->os;
+                f->os = (void *)0x7a5c;
+                dev.ops.surface_bo = h_surface_bo;
+                memset(&sro, 0, sizeof(sro)); sro.op = RD_XNU_SURFACE_BO_IMPORT; sro.surface_id = 15;
+                memset(&srw, 0, sizeof(srw)); srw.op = RD_XNU_SURFACE_BO_IMPORT; srw.surface_id = 14;
+                CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sro) == 0 && sro.out_flags == RD_XNU_SURFACE_BO_OUT_SHARED_RO &&
+                      IOCTL(f, RD_NR_XNU_SURFACE_BO, srw) == 0 && srw.out_flags == 0 && sro.size == 4096);
+                g_uf.handle = sro.handle; g_uf.offset = 16;
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+                g_uf.handle = srw.handle;
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+                g_uf.handle = 0;
+                /* the CS branch of the fault attribution: a guilty VM's submission is refused (-ECANCELED) and
+                 * a fault inside its read-only shared import goes to the OS once, not again for the same address */
+                memset(&fva, 0, sizeof(fva));
+                fva.handle = sro.handle; fva.operation = AMDGPU_VA_OP_MAP; fva.va_address = 0x7100000;
+                fva.map_size = 0x1000; fva.flags = AMDGPU_VM_PAGE_READABLE;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), fva) == 0);
+                dev.ops.surface_fault = h_surface_fault;
+                dev.ops.vm_fault_info = h_fault_info;
+                dev.ops.vm_query = h_vm_query;
+                h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
+                h_fault_calls = 0; f->share_fault_seen = 0;
+                h_fault_addr = 0x7100800;
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED &&
+                      h_fault_calls == 1 && h_fault_id == 15 && h_fault_va == 0x7100800 && h_fault_pid == 4242);
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED && h_fault_calls == 1);
+                h_fault_addr = 0x7200000;   /* a new fault outside it: not reported */
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED && h_fault_calls == 1);
+                h_query_flags = 0;
+                h_fault_addr = 0x500000000000ull;
+                f->share_fault_seen = 0;
+                dev.ops.surface_fault = NULL;
+                dev.ops.vm_fault_info = NULL;
+                dev.ops.vm_query = NULL;
+                fva.operation = AMDGPU_VA_OP_UNMAP;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), fva) == 0);
+                {
+                    struct drm_gem_close c2;
+                    memset(&c2, 0, sizeof(c2));
+                    c2.handle = sro.handle;
+                    CHECK(IOCTL(f, RD_NR_GEM_CLOSE, c2) == 0);
+                    c2.handle = srw.handle;
+                    CHECK(IOCTL(f, RD_NR_GEM_CLOSE, c2) == 0 && h_surf_refs[15] == 0 && h_surf_refs[14] == 0);
+                }
+                dev.ops.surface_bo = NULL;
+                f->os = os0;
+            }
             g_uf.handle = ufh; g_uf.offset = 16;
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &h2) == 0);
             CHECK(last_job.uf_bo == rdna3_drm_bo_lookup(f, ufh) && last_job.uf_offset == 16);

@@ -25,7 +25,10 @@
  * is its read end. dup()/fcntl(F_DUPFD) of that fd (libdrm_amdgpu does
  * this in amdgpu_device_initialize) refer to the same pipe inode, so any
  * duplicate resolves to the same connection through fstat(). */
-static struct { uintptr_t conn; dev_t dev; ino_t ino; int fd; int used; int orphan; } g_conns[MAX_CONN];
+/* serial: a number per open (never reused), so a slot or a backend handle reused by a later open is
+ * never taken for the connection an earlier import went to (N71 (c) review) */
+static struct { uintptr_t conn; dev_t dev; ino_t ino; int fd; int used; int orphan; unsigned serial; } g_conns[MAX_CONN];
+static unsigned g_conn_serial;
 static struct { void *addr; size_t len; uint64_t off; uint64_t seq; int ci; } g_maps[MAX_MAPS];
 static uint64_t g_map_seq;   /* the order of the maps, for munmap of an address mapped more than once */
 /* Syncobj "fds" (DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD / FD_TO_HANDLE): the kext has
@@ -214,6 +217,7 @@ int drm_xnu_open(const char *path, int flags)
     g_conns[ci].fd = p[0];
     g_conns[ci].used = 1;
     g_conns[ci].orphan = 0;
+    g_conns[ci].serial = ++g_conn_serial;
     pthread_mutex_unlock(&g_lock);
     return p[0];
 }
@@ -434,8 +438,31 @@ int drm_xnu_surface_last_import(uint32_t *flags, uint64_t *gen)
  * looks the import up there). The newest import of a plane wins; a full
  * table forgets the oldest. Under g_surf_lock. */
 #define XNU_SURF_IMPORTS 64
-static struct { uint32_t surface_id, plane; uintptr_t conn; int ci; unsigned stamp; int used; } g_imports[XNU_SURF_IMPORTS];
+static struct { uint32_t surface_id, plane; uintptr_t conn; int ci; unsigned serial, stamp; int used; } g_imports[XNU_SURF_IMPORTS];
 static unsigned g_import_stamp;
+/* the share's silent misses, for drm_xnu_surface_share_stats and DRM_XNU_TRACE */
+static uint64_t g_share_noimport, g_share_deadconn, g_import_evicted;
+
+void drm_xnu_surface_share_stats(uint64_t *noimport, uint64_t *deadconn, uint64_t *evicted)
+{
+    pthread_mutex_lock(&g_surf_lock);
+    if (noimport)
+        *noimport = g_share_noimport;
+    if (deadconn)
+        *deadconn = g_share_deadconn;
+    if (evicted)
+        *evicted = g_import_evicted;
+    pthread_mutex_unlock(&g_surf_lock);
+}
+
+/* tests only: the stamp the next import note continues from (the wrap) */
+void drm_xnu__test_import_stamp(unsigned v);
+void drm_xnu__test_import_stamp(unsigned v)
+{
+    pthread_mutex_lock(&g_surf_lock);
+    g_import_stamp = v;
+    pthread_mutex_unlock(&g_surf_lock);
+}
 
 static void surface_import_note(int ci, uint32_t surface_id, uint32_t plane)
 {
@@ -452,11 +479,16 @@ static void surface_import_note(int ci, uint32_t surface_id, uint32_t plane)
         for (i = 1; i < XNU_SURF_IMPORTS; i++)
             if (g_imports[i].stamp - g_imports[k].stamp > 0x80000000u)   /* i older than k (wrap-safe) */
                 k = i;
+        g_import_evicted++;
+        if (trace())
+            fprintf(stderr, "drm_xnu: surface import table full: surface %u plane %u forgotten for the share\n",
+                    g_imports[k].surface_id, g_imports[k].plane);
     }
     g_imports[k].surface_id = surface_id;
     g_imports[k].plane = plane;
     g_imports[k].ci = ci;
     g_imports[k].conn = g_conns[ci].conn;
+    g_imports[k].serial = g_conns[ci].serial;
     g_imports[k].stamp = ++g_import_stamp;
     g_imports[k].used = 1;
     pthread_mutex_unlock(&g_surf_lock);
@@ -787,8 +819,8 @@ int drm_xnu_surface_share(uint32_t surface_id, uint32_t plane)
 {
     struct xnu_surface_bo s;
     uintptr_t conn = 0;
-    unsigned i, best = XNU_SURF_IMPORTS;
-    int ci = -1, err;
+    unsigned i, best = XNU_SURF_IMPORTS, serial = 0;
+    int ci = -1, err, dead = 0;
     if (!surface_id || plane > 15) {
         errno = EINVAL;
         return -1;
@@ -801,14 +833,32 @@ int drm_xnu_surface_share(uint32_t surface_id, uint32_t plane)
     if (best < XNU_SURF_IMPORTS) {
         ci = g_imports[best].ci;
         conn = g_imports[best].conn;
+        serial = g_imports[best].serial;
     }
     pthread_mutex_unlock(&g_surf_lock);
-    /* the connection must still be the one the import went to */
+    /* the connection must still be the one the import went to (its serial: a slot or a handle reused by a
+     * later open is another connection) */
     pthread_mutex_lock(&g_lock);
-    if (ci >= 0 && (!g_conns[ci].used || g_conns[ci].conn != conn))
+    /* an orphan (its first fd closed, dup()s alive: libdrm_amdgpu's) is still the connection */
+    if (ci >= 0 && (!g_conns[ci].used || g_conns[ci].conn != conn || g_conns[ci].serial != serial)) {
         ci = -1;
+        dead = 1;
+    }
     pthread_mutex_unlock(&g_lock);
     if (ci < 0) {
+        pthread_mutex_lock(&g_surf_lock);
+        if (dead) {
+            g_share_deadconn++;
+            if (g_imports[best].used && g_imports[best].serial == serial && g_imports[best].surface_id == surface_id &&
+                g_imports[best].plane == plane)
+                g_imports[best].used = 0;   /* that import went with its connection */
+        } else {
+            g_share_noimport++;
+        }
+        pthread_mutex_unlock(&g_surf_lock);
+        if (trace())
+            fprintf(stderr, "drm_xnu: surface %u plane %u share: %s -> ENOENT\n", surface_id, plane,
+                    dead ? "the connection of its import is closed" : "no writable import in this process (or forgotten)");
         errno = ENOENT;   /* no writable import of it in this process */
         return -1;
     }

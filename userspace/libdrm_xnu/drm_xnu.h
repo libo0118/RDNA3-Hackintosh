@@ -80,6 +80,10 @@ int   drm_xnu_surface_last_import(uint32_t *flags, uint64_t *gen);
  * sharing is off (debug.rdna3accel_a3share 0), ENODEV an accelerator
  * without it, ENOSYS a kext without the op, EINVAL surface 0 / plane > 15. */
 int   drm_xnu_surface_share(uint32_t surface_id, uint32_t plane);
+/* the share's ENOENT misses so far: no import known (never imported here, or
+ * forgotten), the import's connection closed, and imports the 64-entry
+ * table forgot (the oldest goes when it is full) */
+void  drm_xnu_surface_share_stats(uint64_t *noimport, uint64_t *deadconn, uint64_t *evicted);
 int   drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
                        uint16_t *subdevice, uint8_t *revision, uint16_t *domain,
                        uint8_t *bus, uint8_t *dev, uint8_t *func);

@@ -544,16 +544,23 @@ static const char *surfaceStatusName(unsigned int st)
     }
 }
 
-/* the first refusals of each cause, then one in 1024 */
-static void surfaceRefusedLog(const char *what, uint32_t surfaceId, uint32_t plane, unsigned int st, IOReturn rr)
+/* the first refusals of each cause, then one in 1024; 'buckets' (8): each
+ * kind of call its own budget (N71 (c) review: share records must not use up
+ * the import refusals' first lines) */
+static void surfaceRefusedLogIn(SInt32 *buckets, const char *what, uint32_t surfaceId, uint32_t plane,
+                                unsigned int st, IOReturn rr)
 {
-    static SInt32 gRefused[8];
     unsigned i = st == 0 ? 0 : (st & 7u);
-    SInt32 n = OSIncrementAtomic(&gRefused[i]);
+    SInt32 n = OSIncrementAtomic(&buckets[i]);
     if (n < 6 || (n & 1023) == 0)
         LOG("GEM: IOSurface %u plane %u %s refused: %s (status %#x, call %#x, %d of this cause)", surfaceId, plane,
             what, rr != kIOReturnSuccess ? "the accelerator did not answer" : surfaceStatusName(st), st, rr,
             (int)n + 1);
+}
+static void surfaceRefusedLog(const char *what, uint32_t surfaceId, uint32_t plane, unsigned int st, IOReturn rr)
+{
+    static SInt32 gRefused[8];
+    surfaceRefusedLogIn(gRefused, what, surfaceId, plane, st, rr);
 }
 
 /* RD3ACCEL_SS_FN 'cmd' on the accelerator; fDrmLock held and dropped
@@ -659,10 +666,20 @@ int RDNA3Accel::drmSurfaceShare(void *ctx, void *fileOs, uint32_t surfaceId, uin
     e.status = RD3K_SS_OFF;
     e.size = gen;
     IOReturn rr = a->accelSurfaceCall(&e, fileOs, RD3K_ESC_SURF_DIRTY, &svc);
-    if (!svc || rr != kIOReturnSuccess)
+    if (!svc || rr != kIOReturnSuccess) {
+        /* not the switch being off (that is RD3K_SS_OFF from the accelerator): say which */
+        static SInt32 gShareNoCall;
+        const SInt32 n = OSIncrementAtomic(&gShareNoCall);
+        if (n < 4 || (n & 1023) == 0)
+            LOG("GEM: share record of IOSurface %u plane %u not delivered: %s (call %#x, %d such) -- -ENXIO",
+                surfaceId, plane, !svc ? "no RDNA3Accelerator service" : "the accelerator call failed", rr,
+                (int)n + 1);
         return -RD_ENXIO;
-    if (e.status)   /* the accelerator logged its own reason; this says what the client got */
-        surfaceRefusedLog("share record", surfaceId, plane, e.status, rr);
+    }
+    if (e.status) {   /* the accelerator logged its own reason; this says what the client got */
+        static SInt32 gShareRefused[8];
+        surfaceRefusedLogIn(gShareRefused, "share record", surfaceId, plane, e.status, rr);
+    }
     return surfaceStatusErrno(e.status);
 }
 

@@ -46,11 +46,13 @@ uint32_t lb_surface_dirty_count, lb_surface_try_count, lb_surface_mark_count[2];
  * WindowServer gets for an application's shared drawable) */
 #define LB_SURFACE_RO_ID 0x53u
 #define LB_SURFACE_GEN   5u
+/* 0x100..0x1ff: writable aliases of 0x51 (the share table's tests need many surfaces) */
+#define LB_SURFACE_ALIAS(id) ((id) >= 0x100u && (id) < 0x200u)
 uint32_t lb_surface_share_count, lb_surface_share_gen;
 static int lb_surface_share(void *c, void *os, uint32_t id, uint32_t plane, uint64_t gen)
 {
     (void)c; (void)os;
-    if (id != LB_SURFACE_ID || plane)
+    if ((id != LB_SURFACE_ID && !LB_SURFACE_ALIAS(id)) || plane)
         return -RD_ENOENT;
     if (gen != LB_SURFACE_GEN)
         return -RD_EPERM;
@@ -61,7 +63,7 @@ static int lb_surface_share(void *c, void *os, uint32_t id, uint32_t plane, uint
 static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
 {
     (void)c; (void)os;
-    if ((id != LB_SURFACE_ID && id != LB_SURFACE_RO_ID) || plane)
+    if ((id != LB_SURFACE_ID && id != LB_SURFACE_RO_ID && !LB_SURFACE_ALIAS(id)) || plane)
         return -RD_ENOENT;
     bo->surf_gen = LB_SURFACE_GEN;
     if (id == LB_SURFACE_RO_ID) {

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include "amdgpu.h"
@@ -226,7 +227,12 @@ int main(void)
         extern uint32_t lb_surface_dirty_count;
         struct amdgpu_bo_import_result imp, imp2;
         uint8_t *p = NULL, *q = NULL;
-        int sfd = drm_xnu_surface_fd(0x51, 0, 5000), bad;
+        int sfd, bad;
+        {
+            extern void drm_xnu__test_import_stamp(unsigned v);
+            drm_xnu__test_import_stamp(0xffffffe0u);   /* N71 (c) review: the import table's stamps wrap below */
+        }
+        sfd = drm_xnu_surface_fd(0x51, 0, 5000);
         CHECK(sfd >= 0 && lseek(sfd, 0, SEEK_END) == 8192);   /* whole pages */
         memset(&imp, 0, sizeof(imp));
         CHECK(amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)sfd, &imp) == 0);
@@ -305,6 +311,75 @@ int main(void)
             close(bad);
             CHECK(amdgpu_bo_free(imp.buf_handle) == 0);
             close(sfd);
+        }
+        /* N71 (c) review: the 64-entry import table - the oldest forgotten when full (also across the stamp's
+         * wrap), a re-import reusing its slot, an import whose connection was closed (and its slot reused by
+         * another open) never sent to that other connection; every miss counted */
+        {
+            extern uint32_t lb_surface_share_count;
+            uint64_t none0, dead0, ev0, none1, dead1, ev1;
+            amdgpu_bo_handle held[66];
+            uint32_t id, nheld = 0;
+            int ok = 1;
+            drm_xnu_surface_share_stats(&none0, &dead0, &ev0);
+            /* (the stamps were set near the wrap before this process's first import: they wrap in the middle
+             * of the 65 imports below) */
+            for (id = 0x100; id < 0x100 + 65; id++) {
+                struct amdgpu_bo_import_result r1;
+                int t = drm_xnu_surface_fd(id, 0, 4096);
+                memset(&r1, 0, sizeof(r1));
+                ok &= t >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)t, &r1) == 0;
+                if (t >= 0)
+                    close(t);
+                if (r1.buf_handle)   /* held: the kernel's share needs the import alive */
+                    held[nheld++] = r1.buf_handle;
+            }
+            CHECK(ok);
+            drm_xnu_surface_share_stats(&none1, &dead1, &ev1);
+            CHECK(ev1 >= ev0 + 1);
+            /* the first one (0x100) went, the newest and the second are there */
+            CHECK(drm_xnu_surface_share(0x100, 0) == -1 && errno == ENOENT);
+            CHECK(drm_xnu_surface_share(0x100 + 64, 0) == 0 && drm_xnu_surface_share(0x101, 0) == 0);
+            drm_xnu_surface_share_stats(&none1, &dead1, &ev1);
+            CHECK(none1 == none0 + 1 && dead1 == dead0);
+            /* a re-import of a known surface takes its own slot again: nothing more forgotten */
+            {
+                struct amdgpu_bo_import_result r2;
+                int t = drm_xnu_surface_fd(0x101, 0, 4096);
+                uint64_t ev2;
+                memset(&r2, 0, sizeof(r2));
+                CHECK(t >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)t, &r2) == 0);
+                close(t);
+                if (r2.buf_handle)
+                    held[nheld++] = r2.buf_handle;
+                drm_xnu_surface_share_stats(NULL, NULL, &ev2);
+                CHECK(ev2 == ev1 && drm_xnu_surface_share(0x101, 0) == 0);
+            }
+            /* an import on a second connection that is then closed: ENOENT, counted as a dead connection,
+             * even after a new connection took its slot */
+            {
+                struct { uint32_t handle, flags; int32_t fd; } ph;
+                int fd2 = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR), t = drm_xnu_surface_fd(0x1f0, 0, 4096), fd3;
+                CHECK(fd2 >= 0 && t >= 0);
+                memset(&ph, 0, sizeof(ph));
+                ph.fd = t;
+                CHECK(drm_xnu_ioctl_nr(fd2, 0x2e, &ph, sizeof(ph)) == 0 && ph.handle != 0);   /* PRIME_FD_TO_HANDLE */
+                close(t);
+                CHECK(drm_xnu_close(fd2) == 0);
+                fd3 = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR);
+                CHECK(fd3 >= 0);
+                drm_xnu_surface_share_stats(&none0, &dead0, NULL);
+                lb_surface_share_count = 0;
+                CHECK(drm_xnu_surface_share(0x1f0, 0) == -1 && errno == ENOENT && lb_surface_share_count == 0);
+                drm_xnu_surface_share_stats(&none1, &dead1, NULL);
+                CHECK(dead1 == dead0 + 1 && none1 == none0);
+                CHECK(drm_xnu_surface_share(0x1f0, 0) == -1 && errno == ENOENT);   /* forgotten: no import now */
+                drm_xnu_surface_share_stats(&none1, &dead1, NULL);
+                CHECK(dead1 == dead0 + 1 && none1 == none0 + 1);
+                drm_xnu_close(fd3);
+            }
+            while (nheld)
+                CHECK(amdgpu_bo_free(held[--nheld]) == 0);
         }
     }
     /* malformed surface files: refused, nothing imported, the reason kept */

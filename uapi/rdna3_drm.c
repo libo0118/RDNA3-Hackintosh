@@ -1583,9 +1583,15 @@ static int soc21_query_video_codecs(const rdna3_drm_device *dev, int encode, con
     }
 }
 
+/* the user fence BO: the ring writes it through VMID0 (its MC / GART address,
+ * RDNA3Bringup::ufAddr), past the client's VM and its read-only pages, so
+ * never a userptr and never a foreign BO (N71 (c) security review: a
+ * read-only shared IOSurface import would let WindowServer write the
+ * producer's VRAM; a writable import is another process's VRAM too) */
 static int uf_bo_ok(const rdna3_bo *bo, uint64_t offset)
 {
-    return bo && bo->size == 4096 && !bo->userptr && offset <= 4096 - 8 && !(offset & 7);
+    return bo && bo->size == 4096 && !bo->userptr && !bo->foreign && !bo->gpu_ro && offset <= 4096 - 8 &&
+           !(offset & 7);
 }
 
 static void share_fault_attribute(rdna3_drm_file *f);
@@ -2359,7 +2365,7 @@ static void share_fault_attribute(rdna3_drm_file *f)
         return;
     f->share_fault_seen = addr;
     va = addr & GMC_HOLE_MASK;
-    for (i = 0; i < RD_MAX_VA && !hit; i++) {
+    for (i = 0; i < f->nvas && !hit; i++) {
         const rdna3_va *m = &f->vas[i];
         if (m->handle && m->bo && m->bo->gpu_ro && va >= m->va && va - m->va < m->size) {
             sid = m->bo->surf_id; splane = m->bo->surf_plane; spid = m->bo->surf_pid;
@@ -2371,8 +2377,12 @@ static void share_fault_attribute(rdna3_drm_file *f)
 }
 
 /* RD_NR_XNU_SURFACE_BO: a handle on an IOSurface's VRAM, or its dirty mark.
- * 'size': the bytes the ioctl's buffer holds (the out tail only when it
- * reaches it: rdna3_drm_ioctl copies back only the caller's bytes) */
+ * 'size': the bytes of the buffer this function was given. A caller's
+ * struct of 8..511 bytes reaches it in rdna3_drm_ioctl's zeroed 512-byte
+ * copy (size 512), of which only the caller's own bytes are copied back:
+ * that copy, not this check, keeps a 24-byte caller's memory past 'size'
+ * untouched; the check only keeps the tail inside the buffer passed here
+ * (a direct dispatch of a large buffer) */
 static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s, uint32_t size)
 {
     rdna3_drm_device *dev = f->dev;
