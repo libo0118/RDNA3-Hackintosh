@@ -394,6 +394,19 @@ impl Emitter {
                     _ => false,
                 }
             });
+        // N76: the analyses before emission took this load as its field's only
+        // stored pointer; emission must agree (the store may be emitted later
+        // in a construct tree's dispatch, then the prediction is the value).
+        let stored = match (stored, self.field_forwards.get(result_name)) {
+            (Some(stored), Some(predicted)) if stored != *predicted => {
+                return Err(format!(
+                    "native emitter: local pointer field load {result_name} reads {:?}, but its field's only store is {:?} (N76)",
+                    stored.value, predicted.value
+                ));
+            }
+            (None, Some(predicted)) => Some(predicted.clone()),
+            (stored, _) => stored,
+        };
         let Some(stored) = stored else {
             self.emit_unmodeled_byte_pointer_copy(result_name, result, *addrspace, instructions)?;
             self.emit_sidecar.local_pointer_field_loads.push(

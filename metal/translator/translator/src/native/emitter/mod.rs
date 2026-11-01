@@ -74,6 +74,13 @@ pub(super) struct Emitter {
     vector_word_pointers: HashMap<String, VectorWordPointer>,
     local_pointer_fields: HashMap<LocalPointerField, TypedValue>,
     pointer_forward_values: HashMap<String, TypedValue>,
+    /// Loads of local pointer fields whose value is fixed before emission
+    /// (tir/field_forward.rs, DRIVER-PLAN N76): load -> stored pointer.
+    field_forwards: HashMap<String, TypedValue>,
+    /// The entry block's values and the parameters (pointers/phi_uniform.rs).
+    entry_block_values: HashSet<String>,
+    /// Pointer phis emitted as an alias of their one pointer (N76).
+    uniform_pointer_phis: HashMap<String, LlValue>,
     raw_memcpy_shadows: HashMap<String, Vec<(u64, Word)>>,
     imageblock_data_scratch: Option<(Word, LlType)>,
     dynamic_pointer_tables: HashMap<String, DynamicPointerTable>,
@@ -389,6 +396,9 @@ impl Emitter {
             vector_word_pointers: HashMap::new(),
             local_pointer_fields: HashMap::new(),
             pointer_forward_values: HashMap::new(),
+            field_forwards: HashMap::new(),
+            entry_block_values: HashSet::new(),
+            uniform_pointer_phis: HashMap::new(),
             raw_memcpy_shadows: HashMap::new(),
             imageblock_data_scratch: None,
             dynamic_pointer_tables: HashMap::new(),

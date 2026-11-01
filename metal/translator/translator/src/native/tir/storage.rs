@@ -26,6 +26,20 @@ pub(in crate::native) fn derive_pointer_storage_from(
     named_types: &HashMap<String, LlType>,
     seeds: &HashMap<String, StorageClass>,
 ) -> HashMap<String, StorageClass> {
+    derive_pointer_storage_with_field_forwards(tir, params, named_types, seeds, &HashMap::new())
+}
+
+/// As `derive_pointer_storage_from`, with the loads of local pointer fields
+/// the emitter forwards (`local_pointer_field_forwards`, DRIVER-PLAN N76):
+/// such a load has its stored pointer's storage, not the address space's
+/// default.
+pub(in crate::native) fn derive_pointer_storage_with_field_forwards(
+    tir: &TirFunction,
+    params: &[(String, LlType)],
+    named_types: &HashMap<String, LlType>,
+    seeds: &HashMap<String, StorageClass>,
+    field_forwards: &HashMap<String, TypedValue>,
+) -> HashMap<String, StorageClass> {
     let mut storage = seeds.clone();
     for (name, ty) in params {
         if let LlType::Ptr(addrspace) = ty {
@@ -60,6 +74,12 @@ pub(in crate::native) fn derive_pointer_storage_from(
                     "phi" => inst
                         .phi_values()
                         .and_then(|values| phi_incoming_storage(values, &storage)),
+                    "load" if field_forwards.contains_key(result) => {
+                        match &field_forwards[result].value {
+                            LlValue::Global(_) => addrspace_default_storage(*addrspace),
+                            value => local_storage(value, &storage),
+                        }
+                    }
                     _ => addrspace_default_storage(*addrspace),
                 };
                 if let Some(s) = resolved {

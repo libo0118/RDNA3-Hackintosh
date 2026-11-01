@@ -33,6 +33,9 @@ impl Emitter {
             }
             self.refuse_unsplit_network_member(&name, "pointer phi")?;
         }
+        if self.emit_uniform_pointer_phi(&name, &incoming, &result_ty)? {
+            return Ok(());
+        }
         if self.emit_selected_access_tree_phi(&name, &incoming, &result_ty, instructions)? {
             return Ok(());
         }
@@ -245,7 +248,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn forwarded_pointer_value(&self, value: &LlValue) -> LlValue {
+    pub(super) fn forwarded_pointer_value(&self, value: &LlValue) -> LlValue {
         let mut value = value.clone();
         let mut visited = HashSet::new();
         while let LlValue::Local(name) = &value {

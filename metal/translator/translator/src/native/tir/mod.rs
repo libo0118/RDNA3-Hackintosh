@@ -11,6 +11,8 @@ mod pointee;
 pub(in crate::native) use pointee::*;
 mod storage;
 pub(in crate::native) use storage::*;
+mod field_forward;
+pub(in crate::native) use field_forward::local_pointer_field_forwards;
 mod terminator;
 pub(in crate::native) use terminator::*;
 mod operands;

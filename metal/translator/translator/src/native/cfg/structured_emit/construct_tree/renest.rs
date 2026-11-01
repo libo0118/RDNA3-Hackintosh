@@ -134,6 +134,7 @@ fn dominating_pointer_derivations(
                         tir::TirOpcode::Bitcast
                             | tir::TirOpcode::AddrSpaceCast
                             | tir::TirOpcode::GetElementPtr
+                            | tir::TirOpcode::ExtractValue
                     )
                 {
                     continue;
@@ -146,6 +147,15 @@ fn dominating_pointer_derivations(
                             LlValue::Local(name) if !defined_values.contains(name)
                         )
                     }),
+                    // DRIVER-PLAN N76: a pointer field of a by-value
+                    // parameter (`%p = extractvalue %struct %param, ...`)
+                    // is the parameter's for the whole function; carried
+                    // across cases in a value slot it had no form (a
+                    // Private pointer phi with no structural source).
+                    tir::TirOpcode::ExtractValue => matches!(
+                        inst.operands.first(),
+                        Some(tir::TirOperand::Value { name, .. }) if !defined_values.contains(name)
+                    ),
                     tir::TirOpcode::Bitcast | tir::TirOpcode::AddrSpaceCast => {
                         inst.operands.iter().any(|operand| {
                             matches!(

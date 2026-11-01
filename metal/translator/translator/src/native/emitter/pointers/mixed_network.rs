@@ -284,6 +284,12 @@ impl Emitter {
                     Some((_, incoming)) => NetDef::Phi(incoming.clone()),
                     None => NetDef::Unknown,
                 },
+                TirOpcode::Load => match self.field_forwards.get(result) {
+                    Some(stored) if stored.ty == LlType::Ptr(0) => {
+                        NetDef::Copy(stored.value.clone())
+                    }
+                    _ => NetDef::Unknown,
+                },
                 TirOpcode::Select => {
                     if let Some(arms) = inst.select_arms() {
                         select_operands.push([arms.0.value.clone(), arms.1.value.clone()]);
