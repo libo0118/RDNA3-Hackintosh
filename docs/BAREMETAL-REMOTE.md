@@ -457,3 +457,37 @@ Install the plugin with N73 (CI `full: true`), reboot or log out (WindowServer r
    game's `nvmtl-fps-<pid>.log` (gpuwait, submits/frame) for the same window: they say which half to cut next (DRIVER-PLAN N73 OPEN).
 4. Desktop sanity with the keep ring on: drag windows, resize the game's window, close it; no stale or wrong window contents
    (a reused image keeps the seed check; a wrong picture = set NVMTL_SURFTEX_KEEP=0 and report).
+
+## Round 3 plan (Linux session, 2026-11-01): build 2a0525d
+
+All from the ONE full `build.yml` run on 2a0525d (kexts unchanged since
+round 2, but take the core, tarball, `RDNA3MTL` and `radv-macos-logs` from
+the same run). Plugin installs: `rm` the old dylib/bundle first, never `cp`
+over a mapped file (round-2 lesson); log out after installing the plugin.
+
+New since round 2:
+- N73 (merged, CI run 113 green): WindowServer keeps IOSurface texture images
+  (`NVMTL_SURFTEX_KEEP`, 8 in WindowServer) instead of rebuilding an 8 MB
+  image and re-uploading it every frame; `vk: drawable: SUMMARY` lines with
+  the apps' nextDrawable wait; triage row `drawable`. Checks: the section
+  "Round 3 checks for N73" above (horizon-client 30 s, A/B with
+  `NVMTL_SURFTEX_KEEP=0`, `ws frame` + `nvmtl-fps-<pid>.log`, desktop sanity).
+- N72 (merged): the translator splits a pointer phi that mixes Function and
+  Private storage and is ~2x faster on large kernels; translator notes now
+  reach the release syslog as `translator note: <fn>: ...`. Check: Geekbench
+  7 GPU from the app; look for `translator note: depthwiseConv_3x3: ...
+  demoted to a per-storage value select (DRIVER-PLAN N72)`, the link time,
+  and the next `link FAILED` line if any (bring back `NVMTL_LINK_DUMP` files
+  to the Pi if it still fails). Score vs Linux (ask the owner for GB7 Linux).
+- `metal/rdna3mtl-allow.txt` now carries `horizon-client` and `geekbench_avx2`.
+
+Also in this round:
+1. Set `Booter/Quirks/ResizeAppleGpuBars` to 10 in `config-metal.plist` and
+   `config-driver.plist` on the stick too (only config.plist has it).
+2. Mouse wake (round-2 plan item 3, still not done).
+3. One 240 fps video of a fast window drag on the desktop (confirms the
+   round-2 "smooth" by numbers; the Linux session analyses it).
+4. N70 (branch quick/gsub-last, unmerged): decide keep or drop from the N73
+   numbers (`pres_us_avg` large -> the app's execution thread, N70 matters).
+
+Write "## Round 3 findings" below and push to Forgejo.
