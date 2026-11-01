@@ -67,7 +67,7 @@ int main(void)
     s.st_kept = 3; s.st_evict = 1;
     CHECK(nvmtl_dl_format(&s, 8, 1, body, sizeof body));
     CHECK(has(body, "next_n=4 ") && has(body, "next_us_avg=875 ") && has(body, "next_us_max=2000 ") && has(body, "next_slow=1 "));
-    CHECK(has(body, "next_nil=1 ") && has(body, "next_pct=18.4 "));   /* 3.5 ms of the 19 ms from the first start to the latest end */
+    CHECK(has(body, "next_nil=1 ") && has(body, "next_pct=18.4 ") && has(body, "next_ms=3 ") && has(body, "wall_ms=19 "));   /* 3.5 ms of the 19 ms from the first start to the latest end */
     CHECK(has(body, "pres_n=1 ") && has(body, "pres_us_avg=3000 ") && has(body, "pres_us_max=3000 "));
     CHECK(has(body, "away_n=2 ") && has(body, "away_us_avg=6000 ") && has(body, "away_us_max=8000 ") && has(body, "away_unknown=2 "));
     CHECK(has(body, "st_new=2 ") && has(body, "st_new_us_avg=300 ") && has(body, "st_alias=1 ") && has(body, "st_kept=3 ") && has(body, "st_evict=1 "));

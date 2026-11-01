@@ -19,7 +19,8 @@
  *
  * The SUMMARY (`vk: drawable: SUMMARY`, tools/triage_present_cost.py row `drawable`), cumulative per process:
  *   next_n next_us_avg next_us_max next_slow (> NVMTL_DL_SLOW_NS) next_nil next_pct (time in nextDrawable, % of the wall
- *   from the first call to the end of the last)   pres_n pres_us_avg pres_us_max (commit -> present call)
+ *   from the first call to the end of the last; next_ms / wall_ms the two totals, so triage can take the share of the
+ *   interval between two lines)   pres_n pres_us_avg pres_us_max (commit -> present call)
  *   away_n away_us_avg away_us_max away_unknown (a drawable back that was never presented here, or the table forgot it)
  *   st_new st_new_us_avg (IOSurface textures made: a private image each) st_alias (wrappers that reused a live image)
  *   st_kept st_evict (the keep ring, NVMTL_SURFTEX_KEEP) st_life_n st_life_us_avg st_life_us_max (wrapper made -> freed;
@@ -36,7 +37,9 @@
 #define NVMTL_DL_SLOTS    16                 /* surfaces whose present time is remembered (a layer has 2-3, a few layers) */
 #define NVMTL_DL_SLOW_NS  1000000ull         /* a nextDrawable longer than 1 ms counts as slow */
 #define NVMTL_KEEP_MAX    32                 /* NVMTL_SURFTEX_KEEP is clamped to this */
-#define NVMTL_KEEP_AGE_NS 2000000000ull      /* a kept image unused for 2 s is let go (its IOSurface with it) */
+#define NVMTL_KEEP_AGE_NS 2000000000ull      /* a kept image unused for 2 s is let go (its IOSurface with it) at the next texture
+                                                made, else by the 10 s summary timer (up to ~12 s); the ring is bounded by a COUNT
+                                                of images of any size (8 x 4K BGRA ~ 265 MB) */
 #define NVMTL_KEEP_WS_DEFAULT 8              /* WindowServer's default ring size; other processes 0 */
 
 typedef struct { uint32_t id; uint64_t t; } nvmtl_dl_slot;
@@ -167,11 +170,12 @@ static inline int nvmtl_dl_format(const nvmtl_dl_stats *s, unsigned keep, int tr
     const unsigned long long wall = L_(t_end) > L_(t_first) ? L_(t_end) - L_(t_first) : 0;
     const unsigned long long pct10 = wall ? L_(next_ns) * 1000u / wall : 0;   /* tenths of a percent */
     snprintf(out, cap,
-             "next_n=%llu next_us_avg=%llu next_us_max=%llu next_slow=%llu next_nil=%llu next_pct=%llu.%llu "
+             "next_n=%llu next_us_avg=%llu next_us_max=%llu next_slow=%llu next_nil=%llu next_pct=%llu.%llu next_ms=%llu wall_ms=%llu "
              "pres_n=%llu pres_us_avg=%llu pres_us_max=%llu away_n=%llu away_us_avg=%llu away_us_max=%llu away_unknown=%llu "
              "st_new=%llu st_new_us_avg=%llu st_alias=%llu st_kept=%llu st_evict=%llu st_life_n=%llu st_life_us_avg=%llu "
              "st_life_us_max=%llu keep=%u trace=%d",
              L_(next_n), AVG_(next_ns, next_n), L_(next_max_ns) / 1000u, L_(next_slow), L_(next_nil), pct10 / 10u, pct10 % 10u,
+             L_(next_ns) / 1000000u, wall / 1000000u,
              L_(pres_n), AVG_(pres_ns, pres_n), L_(pres_max_ns) / 1000u, L_(away_n), AVG_(away_ns, away_n), L_(away_max_ns) / 1000u,
              L_(away_unknown), L_(st_new), AVG_(st_new_ns, st_new), L_(st_alias), L_(st_kept), L_(st_evict), L_(st_life_n),
              AVG_(st_life_ns, st_life_n), L_(st_life_max_ns) / 1000u, keep, trace ? 1 : 0);
