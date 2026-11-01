@@ -147,7 +147,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
               { "NVMTL_PRESUBMIT_PROLOGUE", "0" }, { "NVMTL_NO_POOL_REUSE", "1" }, { "NVMTL_NO_BUFREUSE", "1" }, { "NVMTL_NO_BUFTEX_RECYCLE", "1" },
               { "NVMTL_NO_HEAPTEX_RECYCLE", "1" }, { "NVMTL_NO_HEAPTEX_PLACE", "1" }, { "NVMTL_NO_DIRTYONLY", "1" }, { "NVMTL_ENC78_OFF", "all" },
               { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" }, { "NVMTL_NO_SURFIN_CACHE", "1" },
-              { "NVMTL_SURFOUT_DMA", "0" } };   /* N61: the CPU copy-out */
+              { "NVMTL_SURFOUT_DMA", "0" }, { "NVMTL_SURFTEX_KEEP", "0" } };   /* N61: the CPU copy-out; N73: no kept IOSurface images */
           /* MANAGED_CHECK / MANAGED_SNAPSHOT are not in the profile: they live in the pre-submit prologue, which PRESUBMIT_PROLOGUE=0 removes, so
            * they would log ON and do nothing. They are rungs of their own. */
           char setl[480]; size_t setn = 0; setl[0] = 0;
@@ -813,6 +813,7 @@ static void nvmtl_mg_summary(int force) {
  * counter moved since its last line, so an idle process prints nothing. A failed timer is said once and the summaries stay call-driven / at exit. */
 static void nvmtl_ho_summary(void);   /* N59, NVMTLEventSync.m */
 static void nvmtl_pc_summary(void);   /* N61, below */
+static void nvmtl_dl_summary(void);   /* N73, below */
 static void nvmtl_summary_timer_arm(void)
 {
     static dispatch_once_t once; static dispatch_source_t timer;
@@ -822,7 +823,7 @@ static void nvmtl_summary_timer_arm(void)
         if (!timer) { nvlog("summaries: the shared 10 s timer could not be made - the managed / census / ab / fbfetch totals go out at their events and at exit only"); return; }
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10ll * NSEC_PER_SEC), 10ull * NSEC_PER_SEC, 1ull * NSEC_PER_SEC);
         dispatch_source_set_event_handler(timer, ^{ @autoreleasepool {
-            nvmtl_cen_summary(1); nvmtl_mg_summary(1); nvmtl_vk_summaries(); nvmtl_ho_summary(); nvmtl_pc_summary();   /* force: skip each one's own 10 s clock, a line is still printed only when a counter moved */
+            nvmtl_cen_summary(1); nvmtl_mg_summary(1); nvmtl_vk_summaries(); nvmtl_ho_summary(); nvmtl_pc_summary(); nvmtl_dl_summary();   /* force: skip each one's own 10 s clock, a line is still printed only when a counter moved */
         } });
         dispatch_resume(timer);
     });
@@ -1605,6 +1606,17 @@ static void nvmtl_pc_summary(void) {
     g_pc_last = ev;
     nvlog_uncapped("vk: present cost: SUMMARY %s", body);
 }
+/* N73: `vk: drawable: SUMMARY` (nvmtl_drawable_life.h) on the shared timer, which also lets go of kept surface images unused for 2 s */
+static uint64_t g_dl_last;   /* the summary timer's queue only */
+static void nvmtl_dl_line(void) {
+    char body[700];
+    const uint64_t ev = nvmtl_dl_events(&g_dl);
+    if (ev == g_dl_last || !nvmtl_dl_format(&g_dl, g_dl_keep, g_dl_trace, body, sizeof body)) return;
+    g_dl_last = ev;
+    nvlog_uncapped("vk: drawable: SUMMARY %s", body);
+}
+static void nvmtl_dl_summary(void) { nvmtl_keep_prune(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)); nvmtl_dl_line(); }
+static void nvmtl_dl_atexit(void) { nvmtl_dl_line(); }   /* no prune at exit: a kept image's dealloc would call Vulkan during teardown */
 /* every page of [a, a + len) is writable in this process: GEM_USERPTR would wire read-only pages read-only and a GPU write
  * into them is a VM fault (RDNA3Drm.cpp drmBoUserptr) */
 static int nvmtl_so_writable(uintptr_t a, size_t len) {
@@ -1678,6 +1690,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (void)dealloc {
+    if (_dlBornNs) nvmtl_dl_st_life(&g_dl, _dlBornNs, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));   /* N73: an IOSurface wrapper's life */
     if (_sampledDepthView) nvmtl_vk_image_view_destroy(_sampledDepthView);
     nvmtl_tex_objs_gone++;
     if (_tbView || _tbAlias) { nvmtl_vk_texel_view_destroy(_tbAlias, _tbView); _tbView = _tbAlias = NULL; }

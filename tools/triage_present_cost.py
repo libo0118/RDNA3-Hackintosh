@@ -26,6 +26,7 @@ Sources:
     iop_latch_rows(counters) -> [(LEVEL, 'IOP timing' | 'IOP latch', text)]
     python3 tools/triage_present_cost.py SYSCTL_DUMP [PLUGIN_LOG]   (prints the rows; the Pi session's sysctl.txt)
     ws_frame_rows(plugin_text) -> [(LEVEL, 'ws frame', text)]
+    drawable_rows(plugin_text) -> [(LEVEL, 'drawable', text)]   (N73: nextDrawable wait, present latency, WindowServer's surface textures)
 """
 import re
 
@@ -310,8 +311,59 @@ def ws_frame_rows(plugin_text):
     return out
 
 
+DL_WAIT_PCT = 30.0   # an app in nextDrawable more than this share of its wall is held by the drawables' way back (N73)
+
+
+def dl_summaries(plugin_text):
+    """{'Proc[pid]': {key: value}} from the newest `vk: drawable: SUMMARY` per process (DRIVER-PLAN N73)"""
+    last = {}
+    for m in re.finditer(r"([A-Za-z][\w .-]*?)\[(\d+):[0-9a-f]+\].*?NVMTL: vk: drawable: SUMMARY (.*)$", plugin_text or "", re.M):
+        name = re.sub(r"^(Df|Db|Dc|I|In|E|Er|Ef|F|Fa|A|De|Default|Info|Debug|Error|Fault)\s+", "", m.group(1).strip())
+        last["%s[%s]" % (name, m.group(2))] = dict(kv.split("=", 1) for kv in m.group(3).split() if "=" in kv)
+    return last
+
+
+def drawable_rows(plugin_text):
+    """N73: `drawable: nextDrawable P % of the wall ... commit -> present ... away ... | surface textures ...` per process"""
+    out = []
+    for proc, d in sorted(dl_summaries(plugin_text).items(), key=lambda kv: (not kv[0].startswith("WindowServer"), kv[0])):
+        nn, an, sn, sa = _num(d, "next_n"), _num(d, "away_n"), _num(d, "st_new"), _num(d, "st_alias")
+        try:
+            pct = float(d.get("next_pct", "0"))
+        except ValueError:
+            pct = 0.0
+        ms = lambda k: _num(d, k) / 1000.0  # noqa: E731
+        parts = []
+        if nn:
+            parts.append("nextDrawable %.1f %% of the wall (%d call(s), avg %.2f ms, longest %.2f ms, %d over 1 ms, %d nil)" % (
+                pct, nn, ms("next_us_avg"), ms("next_us_max"), _num(d, "next_slow"), _num(d, "next_nil")))
+        elif d.get("trace") == "1":
+            parts.append("nextDrawable hooked but never called")
+        if _num(d, "pres_n"):
+            parts.append("commit -> present avg %.2f ms (longest %.2f, %d present(s))" % (ms("pres_us_avg"), ms("pres_us_max"), _num(d, "pres_n")))
+        if an or _num(d, "away_unknown"):
+            parts.append("present -> back from nextDrawable avg %.2f ms (longest %.2f, %d timed, %d unknown)" % (
+                ms("away_us_avg"), ms("away_us_max"), an, _num(d, "away_unknown")))
+        if sn or sa:
+            parts.append("IOSurface textures: %d new image(s) (avg %.3f ms to make), %d wrapper(s) reused a live image, wrapper life avg %.2f ms "
+                         "(longest %.2f, %d); keep ring %s (%d kept, %d let go)" % (
+                             sn, ms("st_new_us_avg"), sa, ms("st_life_us_avg"), ms("st_life_us_max"), _num(d, "st_life_n"),
+                             ("%s" % d.get("keep")) if d.get("keep", "0") != "0" else "OFF", _num(d, "st_kept"), _num(d, "st_evict")))
+        if not parts:
+            continue
+        text = "%s: %s" % (proc, "; ".join(parts))
+        lvl = "INFO"
+        if nn >= 100 and pct > DL_WAIT_PCT:
+            lvl = "WARN"
+            text += (": the app waits for its drawables over %.0f %% of the time - the cap is the drawables' way back "
+                     "(compare commit -> present, ours in the app, with present -> back, WindowServer's hold; WindowServer's own row "
+                     "says what its frames cost)" % DL_WAIT_PCT)
+        out.append((lvl, "drawable", text))
+    return out
+
+
 def present_rows(plugin_text, surfvram, iop_on=True):
-    return _present_rows(plugin_text, surfvram, iop_on) + ws_frame_rows(plugin_text)
+    return _present_rows(plugin_text, surfvram, iop_on) + ws_frame_rows(plugin_text) + drawable_rows(plugin_text)
 
 
 def _present_rows(plugin_text, surfvram, iop_on=True):

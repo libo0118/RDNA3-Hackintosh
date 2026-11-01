@@ -77,6 +77,8 @@ $(BUILD)/test_handoff: tests/test_handoff.c metal/plugin/nvmtl_handoff.h | $(BUI
 
 $(BUILD)/test_present_cost: tests/test_present_cost.c metal/plugin/nvmtl_present_cost.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_present_cost.c
+$(BUILD)/test_drawable_life: tests/test_drawable_life.c metal/plugin/nvmtl_drawable_life.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_drawable_life.c
 $(BUILD)/test_ws_frame: tests/test_ws_frame.c metal/plugin/nvmtl_ws_frame.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_ws_frame.c
 $(BUILD)/test_strip: tests/test_strip.c common/rdna3_strip.h | $(BUILD)
@@ -250,7 +252,7 @@ C_TESTS := test_discovery test_uapi test_range_alloc test_vram_place test_bo_map
     test_linear_pitch test_gpu_time_queue test_ab_switch test_drawable_defer test_surface_share test_surf_census test_surfin_cache test_ci_refl \
     test_copy_pack test_msupload test_msdl test_spirv_fbfetch test_fbfetch_plan test_agdc_k5 test_agdc_n48 \
     test_bootargs test_a3_display test_gamma_judge test_swap_front test_attr_ring test_bar_window \
-    test_flip_latch test_iop_stale test_iop_copy test_iop_latch test_handoff test_present_cost test_ws_frame test_vbl_irq \
+    test_flip_latch test_iop_stale test_iop_copy test_iop_latch test_handoff test_present_cost test_ws_frame test_drawable_life test_vbl_irq \
     test_tcall test_fbgate test_flip_queue test_gpu_busy test_coh test_fb_policy test_swap_copy test_write_gen \
     test_vram_park test_surf_pending test_trace test_libdrm_amdgpu test_strip
 PY_TESTS := test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash_parity \

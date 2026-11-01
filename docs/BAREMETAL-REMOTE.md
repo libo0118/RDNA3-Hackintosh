@@ -441,3 +441,19 @@ argument; move the old tarball to `rdna3/old/` first (the first attempt reinstal
     240 fps video. The BAR change is still worth keeping (no VRAM refusals, room for iop_latch); make
     ResizeAppleGpuBars 10 the default in the stick's config-*.plist (config-metal.plist /
     config-driver.plist still -1; only config.plist has 10).
+
+## Round 3 checks for N73 (the game's nextDrawable wait; Linux session, 2026-11-01)
+
+Install the plugin with N73 (CI `full: true`), reboot or log out (WindowServer reads rdna3mtl.conf at its start).
+
+1. horizon-client in a world, 30 s, VSync off; then `sudo sh /Volumes/OPENCORE/rdna3/report.sh` and
+   `grep "vk: drawable: SUMMARY" rdna3-3h.log | tail` (or `python3 tools/triage_present_cost.py sysctl.txt rdna3-3h.log`).
+   The game's line: `next_pct` (share of its wall in nextDrawable), `pres_us_avg` (commit -> present, ours in the app),
+   `away_us_avg` (present -> the same surface back: WindowServer's hold). WindowServer's line: `st_new` (new 8 MB images:
+   with `keep=8` a few per surface, not one per frame), `st_alias`, `st_evict`, `st_new_us_avg` (what an image costs).
+2. A/B: `NVMTL_SURFTEX_KEEP=0` in `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`, log out and in, the same 30 s; compare
+   presented fps (DTrace `presentDrawable` count or the plugin's `fps:` lines), `away_us_avg`, WindowServer CPU. Remove the line.
+3. Also record WindowServer's `vk: ws frame: SUMMARY` (up_us_avg = the CPU upload of the game's frame, wait_us_avg) and the
+   game's `nvmtl-fps-<pid>.log` (gpuwait, submits/frame) for the same window: they say which half to cut next (DRIVER-PLAN N73 OPEN).
+4. Desktop sanity with the keep ring on: drag windows, resize the game's window, close it; no stale or wrong window contents
+   (a reused image keeps the seed check; a wrong picture = set NVMTL_SURFTEX_KEEP=0 and report).
