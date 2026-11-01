@@ -30,7 +30,7 @@ def bar_rows(*texts):
     if nots:
         bar, why = nots[-1]
         out.append(("FAIL", ROW, "BAR0 %s MiB, mapped 0 MiB, visible heap 0 MiB - NOT MAPPED: %s; nothing of VRAM is CPU-visible, "
-                                 "the bring-up stops at its own map (docs/TESTING-VM.md 'A bigger BAR0')" % (bar, why.strip()[:300])))
+                                 "the bring-up stops at its own map (docs/TESTING-VM.html 'A bigger BAR0')" % (bar, why.strip()[:300])))
     elif oks:
         bar, phys, mapped, how, vis, beyond = oks[-1]
         bar_i, mapped_i = int(bar), int(mapped)

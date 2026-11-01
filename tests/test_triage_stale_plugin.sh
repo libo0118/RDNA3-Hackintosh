@@ -70,7 +70,7 @@ STALE='FAIL STALE PLUGIN/RADV'
 # -- no stamp: the log signature
 mk s1 "$C5" "$G14" -
 o=$(run s1); grep -q "$STALE: PLUGIN log has the 'vk: G14 primitive topology' line but no" <<<"$o" || fail "s1 stale signature: $o"
-grep -q 'run build_radv.sh and build_metal.sh in the VM (docs/TESTING-VM.md)' <<<"$o" || fail "s1 hint: $o"
+grep -q 'run build_radv.sh and build_metal.sh in the VM (docs/TESTING-VM.html)' <<<"$o" || fail "s1 hint: $o"
 mk s2 "$C5" "$G14\\n$EDS" -
 o=$(run s2); ! grep -q "$STALE" <<<"$o" || fail "s2 eds ENABLED printed STALE: $o"
 mk s3 "$C5" "$G14\\nNVMTL: vk: VK_EXT_extended_dynamic_state ABSENT" -

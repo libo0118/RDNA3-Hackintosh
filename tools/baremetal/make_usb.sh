@@ -8,7 +8,7 @@
 # com.apple.recovery.boot) onto it, plus the helper scripts the owner runs inside macOS
 # (tools/baremetal/stick/: install.sh, report.sh, metal.sh) into rdna3/ and everything in
 # DIR/rdna3/ (the release tarball RDNA3-Hackintosh-*.tar.gz, metal/ with the Metal plugin and
-# RADV; docs/BAREMETAL.md part 5) next to them. DIR is what fetch.sh and build_efi.py made
+# RADV; docs/BAREMETAL.html part 5) next to them. DIR is what fetch.sh and build_efi.py made
 # (default: ~/rdna3-baremetal of the user who ran sudo).
 #
 # It refuses, before touching anything:
@@ -291,4 +291,4 @@ MNT=""
 
 echo
 echo "Done. $DEV is a macOS installer stick (EFI/OC + com.apple.recovery.boot + rdna3/ helper scripts)."
-echo "Next: docs/BAREMETAL.md, 'First boot'. Boot it from the BIOS boot menu (F11 on MSI), UEFI entry of the stick."
+echo "Next: docs/BAREMETAL.html, 'First boot'. Boot it from the BIOS boot menu (F11 on MSI), UEFI entry of the stick."

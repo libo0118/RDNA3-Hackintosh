@@ -1,0 +1,1660 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test in a virtual machine (Linux + a single RX 7800 XT card) - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Test in a virtual machine (Linux + a single RX 7800 XT card)</div>
+  <h1>Test in a virtual machine (Linux + a single RX 7800 XT card)</h1>
+  <p class="muted">How to test the driver in a QEMU virtual machine on a Linux computer whose only graphics card is the RX 7800 XT: setup, the steps, the reports, emergencies. For the owner (and anyone with the same hardware).</p>
+</header>
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#step-a-bios-and-linux-once-10-min">Step A. BIOS and Linux (once, 10 min)</a>
+</li>
+<li><a href="#step-b-downloading-macos-once-10-min">Step B. Downloading macOS (once, 10 min)</a>
+</li>
+<li><a href="#step-c-driver-package-once-and-after-every-new-version">Step C. Driver package (once and after every new version)</a>
+</li>
+<li><a href="#step-d-installing-macos-in-a-window-once-1-h">Step D. Installing macOS in a window (once, ~1 h)</a>
+</li>
+<li><a href="#step-e-tests-on-the-card-about-3-min-each">Step E. Tests on the card (about 3 min each)</a>
+
+<ol>
+<li><a href="#display-bisect-step-bisect">Display bisect (step bisect)</a></li>
+<li><a href="#display-bisect-on-the-agdc-profile-step-bisect-agdc">Display bisect on the agdc profile (step bisect-agdc)</a></li>
+<li><a href="#play-step-play-the-desktop-is-yours">Play (step play): the desktop is yours</a></li>
+<li><a href="#present-mode-ab-steps-play-macpro-play-rootport-play-desktop">Present-mode A/B (steps play-macpro, play-rootport, play-desktop)</a></li>
+<li><a href="#driver-side-ab-driver-plan-n40">Driver-side A/B (DRIVER-PLAN N40)</a></li>
+<li><a href="#the-ab-ladder-steps-ladder-ladder-ws-and-ladder-glyphs">The A/B ladder (steps ladder, ladder-ws and ladder-glyphs)</a></li>
+<li><a href="#the-app-survey-step-apps">The app survey (step apps)</a></li>
+<li><a href="#tests-that-already-passed">Tests that already passed</a></li>
+<li><a href="#a-new-framebuffer-build-allow-it-once">A new framebuffer build: allow it once</a></li>
+<li><a href="#a-new-build-reaches-macos-without-the-card">A new build reaches macOS without the card</a></li>
+<li><a href="#several-steps-in-one-go">Several steps in one go</a></li>
+</ol>
+</li>
+<li><a href="#emergency-exit">Emergency exit</a>
+</li>
+<li><a href="#when-something-goes-wrong">When something goes wrong</a>
+</li>
+<li><a href="#what-to-send-me">What to send me</a>
+</li>
+<li><a href="#new-driver-version">New driver version</a>
+
+<ol>
+<li><a href="#the-vm-on-this-computers-real-cpu-cpu_modelhost-amd-hosts-driver-plan-n53">The VM on this computer's real CPU (CPU_MODEL="host", AMD hosts; DRIVER-PLAN N53)</a></li>
+<li><a href="#macos-26-tahoe-on-a-second-disk">macOS 26 (Tahoe) on a second disk</a></li>
+<li><a href="#with-vulkan-radv">With Vulkan (RADV)</a></li>
+<li><a href="#vulkan-cts-subset-step-cts">Vulkan CTS subset (step cts)</a></li>
+<li><a href="#metal-plugin-optional-once">Metal plugin (optional, once)</a></li>
+<li><a href="#keeping-the-plugin-and-radv-current">Keeping the plugin and RADV current</a></li>
+<li><a href="#a-bigger-bar0-for-the-vm-optional">A bigger BAR0 for the VM (optional)</a></li>
+</ol>
+</li>
+<li><a href="#how-it-works-for-the-curious">How it works (for the curious)</a>
+</li>
+</ol></nav>
+<p>Instructions for a Linux computer in which <strong>the only graphics card is the
+RX 7800 XT</strong> (no iGPU and no second card). macOS runs in a QEMU virtual
+machine, and the card is passed through to it (passthrough). One script
+does everything: <code>tools/vm/rdna3vm</code>.</p>
+<p>What it looks like in practice:</p>
+<ol>
+<li>You type <code>rdna3vm step 2</code>. The Linux desktop disappears, because Linux hands over the card.</li>
+<li>macOS appears on the monitor. It boots with our driver at the
+level for the given step.</li>
+<li>After about 2 minutes macOS collects a report by itself, sends it to Linux and
+shuts down. The Linux desktop comes back.</li>
+<li>The report is in <code>~/rdna3-vm/reports</code>. You type the next step.</li>
+</ol>
+<p><strong>Time:</strong> one-time setup, about 1–1.5 hours (almost all of that time is
+the macOS installation). After that each step takes about 3 minutes.</p>
+<div class="warnbox">
+<p>During a step Linux has no display, and the keyboard and mouse belong to macOS.
+<strong>Every step logs you out of the Linux desktop</strong>: the desktop session holds the
+card, so the script stops the display manager to hand the card over and starts
+it again afterwards. You come back to the login screen; that is expected.
+Save your open work beforehand. You will not get stuck without a display, see
+<a href="#emergency-exit">Emergency exit</a>: <strong>both Ctrl keys at once, then Esc 3×</strong>.</p>
+</div>
+<hr />
+<figure>
+<svg viewBox="0 0 560 344" width="560" role="img" aria-labelledby="t72320 d72320" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t72320">Setting the VM up: steps A to E</title>
+<desc id="d72320">Five steps in order: BIOS and Linux, downloading macOS, the driver package, installing macOS in a window, tests on the card.</desc>
+<defs><marker id="arr72320" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs><a href="#step-a-bios-and-linux-once-10-min"><rect x="88" y="8" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="33" style="fill:var(--fg);font-weight:600">BIOS and Linux</text><text x="98" y="49" style="fill:var(--muted);font-size:12px">once, 10 min</text></a><rect x="8" y="22" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="36" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Step A</text><line x1="320" y1="56" x2="320" y2="77" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr72320)"/><a href="#step-b-downloading-macos-once-10-min"><rect x="88" y="78" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="103" style="fill:var(--fg);font-weight:600">Downloading macOS</text><text x="98" y="119" style="fill:var(--muted);font-size:12px">once, 10 min</text></a><rect x="8" y="92" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="106" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Step B</text><line x1="320" y1="126" x2="320" y2="147" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr72320)"/><a href="#step-c-driver-package-once-and-after-every-new-version"><rect x="88" y="148" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="173" style="fill:var(--fg);font-weight:600">Driver package</text><text x="98" y="189" style="fill:var(--muted);font-size:12px">once and after every new version</text></a><rect x="8" y="162" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="176" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Step C</text><line x1="320" y1="196" x2="320" y2="217" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr72320)"/><a href="#step-d-installing-macos-in-a-window-once-1-h"><rect x="88" y="218" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="243" style="fill:var(--fg);font-weight:600">Installing macOS in a window</text><text x="98" y="259" style="fill:var(--muted);font-size:12px">once, about 1 h</text></a><rect x="8" y="232" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="246" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Step D</text><line x1="320" y1="266" x2="320" y2="287" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr72320)"/><a href="#step-e-tests-on-the-card-about-3-min-each"><rect x="88" y="288" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:1.5"/><text x="98" y="313" style="fill:var(--fg);font-weight:600">Tests on the card</text><text x="98" y="329" style="fill:var(--muted);font-size:12px">about 3 min each, in order</text></a><rect x="8" y="302" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="316" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Step E</text></svg>
+<figcaption>The one-time setup (A-D) and then the tests (E). Click a box to jump to the step.</figcaption>
+</figure>
+<figure>
+<svg viewBox="0 0 560 344" width="560" role="img" aria-labelledby="t82436 d82436" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--sans);font-size:13px">
+<title id="t82436">What one step looks like</title>
+<desc id="d82436">rdna3vm step N: the Linux desktop goes away, macOS boots on the card with the step's driver level, a report is collected and sent, macOS shuts down, the desktop comes back.</desc>
+<defs><marker id="arr82436" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker></defs><rect x="88" y="8" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="33" style="fill:var(--fg);font-weight:600">rdna3vm step N</text><text x="98" y="49" style="fill:var(--muted);font-size:12px">Linux stops the desktop and hands the card over to the VM</text><rect x="8" y="22" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="36" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">you</text><line x1="320" y1="56" x2="320" y2="77" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr82436)"/><rect x="88" y="78" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--accent2);stroke-width:1.5"/><text x="98" y="103" style="fill:var(--fg);font-weight:600">macOS boots on the card</text><text x="98" y="119" style="fill:var(--muted);font-size:12px">OpenCore, then verbose macOS with our driver at the step's level</text><rect x="8" y="92" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="106" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">VM</text><line x1="320" y1="126" x2="320" y2="147" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr82436)"/><rect x="88" y="148" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--warn);stroke-width:1.5"/><text x="98" y="173" style="fill:var(--fg);font-weight:600">about 2 minutes after the desktop appears</text><text x="98" y="189" style="fill:var(--muted);font-size:12px">collects a report, sends it to Linux, shuts itself down</text><rect x="8" y="162" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="176" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">macOS</text><line x1="320" y1="196" x2="320" y2="217" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr82436)"/><rect x="88" y="218" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:1.5"/><text x="98" y="243" style="fill:var(--fg);font-weight:600">the desktop comes back (login screen)</text><text x="98" y="259" style="fill:var(--muted);font-size:12px">the card is given back; the computer sleeps ~5 s to reset it</text><rect x="8" y="232" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="246" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">Linux</text><line x1="320" y1="266" x2="320" y2="287" style="stroke:var(--muted);stroke-width:1.5" marker-end="url(#arr82436)"/><rect x="88" y="288" width="464" height="48" rx="8" style="fill:var(--card);stroke:var(--ok);stroke-width:1.5"/><text x="98" y="313" style="fill:var(--fg);font-weight:600">report in ~/rdna3-vm/reports</text><text x="98" y="329" style="fill:var(--muted);font-size:12px">type the next step (about 3 minutes per step)</text><rect x="8" y="302" width="74" height="20" rx="10" style="fill:none;stroke:var(--muted)"/><text x="45" y="316" text-anchor="middle" style="fill:var(--muted);font-size:12px;font-weight:600">you</text></svg>
+<figcaption>One test step as the owner sees it. The step table in step E lists every step.</figcaption>
+</figure>
+<h2 id="step-a-bios-and-linux-once-10-min">Step A. BIOS and Linux (once, 10 min)</h2>
+<p><strong>Motherboard BIOS:</strong></p>
+<ul>
+<li>enabled: <strong>SVM</strong> (AMD) or <strong>VT-x</strong> (Intel);</li>
+<li>enabled: <strong>IOMMU</strong> (AMD-Vi) or <strong>VT-d</strong> (Intel);</li>
+<li>enabled: <strong>Above 4G Decoding</strong>;</li>
+<li>disabled: <strong>CSM</strong>.</li>
+</ul>
+<p>Resizable BAR can stay enabled.</p>
+<p><strong>Kernel parameter</strong> <code>iommu=pt</code> (on Intel also <code>intel_iommu=on</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Distribution</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ubuntu / Debian / Mint</td>
+<td>in <code>/etc/default/grub</code> add the text <code>iommu=pt</code> to <code>GRUB_CMDLINE_LINUX_DEFAULT</code>, then <code>sudo update-grub</code></td>
+</tr>
+<tr>
+<td>Fedora</td>
+<td><code>sudo grubby --update-kernel=ALL --args=&quot;iommu=pt&quot;</code></td>
+</tr>
+<tr>
+<td>Arch (GRUB)</td>
+<td>like Ubuntu, then <code>sudo grub-mkconfig -o /boot/grub/grub.cfg</code></td>
+</tr>
+</tbody>
+</table>
+<p>Then restart the computer.</p>
+<p><strong>Packages:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Distribution</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ubuntu / Debian</td>
+<td><code>sudo apt install qemu-system-x86 qemu-utils python3 git dmg2img zstd psmisc</code></td>
+</tr>
+<tr>
+<td>Fedora</td>
+<td><code>sudo dnf install qemu-kvm qemu-img python3 git dmg2img zstd psmisc</code></td>
+</tr>
+<tr>
+<td>Arch</td>
+<td><code>sudo pacman -S qemu-full python git zstd psmisc</code>; <code>dmg2img</code> is in the AUR</td>
+</tr>
+</tbody>
+</table>
+<p>Finally, add yourself to the <code>kvm</code> group: <code>sudo usermod -aG kvm $USER</code>. Then
+log out and log back in.</p>
+<p><strong>Check:</strong></p>
+<pre><code class="language-sh">git clone -b stage1-kext https://github.com/Voten641/RDNA3-Hackintosh ~/RDNA3-Hackintosh
+~/RDNA3-Hackintosh/tools/vm/rdna3vm check</code></pre>
+<p>Every line should show <code>OK</code>. The script also shows what will go to the VM: the card (with its
+HDMI audio function) and the USB keyboard and mouse.</p>
+<p>For convenience, set an alias. After that typing <code>rdna3vm</code> is enough:</p>
+<pre><code class="language-sh">echo "alias rdna3vm=~/RDNA3-Hackintosh/tools/vm/rdna3vm" &gt;&gt; ~/.bashrc &amp;&amp; . ~/.bashrc</code></pre>
+<h2 id="step-b-downloading-macos-once-10-min">Step B. Downloading macOS (once, 10 min)</h2>
+<p>We use the existing <a href="https://github.com/kholia/OSX-KVM">OSX-KVM</a> project:</p>
+<pre><code class="language-sh">git clone --depth 1 --recursive https://github.com/kholia/OSX-KVM.git ~/OSX-KVM
+cd ~/OSX-KVM
+./fetch-macOS-v2.py                      # choose Sequoia (macOS 15)
+dmg2img -i BaseSystem.dmg BaseSystem.img</code></pre>
+<h2 id="step-c-driver-package-once-and-after-every-new-version">Step C. Driver package (once and after every new version)</h2>
+<ol>
+<li>Open <a href="https://forgejo.voten.me/Voten641/RDNA3-Hackintosh/actions">Forgejo → Actions</a>
+(CI runs only there; GitHub just mirrors the code). Go to the latest
+green <strong>build</strong> run on the <code>stage1-kext</code> branch and download the
+<strong>RDNA3Accel-kext</strong> artifact (a <code>.zip</code> file). <code>rdna3vm update</code> does
+this for you (see &quot;New driver version&quot;).</li>
+<li>Run:</li>
+</ol>
+<pre><code class="language-sh">rdna3vm prepare --osx-kvm ~/OSX-KVM --artifact ~/Downloads/RDNA3Accel-kext.zip</code></pre>
+<p>The script does, in order:</p>
+<ul>
+<li>a copy of OpenCore with SIP disabled (required for an unsigned kext);</li>
+<li>a package for macOS: kexts with firmware taken from <code>/lib/firmware/amdgpu</code> of your
+Linux;</li>
+<li>a dump of the card's VBIOS;</li>
+<li>reference data from amdgpu (<code>reports/linux-reference</code>), which we
+compare the results with.</li>
+</ul>
+<p>It asks for the <code>sudo</code> password a few times.</p>
+<h2 id="step-d-installing-macos-in-a-window-once-1-h">Step D. Installing macOS in a window (once, ~1 h)</h2>
+<p>This step works <strong>without passing through the card</strong>: macOS opens in a normal
+window on the Linux desktop.</p>
+<pre><code class="language-sh">rdna3vm window</code></pre>
+<p>macOS runs at 1440x900 there (<code>WINDOW_RESOLUTION</code> in the config, or
+<code>rdna3vm window --res 1280x800</code> for one run), not at the monitor's full
+size, and the picture is scaled to the window (QEMU's GTK <code>zoom-to-fit</code>):
+resize the window freely, the whole desktop stays visible. <code>--no-zoom</code>
+shows it 1:1. The steps with the card set the card's own mode back
+(<code>OC_RESOLUTION</code>).</p>
+<ol>
+<li>In the OpenCore menu choose <strong>macOS Base System</strong>.</li>
+<li><strong>Disk Utility</strong> → choose <em>QEMU HARDDISK</em> (about 128 GB) → <strong>Erase</strong>:
+name <code>macOS</code>, format <strong>APFS</strong>. Close Disk Utility.</li>
+<li><strong>Reinstall macOS Sequoia</strong> → choose the <code>macOS</code> disk. The installer
+restarts the VM several times by itself. If you see the OpenCore menu, choose
+the installer entry (<em>macOS Installer</em>), and at the end simply <code>macOS</code>.</li>
+<li>Create an account. You can skip Apple ID, location and other options.</li>
+<li>In macOS open <strong>Terminal</strong> (Cmd+Space, type &quot;Terminal&quot;) and paste:</li>
+</ol>
+<pre><code class="language-sh">curl -s http://10.0.2.2:8000/setup.sh | sudo sh</code></pre>
+<p>This installs the driver and the automatic reports. When it finishes, shut down the VM
+with <code>sudo shutdown -h now</code>.</p>
+<p>If macOS shows &quot;System Extension Blocked&quot;: go to System
+Settings → Privacy &amp; Security → <strong>Allow</strong>, restart and shut down the VM.</p>
+<h2 id="step-e-tests-on-the-card-about-3-min-each">Step E. Tests on the card (about 3 min each)</h2>
+<p>Run the steps <strong>in order</strong>. Start the next one only when the previous one
+has come back with a report:</p>
+<pre><code class="language-sh">rdna3vm step 0</code></pre>
+<p>The desktop goes dark, OpenCore appears on the monitor, and then macOS with white
+text on a black background (verbose mode). About 2 minutes after the desktop
+appears, macOS shuts down by itself and the Linux desktop comes back. Then run the next
+steps:</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>What it tests</th>
+<th>What you watch on the screen</th>
+</tr>
+</thead>
+<tbody>
+<tr id="vmstep-0">
+<td><code>0</code></td>
+<td>the kext loads, does nothing</td>
+<td>macOS boots normally</td>
+</tr>
+<tr id="vmstep-1">
+<td><code>1</code></td>
+<td>register reads, VRAM size</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-2">
+<td><code>2</code></td>
+<td>IP discovery table, VBIOS, monitor (EDID)</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-3">
+<td><code>3</code></td>
+<td>GC block registers, CU count</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-4">
+<td><code>4</code></td>
+<td>PSP: firmware loading</td>
+<td>same as above; the first step that writes to the card</td>
+</tr>
+<tr id="vmstep-5">
+<td><code>5</code></td>
+<td>SMU: clocks, fan, temperature</td>
+<td>the fan speed may change</td>
+</tr>
+<tr id="vmstep-5b">
+<td><code>5b</code></td>
+<td>DMCUB (display firmware)</td>
+<td><span class="badge warn">display risk</span> <strong>the screen may flicker or go dark</strong></td>
+</tr>
+<tr id="vmstep-6">
+<td><code>6</code></td>
+<td>GPU memory (GART), interrupts</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-6b">
+<td><code>6b</code></td>
+<td>MSI interrupts</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-7">
+<td><code>7</code></td>
+<td>SDMA: first commands executed by the GPU (+ DMA test)</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-8">
+<td><code>8</code></td>
+<td>GFX: graphics ring (+ GFX test)</td>
+<td>same as above</td>
+</tr>
+<tr id="vmstep-9">
+<td><code>9</code></td>
+<td>our framebuffer instead of the UEFI image</td>
+<td><span class="badge warn">display risk</span> the image should stay unchanged; <strong>it may go dark</strong></td>
+</tr>
+<tr id="vmstep-8c">
+<td><code>8c</code></td>
+<td>MES scheduler (<code>rdna3mes=1</code>)</td>
+<td><span class="badge ok">low risk</span>, the kernel rings stay on the KIQ</td>
+</tr>
+<tr id="vmstep-userq">
+<td><code>userq</code></td>
+<td>user queues through the MES (<code>rdna3userq=1</code>, + user queue test)</td>
+<td><span class="badge ok">low risk</span>; after 8c</td>
+</tr>
+<tr id="vmstep-pmctl">
+<td><code>pmctl</code></td>
+<td>power management from userspace (<code>rdna3pmctl=2</code>): fan, power limit, overdrive, profiles; the report sets each once and back</td>
+<td>the fan may change speed for a few seconds</td>
+</tr>
+<tr id="vmstep-baco">
+<td><code>baco</code></td>
+<td>the chip through BACO and back (<code>rdna3baco=1</code>), then the GPU is brought up again</td>
+<td><span class="badge fail">risky</span>: only after <code>pmctl</code> passed; the screens go dark during the cycle, a failed one needs a reboot</td>
+</tr>
+<tr id="vmstep-vcn">
+<td><code>vcn</code></td>
+<td>the video engines: VCN 4.0 decode/encode and the JPEG decoder (<code>rdna3vcn=1</code>, + <code>rdna3_drminfo --vcn-test</code>)</td>
+<td><span class="badge warn">medium risk</span>; after 8 passed. Nothing shows on screen; the report has the result</td>
+</tr>
+<tr id="vmstep-vcn2">
+<td><code>vcn2</code></td>
+<td>the video engines as in <code>vcn</code>, with the power saving Linux uses on this card (dynamic power gating, <code>rdna3vcn=2</code>)</td>
+<td><span class="badge warn">medium risk</span>; after <code>vcn</code> passed. Nothing shows on screen; the report has the result</td>
+</tr>
+<tr id="vmstep-9b">
+<td><code>9b</code></td>
+<td>the second monitor with the same picture (<code>rdna3dmub=1 rdna3mirror=1</code>)</td>
+<td><span class="badge warn">display risk</span> only after step 5b passed; <strong>either screen may go dark</strong></td>
+</tr>
+<tr id="vmstep-9c">
+<td><code>9c</code></td>
+<td>the second monitor as its own display (<code>rdna3mirror=2</code>)</td>
+<td><span class="badge warn">display risk</span> after 9b; <strong>either screen may go dark</strong></td>
+</tr>
+<tr id="vmstep-10">
+<td><code>10</code></td>
+<td>accelerator (WindowServer)</td>
+<td><span class="badge fail">risky</span>; send the reports from 0–9 first</td>
+</tr>
+<tr id="vmstep-hotplug">
+<td><code>hotplug</code></td>
+<td>a monitor unplugged and plugged back while macOS runs (<code>rdna3hotplug=1</code>)</td>
+<td><strong>stay at the machine</strong>: when the progress window says <em>unplug and replug the second monitor now</em>, pull the second monitor's cable, wait about 10 seconds, put it back; the second screen goes dark and comes back, macOS drops that display and adds it again</td>
+</tr>
+<tr id="vmstep-dplink">
+<td><code>dplink</code></td>
+<td>the mode switches of step <code>modeset</code> on a monitor connected over native DisplayPort (<code>rdna3dplink=1</code>): the driver trains the DP link itself</td>
+<td>only with a monitor on a DP cable straight into the card (no adaptor) that shows the boot picture; that monitor goes black for a moment at each switch and comes back in the new mode. <strong>It may stay on &quot;no signal&quot;</strong> until the step puts the old mode back</td>
+</tr>
+<tr id="vmstep-dsc">
+<td><code>dsc</code></td>
+<td>step <code>dplink</code> with DSC and FEC (<code>rdna3dsc=1</code>): a mode too big for the DP link is sent compressed</td>
+<td>only with a DP monitor that supports DSC (most 4K 144 Hz and 5K/6K monitors) on a DP cable straight into the card; the monitor goes black at each switch; <strong>it may stay black or show a garbled picture</strong> until the step puts the old mode back</td>
+</tr>
+<tr id="vmstep-mst">
+<td><code>mst</code></td>
+<td>step <code>dplink</code> through an MST hub or a daisy-chain monitor (<code>rdna3mst=1</code>): the driver reads the monitors behind the hub and drives one of them</td>
+<td>only with an MST hub (or a monitor with DP out) on a DP cable into the card and a monitor behind it showing the boot picture; that monitor goes black at the first switch and should come back; <strong>it may stay black</strong> until the step goes back to the normal (SST) mode. <code>rdna3mstport=2</code> picks the hub's second port</td>
+</tr>
+<tr id="vmstep-uhbr">
+<td><code>uhbr</code></td>
+<td>step <code>dplink</code> with the DisplayPort 2.1 speeds (UHBR10 / 13.5 / 20, <code>rdna3uhbr=1</code>): a mode too fast for DP 1.4 runs over the new 128b/132b link</td>
+<td>only with a DP 2.1 monitor (&quot;UHBR&quot; or &quot;DP80&quot; in its specs) on a DP80 or DP54 certified cable straight into the card, and a mode beyond 4K 120 Hz in its list (4K 240 Hz, 5K, 8K); the monitor goes black at each switch; <strong>it may stay black</strong> until the step goes back to the old mode</td>
+</tr>
+<tr id="vmstep-odm">
+<td><code>odm</code></td>
+<td>step <code>uhbr</code> with two display pipes per picture (<code>rdna3odm=1</code>, and DSC): an 8K mode is split in a left and a right half</td>
+<td>only with an 8K monitor (or a very high refresh-rate one) on native DP; <strong>it may show half a picture or stay black</strong> until the step goes back to the old mode</td>
+</tr>
+<tr id="vmstep-mall">
+<td><code>mall</code></td>
+<td>step <code>modeset2</code> with the display power features (<code>rdna3mall=1</code>): the memory clock and the fabric clock may go down while the monitors stay on, the idle screen is kept in the GPU's cache</td>
+<td>both monitors as usual; watch for flicker, a black line or a short black screen, especially in the first minute and when nothing moves on screen. Then do the mode switches of <code>modeset2</code></td>
+</tr>
+<tr id="vmstep-subvp">
+<td><code>subvp</code></td>
+<td>step <code>mall</code> with one monitor and &quot;sub-viewport&quot; memory switching (<code>rdna3subvp=1</code>) for high refresh rates</td>
+<td><span class="badge warn">display risk</span> only with a monitor that runs 120-175 Hz at 4K, 3440x1440, 2560x1440 or 1080p; only that monitor is used. Switch it to its high-refresh mode with <code>rdna3_modetest</code>; <strong>it may flicker or show a torn picture</strong> while the mode is set: note what it showed, then switch back</td>
+</tr>
+<tr id="vmstep-otg">
+<td><code>otg</code></td>
+<td>the second monitor as its own display (step <code>9c</code>) and the driver reading every lit picture's timing generator through Linux's own functions (<code>rdna3otg=1</code>)</td>
+<td><span class="badge ok">low risk</span>: nothing changes on screen; the result is in the report</td>
+</tr>
+<tr id="vmstep-dmubreset">
+<td><code>dmubreset</code></td>
+<td>step <code>9c</code> with the display microcontroller (DMCUB) reset exactly as Linux resets it (<code>rdna3dmubreset=1</code>)</td>
+<td><span class="badge warn">medium risk</span>: the second monitor may stay dark if the DMCUB does not come back</td>
+</tr>
+<tr id="vmstep-hdmi">
+<td><code>hdmi</code></td>
+<td>the mode switches of step <code>modeset</code> with Linux's HDMI setup on top (<code>rdna3hdmi=1</code>): the picture-format packet (AVI infoframe) the TV/monitor reads, audio/video mute around each switch, the HDMI 2.0 control channel (SCDC)</td>
+<td>for a monitor or TV on HDMI (or DVI); it goes black for a moment at each switch as in <code>modeset</code>. If it shows wrong colours, overscan or &quot;no signal&quot; after a switch, note what it showed</td>
+</tr>
+<tr id="vmstep-agdc">
+<td><code>agdc</code></td>
+<td>the desktop with RDNA3AGDC (<code>rdna3agdc=3</code>; WindowServer waits until it is up) and WindowServer on our Metal plugin, which CoreDisplay requires then (card runs 41-48; run 48: works), plus the Metal probes M4-M6 (an app window on the Metal plugin, Chess and Maps briefly). <strong>First</strong> rebuild the plugin in the VM: <code>rdna3vm window</code>, then in its Terminal <code>bash &lt;(curl -s http://10.0.2.2:8000/tools/build_metal.sh)</code>. macOS learns the monitors' timings from it and should send each frame through the display pipe; the gamma test runs too</td>
+<td>new kext: <code>rdna3vm approve</code> first (it asks to allow RDNA3AGDC); watch both monitors: if the picture freezes, goes black or flickers, say so</td>
+</tr>
+<tr id="vmstep-relight">
+<td><code>relight</code></td>
+<td>step <code>hotplug</code> the NullMoth way (<code>rdna3hotplug=2</code>): the unplugged monitor keeps its place, macOS is not told; plugged back, the card lights the same picture again</td>
+<td><strong>stay at the machine</strong> and do the same as in <code>hotplug</code> (cable out ~10 s, back in): say whether the other monitor stayed as it was and whether the replugged one came back with the desktop (not black)</td>
+</tr>
+<tr id="vmstep-cursormall">
+<td><code>cursormall</code></td>
+<td>step <code>9c</code> with the mouse pointer read through the card's big cache as Linux does it (<code>rdna3cursormall=1</code>)</td>
+<td><span class="badge ok">low risk</span>; <strong>move the mouse over both monitors</strong> during the step and note if the pointer flickers, shows garbage or vanishes</td>
+</tr>
+<tr id="vmstep-dcseq">
+<td><code>dcseq</code></td>
+<td>step <code>modeset2</code> with two small steps Linux adds around each switch (<code>rdna3dcseq=1</code>): the HDMI clock kept running a moment longer while the picture goes off, and the display FIFOs re-synchronised after the switch</td>
+<td>same as <code>modeset2</code>: the monitors go black for a moment at each switch and come back</td>
+</tr>
+<tr id="vmstep-audio">
+<td><code>audio</code></td>
+<td>the mode switches of step <code>hdmi</code> with the monitor's sound turned on as Linux does it (<code>rdna3audio=1</code>, also on a DisplayPort monitor): the card tells the monitor's speakers about the sound it can send and starts the sound stream</td>
+<td>for a monitor or TV <strong>with speakers or an audio output</strong> on HDMI (or native DisplayPort). After the step, if macOS has an HDMI audio driver for the card, open System Settings &gt; Sound &gt; Output: note whether the monitor is listed and whether a test sound plays. If nothing is listed, that is expected without such a driver: the report still shows whether the card side worked</td>
+</tr>
+<tr id="vmstep-fmt">
+<td><code>fmt</code></td>
+<td>the mode switches of step <code>hdmi</code> in the colour format Linux picks (<code>rdna3fmt=1</code>): YCbCr instead of RGB and 10 or 12 bits per colour when the monitor/TV supports it</td>
+<td>for a monitor or TV on HDMI. Look at the colours after every switch: note any pink / green / washed-out picture or visible banding, and if the monitor's own menu shows the input format (&quot;YCbCr&quot;, &quot;10 bit&quot;), note what it says</td>
+</tr>
+<tr id="vmstep-hdmi20">
+<td><code>hdmi20</code></td>
+<td>step <code>modeset2</code> plus modes that need HDMI 2.0 speed (<code>rdna3hdmi=3</code>), e.g. 3840x2160 at 60 Hz</td>
+<td>only with a 4K monitor/TV on an HDMI 2.0 (or newer) port and a &quot;high speed&quot; HDMI cable. <strong>It may stay on &quot;no signal&quot;</strong> until the step puts the old mode back. If the automatic run does not pick 4K60, run <code>rdna3_modetest set 0 3840 2160</code> once by hand</td>
+</tr>
+<tr id="vmstep-sleep">
+<td><code>sleep</code></td>
+<td>monitor standby on every monitor, then a short system sleep: the display is saved, taken down and brought back (<code>rdna3dpms=2 rdna3resume=1</code>)</td>
+<td><span class="badge warn">display risk</span> both monitors go to standby (no signal) and come back; then macOS sleeps for ~30 s and wakes by itself (the host wakes the VM after 90 s otherwise). <strong>A screen may stay dark after the wake</strong></td>
+</tr>
+<tr id="vmstep-vcnsleep">
+<td><code>vcnsleep</code></td>
+<td>the <code>sleep</code> step with the video engines on (<code>rdna3vcn=2</code>): the video test runs before the system sleep and again after the wake</td>
+<td><span class="badge warn">display risk</span> as <code>sleep</code>; after <code>sleep</code> and <code>vcn2</code> passed. <strong>A screen may stay dark after the wake</strong></td>
+</tr>
+<tr id="vmstep-amdgpu">
+<td><code>amdgpu</code></td>
+<td>the default profile, but the driver follows Linux amdgpu's own order where the tested one differs (<code>rdna3amdgpu=1</code>): firmware load order, power management setup, page tables, the interrupt ring in system memory</td>
+<td><span class="badge warn">medium risk</span>; after <code>default</code> passed. Looks like step <code>default</code>; if the screen stays on the boot picture and the report says PSP or SMU failed, boot once without it</td>
+</tr>
+<tr id="vmstep-bisect">
+<td><code>bisect</code></td>
+<td>the display bug (black screens, windows that do not appear or only flash, flicker): every new feature that has a runtime switch off, then back on one at a time, 30 s each (13 steps, 6.5 min; <a href="#display-bisect-step-bisect">Display bisect</a>)</td>
+<td><strong>sit at the monitors for the whole run</strong>: a notification, a spoken &quot;step N&quot; and N beeps announce every step; note the step numbers where the picture goes wrong</td>
+</tr>
+<tr id="vmstep-bisect-plugin">
+<td><code>bisect-plugin</code></td>
+<td>the same for the Metal plugin's switches (<code>rdna3mtl.conf</code>, the allow list); <strong>restarts WindowServer three times</strong></td>
+<td>run it last, after <code>bisect</code>; log in again at the login window each time unless the guest logs in by itself</td>
+</tr>
+<tr id="vmstep-bisect-agdc">
+<td><code>bisect-agdc</code></td>
+<td>the same bisect on the <strong>agdc profile</strong> (WindowServer on our Metal plugin, the card busy): <code>swap_mode</code>, <code>swap_gen</code>, <code>flipbuf_present</code>, <code>swap_stale</code>, <code>iop</code>, <code>a3</code>, <code>swap_latch</code>, <code>iop_flip</code> in 13 combinations of 30 s each, 6.5 min (<a href="#display-bisect-on-the-agdc-profile-step-bisect-agdc">Display bisect on the agdc profile</a>)</td>
+<td>the plain <code>bisect</code> runs the default profile, where the AGDC is idle and WindowServer draws on the CPU: use this one for the real desktop. <strong>Sit at the monitors for the whole run</strong>; same announcements as <code>bisect</code>. Step 7 turns <code>iop</code> off while WindowServer runs: the picture may stay wrong afterwards (shut macOS down from the report's end as usual)</td>
+</tr>
+<tr id="vmstep-ladder">
+<td><code>ladder</code></td>
+<td>DRIVER-PLAN N50, the broken glyphs / tile blocks: the Metal plugin's A/B switches one rung at a time in ONE run (8 rungs, about 29 min; <a href="#the-ab-ladder-steps-ladder-ladder-ws-and-ladder-glyphs">The A/B ladder</a>)</td>
+<td>nothing to type, nothing to answer: Terminal and Chess open and close by themselves on the desktop, look at the screen; the report has one row per rung. <code>ladder-ws</code> (about 45 min) adds the WindowServer rungs, which restart the desktop: <strong>log in at the login window each time</strong></td>
+</tr>
+<tr id="vmstep-apps">
+<td><code>apps</code></td>
+<td>the app survey: fifteen real apps (Chess, Terminal, TextEdit, Calculator, Notes, Safari with a text / canvas / WebGL page, Preview with a PDF and a JPEG, Maps, System Settings, App Store, Photos, Image Capture, QuickTime Player, Mission Control, Launchpad) opened one after another on the DEFAULT driver, a look of both screens each (about 25 min; <a href="#the-app-survey-step-apps">The app survey</a>)</td>
+<td>read the <code>app &lt;name&gt;</code> rows and look at the <code>scanoutapps-*</code> pictures; <a href="AFTER-TESTS.md">AFTER-TESTS</a> &quot;The app survey&quot;</td>
+</tr>
+</tbody>
+</table>
+<p>If you want to look longer, add <code>--stay</code>, for example <code>rdna3vm step 9 --stay</code>.</p>
+<p>Step <code>hotplug</code> is the one step that needs you at the screens: about two minutes after the desktop appears, the progress window and a notification say <em>unplug and replug the second monitor now</em>. You have two minutes from then: pull the second monitor's cable (the one the GOP did not light at boot), wait about 10 seconds, plug it back in. The report records what the driver saw (<code>RDNA3,HPDState</code> over time, the hotplug lines of the log) and takes a picture of both pipes afterwards. If you miss the window, the report says <code>HOTPLUG: 0 HPD change(s)</code>; run the step again.</p>
+<h3 id="display-bisect-step-bisect">Display bisect (step <code>bisect</code>)</h3>
+<p>The screens have been wrong since about card run 58: black, windows that do
+not appear or only flash every few seconds, flicker. Since then several
+things were added; most have a switch that works while macOS runs. This step
+turns every one of them off, then on again one at a time (the oldest first,
+each one on top of the ones before it), and holds each state for 30 seconds
+while <strong>you</strong> look at both monitors. The report then says at which step the
+picture went wrong.</p>
+<p>What you run:</p>
+<pre><code class="language-sh">rdna3vm update
+rdna3vm step bisect</code></pre>
+<p>The VM boots as for any step. A few minutes after the desktop appears (the
+progress window says when) the 13 steps start; the whole run is 6.5 minutes
+and the report arrives a few minutes later. <strong>Nothing else runs in this step</strong>
+(no swap A/B, no Metal apps, no mode switches except the controls): the screens show the desktop
+and Activity Monitor (it redraws every few seconds, so a frozen picture shows).
+Only look at the monitors; do not touch the mouse or keyboard.</p>
+<p>What you see and hear at every step: a macOS notification &quot;step N of 12: ...&quot;,
+the voice saying &quot;step N&quot;, and N short beeps (step 5: five beeps). If the
+virtual machine has no sound you still get the notification and the progress
+window; the timetable below tells you the step by the clock as well. Write down
+the numbers of the steps where a monitor goes black, a window does not appear
+or only flashes, or the picture flickers, and which monitor. The run also
+looks at the monitors itself (two pictures of every pipe per step) and sends
+what each step switched, so the report answers even without your notes.</p>
+<p>Timetable (the time after the start; the progress window and the first
+notification say the clock time of the start). Each state is held for 30 s.
+&quot;Off&quot; is the value a switch has to restore the behaviour before it was added;
+the switches read back are in the report (<code>39-bisect.txt</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Time</th>
+<th>What is switched</th>
+<th>Since</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>00:00</td>
+<td>nothing: the defaults as the boot left them (the reference)</td>
+<td></td>
+</tr>
+<tr>
+<td>1</td>
+<td>00:30</td>
+<td><strong>every new feature off</strong>: <code>a3</code> 0, <code>flicker</code> 0, <code>swap_latch</code> 0, <code>swap_torn</code> 0, <code>swap_mode</code> 0 (the flip), <code>trace_scan</code> 0, <code>swap_stale</code> 0 (closest to before the bug)</td>
+<td></td>
+</tr>
+<tr>
+<td>2</td>
+<td>01:00</td>
+<td><code>a3</code> 1: applications' IOSurfaces live in the card's VRAM (A3)</td>
+<td>2026-10-15</td>
+</tr>
+<tr>
+<td>3</td>
+<td>01:30</td>
+<td><code>flicker</code> 1: the flicker test hashes the swaps' pictures (reads the card's memory through the BAR)</td>
+<td>2026-10-15d</td>
+</tr>
+<tr>
+<td>4</td>
+<td>02:00</td>
+<td><code>swap_latch</code> 1: a swap waits until its flip latched</td>
+<td>2026-10-17</td>
+</tr>
+<tr>
+<td>5</td>
+<td>02:30</td>
+<td><code>swap_torn</code> 1: a second hash of every shown buffer</td>
+<td>2026-10-17</td>
+</tr>
+<tr>
+<td>6</td>
+<td>03:00</td>
+<td><code>swap_stale</code> 1: the stale-back hold. This is the defaults again (the same switches as step 0; it only acts in mode 1/2)</td>
+<td>2026-10-17c</td>
+</tr>
+<tr>
+<td>7</td>
+<td>03:30</td>
+<td>control, off by default: <code>swap_mode</code> 1 (the back is copied into a scanout buffer instead of flipped to; the former default, it broke both monitors in the 2026-10-17d bisect)</td>
+<td>2026-10-17b</td>
+</tr>
+<tr>
+<td>8</td>
+<td>04:00</td>
+<td>control, off by default: <code>trace_scan</code> 1 (the trace samples the swap's other buffers)</td>
+<td>2026-10-17b</td>
+</tr>
+<tr>
+<td>9</td>
+<td>04:30</td>
+<td>control, off by default: <code>swap_mode</code> 1 with <code>swap_landed</code> 1</td>
+<td>2026-10-17c</td>
+</tr>
+<tr>
+<td>10</td>
+<td>05:00</td>
+<td>control, off by default: <code>swap_mode</code> 2 (every back copied)</td>
+<td>2026-10-17b</td>
+</tr>
+<tr>
+<td>11</td>
+<td>05:30</td>
+<td>control, off by default: <code>a3ws</code> 1 (WindowServer's own inputs in A3, the card run 58b flicker)</td>
+<td>2026-10-15d</td>
+</tr>
+<tr>
+<td>12</td>
+<td>06:00</td>
+<td>the defaults again (the end state; the switches are put back even if the run dies)</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Steps 7 to 11 are controls: they show what the states that are off by default
+look like (swap mode 1 and 2, <code>trace_scan</code>, <code>a3ws</code>); a bad picture there is
+expected and does not count. Since card run 2026-10-17d the defaults are the
+flip (<code>swap_mode</code> 0) and <code>trace_scan</code> 0, i.e. the good state of that bisect, so
+step 0, step 6 and step 12 have the same switches (a different picture in them
+is reported as flaky). A step 1 that looks fine and a step 0 that does not means
+the cause is one of the switches above; the first of steps 2 to 6 that is bad
+again is the one that brings it back. If step 1 is bad too, none of these
+switches is the cause.</p>
+<p><code>a3</code> and <code>a3ws</code> only reach surfaces created after the switch, so the run
+opens Activity Monitor again at steps 0, 1, 2, 11 and 12; every other switch
+acts at the next swap.</p>
+<p>How to answer. By default the run is on a timer and records no answers
+(the triage uses its own looks: a lit pipe with almost no picture is black, a
+picture that stood still between two looks while it moved in other steps is
+frozen). To answer with the keyboard, start it by hand in a Terminal inside
+macOS instead:</p>
+<pre><code class="language-sh">rdna3vm args "rdna3bisect=3" --stay          # on the host: boots macOS, runs nothing
+sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh" --bisect    # in the macOS Terminal</code></pre>
+<p>Then press <code>y</code> (the picture looks right), <code>n</code> (broken) or Enter (next step)
+once a step is on; a key moves on to the next step after the run has taken its
+pictures (about 20 s into the step), no key = the 30 s timer. On bare metal
+(docs/TESTING-HW.html) the same with <code>sudo sh &quot;/Library/Application Support/RDNA3/autoreport.sh&quot; --standalone --bisect</code>.</p>
+<p>The Metal plugin's own switches are the optional second run:</p>
+<pre><code class="language-sh">rdna3vm step bisect-plugin</code></pre>
+<p>Its steps: 0 the plugin as it is; 1 <code>NVMTL_NO_SURFACE_SHARE=1</code>,
+<code>NVMTL_NO_SURFACE_PAGEOFF=1</code> and <code>NVMTL_TRACE=0</code> in
+<code>/Library/GPUBundles/rdna3mtl/rdna3mtl.conf</code> and the <code>%apps</code> line out of the
+allow list (apps mode off); 2 the two <code>NVMTL_NO_SURFACE_*</code> lines out again (A3's
+plugin half, 2026-10-15); 3 apps mode back (2026-10-15); 4 the frame trace back
+(2026-10-17, the defaults again). The plugin reads its conf when a process
+loads it, so WindowServer is <strong>restarted at steps 1, 2 and 4</strong>: your session
+ends, the login window shows and you log in again (the run waits up to 5
+minutes; if the guest logs in by itself nothing is needed). The risk is
+that of any WindowServer restart: the picture may stay black and the VM may
+panic (card run 50). The run uploads its table after every step, and the
+plugin's files are put back at the end and at the next boot should the run
+die. Run it last, and only when <code>bisect</code> points at nothing in the kernel.</p>
+<p>This run is the default profile, where the AGDC is idle and WindowServer does
+no GPU work (it renders on the CPU). Its answer (swap mode 0 fine, mode 1
+broken) therefore does not hold for the real desktop, which is the <code>agdc</code>
+profile: use <a href="#display-bisect-on-the-agdc-profile-step-bisect-agdc"><code>bisect-agdc</code></a>
+for that.</p>
+<p>Not switchable at runtime (not tested by the steps above): the copy
+forward fixes of 2026-10-17 (<code>rdna3accelcf=0</code> switches copy forward off for
+the whole boot), the visible-VRAM reserve (<code>rdna3visreserve=&lt;MiB&gt;</code>, 0 = none),
+output gamma on by default (<code>rdna3gamma=0</code>), the VRAM-lost CS refusal
+(<code>rdna3vramlostcs=0</code>), FreeSync (<code>rdna3vrr=1</code>, off by default), the VMID
+admission and every other change in the kext without a switch. Try those with
+<code>rdna3vm args &quot;&lt;the boot-arg&gt;&quot;</code> (no <code>rdna3lvl</code> in it: the default profile) and
+compare with step 0. Older than the bug and left alone: <code>iop_async</code>,
+<code>crc_head</code> and the plugin's <code>NVMTL_NO_DIRTYONLY</code>, <code>NVMTL_NO_TEXBUF</code>,
+<code>NVMTL_SKIP_EMPTY</code>, <code>NVMTL_NO_BUFTEX_RECYCLE</code> (all imported with the plugin on
+2026-10-09; their defaults did not change).</p>
+<p>The result: <code>rdna3vm result</code> prints the table (step, what changed, your
+answer, pipe 0 / 1 % not black, whether each picture moved between the step's
+two looks, the swap and stale-hold counter changes) and names the first step
+you marked <code>n</code>, the first whose looks went black or stood still, and where
+the run says the bug starts (<code>BISECT: BREAKS AT step N</code>). Anything missing
+(a look, the counters, a step that never ran) is a <code>WARN</code>.</p>
+<h3 id="display-bisect-on-the-agdc-profile-step-bisect-agdc">Display bisect on the agdc profile (step <code>bisect-agdc</code>)</h3>
+<p>Card run 2026-10-17f (<code>rdna3vm step play</code>, swap mode 0): the desktop is broken
+again. The serial log says <code>swap #83: head 1: the buffer it showed (phys ...) changed while on the panel ... rewritten in place and shown again</code> and
+<code>FRONT SURFACE sample: *** MOVED -- A LIVE WRITER IS PAINTING THE SCANNED-OUT SURFACE ***</code>, and the second back buffer reads empty at every swap. The plain
+<code>bisect</code> could not have seen that: it boots the default profile, where the
+AGDC is idle and WindowServer renders on the CPU. <code>bisect-agdc</code> is the same
+30-seconds-per-step bisect on the profile you really use.</p>
+<pre><code class="language-sh">rdna3vm update
+rdna3vm step bisect-agdc</code></pre>
+<p>The boot-args are exactly those of step <code>agdc</code> (WindowServer on our Metal
+plugin: <code>rdna3agdc=3 rdna3acceliop=1 rdna3accelfb=4</code> ...) plus
+<code>rdna3bisect=4</code>. (<code>rdna3bisect=3</code> is &quot;no tests this boot, start by hand&quot;, see
+above.) The run takes about 6.5 minutes of steps, the rest is the usual report
+(trace pump, plugin trace, <code>collect.sh</code>); the host stops the VM after about 23
+minutes at the latest. Everything else is as in <code>bisect</code>: the notification
+&quot;step N of 12: ...&quot;, the voice, N beeps, two pictures of each monitor per step
+(8 s and 20 s in) and the table in <code>39-bisect.txt</code> / <code>&lt;report&gt;-bisect.txt</code>.
+Without keys the triage judges from the pictures (black, frozen). To answer
+with <code>y</code> / <code>n</code> / Enter, boot the agdc profile without tests and start the run
+in a macOS Terminal (the plain <code>rdna3bisect=3</code> has no agdc profile, the AGDC
+would stay idle):</p>
+<pre><code class="language-sh">rdna3vm args "$(awk '$1 == "agdc" { $1 = ""; print }' tools/ladder-steps.txt) rdna3bisect=3" --stay
+sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh" --bisect-agdc    # in the macOS Terminal</code></pre>
+<p>Unlike <code>bisect</code> the steps are <strong>not cumulative</strong>: every step sets its whole
+combination from the values the boot left, so a step is only what its row
+says. Each holds 30 s; the time is after the start (the first notification
+says the clock time).</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Time</th>
+<th>What is set (everything else as the boot left it; <code>trace_scan</code> 0, <code>swap_stale</code> 1, <code>iop</code> 1 unless the row says otherwise)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>00:00</td>
+<td>the reference: <code>swap_mode</code> 1 (the copy, the default again), <code>swap_gen</code> 1 (the write generations), <code>flipbuf_present</code> 0, <code>a3</code> as booted</td>
+</tr>
+<tr>
+<td>1</td>
+<td>00:30</td>
+<td><code>swap_mode</code> 0 (the flip), <code>swap_gen</code> 1</td>
+</tr>
+<tr>
+<td>2</td>
+<td>01:00</td>
+<td><code>swap_mode</code> 1, <code>swap_gen</code> 0 (the generations only counted: the copy of card run 2026-10-17d)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>01:30</td>
+<td><code>swap_mode</code> 0, <code>swap_gen</code> 0 (the flip of card runs 2026-10-17f / g)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>02:00</td>
+<td><code>swap_mode</code> 1, <code>flipbuf_present</code> 1 (the family's flip-buffer frames copied to the panel too)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>02:30</td>
+<td><code>swap_mode</code> 0, <code>flipbuf_present</code> 1 (the family's flip-buffer frames flipped to)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>03:00</td>
+<td><code>swap_mode</code> 2 (every back copied: the control, nothing held)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>03:30</td>
+<td><code>swap_mode</code> 1, <code>iop</code> 0 (no display-pipe transactions)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>04:00</td>
+<td><code>swap_mode</code> 1, <code>a3</code> 0 (Activity Monitor opened again)</td>
+</tr>
+<tr>
+<td>9</td>
+<td>04:30</td>
+<td><code>swap_mode</code> 1, <code>swap_latch</code> 0 (Activity Monitor opened again: <code>a3</code> is back, and only new surfaces see it)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>05:00</td>
+<td><code>swap_mode</code> 1, <code>swap_stale</code> 0 (stale backs left to the write generations alone)</td>
+</tr>
+<tr>
+<td>11</td>
+<td>05:30</td>
+<td><code>swap_mode</code> 0, <code>iop_flip</code> toggled from its boot value (0 -&gt; 1)</td>
+</tr>
+<tr>
+<td>12</td>
+<td>06:00</td>
+<td>the defaults again (Activity Monitor opened again)</td>
+</tr>
+</tbody>
+</table>
+<p>All the switches can change at runtime (read from <code>accel/rdna3-accel.cpp</code>:
+<code>swap_mode</code>, <code>swap_gen</code>, <code>swap_stale</code>, <code>trace_scan</code>, <code>swap_latch</code> and <code>iop_flip</code>
+are read at every swap or import, <code>flipbuf_present</code> at every flip-buffer call,
+<code>a3</code> at every IOSurface import, <code>iop</code> is a handler
+that publishes or removes <code>IOAccelDisplayPipeCapabilities</code> and makes the
+transaction hooks answer as the base class), so none was dropped. Three things
+the run cannot promise: <code>a3</code> only reaches surfaces created after the switch
+(hence the reopened Activity Monitor); WindowServer may have read the pipe
+capabilities once at its start, so <code>iop</code> 0 may change only what the hooks
+answer; and after step 7 the later steps assume <code>iop</code> back at 1 really
+puts WindowServer back (step 12 has the same switches as step 0: a different
+picture there is reported as flaky or an order effect). <code>iop</code> is never written
+to the value it already has. The unswitched boot-args stay: <code>rdna3gamma</code>,
+<code>rdna3accelcf</code> and the rest are in the report's boot-args.</p>
+<p>Evidence per step, on top of what <code>bisect</code> records: the swap counters at the
+step's start (the table subtracts them, so a delta is exactly one step), the
+trace position (<code>trace_events_start</code> / <code>trace_events</code>, <code>stream_bytes_start</code> /
+<code>stream_bytes</code>) so the decoder cuts the accelerator / DRM trace stream and
+the Metal plugin's trace per step (<code>tools/rdna3_trace.py</code> on the stream, events
+<code>trace_events_start</code>..<code>trace_events</code>), and one line <code>trace: events W..W (asked by sysctl debug.rdna3accel_trace_dump)</code> in the kernel log at each step's start
+(the serial log has no clock; the triage cuts the log by these lines). The
+trace pump runs for the whole bisect; the full report follows the steps: the
+trace stream, the plugin trace snapshot at the end, <code>collect.sh</code>. A plugin
+trace snapshot after every step is not on by default (about 50 MB uploaded per
+step, and the copy loads the guest while you look); by hand
+<code>BISECT_PLUGIN_SNAP=1 sudo -E sh .../autoreport.sh --bisect-agdc</code> does it.</p>
+<p>The result: <code>rdna3vm result</code> prints the same table as <code>bisect</code>, and a second
+one with the counters of each step: swaps per head, copies, stale holds, zero-copy
+<code>iop</code> flips, buffers <strong>rewritten in place</strong> (the flicker you saw), torn
+buffers, frames copied by the display pipe, and the <code>FRONT SURFACE</code> lines of
+that step (<code>live writer lines / sampler lines</code>). It names the steps that
+<strong>looked right</strong> (your answers; black %, motion of the pictures) and the
+ones that looked broken, and the same by swap mode. The FRONT SURFACE column
+needs the kernel log: the serial log next to the report or the archive's
+<code>20-log-rdna3.txt</code>. The kext samples the front surface only 40 times per boot, so
+if those were used up before the bisect the column says so (a WARN) and the
+<code>inplace</code> / <code>torn</code> counters are the evidence.</p>
+<h3 id="play-step-play-the-desktop-is-yours">Play (step <code>play</code>): the desktop is yours</h3>
+<p>When you want to drive the desktop by hand (drag windows, open apps) and still
+get a full report:</p>
+<pre><code class="language-sh">rdna3vm update
+rdna3vm step play</code></pre>
+<p>The profile is the <code>agdc</code> step's (WindowServer runs on our Metal plugin, so the
+card works and its clocks are lifted) plus <code>rdna3play=1</code>. Do not use
+<code>rdna3vm args &quot;rdna3bisect=3&quot; --stay</code> for this: it has no agdc profile, the
+AGDC stays idle, WindowServer does no GPU work and no report is sent.</p>
+<p>What happens: no test runs (no swap A/B, no mode switches, no apps, no gamma,
+no sleep). A notification says <em>use the desktop; the report is taken at
+minute 5 and again at minute 10</em>. The trace pump (accelerator and DRM trace
+streams, the plugin's trace snapshots) runs as in every step. At minute 5 (after
+the desktop has settled, about 90 s after boot) the run takes three scanout
+looks, the counters and <code>rdna3_pmctl info</code> and the full collection
+(<code>collect.sh</code>), and uploads it like any report (<code>rdna3vm result</code> picks it up).
+At minute 10 the same again, as a second report with its own name (the label
+is <code>play</code>). A snapshot of the trace stream is taken at each moment while the
+pump keeps running. Then the VM stays up: shut macOS down yourself (Apple
+menu), or the host stops it after 30 minutes. A report at shutdown is not
+possible (the shutdown gives the report script seconds, a collection needs
+minutes), so the second one is at minute 10.</p>
+<p>The swap A/B is no longer part of a normal step (card run 2026-10-17d): add the
+boot-arg <code>rdna3swapab=1</code> (<code>rdna3vm args &quot;&lt;the step's args&gt; rdna3swapab=1&quot;</code>) to
+run it; it breaks the picture for a minute on purpose (mode 1).</p>
+<p>CoreDisplay's IOPresentment switches (DRIVER-PLAN N44): every boot of the VM
+(the install boot included) writes <code>useIOP</code> and <code>useIOP_onAMD</code> = true into
+<code>/Library/Preferences/com.apple.CoreDisplay</code> (AnyHost) and into the ByHost store
+<code>/Library/Preferences/ByHost/com.apple.CoreDisplay.&lt;IOPlatformUUID&gt;</code> (the one
+Navi48-MacOS found CoreDisplay reading on macOS 26; each store is reported on
+its own); WindowServer reads them when it
+starts, so a change counts from the next boot. For the A/B without them add
+<code>rdna3iopprefs=0</code> (<code>rdna3vm args &quot;&lt;the step's args&gt; rdna3iopprefs=0&quot;</code>): that
+boot takes both keys out of both stores, and the boot after it starts without them. The
+tests file says what this boot's WindowServer started with (<code>== CoreDisplay prefs ...</code>), triage prints it as <code>present mode, CoreDisplay prefs</code>.</p>
+<h3 id="present-mode-ab-steps-play-macpro-play-rootport-play-desktop">Present-mode A/B (steps <code>play-macpro</code>, <code>play-rootport</code>, <code>play-desktop</code>)</h3>
+<p>Why: with our driver WindowServer presents with the legacy page-flip mode
+(CoreDisplay logs <code>init_page_flip: page flip mode is on</code>) and never sends
+IOPresentment transactions, while the NullMoth NVIDIA driver gets
+transactions. Two things in our VM differ from that setup, and a card run
+can tell whether either decides the mode:</p>
+<ul>
+<li><strong>The card is &quot;integrated&quot;.</strong> IOGraphics sets <code>IOFBIntegrated</code> when the
+card's PCI bus number is 0 (<code>fIntegrated = (0 == pciDevice-&gt;getBusNumber())</code>),
+and the VM puts the card on the root bus (<code>GPU_BUS=pcie0</code>, <code>00:10.0</code>).
+GPUWrangler then logs <code>flags 0x10 (IG) ... b:d:f=0:16:0</code>. Behind a PCIe
+root port the card is bus 1.</li>
+<li><strong>The Mac model is a muxed laptop.</strong> The OpenCore image says
+<code>MacBookPro16,1</code>; CoreDisplay logs <code>isBDW=YES ... isMobile=YES</code> and
+<code>mux_initialize: Couldn't find any matches</code>. A Mac Pro has none of that.</li>
+</ul>
+<p>The three steps are the <code>play</code> step (the desktop is yours, reports at minute 5
+and 10, the VM stays up) with one or both changed for that run only:</p>
+<table>
+<thead>
+<tr>
+<th>step</th>
+<th>Mac model</th>
+<th>card</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>play</code> (as before)</td>
+<td>MacBookPro16,1</td>
+<td>root bus (bus 0)</td>
+</tr>
+<tr>
+<td><code>play-macpro</code></td>
+<td><strong>MacPro7,1</strong></td>
+<td>root bus</td>
+</tr>
+<tr>
+<td><code>play-rootport</code></td>
+<td>as in the config</td>
+<td><strong>behind a PCIe root port (bus 1)</strong></td>
+</tr>
+<tr>
+<td><code>play-desktop</code></td>
+<td><strong>MacPro7,1</strong></td>
+<td><strong>behind a PCIe root port</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Cheapest order: <code>rdna3vm step play-desktop</code> first. If the present mode changes
+there, run <code>play-macpro</code> and <code>play-rootport</code> to see which of the two did it
+(or whether it takes both); if it does not change, neither is the cause and
+the next suspect is CoreDisplay's own decision (<code>tools/probe/coredisplay.sh</code>,
+run by CI on the macOS runner, lists what the function that logs the mode
+reads). Each step is a normal card run: <code>rdna3vm update</code>, <code>rdna3vm step ...</code>,
+use the desktop for ~10 minutes (or just wait), shut macOS down,
+<code>rdna3vm result</code>, send the file.</p>
+<p>Both can also be set for every run in <code>~/rdna3-vm/config</code> (<code>rdna3vm prepare</code>
+keeps them): <code>SMBIOS_MODEL=&quot;MacPro7,1&quot;</code> (also <code>iMacPro1,1</code>) and
+<code>GPU_BUS=&quot;rootport&quot;</code> (default <code>pcie0</code>), or for one custom run
+<code>rdna3vm args &quot;&lt;the step's rdna3 args&gt; @smbios=MacPro7,1 @gpubus=rootport&quot;</code>.
+The <code>@</code> words are for the host: they are taken out of the boot-args macOS gets,
+and <code>rdna3vm check</code> prints what the config selects. An unknown <code>@</code> word or an
+empty value (<code>@smbois=...</code>, <code>@smbios=</code>) stops the run with a message.</p>
+<p><strong>Nothing asked, nothing touched.</strong> <code>rdna3vm</code> edits the OpenCore config's
+<code>SystemProductName</code> only when a model was asked for (<code>SMBIOS_MODEL</code> other than
+<code>MacBookPro16,1</code>, or a step's <code>@smbios=</code>). With nothing asked, <code>prepare</code>,
+<code>window</code>, the install boot and every card step leave the OpenCore config as it
+is, exactly as before this feature (a config whose <code>PlatformInfo/Automatic</code> is
+false, which <code>--smbios</code> refuses, still works). If an earlier run wrote another
+model (<code>play-macpro</code>), the next run that asks for nothing writes
+<code>MacBookPro16,1</code> back, so the model never outlives the step that asked for it;
+the host log says <code>SMBIOS model:</code> with the model, or <code>SMBIOS model: not asked</code>.</p>
+<p><strong>What changes in the VM with the model.</strong> Only <code>PlatformInfo/Generic/SystemProductName</code>
+of the OpenCore config. The serial number, board serial, UUID and ROM stay as
+they are, so the serial belongs to a MacBook model while the VM says it is a
+Mac Pro; that only matters for Apple's online services (iMessage, iCloud
+activation), which this VM does not use. macOS derives the board id
+(<code>Mac-27AD2F918AE68F61</code> for MacPro7,1) from the model; the report records
+<code>hw.model</code> and <code>board-id</code> in <code>00-system.txt</code>. Both desktop models are the
+kind the OpenCore sample configs use; <code>iMacPro1,1</code> is only for the case
+<code>MacPro7,1</code> boots badly (macOS 26 supports the Mac Pro, not the iMac Pro: an
+update from the installer may refuse it, a disk that is already installed
+boots).</p>
+<p><strong>Does a model change need <code>rdna3vm approve</code> again? Unknown.</strong> macOS records
+the &quot;Allow&quot; for a third-party kext by team and bundle identifier
+(<code>/var/db/SystemPolicyConfiguration/KextPolicy</code>) and builds the Auxiliary KC
+for the architecture, not for the model, so the approval should survive; nobody
+has tried it on this VM. Nothing is silent either way: the install boot and the
+approval window of a step run with that step's model, and if macOS then ran
+an old framebuffer/accelerator the run says <code>STALE KEXTS old driver ran</code>
+(triage, first line) and the host log names the model change
+(<code>SMBIOS model changed since the last card run: A -&gt; B</code>). In that case run
+<code>rdna3vm approve --step play-desktop</code> (the window then runs that step's
+model; plain <code>rdna3vm approve</code> uses the config's; <code>approve --card --step</code> is
+refused, the card boot would use step 0's boot-args) and send the result so the
+open question in DRIVER-PLAN N39 can be closed. The messages that tell you to
+approve (the run's note, the queue stop, the triage's <code>STALE KEXTS</code> line) name
+<code>rdna3vm approve --step &lt;n&gt;</code> by themselves when the step used <code>@smbios=</code>.</p>
+<p><strong>The root port.</strong> <code>GPU_BUS=rootport</code> puts the card (VGA function 0 and the
+HDMI audio function 1, together) on <code>pcie-root-port,id=rp0,hotplug=off</code>. Earlier
+runs found the card unconfigured behind an unsized port (commits 0a80e3c,
+c21eed6), so the port now carries the windows the card needs: <code>mem-reserve</code>
+for the 32-bit BARs (2 MiB or more), <code>pref32-reserve</code> (512 MiB for the default
+256 MiB BAR0, all BARs stay below 4 GiB as on the root bus) or, with a 64-bit
+window (<code>RESIZE_BAR_LOG2</code> above 10, <code>PCI_MMIO64_MB</code>), <code>pref64-reserve</code> (a power
+of two above BAR0 + BAR2: 32 GiB for a 16 GiB BAR0) together with
+<code>-global q35-pcihost.pci-hole64-size</code> as large as OVMF's window. The sizes
+are read from the card's BARs after BAR0 was resized and printed in the host
+log (<code>root port windows: ...</code>). It is <strong>not proven on the card</strong>: OVMF only
+pads ports it treats as hot-plug capable, so with <code>hotplug=off</code> the real
+windows come from the BARs OVMF finds behind the port. If the report shows no
+AMD device or an unconfigured card, <code>host-*.log</code> has the guest's PCI bus at 8
+and 40 s (<code>info pci</code>): send it, set <code>GPU_BUS=pcie0</code> again, and judge
+<code>play-macpro</code> alone.</p>
+<p><strong>What to look for in the result.</strong> The triage prints one row each, for every
+run (<code>present: ...</code> in the SUMMARY and the checklist, <code>present mode, ...</code> per report):</p>
+<table>
+<thead>
+<tr>
+<th>row</th>
+<th>before (card run 2026-10-17d)</th>
+<th>what a change means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>page flip mode</code></td>
+<td><code>init_page_flip: page flip mode is on</code></td>
+<td><code>is off</code> or no such line: CoreDisplay chose another mode; the changed variable is the cause</td>
+</tr>
+<tr>
+<td><code>transactions</code></td>
+<td><code>iop_ok 0, iop_empty 0</code></td>
+<td><code>iop_ok &gt; 0</code>: planes arrive in IOPresentment transactions (what the NVIDIA setups have); <code>iop_empty &gt; 0</code> and <code>iop_ok 0</code>: transactions are sent but without planes (AGDC/IOPresentment next)</td>
+</tr>
+<tr>
+<td><code>integrated</code></td>
+<td><code>IOFBIntegrated = Yes on 2 of 2</code></td>
+<td><code>not set</code> after <code>play-rootport</code>/<code>play-desktop</code>: IOGraphics sees a discrete card</td>
+</tr>
+<tr>
+<td><code>GPUWrangler</code></td>
+<td><code>flags 0x10 (IG) ... b:d:f=0:16:0</code></td>
+<td>no <code>(IG)</code>, <code>b:d:f=1:0:0</code></td>
+</tr>
+<tr>
+<td><code>SMBIOS</code></td>
+<td><code>MacBookPro16,1 ... isMobile=YES ... mux_initialize found no match</code></td>
+<td><code>MacPro7,1 (hw.model, board-id ...)</code>, <code>isMobile=NO</code>; a <code>WARN ... BUT macOS reports X</code> means OpenCore did not apply the model</td>
+</tr>
+<tr>
+<td><code>card bus</code> (WARN only)</td>
+<td>-</td>
+<td>rdna3vm asked for pcie0/rootport but macOS sees the other bus</td>
+</tr>
+<tr>
+<td><code>fb index</code></td>
+<td>INFO: <code>IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree ... (unchanged)</code></td>
+<td>independent of the two variables above; INFO while it is the state of card run 2026-10-17d, WARN when the mismatch differs, INFO with a note when the indices now agree (a separate suspect, DRIVER-PLAN N39)</td>
+</tr>
+<tr>
+<td><code>host log not matched</code> / <code>request unknown</code> (WARN)</td>
+<td>-</td>
+<td>the host log is found by its <code>boot-args:</code> line against the report's boot-args, not by clock stamps. <code>not matched</code>: no log has them (or two logs with them ask for different things): the newest is used as a guess and the rows from it say so. <code>request unknown</code>: no host log, or one without the <code>SMBIOS model:</code> / <code>GPU on:</code> lines. A TESTS-ONLY report and a result without any report get <code>asked model</code>, <code>asked bus</code> and <code>guest PCI</code> (the card's bus and BARs in <code>info pci</code> at 8 and 40 s) from the host log alone</td>
+</tr>
+</tbody>
+</table>
+<h3 id="driver-side-ab-driver-plan-n40">Driver-side A/B (DRIVER-PLAN N40)</h3>
+<p>The steps above change the VM; these boot-args change what our driver tells
+macOS, so each one can be tried alone on top of any of them. The defaults are
+in every run's log (<code>RDNA3-fb: head N switches: ...</code>, <code>RDNA3-agdc: vendor info answer ...</code>) and the triage prints them (<code>fb N40, switches</code>).</p>
+<table>
+<thead>
+<tr>
+<th>boot-arg</th>
+<th>default</th>
+<th>other value</th>
+<th>what it changes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rdna3agdcvendor</code></td>
+<td>0: AMD 0x1002</td>
+<td>1: NVIDIA 0x10de (what NullMoth's AGDC answers), 2: Intel 0x8086</td>
+<td>the AGDC vendor info IOPresentment asks for; also <code>sudo sysctl debug.rdna3agdc_vendor=1</code> at runtime (WindowServer may ask only at its start)</td>
+</tr>
+<tr>
+<td><code>rdna3fbintegrated</code></td>
+<td>0: as IOGraphics sets it</td>
+<td>1: <code>IOFBIntegrated</code> removed, 2: set</td>
+<td>the property only; GPUWrangler's <code>(IG)</code> stays (only <code>play-rootport</code> changes the bus)</td>
+</tr>
+<tr>
+<td><code>rdna3dispflags</code></td>
+<td>0 (NullMoth's answer)</td>
+<td>1: the old answer (CEA underscan)</td>
+<td><code>kConnectionDisplayFlags</code></td>
+</tr>
+<tr>
+<td><code>rdna3glorder</code></td>
+<td>1: head 0 opens first</td>
+<td>0: as before</td>
+<td><code>IOFramebufferOpenGLIndex</code> (the new default makes it equal <code>IOFBDependentIndex</code>)</td>
+</tr>
+<tr>
+<td><code>rdna3cursorasync</code></td>
+<td>1: the cursor moves on a thread call</td>
+<td>0: on WindowServer's thread, as before</td>
+<td>cursor smoothness while flips run</td>
+</tr>
+<tr>
+<td><code>rdna3fbwake</code></td>
+<td>1: the framebuffer does the family's wake work</td>
+<td>0: as before</td>
+<td>the desktop after a system sleep (Apple menu &gt; Sleep, then a key)</td>
+</tr>
+<tr>
+<td><code>rdna3vblonce</code></td>
+<td>1</td>
+<td>0: as before</td>
+<td>never two VBL runs at once</td>
+</tr>
+<tr>
+<td><code>rdna3fbdtmap</code></td>
+<td>0: as before (logged)</td>
+<td>1: our modes' timings accepted</td>
+<td>the <code>InstallTiming ... FAILED</code> lines in the CoreDisplay log</td>
+</tr>
+<tr>
+<td><code>rdna3fbconsole</code></td>
+<td>1: the framebuffer that holds the boot console</td>
+<td>0: head 0</td>
+<td><code>isConsoleDevice</code></td>
+</tr>
+<tr>
+<td><code>rdna3vblirq</code> (N42)</td>
+<td>1: VBL from the DCN vblank interrupt, flip done from the pflip interrupt, the OTG poll as fallback (needs <code>rdna3msi=1</code>, in the profile)</td>
+<td>0: the OTG poll alone, as before N42</td>
+<td>VBL timing and the present queue's completion; also <code>sudo sysctl debug.rdna3_vblirq=0</code> / <code>=1</code> at runtime (the framebuffers fall back within 3 frames)</td>
+</tr>
+<tr>
+<td><code>rdna3hpdirq</code> (N42)</td>
+<td>0: HPD interrupts counted and logged (<code>RDNA3,HPDIrqs</code>), the hotplug poll decides</td>
+<td>1: an HPD interrupt probes the connectors (B7)</td>
+<td>what a cable pull / a DP monitor's standby does</td>
+</tr>
+</tbody>
+</table>
+<p>One run per value: take the step's line and add the boot-arg, e.g.</p>
+<pre><code class="language-sh">rdna3vm args "$(awk '$1 == "play-desktop" { $1 = ""; print }' tools/ladder-steps.txt) rdna3agdcvendor=1"
+rdna3vm args "$(awk '$1 == "play" { $1 = ""; print }' tools/ladder-steps.txt) rdna3fbintegrated=1"</code></pre>
+<p>(the step's <code>@smbios=</code> / <code>@gpubus=</code> words come along). Cheapest order after
+<code>play-desktop</code>: <code>rdna3agdcvendor=1</code> on <code>play</code>, then <code>rdna3fbintegrated=1</code>,
+then <code>rdna3dispflags=1</code> and <code>rdna3glorder=0</code> (both only undo this round's
+defaults). What decides it is the same pair of rows as above:
+<code>present: page flip mode</code> and <code>present: transactions</code>. For <code>rdna3fbwake</code>, put
+macOS to sleep once during a <code>play</code> run and wake it; the <code>fb N40, wake</code> row
+must show as many family wakes as system sleeps and the desktop must come
+back.</p>
+<p>N42's A/B: one <code>play</code> run as the step is (<code>rdna3vblirq=1</code>) and one with
+<code>rdna3vblirq=0</code> added. The triage rows <code>fb N40, vblank irq</code> and <code>N42, display irq</code> of the first must be INFO with the interrupt counts growing with the
+frames (no fallback, no storm) and the present queue's <code>flip done from the pflip interrupt</code> rows present; the second shows <code>rdna3vblirq=0</code> rows. Compare
+how smooth windows move in both.</p>
+<p>N45's AGDC A/B (the answers after Navi48-MacOS, <code>agdc/rdna3_agdc_n48.h</code>):
+<code>play</code> runs them all at their defaults (as before N45); each of these steps
+is <code>play</code> with one switch changed, judged against a plain <code>play</code> run of the
+same build:</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Switch</th>
+<th>What changes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>play-agdcib</code></td>
+<td><code>rdna3agdcib=3</code></td>
+<td>0x711 type 0x40 (inline buffer) answered, the other capability types zero-filled with success</td>
+</tr>
+<tr>
+<td><code>play-agdclink</code></td>
+<td><code>rdna3agdclinkflags=1</code></td>
+<td>the 0x921 flags without bit 0 (0xa)</td>
+</tr>
+<tr>
+<td><code>play-agdcscaler</code></td>
+<td><code>rdna3agdcscaler=1</code></td>
+<td>the plane scaler with AMD's markers (0x50005 / 4)</td>
+</tr>
+</tbody>
+</table>
+<p><code>rdna3agdcib=1</code> (type 0x40 only, no zero fill) and <code>rdna3agdcscaler=2</code>
+(Navi48's width-first entry) are <code>rdna3vm args</code> lines:</p>
+<pre><code class="language-sh">rdna3vm args "$(awk '$1 == "play" { $1 = ""; print }' tools/ladder-steps.txt) rdna3agdcib=1"</code></pre>
+<p>Run <code>play-agdcib</code> first. What decides it: the triage rows <code>AGDC N45</code> (the
+switch values this boot ran, the per-type <code>asked/answered</code> text) and
+<code>planes in transactions</code> (<code>iop_ok</code> &gt; 0). The sysctls
+(<code>sudo sysctl debug.rdna3agdc_ib=3</code>) count only from the next WindowServer
+start, so a boot-arg step is the clean A/B.</p>
+<h3 id="the-ab-ladder-steps-ladder-ladder-ws-and-ladder-glyphs">The A/B ladder (steps <code>ladder</code>, <code>ladder-ws</code> and <code>ladder-glyphs</code>)</h3>
+<p>DRIVER-PLAN N50 (broken glyphs in Terminal / Maps, tile-shaped blocks in Chess; card run 2026-10-25e). One run replaces five reports with a switch each:</p>
+<pre><code class="language-sh">rdna3vm step ladder       # the app rungs: about 29 minutes
+rdna3vm step ladder-ws    # and the two WindowServer rungs: about 45 minutes, you log in after each restart
+rdna3vm step ladder-glyphs     # the glyph hunt: 13 rungs, about 25 minutes (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...)
+rdna3vm step ladder-coh        # the kernel coherence switches (DRIVER-PLAN N54): 10 rungs, about 17 minutes (baseline, all, then one sysctl debug.rdna3_coh_&lt;name&gt; each; docs/AFTER-TESTS.md "Kernel coherence switches")</code></pre>
+<p>The step is the <code>play</code> profile (the desktop on the Metal plugin) with <code>rdna3ladder=1</code> / <code>2</code> instead of <code>rdna3play=1</code>; no other test runs. Per rung
+(<code>baseline</code>, <code>attrring</code> (DRIVER-PLAN N57: <code>NVMTL_ATTR_RING_BIG_PAGE=0</code>, RADV's attribute ring without BIG_PAGE), <code>radv</code>, <code>sync</code>, <code>managed</code>, <code>alignguard</code>, <code>paranoid</code>, <code>loadbarrier</code>) the guest opens Terminal (colour text, a tick line every second) and Chess as
+new instances with that rung's <code>NVMTL_*</code> switches in their environment (<code>open -n -a APP --env ...</code>; the plugin reads the environment as well as <code>rdna3mtl.conf</code>),
+takes a 320-wide and a hi-res (native size) scanout look, keeps the plugin log of those two processes, and quits them. <code>rdna3mtl.conf</code> is not touched by the app rungs.
+Terminal's text is a colour listing, then a tick line a second in ONE fixed colour (bright white) ending in the same <code>abcdefghijklmnopqrstuvwxyz</code>, and every 4th second a
+line of mixed glyphs (upper case, digits, punctuation). The Terminal is opened with <code>-ApplePersistenceIgnoreState YES</code>: without it the new instance restores the windows
+the previous rung's Terminal had saved, which show the text of the rung before, static and drawn clean, next to the live one (card run 2026-10-25f: that is what looked
+like a clean <code>paranoid</code> rung). The report's triage reads each rung's hi-res look and prints an automatic glyph verdict
+(<a href="AFTER-TESTS.md#the-whole-ladder-in-one-card-run-rdna3vm-step-ladder">The whole ladder in one card run</a>).
+In the guest's Terminal, by hand (a tty: it also asks y / n / Enter per rung):</p>
+<pre><code class="language-sh">sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder      # or --ladder-ws or --ladder-glyphs</code></pre>
+<p><code>ladder-ws</code> edits <code>rdna3mtl.conf</code> and restarts WindowServer for <code>radv-ws</code> and <code>paranoid-ws</code>, and puts the conf back exactly (also on Ctrl-C and, after a dead run,
+at the next start of <code>autoreport.sh</code>). The report: <code>41-ladder.txt</code>, <code>41-ladder-&lt;rung&gt;.log</code>, the looks <code>scanoutladder-&lt;rung&gt;[a|h]-pipe*.ppm</code>; the triage prints a row per
+rung (docs/AFTER-TESTS.md, &quot;The whole ladder in one card run&quot;). The host tests are <code>tests/test_ladder_step.sh</code> and <code>tests/test_glyph_verdict.py</code>.</p>
+<p><code>ladder-glyphs</code> (<code>rdna3ladder=3</code>, <code>--ladder-glyphs</code>, 13 rungs of about 95 s) is the glyph hunt after card run 2026-10-25f, where NVMTL_PARANOID did not cure Terminal's text
+(it replaced the earlier <code>ladder-paranoid</code>, which was for the day PARANOID did). Rungs, the strongest suspect first so that a run cut short keeps them: <code>baseline</code>;
+<code>managed-whole</code> (<code>NVMTL_MANAGED_WHOLE=1</code>: every managed-buffer flush uploads the whole buffer, not the declared range); <code>managed-check</code> (<code>NVMTL_MANAGED_CHECK=1</code>: the undeclared-write
+detector, no behaviour change); <code>no-surface-share</code> (the window is a private image, not the shared family VRAM); <code>no-surface-pageoff</code> (a GPU write is copied out eagerly, no VRAM-newest
+mark); <code>fbfetch-zero</code> (framebuffer fetch returns zero); <code>managed-pages</code> (ranges widened to 4 KiB pages); <code>managed-eager-zero</code> (<code>=1</code> is the OLD behaviour: a new managed buffer is memset and
+uploaded); <code>no-texbuf</code>; <code>no-bindless</code>; <code>dontcare-clears</code>; <code>skip-empty-0</code> (<code>NVMTL_SKIP_EMPTY=0</code>); <code>paranoid</code>, the NEGATIVE control. Each rung takes a second hi-res look three seconds after the
+first (<code>...h2</code>): the glyph verdict only counts the tick-line window that CHANGED between them, the rung's own live text.
+Apps are quit with SIGINT, then SIGTERM, then SIGKILL (no System Events, no Automation prompt); <code>41-ladder.txt</code> says how each instance ended.</p>
+<h3 id="the-app-survey-step-apps">The app survey (step <code>apps</code>)</h3>
+<pre><code class="language-sh">rdna3vm step apps         # about 25 minutes; nothing to answer, the apps open and close by themselves</code></pre>
+<p>The <code>play</code> profile with <code>rdna3ladder=5</code> (<code>autoreport.sh --apps</code> by hand, in the guest's Terminal): the default driver and plugin settings, no switch of any kind. One after another,
+the guest opens Chess, Terminal (the tick text), TextEdit (an RTF), Calculator, Notes, Safari (stages: a text / CSS page, a canvas animation, a WebGL cube; local files the run writes),
+Preview (a PDF and a JPEG), Maps, System Settings (appearance, wallpaper, displays), App Store, Photos, Image Capture, QuickTime Player (a 12 s movie the run carries), Mission Control
+(with Calculator and TextEdit open) and Launchpad (<code>Apps</code> on macOS 26). It needs no network. Per app and stage it takes a 320-wide and a hi-res look of both pipes, then checks whether the
+app is still running (a death is a crash when a report appeared), whether the Metal plugin is loaded in it, whether WindowServer kept its pid, collects its log slice, and quits it (SIGINT,
+TERM, KILL; an instance you had open before the run is left alone). The report: <code>41-ladder.txt</code> (variant 5), <code>41-ladder-&lt;app&gt;.log</code>, <code>41-ladder-&lt;app&gt;-sys.log</code>,
+<code>41-ladder-&lt;app&gt;-crash.log</code>, the looks <code>scanoutapps-&lt;app&gt;[-&lt;stage&gt;]a|h-pipe*.ppm</code>; the triage prints a row per app. What it cannot do headless: type or click in an app (System Events
+needs Accessibility / Automation consent), record the screen (Screen Recording consent), sign in (App Store, Photos, Notes may show a welcome or sign-in sheet: that is recorded by the
+look). Whether an app drew is for the pictures. How to read it: <a href="AFTER-TESTS.md">AFTER-TESTS</a>, &quot;The app survey&quot;. The host tests are <code>tests/test_apps_step.sh</code> and
+<code>tests/test_triage_apps.py</code>; the PDF and the movie the run carries are made by <code>tools/apps_assets.py</code>.</p>
+<h3 id="tests-that-already-passed">Tests that already passed</h3>
+<p>The report does not run a long test again (scaled modes, gamma, the
+Vulkan test and CTS, mtlprobe, M6, the PM selftest, soak) when it passed
+before with the same builds of everything it tests: the kexts' source
+hashes, the test tool, the Metal plugin and RADV/libdrm, and the step's
+boot-args. Its saved result goes into the report marked <code>SKIPPED - passed on &lt;date&gt;</code>, and the triage lists them. Any change to what a test uses runs
+it again. To run everything regardless: add <code>rdna3nocache=1</code>, e.g.
+<code>rdna3vm args &quot;&lt;the step's boot-args&gt; rdna3nocache=1&quot;</code>.</p>
+<h3 id="a-new-framebuffer-build-allow-it-once">A new framebuffer build: allow it once</h3>
+<p>OpenCore injects the core kext itself, but <code>RDNA3Framebuffer</code> and
+<code>RDNA3Accelerator</code> load from macOS's own kext cache, and macOS takes a new
+ad-hoc signed build only after you allowed it. After <code>rdna3vm prepare</code>
+with a build that changed them (the reports say so: <code>waits for approval</code>):</p>
+<pre><code class="language-sh">rdna3vm approve</code></pre>
+<p>macOS starts in a window (the card and the screen stay with Linux) and
+stays up; about 2 minutes after the login System Settings → Privacy &amp;
+Security opens by itself: scroll down, <strong>Allow</strong> next to the blocked
+system software, enter the password, then <strong>Not Now</strong> at the restart
+question and Apple menu → Shut Down. No <strong>Allow</strong> button there = already
+allowed, just shut down. <code>rdna3vm approve --card</code> does the same with the
+card passed through (the old way).</p>
+<p>A queue that reaches a boot where macOS still runs the build allowed
+before stops by itself instead of testing it (<code>rdna3vm queue status</code>:
+<code>stopped before step ...: macOS runs an older framebuffer/accelerator</code>):
+<code>rdna3vm approve</code>, then <code>rdna3vm queue</code> goes on with the same step.
+Without that (builds before 2026-10-12) such a run shows the old
+framebuffer in its fallback console mode: everything redrawn about once a
+second, and before the fix of that mode black shown blue.</p>
+<h3 id="a-new-build-reaches-macos-without-the-card">A new build reaches macOS without the card</h3>
+<p>A step or queue whose bundle (<code>rdna3vm prepare</code> / <code>update</code>) the VM does
+not have yet first boots macOS <strong>headless, without the card</strong>: Linux keeps
+the card and the screen for those ~3 minutes (<code>== installing the new bundle in macOS without the card</code> in the host log), macOS copies the new
+kexts and the Metal plugin's libdrm/RADV, and shuts down. Then the step
+starts with the card and already runs the new build: no install boot with
+the card that stops and runs the step again. Only a kext that really
+changed is installed again; a new framebuffer, accelerator or AGDC build
+needs the <strong>Allow</strong> above, and <code>rdna3vm step</code> / <code>queue</code> then opens the
+<code>rdna3vm approve</code> window by itself before the card step (Allow, Not Now,
+Shut Down: the card step starts after the window closes). <code>rdna3vm prepare</code> with the same build changes nothing in macOS. Should the headless
+boot not confirm the install (10 min limit, <code>INSTALL_TIMEOUT_MIN</code> in the
+config), the card step installs the bundle itself and runs once more, as
+before.</p>
+<h3 id="several-steps-in-one-go">Several steps in one go</h3>
+<pre><code class="language-sh">rdna3vm queue pending</code></pre>
+<p>runs the step(s) still waiting for the card - now one big step, <code>big4</code>:
+everything left that only the card can test, in one boot, about 25 minutes.
+It is <code>big3</code> (the default profile with amdgpu's exact sequence, user
+queues, PM control, VCN, mode set, HDMI stream / format / audio endpoint,
+display power) plus the output gamma, amdgpu's display-firmware reset, DC's
+extra steps around each mode switch, monitor standby and a short system
+sleep with the video engines on, and BACO last. What needs no card (builds,
+the simulator, the UAPI and RADV on the loopback, the Metal translator's
+tests) runs in CI on the self-hosted runners instead. Watch for: both
+monitors go to standby and come back, macOS sleeps ~30 s and wakes by
+itself, and at the very end BACO turns the chip off and on: <strong>the screens
+may stay dark after it</strong> - every result is already on the host by then, so
+just wait for the VM to stop (or use the <a href="#emergency-exit">emergency exit</a>).
+Not in it (they need hardware or hands this bench does not have): <code>dplink</code>,
+<code>dsc</code>, <code>mst</code>, <code>uhbr</code>, <code>odm</code> (native DisplayPort monitors), <code>subvp</code> (a
+120 Hz+ monitor), <code>hdmi20</code> (a 4K HDMI 2.0 monitor), <code>hotplug</code> (someone at
+the cables); run them by name when you have that hardware. Before it,
+<code>big2</code>: macOS boots once and the report itself runs everything
+(DMA/GFX/Vulkan tests - buffers, a triangle, images, timeline semaphores -,
+Metal when the plugin is installed, the idle-power experiment, three looks at what
+each monitor shows, display sleep and wake, a switch through scaled
+modes, a 2-minute soak, the hang test last), then shuts down (about 12
+minutes). Nobody needs to watch the screens; both monitors connected.
+While it runs, a Terminal window on the macOS desktop shows each test and
+its result (OK / FAIL), with notifications at the start and the end
+(<code>/Users/Shared/rdna3-progress.log</code>); closing it changes nothing.
+You can also name steps yourself: <code>rdna3vm queue 5b 8c 9</code>.
+The <a href="#emergency-exit">emergency exit</a> stops the VM <strong>and</strong> the rest of
+the queue. If the computer reboots on the way (amdgpu could not take the
+card back), log in and run <code>rdna3vm queue</code> without steps: it goes on
+with what is left. At the end, <code>rdna3vm result</code> packs them into one file to send.</p>
+<p>Step 9 in the VM: OpenCore sets the largest GOP mode (<code>OC_RESOLUTION</code>), so
+the desktop comes up at the monitor's native mode; only the monitor the GOP
+lit shows a picture. EDID comes over AUX for DisplayPort sinks and over the
+DDC (I2C engine) for HDMI and DP-&gt;HDMI adaptors. Read the framebuffer lines
+from the report (<code>20-log-rdna3.txt</code>); <code>tools/triage_reports.py</code> checks them.
+The VM will then not shut down by itself. Shut down macOS normally (Apple menu → Shut Down)
+or with the power button. The report is sent anyway.</p>
+<p>The values we expect at each step are described in <a href="TESTING-HW.html">TESTING-HW</a>.
+You do not need to check them, sending the reports is enough.</p>
+<h2 id="emergency-exit">Emergency exit</h2>
+<p>Each of the methods below closes <strong>only the VM</strong>. The script then gives the card,
+keyboard and mouse back to Linux and restores the desktop:</p>
+<ol>
+<li><strong>Both Ctrl keys at once, then Esc 3×</strong> (within 3 seconds). Both Ctrl keys take
+the keyboard away from macOS and give it back to Linux, and Esc 3× closes the VM. It works even
+when macOS hangs or has a kernel panic, because the keyboard is read by Linux,
+not macOS.</li>
+<li><strong>A short press of the computer's power button.</strong> While the VM is running Linux
+does not shut down from it, it only closes the VM.</li>
+<li><strong>You do nothing:</strong> an automatic step closes the VM by itself after 8 minutes
+(it usually finishes after about 3). With <code>--stay</code> the limit is 30 minutes. You can change both
+limits in <code>~/rdna3-vm/config</code> (<code>AUTO_TIMEOUT_MIN</code>, <code>TIMEOUT_MIN</code>).</li>
+</ol>
+<p>The script gives the card back to Linux even when QEMU itself crashes.
+The restore is hooked to the script's exit, not to macOS.</p>
+<p>After the VM an RDNA3 card does not come back to Linux by itself (amdgpu
+logs <code>DMCUB error</code> / <code>failed to blank crtc</code> and the screen stays black). So
+after every step <strong>the computer sleeps for about 5 seconds and wakes up by
+itself</strong>: that powers the card off and on, and the desktop comes back. If
+amdgpu still cannot drive the card, the script <strong>reboots cleanly</strong> (the
+reports are already saved): wait a minute and log in. Settings in
+<code>~/rdna3-vm/config</code>: <code>RESTORE_MODE=suspend</code> (default), <code>auto</code> (no sleep),
+<code>reboot</code> (always reboot).</p>
+<p>Last resort, when nothing happens for 2 minutes after the VM closed: briefly
+press the power button (Linux shuts down normally), or hold it for 5 seconds.
+It does not harm the card.</p>
+<h2 id="when-something-goes-wrong">When something goes wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>black screen or a hang longer than 5 min, kernel panic</td>
+<td><a href="#emergency-exit">emergency exit</a> (both Ctrl keys, Esc 3×). Send the reports and <strong>do not go further</strong></td>
+</tr>
+<tr>
+<td>the Linux desktop does not come back after the VM closes</td>
+<td>short press of the power button: Linux shuts down normally (see above)</td>
+</tr>
+<tr>
+<td><code>step</code> ends immediately, the desktop does not disappear</td>
+<td>read <code>~/rdna3-vm/reports/host-*.log</code> (the newest) and send it</td>
+</tr>
+<tr>
+<td>macOS did not send a report</td>
+<td>run the same step with <code>--stay</code> and in the macOS Terminal run <code>sudo sh &quot;/Library/Application Support/RDNA3VM/autoreport.sh&quot;</code></td>
+</tr>
+<tr>
+<td>the keyboard does not work in macOS</td>
+<td>the VM started without input capture: send <code>host-*.log</code>; exit with the power button</td>
+</tr>
+<tr>
+<td>macOS does not boot with <code>CPU_MODEL=&quot;host&quot;</code></td>
+<td><a href="#the-vm-on-this-computers-real-cpu-cpu_modelhost-amd-hosts-driver-plan-n53">back to the Skylake model</a>: one <code>sed</code> line; send <code>serial-*.log</code>, <code>host-*.log</code></td>
+</tr>
+</tbody>
+</table>
+<p>A computer without a login manager (booting to a console) also works. The script itself
+stops <code>display-manager</code> and then starts it again.</p>
+<h2 id="what-to-send-me">What to send me</h2>
+<pre><code class="language-sh">rdna3vm result</code></pre>
+<p>It packs every report written since the last <code>step</code> / <code>args</code> / <code>queue</code>
+started (plus a triage summary) into <strong>one</strong> file,
+<code>~/Downloads/rdna3-result.tar.xz</code> (<code>.tar.gz</code> when the host has no <code>xz</code>), replaced each time it runs.
+Send that file. It prints its size: a ladder run is a few MB as <code>.xz</code> (the looks of one run are the same desktop, xz stores it once; as gzip it would be
+about 85 MB even with the looks as PNGs).</p>
+<p>It also prints every test on its own line, <code>PASS</code> / <code>FAIL</code> / <code>WARN</code> /
+<code>INFO</code> / <code>NOT RUN</code>, with the counts and the triage's verdict at the end
+(the same list is saved in the file as <code>00-checklist.txt</code>). <code>WARN</code> is a
+finding that needs reading (a lit pipe without TX lines, two pipes on one
+surface, an underflow), <code>INFO</code> only describes the run (boot-args, power,
+counters), <code>NOT RUN</code> is a test that gave no verdict (a sleeping display,
+no present path). To print the list again later, without collecting
+anything: <code>rdna3vm result --show</code>.</p>
+<p><code>rdna3vm reports</code> only lists them. What one step writes to <code>~/rdna3-vm/reports</code>:</p>
+<ul>
+<li><code>rdna3-report-*.tar.gz</code> (report from macOS);</li>
+<li><code>*-tests.txt</code> (DMA and GFX test results, from step 7);</li>
+<li><code>serial-*.log</code> (macOS kernel log; it is kept even after a hang or a panic);</li>
+<li><code>host-*.log</code> (what the script did on Linux).</li>
+</ul>
+<p>With the first submission also include the <code>linux-reference</code> directory (not in the result file).</p>
+<p>Want a first look yourself? <code>python3 ~/RDNA3-Hackintosh/tools/triage_reports.py ~/rdna3-vm/reports</code>
+prints PASS / FAIL per step. What happens with the reports next is in
+<a href="AFTER-TESTS.md">AFTER-TESTS</a>.</p>
+<h2 id="new-driver-version">New driver version</h2>
+<p><code>rdna3vm update</code> does steps 1-2 in one go: <code>git pull</code> in the checkout, the
+newest successful CI build's artifact over <code>~/Downloads/RDNA3Accel-kext.zip</code>,
+then <code>prepare</code>. The builds come from the owner's Forgejo
+(<code>https://forgejo.voten.me</code>, repository <code>Voten641/RDNA3-Hackintosh</code>); the
+repository is public, so no login is needed. A token is used when there is one
+(<code>FORGEJO_TOKEN</code> in the environment, else the first line of
+<code>~/.config/rdna3vm/forgejo-token</code>, else <code>FORGEJO_TOKEN=...</code> in the checkout's
+git-ignored <code>.env</code>); it may only contain letters, digits, <code>_</code> and <code>-</code>, goes
+only to an <code>https://</code> Forgejo and only as a request header, and when the
+server refuses it (401) <code>rdna3vm</code> says which source it came from and asks
+again without it. The three config keys (in <code>~/rdna3-vm/config</code>, or the
+environment) are optional: <code>CI_FORGE=forgejo</code> (default) or <code>github</code> for the
+old GitHub Actions setup (<code>gh auth login</code>, or a token with <em>Actions: read</em>
+in <code>~/.config/rdna3vm/github-token</code>), <code>FORGEJO_URL</code>, <code>FORGEJO_REPO</code>. The same
+holds for <code>rdna3vm cts</code> (the <code>rdna3-cts</code> artifact). When the build of the pulled commit is
+still running, <code>update</code> shows its jobs live (each job's current step and
+time, refreshed every 15 s) and carries on by itself once its <code>kext</code> job
+(the artifact) finished, without waiting for the longer RADV/Metal jobs; a
+failed build falls back to the last good one. Right after a push it looks
+for the build for up to 2 minutes (not for <code>[skip ci]</code> or docs-only
+commits). <code>rdna3vm update --no-wait</code> stops instead of waiting. By hand:</p>
+<ol>
+<li>Download the new artifact (step C, item 1).</li>
+<li>Run <code>rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip</code>.</li>
+<li>Run <code>rdna3vm window</code> and in the macOS Terminal paste the same
+<code>curl ... | sudo sh</code> command as in step D. Then <code>sudo shutdown -h now</code>.</li>
+<li>Go back to step E.</li>
+</ol>
+<h3 id="the-vm-on-this-computers-real-cpu-cpu_modelhost-amd-hosts-driver-plan-n53">The VM on this computer's real CPU (<code>CPU_MODEL=&quot;host&quot;</code>, AMD hosts; DRIVER-PLAN N53)</h3>
+<p>By default the VM shows macOS an emulated Intel Skylake CPU. For the planned
+bare-metal hackintosh on the same Ryzen the card can be tested with the real
+CPU instead: QEMU's <code>-cpu host</code>, and OpenCore gets the AMD_Vanilla kernel
+patches that every AMD hackintosh needs.</p>
+<p>Switch (one line, nothing else to edit; <code>rdna3vm</code> changes the OpenCore image
+itself before every boot):</p>
+<pre><code class="language-sh">sed -i 's/^CPU_MODEL=.*/CPU_MODEL="host"/' ~/rdna3-vm/config      # the real CPU
+rdna3vm check                                                     # the "VM CPU" part must be green
+rdna3vm window                                                    # first try: macOS in a window, the card stays with Linux</code></pre>
+<p>Back to the Intel model (the patches are removed and what they replaced
+is restored the same way, no manual edit):</p>
+<pre><code class="language-sh">sed -i 's/^CPU_MODEL=.*/CPU_MODEL="Skylake-Client,-hle,-rtm,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check"/' ~/rdna3-vm/config</code></pre>
+<p>What <code>host</code> does:</p>
+<ul>
+<li>QEMU gets <code>-cpu host,kvm=on,-kvm-pv-unhalt,+invtsc,vmware-cpuid-freq=on,check</code>
+(more flags after <code>host,</code> in <code>CPU_MODEL</code> are appended). <code>-kvm-pv-unhalt</code> is
+required: without it macOS 26.4+ turns on paravirtual ticket locks and the
+first contended lock panics the VM on an AMD host (see the table below). The vendor stays AuthenticAMD:
+the patches expect it. <code>+invtsc</code> is the invariant TSC (macOS since Monterey
+panics when the host's TSC is not stable: <code>rdna3vm check</code> wants the host
+clocksource to be <code>tsc</code>). <code>ignore_msrs</code> is set by the VM start as before.</li>
+<li>The topology is <code>CPUS</code> vCPUs = <code>CPUS / CPU_THREADS</code> cores x <code>CPU_THREADS</code>
+threads (<code>CPU_THREADS</code> in the config, default 1; <code>+topoext</code> is added for
+2 or more, QEMU warns without it). The AMD core-count patch gets the same
+number of cores, so the topology macOS reads and the patch agree. With
+<code>CPUS=12</code> that is 12 cores / 12 threads, patch <code>0C</code>; the 5800X as it will
+be on bare metal is <code>CPUS=16</code> and <code>CPU_THREADS=2</code> (8 cores, patch <code>08</code>).</li>
+<li>Before every boot (<code>window</code>, <code>step</code>, the install boot) <code>vmtool.py plist --amd-cpu &lt;cores&gt;</code> writes 24 Kernel/Patch entries into the image's
+<code>config.plist</code> (their Comment starts with <code>rdna3vm-amd:</code>), sets
+<code>Kernel/Quirks/ProvideCurrentCpuInfo</code> and <code>Kernel/Emulate/DummyPowerManagement</code>
+on and the Cpuid1 spoof empty. What it replaced is kept in the key
+<code>#rdna3vm-amd-restore</code> of <code>Kernel</code> (OpenCore ignores <code>#</code> keys) and comes
+back with <code>--no-amd-cpu</code>, which every other <code>CPU_MODEL</code> runs. A second run changes
+nothing. The patch list is vendored in <code>tools/vm/data/</code> (source, commit,
+licence and sha256 in <code>amd_vanilla.SOURCE</code>; the patches are not downloaded).
+Only the kernel patches are used, not AMD_Vanilla's IOPCIFamily ones (the VM's
+chipset is QEMU's; the bare-metal EFI of <code>tools/baremetal/build_efi.py</code> needs the
+&quot;Disable 10 bit tags&quot; ones for the B550 chipset, <code>docs/BAREMETAL.html</code> part 6).</li>
+<li><strong>The CPU name in About This Mac</strong> (RestrictEvents). macOS shows the Mac
+model's CPU (&quot;8-Core Intel Xeon W&quot; for MacBookPro16,1) whatever the VM has.
+In the same mode <code>rdna3vm</code> puts Acidanthera's RestrictEvents 1.1.6 and Lilu
+1.7.2 into OpenCore (<code>EFI/OC/Kexts</code> + <code>Kernel/Add</code>, Lilu first); RestrictEvents
+patches that string for a non-Intel CPU and takes the name from CPUID, so no
+boot-arg is needed (<code>revcpuname=</code> would override it; it is left unset). The
+two RELEASE zips are the only thing <code>rdna3vm</code> downloads for the VM: once, into
+<code>~/rdna3-vm/oc-kexts</code>, with the sha256 pinned in <code>tools/vm/vmtool.py</code> and
+<code>tools/vm/data/oc_kexts.SOURCE</code> (no network after that). The image's own Lilu
+is 1.6.8, which does not run on macOS 26; it is kept as
+<code>Lilu.kext.rdna3vm-orig</code> and put back, with RestrictEvents removed, by every
+run of another <code>CPU_MODEL</code> (or a host that is not AMD). A failed download is
+a <code>!! RestrictEvents is not injected</code> line in the terminal and <code>host-*.log</code>:
+the VM boots and only About This Mac keeps the Mac model's name. Check in
+macOS: About This Mac, and <code>kextstat | grep -i -e lilu -e restrict</code> (both
+listed; with <code>-liludbgall</code>/<code>-revdbg</code> a DEBUG build would log, the RELEASE one
+does not). <strong>Needs the VM: not run yet.</strong></li>
+<li>The run says what it did: <code>VM CPU: ...</code> and <code>amd-cpu: on, 24 AMD_Vanilla kernel patches, core count 12 (0x0C)</code> in the terminal and in <code>host-*.log</code>,
+and the result file's <code>00-host.txt</code> has <code>vm-cpu:</code> lines (CPU, topology, the
+exact <code>-cpu</code> / <code>-smp</code>). In macOS: <code>sysctl machdep.cpu.brand_string machdep.cpu.core_count machdep.cpu.thread_count</code> shows the Ryzen and the
+counts above.</li>
+</ul>
+<p>What a failed boot looks like (<strong>needs the card / the VM: not run yet</strong>).
+<code>-v</code> is on in every step, so the window or <code>serial-*.log</code> shows it:</p>
+<table>
+<thead>
+<tr>
+<th>What you see</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a restart loop at the Apple logo or right after <code>EXITBS:START</code>; a panic naming <code>cpuid_set_info</code>, <code>commpage</code>, <code>Non-monotonic time</code> or <code>thread_invoke</code></td>
+<td>an AMD patch did not match this macOS (Apple changed the kernel; macOS 26.4 needed a new one, which the vendored file has). Send <code>serial-*.log</code>, <code>host-*.log</code> and <code>00-host.txt</code>; the Darwin number is in the panic text. The fix is a newer AMD_Vanilla <code>patches.plist</code> (see <code>amd_vanilla.SOURCE</code>), not a change here</td>
+</tr>
+<tr>
+<td><code>Kernel trap ... type = 14=page fault</code>, <code>CR2</code> equal to <code>RIP</code>, <code>Error code: 0x...3</code>, a backtrace with <code>_copypv</code> (really an unnamed static function after it), <code>lck_ticket</code>, <code>IOCatalogue::findDrivers</code> or any other contended lock</td>
+<td>macOS 26.4+ pv ticket locks: the kernel kicks a sleeping waiter with the Intel <code>VMCALL</code>; KVM on an AMD host rewrites it to <code>VMMCALL</code> in the guest's read-only kernel text and the write faults. Cause: QEMU exposed <code>kvm-pv-unhalt</code> (<code>-cpu host</code> does by default). <code>-kvm-pv-unhalt</code> must be in the <code>-cpu</code> line (<code>last-cpu</code> in <code>~/rdna3-vm</code>, <code>vm-cpu:</code> in <code>00-host.txt</code>); a <code>+kvm-pv-unhalt</code> in <code>CPU_MODEL</code> brings the panic back. Second switch inside macOS: boot-arg <code>pvticket=0</code> in <code>BASE_ARGS</code> of <code>~/rdna3-vm/config</code></td>
+</tr>
+<tr>
+<td>the log ends at <code>EXITBS:START</code> (no <code>EXITBS:END</code>, no kernel line)</td>
+<td>the hang is inside <code>ExitBootServices</code> (OVMF / OpenCore), before macOS runs one instruction, so no kernel patch and no AMD_Vanilla entry can be the cause. Seen once with <code>CPUS=12</code>; <code>CPUS=8</code> (the 5800X's 8 cores, a power of two, the tested setting) reached the kernel. Use <code>CPUS=8</code>; for the full chip <code>CPUS=16 CPU_THREADS=2</code>. If a count other than 8 matters, send <code>serial-*.log</code> and <code>host-*.log</code> of the hang</td>
+</tr>
+<tr>
+<td>a panic about the topology or a CPU count</td>
+<td><code>CPUS</code> / <code>CPU_THREADS</code> / core count disagree or macOS dislikes the number; try <code>CPUS=8</code> or <code>CPUS=16 CPU_THREADS=2</code></td>
+</tr>
+<tr>
+<td><code>kernel_task</code> panics about the TSC or the clock</td>
+<td>the host TSC; <code>dmesg | grep -i -e tsc -e clocksource</code> on Linux, a power cycle of the computer helps sometimes</td>
+</tr>
+<tr>
+<td>QEMU prints <code>warning: host doesn't support requested feature</code></td>
+<td>read the feature: <code>+invtsc</code> missing means the host reports no invariant TSC</td>
+</tr>
+</tbody>
+</table>
+<p>Going back is the sed line above, then any <code>rdna3vm window</code> or <code>step</code> (the
+OpenCore image is cleaned at its start). If macOS does not boot even in
+the Skylake model afterwards, copy the original again:
+<code>qemu-img convert -O raw /mnt/data/OSX-KVM/OpenCore/OpenCore.qcow2 ~/rdna3-vm/OpenCore-rdna3.img</code>
+and <code>rdna3vm prepare ...</code> once more (it re-applies SIP off and the kexts).</p>
+<p>Does the patch list still fit a new macOS? Run it against the kernel the VM boots
+(the files, read only: <code>kernel</code> = <code>/System/Library/Kernels/kernel</code>, the Boot KC =
+<code>/System/Library/KernelCollections/BootKernelExtensions.kc</code>; Darwin = <code>uname -r</code>):</p>
+<pre><code class="language-sh">python3 tools/vm/ocpatchsim.py BootKernelExtensions.kc tools/vm/data/amd_vanilla-a174cca.plist 25.4.0</code></pre>
+<p>It applies the entries exactly as OpenCore 1.0.6 does (Base lookup, Find / Mask /
+Replace / ReplaceMask, Count, Skip, Limit, Min/MaxKernel; <code>tests/test_ocpatchsim.py</code>) and
+prints per entry the matches against its Count with function+offset, and <code>--avoid START-END</code> (file offsets) flags a match inside a range. For Darwin 25.4.0 every
+applicable entry matches its Count (the kernel and the Boot KC give the same sites)
+except one: AMD_Vanilla's <code>Force CPUFAMILY_INTEL_PENRYN 11.3+</code> has the Base
+<code>_cpuid_set_info </code> with a trailing space, so OpenCore never applies it (same on bare
+metal; macOS 26.4.1 and 26.7.1 boot reported with the same file). The quirks that run
+before the list (<code>ProvideCurrentCpuInfo</code>, <code>DisableLinkeditJettison</code>) are not simulated.</p>
+<p>What was checked on this computer (Ryzen 7 5800X, Zen 3, host kernel 7.2): QEMU 11.1.2 accepts
+the <code>-cpu</code> and <code>-smp</code> lines (no warning; <code>threads=2</code> needs <code>+topoext</code>); the
+OpenCore 1.0.6 image (<code>ocvalidate</code> of the same version: no issues on the
+edited config and on the one switched back, which is byte for byte the
+original); <code>make test</code> runs <code>tests/test_vm_amd_cpu.sh</code>. Not checked: that macOS
+26.4.1 boots with these patches in a KVM guest. Known risks: a future Darwin
+that breaks a patch; how macOS finds the TSC frequency in this guest
+(the <code>vmware-cpuid-freq</code> leaf, or what OpenCore's <code>ProvideCurrentCpuInfo</code>
+gives; OSX-KVM's flags were chosen for an Intel guest) is untested; the PAT patch is AMD_Vanilla's default (Algrey's), the
+alternative of Shaneee changes how GPU memory is mapped and is off.</p>
+<h3 id="macos-26-tahoe-on-a-second-disk">macOS 26 (Tahoe) on a second disk</h3>
+<p>The same OpenCore boots either macOS disk: it injects the accelerator's
+Sequoia build up to Darwin 24 and its Tahoe build (<code>RDNA3AcceleratorTahoe</code>,
+from CI builds after 2026-10-12) from Darwin 25 on, and the VM installs the
+one for its own Darwin into the Auxiliary KC. To run a step on macOS 26:
+swap the disk file (<code>MACDISK</code> in <code>~/rdna3-vm/config</code>), <code>rdna3vm update</code>, the
+first time <code>rdna3vm window</code> + the setup command of step D, then
+<code>rdna3vm approve</code> and the steps as usual (<code>rdna3vm queue pending</code>). The
+report's <code>R4 macOS</code> line says which Darwin ran and whether the accelerator
+started there.</p>
+<h3 id="with-vulkan-radv">With Vulkan (RADV)</h3>
+<p>A build made with <code>full</code> or <code>radv</code> on also has the artifact
+<code>radv-macos-logs.zip</code> (RADV + <code>rdna3_vktest</code>). Pass it to prepare too:</p>
+<pre><code class="language-sh">rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip --radv ~/Downloads/radv-macos-logs.zip</code></pre>
+<p>Or build RADV inside the VM, no CI needed (no card either): <code>git pull</code>, then
+<code>rdna3vm window</code>, and in the macOS Terminal:</p>
+<pre><code class="language-sh">bash &lt;(curl -s http://10.0.2.2:8000/tools/build_radv.sh)</code></pre>
+<p>The first run installs the Xcode Command Line Tools (click Install in the
+dialog, then run the command again), Python 3.12 from python.org (asks for
+the password), the build tools from PyPI and glslang from source - no
+Homebrew, which no longer installs on Intel Macs; Mesa takes 10-20 minutes. It ends with a loopback check and installs RADV
+and <code>rdna3_vktest</code> where the report runs them.</p>
+<p>From step 8 on the report then has a <code>== rdna3_vktest</code> section: RADV creates
+a Vulkan device on the card and fills and copies buffers on every queue.</p>
+<h3 id="vulkan-cts-subset-step-cts">Vulkan CTS subset (step cts)</h3>
+<p>With RADV in the VM, the report can run a fixed part of the Vulkan
+conformance tests (<code>tools/cts/patterns.txt</code>, about 2360 cases, up to 45
+minutes). The <code>deqp-vk</code> build comes from CI: Actions -&gt; build -&gt; Run
+workflow with <code>cts</code> on (the first build takes about an hour on the macOS
+runner, later ones minutes). Then, once per CTS build:</p>
+<pre><code class="language-sh">rdna3vm cts          # the newest rdna3-cts artifact into the VM's share
+rdna3vm step cts</code></pre>
+<p>The report's <code>== Vulkan CTS subset</code> section has one line per group (pass,
+fail, not supported) and the failing cases; a group that hangs is killed at
+its time limit and named with the case it was in. Triage prints the total.</p>
+<h3 id="metal-plugin-optional-once">Metal plugin (optional, once)</h3>
+<p>After <code>build_radv.sh</code>, in the same <code>rdna3vm window</code> session:</p>
+<pre><code class="language-sh">bash &lt;(curl -s http://10.0.2.2:8000/tools/build_metal.sh)</code></pre>
+<p>Installs Rust through rustup on the first run, builds the Metal plugin and
+the AIR-&gt;SPIR-V translator (5-10 minutes) and installs them with RADV into
+<code>/Library/GPUBundles</code>. From then on the report has a <code>== mtlprobe</code> section:
+does Metal list the AMD device, and does a compute kernel compiled from
+source run on it (<code>METAL: ALL PASSED</code>). Without the plugin it only lists
+the Metal devices. Only the processes <code>rdna3mtl-allow.txt</code> allows (and <code>mtlprobe</code>) get the
+device: WindowServer, and every application in apps mode (the <code>%apps</code> line;
+<code>rdna3mtlapps=0</code> in the boot-args or no such line gives the explicit names
+only). Everything else sees nothing new.</p>
+<h3 id="keeping-the-plugin-and-radv-current">Keeping the plugin and RADV current</h3>
+<p><code>rdna3vm update</code> installs only the kext bundle. The
+Metal plugin and a RADV built in the VM stay as they were built, so after a
+<code>git pull</code> that touches <code>metal/</code> or <code>userspace/mesa/</code> they are older than the
+kext the report tests. Both build scripts therefore write a stamp (the last
+commit that touched <code>metal/</code>, resp. <code>userspace/mesa/</code>, in the sources they
+built) and the report carries it in <code>35-build-stamps.txt</code>. When the triage
+prints <code>FAIL STALE PLUGIN/RADV</code>, the plugin / RADV results of that run do
+not test the current code: <code>git pull</code>, <code>rdna3vm window</code>, then in the VM
+Terminal <code>build_radv.sh</code> and <code>build_metal.sh</code> again (the commands above),
+shut the VM down and run the steps again. Reports from before the stamps
+(and a RADV from a CI artifact) have none; for the plugin the triage then
+looks for the <code>vk: VK_EXT_extended_dynamic_state</code> line in its log.</p>
+<h3 id="a-bigger-bar0-for-the-vm-optional">A bigger BAR0 for the VM (optional)</h3>
+<p><code>rdna3vm</code> gives the VM the card with BAR0 cut to 256 MiB. That window is
+all the CPU can reach of the card's memory, and macOS's CPU-visible VRAM
+heap is what is left of it (144 MiB): WindowServer's framebuffers, the
+cursor and the swap copies share it with the buffers RADV maps. Card run
+2026-10-17c ran it dry (the main display froze); the driver now keeps a
+reserve of it for the display (<code>rdna3visreserve</code>, docs/INSTALL-OPENCORE.html)
+and keeps buffers that need no CPU access out of it, so 256 MiB stays the
+default.</p>
+<p>What macOS takes (DRIVER-PLAN N62, from Apple's IOPCIFamily source and card
+run 2026-10-28c): in a VM it keeps a PCI BAR only <strong>below 4 GiB</strong> (its PCI
+configurator drops 64-bit placements when CPUID says &quot;hypervisor&quot;), and on
+any machine it takes <strong>no BAR bigger than 1 GiB</strong>. Run 2026-10-28c had a
+1 GiB BAR0 that OVMF put at 0x900000000 (its 64-bit window): macOS gave the
+card no BAR0 at all, the kext could not map it, the bring-up stopped and
+WindowServer never reached the GPU. So <code>rdna3vm</code> now gives the VM no 64-bit
+PCI window for a BAR0 up to 1 GiB, and OVMF has to fit it below 4 GiB. To
+try a larger window, put this in <code>~/rdna3-vm/config</code>:</p>
+<pre><code class="language-sh">RESIZE_BAR_LOG2=9      # 2^9 MiB = 512 MiB (about 400 MiB visible heap); 8 = 256 MiB, the default</code></pre>
+<p>and leave <code>PCI_MMIO64_MB</code> unset (or 0). The host log then says <code>OVMF 64-bit PCI window: 0 MiB (BAR0 512 MiB)</code> and, in the guest's PCI bus at 8 and 40 s,
+<code>BAR0: 64 bit prefetchable memory at 0x80000000 [0x9fffffff]</code> (below 4 GiB).
+When that run is good, <code>RESIZE_BAR_LOG2=10</code> (1 GiB) is the next try: it fits
+only if OVMF's 32-bit window has a free 1 GiB-aligned GiB, which q35 may not
+have. Values above 10 are useless to macOS (and the host log says so).</p>
+<p>What the report must show (triage row <code>VRAM aperture</code>, the kernel's line
+<code>VRAM aperture: BAR0 512 MiB at phys 0x80000000, mapped 512 MiB (kernel window, ...), visible heap N MiB</code>): the same BAR0 size as the host's
+<code>BAR0 ... -&gt; 512 MiB</code>, <code>mapped</code> equal to it, and <code>VISIBLE VRAM</code> with fewer or
+no refusals. <code>VRAM aperture: NOT MAPPED: ...</code> names why (for example <code>the firmware put it above 4 GiB</code>); a picture-less VM or an unconfigured card means
+OVMF could not fit the BAR below 4 GiB: set <code>RESIZE_BAR_LOG2=8</code> again (or
+delete the line) and send <code>host-*.log</code>. The kext maps at most 1 GiB of BAR0
+into the kernel (<code>rdna3vramwin=&lt;MiB&gt;</code> lowers it); a map that fails is retried
+with half the window down to 256 MiB, and the row then says WARN.</p>
+<h2 id="how-it-works-for-the-curious">How it works (for the curious)</h2>
+<ul>
+<li><code>rdna3vm step N</code> writes the step's boot-args to the OpenCore <code>config.plist</code> (a copy
+in <code>~/rdna3-vm/OpenCore-rdna3.img</code>). Then, as a systemd service (<code>rdna3vm-*</code>,
+which keeps running after the desktop goes dark), it:
+<ul>
+<li>stops the desktop and detaches the console;</li>
+<li>rebinds the card from <code>amdgpu</code> to <code>vfio-pci</code>;</li>
+<li>starts QEMU with the card and the USB keyboard and mouse;</li>
+<li>after the VM shuts down, gives everything back to Linux.</li>
+</ul>
+</li>
+<li>Before the VM starts, the computer also sleeps for 5 seconds
+(<code>PRE_SUSPEND=1</code>): that powers the card off, so the VM gets it cold, as
+after a fresh boot. Without it the card's boot screen (OpenCore menu)
+stays dark: the monitor reports no signal.</li>
+<li><code>prepare</code> sets OpenCore's <code>UEFI/Output/Resolution</code> to <code>Max</code>
+(<code>OC_RESOLUTION</code> in the config; empty = leave it): OVMF hands the
+card's GOP 800x600, and macOS keeps whatever mode the boot screen had.</li>
+<li>QEMU reads the keyboard and mouse from Linux (<code>input-linux</code>, the
+&quot;both Ctrl&quot; toggle) and passes them to macOS as USB devices. Linux itself watches for Esc 3×
+and the power button (<code>vmtool.py stopkeys</code>, <code>systemd-inhibit</code>). After the VM
+the button works normally again.</li>
+<li><code>prepare</code> also copies the kexts into the OpenCore image (<code>EFI/OC/Kexts</code>,
+<code>Kernel/Add</code>), and OpenCore injects them at boot. macOS itself refuses our
+ad-hoc signed kexts (&quot;invalid codeful kernel extension&quot;). The copy in
+<code>/Library/Extensions</code> (from <code>setup.sh</code>) only provides the firmware files,
+which the kext reads from disk.</li>
+<li>macOS sees Linux at the address <code>10.0.2.2</code>. At that address
+<code>tools/vm/vmtool.py serve</code> serves the package and receives reports (only
+locally, <code>127.0.0.1:8000</code>).</li>
+<li>In macOS the <code>org.rdna3.vmreport</code> daemon collects a report 90 s after boot, i.e.
+<code>tools/macos/collect.sh</code> plus the <code>rdna3_drminfo</code> tests. It sends it and, if the host
+asked for it (<code>rdna3vmauto=1</code>), shuts down the system.</li>
+<li><code>CPU_MODEL</code> decides the VM's CPU (an emulated Skylake by default, the real one with <code>host</code>);
+<code>rdna3vm</code> adjusts the OpenCore image for it before every boot (see above).</li>
+<li>The kernel log goes to the VM serial port (<code>serial=3</code>) into <code>serial-*.log</code>, and
+<code>debug=0x100</code> halts macOS on a panic instead of restarting.</li>
+</ul>
+<footer class="doc">RDNA3-Hackintosh documentation. </footer>
+</main>
+</body>
+</html>

@@ -191,7 +191,7 @@ jobs:
             build/userspace/libdrm_amdgpu.dylib
       # seconds: pkgbuild over the files above, no firmware inside
       # (package/make_pkg.sh; the Metal plugin and RADV are added locally)
-      # the package TESTING-HW.md has users install: a broken build fails
+      # the package TESTING-HW.html has users install: a broken build fails
       # the run (PR #2 review)
       - name: Installer (.pkg + tarball)
         run: package/make_pkg.sh --out build/pkg

@@ -10,7 +10,7 @@ Reads what tools/baremetal/fetch.sh left in OUT (src/, dl/) and writes OUT/efi/E
                                  boot-args: the installer runs on the card's GOP framebuffer
   EFI/OC/config-installer.plist  the same file under its own name
   EFI/OC/config-driver.plist     the same with the kext enabled and the driver's boot-args;
-                                 copy it over config.plist once macOS is installed (docs/BAREMETAL.md).
+                                 copy it over config.plist once macOS is installed (docs/BAREMETAL.html).
                                  tools/baremetal/stick/metal.sh adds rdna3agdc=3 to it later
 
 Both start from OpenCore's own Docs/Sample.plist (so every key of this OpenCore release is there)
@@ -20,7 +20,7 @@ macserial and kept in OUT/identity.json, never in git. Both configs are checked 
 The AMD_Vanilla kernel patches and their core-count byte are the ones the card VM runs
 (tools/vm/vmtool.py amd_patches, tools/vm/data/amd_vanilla.SOURCE); the Lilu / RestrictEvents
 pins are the VM's too (tools/vm/data/oc_kexts.SOURCE). On top of them this PC needs what the VM
-does not (docs/BAREMETAL.md part 6): AMD_Vanilla's IOPCIFamily "Disable 10 bit tags" patches (the
+does not (docs/BAREMETAL.html part 6): AMD_Vanilla's IOPCIFamily "Disable 10 bit tags" patches (the
 B550 chipset does not work without them) and a codeless kext that keeps AppleIntelMCEReporter
 off (it panics on AMD under MacPro7,1).
 """
@@ -53,7 +53,7 @@ KEXTS = (
     ("NVMeFix", "NVMeFix", "NVMe power management (DRAM-less Crucial P3 / P310)"),
 )
 CORE_KEXT = "RDNA3Accel"
-CORE_KERNEL_MIN = "25.0.0"        # Darwin 25 = macOS 26 Tahoe (docs/INSTALL-OPENCORE.md section 3)
+CORE_KERNEL_MIN = "25.0.0"        # Darwin 25 = macOS 26 Tahoe (docs/INSTALL-OPENCORE.html section 3)
 CORE_KERNEL_MAX = "25.99.99"
 
 SSDTS = ("SSDT-EC-USBX-DESKTOP.aml", "SSDT-CPUR.aml")
@@ -70,7 +70,7 @@ COMMON_ARGS = "-v keepsyms=1 debug=0x100 msgbuf=1048576"
 # 2026-10-31 boots the driver first and tools/baremetal/stick/metal.sh adds it (to a config
 # kept as config-before-metal.plist) once the plugin and RADV are installed
 DRIVER_ARGS = "amfi=0x80"
-# csr-active-config of docs/INSTALL-OPENCORE.md section 4 (SIP relaxed for ad-hoc signed kexts)
+# csr-active-config of docs/INSTALL-OPENCORE.html section 4 (SIP relaxed for ad-hoc signed kexts)
 CSR_ACTIVE_CONFIG = bytes.fromhex("EF0F0000")
 
 # The codeless kext that keeps Apple's AppleIntelMCEReporter from starting: it panics on an AMD
@@ -261,7 +261,7 @@ def build_config(sample, stage, *, kexts, cores, smbios, identity, alcid, entrie
     # Booter: Dortania "Ryzen and Threadripper"; SetupVirtualMap off (Dortania: boards of 2020
     # and later, the B550's firmware, need it off). ResizeAppleGpuBars -1: the BIOS leaves BAR0
     # at 256 MiB (Re-Size BAR off), which is what every working boot had; 10 = BAR0 cut to
-    # 1 GiB for macOS only, the most it takes, for Re-Size BAR on (docs/INSTALL-OPENCORE.md
+    # 1 GiB for macOS only, the most it takes, for Re-Size BAR on (docs/INSTALL-OPENCORE.html
     # section 5, DRIVER-PLAN N62)
     c["Booter"]["Quirks"].update({
         "AvoidRuntimeDefrag": True, "DevirtualiseMmio": False, "EnableSafeModeSlide": True,
@@ -430,7 +430,7 @@ def run_ocvalidate(tool, config, allow_bar_note=False):
     """(ok, text). ocvalidate calls every ResizeAppleGpuBars of 0 or more a problem (8: "not
     useful for macOS", above 8: "unstable with macOS sleep-wake"); that is the one note
     allow_bar_note accepts: 10 (1 GiB, the most macOS takes) is the choice of
-    docs/INSTALL-OPENCORE.md section 5 (DRIVER-PLAN N62) and the driver does not sleep yet"""
+    docs/INSTALL-OPENCORE.html section 5 (DRIVER-PLAN N62) and the driver does not sleep yet"""
     r = subprocess.run([tool, config], capture_output=True, text=True, check=False)
     text = (r.stdout + r.stderr).strip()
     if r.returncode == 0:
@@ -488,7 +488,7 @@ def build(args):
         os.makedirs(tmp)
         core_src = extract_core_kext(zp, tmp)
     core = copy_kext(core_src, os.path.join(oc, "Kexts"), CORE_KEXT)
-    kexts.append(kext_entry(CORE_KEXT, core, "RDNA3-Hackintosh core kext (docs/INSTALL-OPENCORE.md)",
+    kexts.append(kext_entry(CORE_KEXT, core, "RDNA3-Hackintosh core kext (docs/INSTALL-OPENCORE.html)",
                             enabled=False, min_kernel=CORE_KERNEL_MIN, max_kernel=CORE_KERNEL_MAX))
 
     cores = args.cores or detect_cores()

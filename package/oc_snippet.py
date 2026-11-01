@@ -14,7 +14,7 @@ Auxiliary KC) instead; --all lists those too (disabled), the way the VM
 harness injects everything. --plist wraps the entries in a whole plist
 (Kernel/Add only), which plistlib and ProperTree can open.
 Default MinKernel/MaxKernel: macOS 15 Sequoia (Darwin 24), the only
-release the kexts are built and tested for (docs/INSTALL-OPENCORE.md).
+release the kexts are built and tested for (docs/INSTALL-OPENCORE.html).
 """
 import os
 import plistlib

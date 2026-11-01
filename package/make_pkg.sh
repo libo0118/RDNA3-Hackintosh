@@ -24,7 +24,7 @@
 # Tahoe one (kexts-tahoe, which the postinstall picks on Darwin 25).
 #
 # Output: RDNA3-Hackintosh-<version>-<commit>.pkg and .tar.gz. What gets
-# installed where: docs/INSTALL-OPENCORE.md. macOS (pkgbuild, productbuild,
+# installed where: docs/INSTALL-OPENCORE.html. macOS (pkgbuild, productbuild,
 # install_name_tool); elsewhere only the tarball, for tests.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -222,7 +222,7 @@ RDNA3-Hackintosh $VER ($SHA): kexts and tools for the AMD RX 7800 XT on macOS 15
   sudo ./install.sh [--fw <linux-firmware>/amdgpu]     install (the same as the .pkg)
   sudo ./uninstall.sh [--efi /Volumes/EFI]             remove, OpenCore's copy and entries too
                                                        (mount the EFI first; --keep-opencore skips it)
-Before the first boot read docs/INSTALL-OPENCORE.md in the repository
+Before the first boot read docs/INSTALL-OPENCORE.html in the repository
 (SIP, amfi=0x80, OpenCore injection, the way back).
 Parts: ${parts[*]}
 EOF

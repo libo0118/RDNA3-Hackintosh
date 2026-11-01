@@ -4,7 +4,7 @@
 # does (tools/vm/macos/setup.sh): executables, root:wheel, ad-hoc
 # signatures over the final bundles (kernelmanagerd refuses unsigned kexts),
 # the kexts registered with kernelmanagerd for the Auxiliary KC, then
-# warnings about what the user still has to set (docs/INSTALL-OPENCORE.md).
+# warnings about what the user still has to set (docs/INSTALL-OPENCORE.html).
 set -u
 DST=${3:-/}
 [ "$DST" = / ] && DST=
@@ -75,15 +75,15 @@ if [ $live = 1 ]; then
     case "$csr" in
         *disabled*) ;;
         *) say "WARNING: SIP is on ($csr). macOS loads ad-hoc signed kexts only with SIP off" \
-               "(csr-active-config EF0F0000 in OpenCore, docs/INSTALL-OPENCORE.md)." ;;
+               "(csr-active-config EF0F0000 in OpenCore, docs/INSTALL-OPENCORE.html)." ;;
     esac
     args=" $(nvram boot-args 2>/dev/null | cut -f2-) "
     case "$args" in *" amfi=0x80 "*) ;; *) say "NOTE: boot-arg amfi=0x80 is not set: kernelmanagerd may call the" \
-        "framebuffer an 'invalid codeful kernel extension' (docs/INSTALL-OPENCORE.md)." ;; esac
+        "framebuffer an 'invalid codeful kernel extension' (docs/INSTALL-OPENCORE.html)." ;; esac
     case "$args" in *" -rdna3off "*) say "NOTE: boot-arg -rdna3off is set: the driver stays off until you remove it." ;; esac
     case "$args" in *" rdna3lvl="*) say "NOTE: rdna3lvl= is set: a test-ladder step, not the default profile." ;; esac
     loaded=$(kmutil showloaded --list-only 2>/dev/null | grep -o -i -E '[a-z0-9.]*(whatevergreen|radeonsensor|smcradeongpu)[a-z0-9.]*' | sort -u | tr '\n' ' ')
-    [ -n "$loaded" ] && say "NOTE: loaded now: $loaded- see 'What to remove' in docs/INSTALL-OPENCORE.md."
+    [ -n "$loaded" ] && say "NOTE: loaded now: $loaded- see 'What to remove' in docs/INSTALL-OPENCORE.html."
 fi
 say "installed $(head -1 "$A/VERSION" 2>/dev/null). Restart, approve the extensions in"
 say "System Settings -> Privacy & Security if asked, and restart once more."

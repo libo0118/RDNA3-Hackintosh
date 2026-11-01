@@ -2201,7 +2201,7 @@ def plugin_stale_reason(path):
     else:
         has = "a plugin older than the repo's"
     return ("the VM's plugin is STALE: %s - %s; rebuild it in the VM (tools/vm/macos/build_metal.sh, "
-            "docs/TESTING-VM.md) before the next card run" % (text, has))
+            "docs/TESTING-VM.html) before the next card run" % (text, has))
 
 
 _PLUGIN_TRIAGE = {}   # (archive path, A/B window) -> what plugin_trace.triage_ex made of it (the summary and the per-report part both ask)
@@ -3077,7 +3077,7 @@ def stale_builds(stamps_txt, host_txt, plugin_log):
     print("   INFO %-20s %s" % ("build stamps", "; ".join(n.replace("  ", " ") for n in notes) or "none"))
     if reasons:
         print("   FAIL STALE PLUGIN/RADV: %s; run build_radv.sh and build_metal.sh in the VM "
-              "(docs/TESTING-VM.md) - the plugin / RADV results of this run do not test the current code" %
+              "(docs/TESTING-VM.html) - the plugin / RADV results of this run do not test the current code" %
               "; ".join(reasons))
     return bool(reasons)
 
