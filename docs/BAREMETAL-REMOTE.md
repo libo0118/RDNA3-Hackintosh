@@ -739,3 +739,145 @@ The kernel switch is live; apps decide at texture creation, so **restart the app
 for the A/B: the plugin's execution thread CPU and pres_us_avg, on vs off.
 
 Write "## Round 4b findings" below and push to Forgejo.
+
+## Round 4 findings (2026-11-01 evening, Pi session; build e400b68, CI run 126)
+
+Round 4 had not started, so the Pi installed run 126 (Forgejo run_id 204, artifacts 227-230:
+kexts, core, tarball, `RDNA3MTL`, `radv-macos-logs`) and did round 4, then 4b. The stick's
+`rdna3/` holds the e400b68 tarball, the repo's `tools/baremetal/stick/*.sh` and `metal/` with
+run 126's files; the old files are in `rdna3/old/02b2210/`, the old core in
+`EFI/OC/Kexts-old/02b2210/`, the config before round 4 in `EFI/OC/config-before-r4.plist`.
+One reboot after the owner approved the extensions (boot 20:15:56).
+
+1. **N74, UCLK pin: works.**
+   - ioreg: `RDNA3,UclkPinned` = 1, `RDNA3,DCNPower` = `UCLK pinned (two heads, unsynchronised,
+     no FPO / SubVP: no shared vblank) at 1218 MHz: hard min kept (mirror on, decision 3, pins 1,
+     releases 0, fails 0, unconfirmed 0)`, `RDNA3,DCNPowerInit` = `UCLK pin (N74): PMFW 0x505c00,
+     UCLK 4 levels 96..1218 MHz, on (rdna3uclkpin, debug.rdna3_uclk_pin)`.
+   - The kernel log lines of check 2 could not be read: the boot part of the message buffer was
+     already overwritten (`dmesg` starts later) and `log show` has no `display power:` lines.
+     The ioreg strings above are the evidence; `report.sh` was not run.
+   - `rdna3_pmctl levels mclk 15` (all levels allowed): `pp_dpm_mclk (now 1218 MHz)` stays.
+   - No flash on the secondary during two long streamed replies (the owner watched).
+   - A/B: `debug.rdna3_uclk_pin=0` -> `UCLK switching (switched off (rdna3uclkpin=0 /
+     debug.rdna3_uclk_pin 0); two heads lit): hard min released to the lowest level now (sysctl,
+     decision 4, pins 1, releases 1, fails 0, unconfirmed 0)`, UCLK 96 MHz. **The flash did not
+     come back**: the owner watched through two streamed replies and 30 s of scrolling and
+     dragging, while UCLK did switch (samples every 0.5 s: 33 x 96 / 7 x 456 MHz, then
+     34 x 96 / 26 x 456 MHz; never 772 or 1218). `=1` -> `hard min sent now (sysctl, decision 5,
+     pins 2, releases 1, fails 0, unconfirmed 0)`, 1218 MHz. So round 3 item 13's A/B did not
+     reproduce on this build; possibly round 3's flashes came with switches to the higher levels.
+   - Display sleep (`pmset displaysleepnow` 20:24:22) and a click: the desktop was back at once;
+     `hard min kept (display wake, decision 10, pins 3, releases 2, fails 0, unconfirmed 0)`,
+     still 1218 MHz.
+   - Idle power (PMFW socket power from `rdna3_pmctl`, desktop only): **50 W pinned, 28 W
+     with `uclk_pin=0`** (+22 W).
+   - Mouse wake as round 3 item 7: motion of the SteelSeries Rival 3 (USB dongle) and of the
+     Magic Mouse (Bluetooth) does not wake, a click does. After the wake the Rival reconnects to
+     its dongle; the kernel log at the sleep has `Rival 3 Wireless Gen 2 ... endpoint 0x00: status
+     0xe0005000 (pipe stalled)`. macOS USB, not the driver.
+2. **N68, `iop_latch` default on: works, but it caps the game at 120 fps.**
+   - `rdna3ioplatch=1` removed from the stick's boot-args (now `-v keepsyms=1 debug=0x100
+     msgbuf=1048576 alcid=13 amfi=0x80 rdna3agdc=3 rdna3pmctl=1`): `debug.rdna3accel_iop_latch`
+     = 1, boot line `iop latch (N68): ... (the default; rdna3ioplatch=0 ...)`; a fast drag in the
+     top quarter shows no split (the owner).
+   - **New:** horizon-client ran at a flat 119-120 fps (no in-game limit; round 3 had
+     300-400). WindowServer composited ~120 frames/s (2 per 60 Hz vblank), the game waited in
+     `nextDrawable` (`next_pct` 58 %, `away_us_avg` 22-24 ms against 5-6 ms without the latch).
+     Live `debug.rdna3accel_iop_latch=0` -> 250-315 fps at once, `=1` -> 119 again; `uclk_pin`
+     makes no difference. With `a3share=1` (round 4b) the cap stays: 120 fps, WindowServer 15 %
+     CPU, game 25 %, `next_pct` 87 %, `away_us_avg` 23.8 ms. Each WindowServer frame waits for
+     a latch, so the game gets two drawables back per vblank. This needs a fix before N68 stays
+     the default (round 4b ran with the latch off to compare with round 3).
+3. **N75, Geekbench 7 GPU: still fails, unchanged.** Run from the app (Metal): no
+   `translator note`, `link cache: miss 0 B 330417.95 ms [0 hit, 4 miss, 3 stored]`, then
+   `link FAILED: "depthwiseConv_3x3" linked (676122 B AIR) but did not translate: native
+   emitter: Private pointer phi %metal2vulkan.ct.slot.48 has differing structural sources; raw
+   construction failed: native emitter: pointer merge storage mismatch Function vs Private at
+   Local("%1425") across [Local("%72"), Local("%1425")]`, the same text as round 3 (also the two
+   `re-translate FAILED: ... visible function reference ... [postfixPrimary_f, ...]` lines). The
+   translator is run 126's (`cache tag sha256-dffa2fd92b99cad0...`, the artifact's hash). None of
+   the N75 refusal shapes appears. The "it just closes" is Geekbench's backend aborting:
+   `MTLReportFailure` from `MPSLibrary::MPSKey_Compile` in `EncodeDWConv` (no pipeline for
+   the depthwise convolution), SIGABRT. A new `NVMTL_LINK_DUMP` is on the Pi in
+   `~/rdna3-bm/r4/gb7/nvmtl-link-2359/` (evidence only, never committed): its
+   `depthwiseConv_3x3.kernel.ll`, `.linked.ll` and `.fc.txt` are byte-identical to round 3's
+   dump, so round 3's dump reproduces this on Linux.
+4. Optional items: N70 was done in round 4b; the USB port map for mouse wake was not done.
+5. Seen in the kernel log at boot (not new, for the record): `RDNA3-fb: cursor: head 0/1 move to
+   0,0 hidden FAILED in the core (1 such)`.
+
+## Round 4b findings (2026-11-01 night, Pi session; build e400b68, CI run 126)
+
+All runs: horizon-client, `iop_latch` 0 (round 4 item 2), UCLK pinned, 45 s windows (`top`
+every 5 s, the game's 2 s fps samples, SUMMARY counters as the difference across the window).
+Moving around the world changes fps from ~140 to ~600 (the owner: ground 350-400, walking
+150,
+standing 180, sky ~600), so the A/B was done standing still, looking at the sky, at the same
+spot, restarting the game for each leg. The first walking runs (a3share 0: 299 fps hidden /
+215 visible; a3share 1: 219 hidden) are not comparable for that reason.
+
+**N71 (c), a3share: works, no fault, ~15 % more fps and a third less WindowServer CPU.**
+
+| Leg (sky, standing) | fps avg (min-max) | game CPU | WindowServer CPU | next_pct | pres_us_avg | away_us_avg | WS uploads in 45 s |
+|---|---|---|---|---|---|---|---|
+| A, a3share 0, Claude hidden | 454 (436-497) | 96 % | 74 % | 57.5 | 1076 | 4863 | 9643 (in_us 905) |
+| B, a3share 1, Claude hidden | 524 (592 max) | 79 % | 51 % | 50.6 | 587 | 3961 | 0 (sh_skip 11819) |
+| A, a3share 0, Claude visible | 309 (267-426) | 69 % | 70 % | 67.5 | 1049 | 7065 | 8090 (in_us 890) |
+| B, a3share 1, Claude visible | 364 (320-440) | 65 % | 65 % | 59.8 | 666 | 6704 | 1611 (the Claude window only) |
+
+- Step 1: `debug.rdna3accel_a3share` 0, boot log `A3 share: off: WindowServer's imports are
+  refused as above (rdna3a3share=0)`, WindowServer `vk: a3share: read-only imports accepted from
+  the kernel`.
+- Leg B, the game: `vk: a3share: surface 160 plane 0 shared (allocation #57)` and five more
+  (#58-#62); WindowServer: `item 7: surface 160 1920x1080 -> read-only shared VRAM (allocation
+  #57)` with the same numbers; `vk: a3share: surface-in SKIPPED (read-only shared VRAM current at
+  seed 2695, allocation #59): 8000 skipped, 0 stale`. App SUMMARY `pr_shared` 6, the other `pr_*`
+  0; WindowServer `sh_imp` 9, `sh_skip` growing with frames, 0 for `sh_war`, `sh_wr`, `sh_rw`,
+  `sh_refused`, `sh_pdem`, `sh_off`, `sh_stale`, `sh_inelig`; the game's `ups` 0.
+- sysctl: `recorded` 9, `imported` 9, `stale` 0, `fault_off` 0, `noaccept` 0, `norecord` 125
+  (WindowServer imports of other surfaces, `no share record ... as before`).
+- No `item 7: ... -> the family's VRAM` line, no `surfshare: VM fault`, no `GEM: VM fault`, no
+  `[gfxhub]` line in 25 minutes of kernel log.
+- The owner: the game window showed the live picture (no old frames, flicker or black), the
+  desktop and other windows normal. Dragging and resizing the game window with a3share 1 was
+  **not** tried.
+- Expected vs seen: fps above 400 with Claude hidden, yes (524); WindowServer CPU down, yes
+  (74 -> 51 %). `next_pct` fell only from 57.5 to 50.6 %: at ~500 fps the game still waits for
+  WindowServer's composite (one per two game frames), not for an upload.
+- Left at `debug.rdna3accel_a3share=0`.
+
+**N70: keep it.** Sky, standing, Claude hidden, a3share 0:
+
+| | fps | game CPU | pres_us_avg | busiest game threads (3 samples) |
+|---|---|---|---|---|
+| N70 on (default) | 433 (392-443) | 89 % | 1039 | 22/11/11, 32/9/6, 27/11/6 % |
+| `NVMTL_GSUB_LAST_EMPTY=0` (rdna3mtl.conf) | 433 (415-443) | 96 % | 1612 | 25/19/6, 25/17/9, 24/21/9 % |
+
+On: `commit: N70 G-SUB an empty LAST part is retired by the ahead pass, which goes on to the next
+buffer (NVMTL_GSUB_LAST_EMPTY=unset)` and `N70 G-SUB <n> empty LAST parts retired ...` growing
+2, 4, 8, ... 64. Off: `an empty LAST part stops the ahead pass (later buffers submit + wait in
+turn) (NVMTL_GSUB_LAST_EMPTY=0)`, `<n> ahead pass(es) stopped at an empty LAST part`. Same fps;
+with N70 pres_us_avg is 35 % lower and the second-busiest thread uses about half the CPU.
+
+### Mac state after round 4
+
+- Build e400b68 (run 126) installed: kexts, the core on the stick, the plugin, RADV.
+- Stick boot-args without `rdna3ioplatch` (the latch is on by default); `rdna3pmctl=1` stays.
+- `debug.rdna3_uclk_pin` 1, `debug.rdna3accel_iop_latch` 1, `debug.rdna3accel_a3share` 0; no
+  `rdna3mtl.conf`.
+- On the Mac: `~/meas4.sh` (the 45 s measurement), `~/r4meas/` (the raw runs, also on the Pi in
+  `~/rdna3-bm/r4/meas/`), `~/r4-gbdump/` (the Geekbench dump).
+
+### For the Linux session (round 4 open work)
+
+1. N68: the latch caps WindowServer at two composites per vblank, so a game gets 120 fps on
+   a 60 Hz desktop (item 2). Fix before keeping it as the default, or default it off again.
+2. N74: the pin works and costs 22 W idle, but this round the flash did not come back with the
+   pin off. Decide whether to keep it on by default; a longer unpinned watch may be needed.
+3. N75: the Geekbench `ct.slot.48` case is still refused the old way, with no N75 note; round
+   3's dump (identical input) reproduces it.
+4. N71 (c): works on the card; next steps are the drag and resize check with a3share 1 and
+   turning it on by default.
+5. N70: keep.
+6. Push these commits to GitHub (the Pi pushes only to Forgejo).
