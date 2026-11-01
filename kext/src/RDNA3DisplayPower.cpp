@@ -23,6 +23,15 @@
  * allow (rdna3pstate) stays when the mirror is lit: UCLK then drops only
  * for configurations whose every plane switches in active.
  *
+ * Without rdna3mall (the default), DRIVER-PLAN N74: two or more lit heads
+ * cannot hide the PMFW's UCLK switch in one shared vblank (bare metal
+ * 2026-11-01: the secondary's top tenth flashed black at every switch), so
+ * UCLK's hard minimum goes to the top level as dcn32_update_clocks does for
+ * p_state_change_support false, and back to the lowest level with one head
+ * (hw/dcn32_pstate.c dcn32_uclk_pin_*). Same update points, same
+ * RDNA3,DCNPower property ("UCLK pinned (two heads, ...)" or why not);
+ * boot-arg rdna3uclkpin=0 / sysctl debug.rdna3_uclk_pin=0 turn it off.
+ *
  * SPDX-License-Identifier: MIT
  */
 #include "RDNA3Accel.hpp"
@@ -30,6 +39,8 @@
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include <kern/thread_call.h>
+#include <sys/sysctl.h>
+#include <sys/errno.h>
 
 extern "C" {
 #include "rdna3_hw.h"
@@ -119,6 +130,10 @@ bool RDNA3Accel::displayPowerPclk(uint32_t *pclk, uint32_t *cursor)
  * fDispLock held. */
 void RDNA3Accel::displayPowerUpdate(const char *why)
 {
+    if (!fPowerOn) {
+        displayUclkPinUpdate(why);   /* N74: the default path (rdna3mall 0) */
+        return;
+    }
     if (!fPowerOn || !fPower || !fPowerCtx || !fPowerCtxMin || !fSubvp || !fDispDev || !fDcn || fDispAsleep)
         return;
     rdna3_dmub *dm = fDisplayDm;
@@ -297,11 +312,33 @@ void RDNA3Accel::displayPowerSuspend()
 }
 
 /* wake (fDispLock held, fDispAsleep cleared): the update again, unless
- * the card lost its power (the PMFW's tables with it: no more updates) */
-void RDNA3Accel::displayPowerWake(bool powerLost)
+ * the card lost its power (the PMFW's tables with it: no more updates).
+ * 'pmfwBack': after an IP-down sleep, the bring-up's resume ran and
+ * succeeded (the PMFW answers again) */
+void RDNA3Accel::displayPowerWake(bool powerLost, bool pmfwBack)
 {
-    if (!fPowerOn)
+    if (!fPowerOn) {
+        if (fUclkPin) {
+            if (powerLost && !pmfwBack) {
+                /* N74: no bring-up resume (rdna3resume=0) or a failed one:
+                 * the DAL mailbox is dead, nothing is sent to it */
+                fUclkPin->ready = 0;
+                setProperty("RDNA3,DCNPower", "UCLK pin (N74) unavailable (wake): the card went down in the sleep and "
+                            "the bring-up did not resume (rdna3resume, RDNA3,WakeResumeResult): no DAL message until a "
+                            "bring-up");
+                setNumber("RDNA3,UclkPinned", 0);
+                LOG("display power: UCLK pin (N74): wake: the IPs went down and the bring-up did not resume: no DAL "
+                    "message until a bring-up (the PMFW holds what it has)");
+                return;
+            }
+            /* N74: the IPs went down: what the PMFW holds is not known
+             * (its own after a power loss, ours after a suspend) */
+            if (powerLost)
+                dcn32_uclk_pin_power_lost(fUclkPin);
+            displayUclkPinUpdate(powerLost ? "wake after the IPs went down" : "wake");
+        }
         return;
+    }
     if (powerLost) {
         fPowerOn = false;
         setProperty("RDNA3,DCNPower", "off: the card lost its power in the sleep");
@@ -344,4 +381,254 @@ void RDNA3Accel::displayPowerFree()
     if (subvp) IOFree(subvp, sizeof(rdna3_subvp_state));
     if (ctx) IOFree(ctx, sizeof(rdna3_pstate_ctx));
     if (ctxMin) IOFree(ctxMin, sizeof(rdna3_pstate_ctx));
+}
+
+/* ======================================================================
+ * DRIVER-PLAN N74: the default path's UCLK pin (rdna3mall 0)
+ * ====================================================================== */
+
+static RDNA3Accel *gUclkPinOwner;
+static SInt32 gUclkPinSysctlBusy;
+
+static int rdna3_uclk_pin_sysctl SYSCTL_HANDLER_ARGS
+{
+    (void)arg1; (void)arg2;
+    int err = ENXIO, v = 0;
+    OSIncrementAtomic(&gUclkPinSysctlBusy);
+    RDNA3Accel *a = gUclkPinOwner;
+    if (a && !(err = a->displayUclkPinSysctl(&v, false))) {
+        err = sysctl_handle_int(oidp, &v, 0, req);
+        if (!err && req->newptr)
+            err = a->displayUclkPinSysctl(&v, true);
+    }
+    OSDecrementAtomic(&gUclkPinSysctlBusy);
+    return err;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+SYSCTL_PROC(_debug, OID_AUTO, rdna3_uclk_pin, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, nullptr, 0,
+            rdna3_uclk_pin_sysctl, "I",
+            "DRIVER-PLAN N74: 1 (default, boot-arg rdna3uclkpin) = UCLK's hard minimum at the top level while two or "
+            "more heads are lit (dcn32_update_clocks with p_state_change_support false), 0 = left to the PMFW; "
+            "the state in ioreg RDNA3,DCNPower");
+#pragma clang diagnostic pop
+
+/* the bring-up (rdna3mall 0, the PMFW up): the UCLK levels, then the first
+ * decision. 'd' is the bring-up's device; the updates use fDispDev (the
+ * same registers). */
+void RDNA3Accel::displayUclkPinInit(rdna3_dev *d)
+{
+    if (rd3_arg("rdna3mall", 0) || !d || !fDispLock || !fDcn)
+        return;
+    rdna3_uclk_pin *fresh = nullptr;
+    if (!fUclkPin) {
+        fresh = (rdna3_uclk_pin *)IOMalloc(sizeof(rdna3_uclk_pin));
+        if (!fresh) {
+            setProperty("RDNA3,DCNPower", "UCLK pin (N74) not set up: no memory; UCLK left to the PMFW");
+            LOG("display power: UCLK pin (N74): no memory: UCLK left to the PMFW (two heads may flash)");
+            return;
+        }
+        bzero(fresh, sizeof(*fresh));
+    }
+    char val[200];
+    IOLockLock(fDispLock);
+    if (fresh) {
+        fUclkPin = fresh;
+        fUclkPinOn = rd3_arg("rdna3uclkpin", 1) != 0;
+    }
+    int r = dcn32_uclk_pin_init(d, fUclkPin, fUclkPinEver ? 1 : 0);
+    if (r == RDNA3_OK)
+        snprintf(val, sizeof(val), "UCLK pin (N74): PMFW 0x%x, UCLK %u levels %u..%u MHz, %s%s", fUclkPin->pmfw,
+                 fUclkPin->n_memclk, fUclkPin->min_mhz, fUclkPin->max_mhz,
+                 fUclkPinOn ? "on (rdna3uclkpin, debug.rdna3_uclk_pin)" : "OFF (rdna3uclkpin=0)",
+                 fUclkPin->resync ? ", the first decision sent (a bring-up again after a pin)" : "");
+    else
+        snprintf(val, sizeof(val), "UCLK pin (N74) unavailable: %d (the PMFW's DAL mailbox: GetSmuVersion / UCLK "
+                 "levels, last %d); UCLK left to the PMFW", r, fUclkPin->last_err);
+    setProperty("RDNA3,DCNPowerInit", val);
+    LOG("display power: %s", val);
+    displayUclkPinUpdate("init");
+    IOLockUnlock(fDispLock);
+    if (!fUclkPinSysctl) {
+        gUclkPinOwner = this;
+        sysctl_register_oid(&sysctl__debug_rdna3_uclk_pin);
+        fUclkPinSysctl = true;
+    }
+}
+
+/* the heads that fetch: lit (dcn32_read_state's heads, the clone head),
+ * not blanked or with their link down by a power request (rdna3dpms), and
+ * the mirror's pipe when it is not a head of its own (rdna3mirror=1);
+ * 'upMask' heads about to be lit count even when down, 'goneMask' heads a
+ * change failed to light do not (dcn32_uclk_pin_lit) */
+uint32_t RDNA3Accel::displayUclkPinLit(int *mirrorPipe, uint32_t upMask, uint32_t goneMask)
+{
+    uint32_t down = 0, n = fDcn ? fDcn->nheads : 0;
+    if (n > RD_DCN_MAX_PIPES)
+        n = RD_DCN_MAX_PIPES;
+    for (uint32_t i = 0; i < n && i < 4; i++)
+        if (fHeadBlank[i] || fHeadLinkDown[i])
+            down |= 1u << i;
+    *mirrorPipe = fMirrorOn && fCloneHead < 0;
+    return dcn32_uclk_pin_lit(n, down, upMask, goneMask, *mirrorPipe);
+}
+
+/* one decision (fDispLock held): every one is logged and published.
+ * 'goneMask': heads a change just failed to light (an unblank that did
+ * not go through) */
+void RDNA3Accel::displayUclkPinUpdate(const char *why, uint32_t goneMask)
+{
+    if (!fUclkPin || fDispAsleep)
+        return;
+    int mirror = 0;
+    uint32_t lit = displayUclkPinLit(&mirror, 0, goneMask);
+    displayUclkPinApply(why, lit, mirror);
+}
+
+/* before a change that lights a head (fDispLock held): the pin first when
+ * the heads lit after it cannot share a vblank - dcn32_prepare_bandwidth's
+ * update_clocks(safe_to_lower false) before the plane is enabled. Raises
+ * only; the update after the change decides the rest. 'upMask': heads the
+ * change brings up (counted although still blanked / link down); 'extra':
+ * pipes it adds that are not heads yet (the clone) */
+void RDNA3Accel::displayUclkPinRaise(const char *why, uint32_t upMask, uint32_t extra)
+{
+    if (!fUclkPin || !fUclkPin->ready || !fUclkPinOn || fDispAsleep)
+        return;
+    int mirror = 0;
+    uint32_t lit = displayUclkPinLit(&mirror, upMask, 0) + extra;
+    if (dcn32_uclk_pin_decide(lit, 0, 0, nullptr) || !fUclkPin->p_state_change_support)
+        return;
+    displayUclkPinApply(why, lit, mirror);
+}
+
+void RDNA3Accel::displayUclkPinApply(const char *why, uint32_t lit, int mirror)
+{
+    if (!fDispDev) {
+        if (!fUclkPinNoDevLogged) {
+            fUclkPinNoDevLogged = true;
+            LOG("display power: UCLK pin (N74): %s: no display device (the display start failed): nothing decided", why);
+        }
+        return;
+    }
+    int sent = 0;
+    int off = fUclkPinOn ? 0 : 1;
+    int pin = !dcn32_uclk_pin_decide(lit, 0, off, nullptr);
+    int r = dcn32_uclk_pin_update(fDispDev, fUclkPin, lit, 0, off, &sent);
+    const rdna3_uclk_pin *u = fUclkPin;
+    const char *reason = dcn32_uclk_pin_why_name(u->why);
+    char heads[24], val[400], tail[144];
+    if (lit == 2)
+        snprintf(heads, sizeof(heads), "two heads");
+    else
+        snprintf(heads, sizeof(heads), "%u head%s", lit, lit == 1 ? "" : "s");
+    /* a pin message went out: the PMFW may hold it from now on, even when
+     * the answer did not come (the next bring-up sends its decision) */
+    if (sent && pin)
+        fUclkPinEver = true;
+    snprintf(tail, sizeof(tail), "decision %u, pins %u, releases %u, fails %u, unconfirmed %u%s", u->decisions,
+             u->pins, u->releases, u->fails, u->unconfirmed,
+             u->status_unreliable ? ", status wait skipped (ReturnHardMinStatus unreliable)" : "");
+    if (u->gave_up)
+        snprintf(val, sizeof(val), "UCLK pin GAVE UP (%s): %u refused / unanswered SetHardMinByFreq in a row (last %d): "
+                 "no DAL message until the next bring-up, UCLK as the PMFW has it (last minimum %u MHz); %s lit (%s)",
+                 why, u->consecutive_fails, u->last_err, u->hard_min_mhz, heads, tail);
+    else if (r == RDNA3_ENODEV && u->n_memclk && u->max_mhz)
+        snprintf(val, sizeof(val), "UCLK pin (N74) unavailable (%s): the bring-up is down, no DAL message until it is "
+                 "back; %s lit, the last minimum %u MHz", why, heads, u->hard_min_mhz);
+    else if (r == RDNA3_ENODEV)
+        snprintf(val, sizeof(val), "UCLK pin (N74) unavailable (%s): the PMFW's DAL mailbox did not answer at the "
+                 "bring-up (%d); %s lit, UCLK left to the PMFW", why, u->last_err, heads);
+    else if (r)
+        snprintf(val, sizeof(val), "UCLK pin FAILED (%s): SetHardMinByFreq(UCLK, %u MHz) for %s (%s) -> %d (%s), "
+                 "tried again at the next update, %u in a row of %u allowed (%s)", why,
+                 pin ? u->max_mhz : u->min_mhz, heads, reason, r,
+                 r == RDNA3_ETIME ? "no answer from the DAL mailbox" : "refused by the PMFW", u->consecutive_fails,
+                 RD_UCLK_PIN_MAX_FAILS, tail);
+    else if (!u->p_state_change_support)
+        snprintf(val, sizeof(val), "UCLK pinned (%s, %s%s) at %u MHz: hard min %s (%s, %s)", heads, reason,
+                 mirror ? ", the mirror's pipe counted" : "", u->hard_min_mhz,
+                 !sent ? (u->last_unconfirmed ? "kept, NOT confirmed" : "kept")
+                 : u->last_unconfirmed ? "sent now, accepted, NOT confirmed by ReturnHardMinStatus" : "sent now",
+                 why, tail);
+    else
+        snprintf(val, sizeof(val), "UCLK switching (%s%s; %s lit): %s (%s, %s)", reason,
+                 mirror ? ", the mirror's pipe counted" : "", heads,
+                 sent ? (u->last_unconfirmed ? "hard min released to the lowest level now, NOT confirmed"
+                                             : "hard min released to the lowest level now")
+                 : u->hard_min_mhz ? "hard min at the lowest level" : "no hard min sent, the PMFW's own",
+                 why, tail);
+    setProperty("RDNA3,DCNPower", val);
+    /* 0 switching / not pinned, 1 pinned and confirmed (or no status to
+     * ask), 2 pinned, accepted but not confirmed by ReturnHardMinStatus */
+    setNumber("RDNA3,UclkPinned", (uint64_t)(r != RDNA3_OK || u->p_state_change_support ? 0
+                                             : u->last_unconfirmed ? 2 : 1));
+    LOG("display power: %s", val);
+}
+
+/* the bring-up is going (its PMFW mailbox with it): no message until the
+ * next init; the decision state stays (fUclkPinEver). A pin is left in the
+ * PMFW (it goes with the PMFW's next start), said in the log. */
+void RDNA3Accel::displayUclkPinStop(const char *why)
+{
+    if (!fUclkPin)
+        return;
+    if (fDispLock)
+        IOLockLock(fDispLock);
+    if (fUclkPin->ready && !fUclkPin->p_state_change_support)
+        LOG("display power: UCLK pin (N74): %s: the pin (%u MHz) is left in place in the PMFW (teardown)", why,
+            fUclkPin->hard_min_mhz);
+    fUclkPin->ready = 0;
+    if (fDispLock)
+        IOLockUnlock(fDispLock);
+}
+
+/* stop(): the sysctl first (a write in flight finishes), then the memory */
+void RDNA3Accel::displayUclkPinFree()
+{
+    if (fUclkPinSysctl) {
+        sysctl_unregister_oid(&sysctl__debug_rdna3_uclk_pin);
+        gUclkPinOwner = nullptr;
+        for (int i = 0; i < 200 && gUclkPinSysctlBusy; i++)
+            IOSleep(10);
+        if (gUclkPinSysctlBusy)
+            LOG("display power: UCLK pin (N74): a sysctl was still running after 2 s; going on");
+        fUclkPinSysctl = false;
+    }
+    rdna3_uclk_pin *u = fUclkPin;
+    if (fDispLock)
+        IOLockLock(fDispLock);
+    fUclkPin = nullptr;
+    if (fDispLock)
+        IOLockUnlock(fDispLock);
+    if (u)
+        IOFree(u, sizeof(*u));
+}
+
+int RDNA3Accel::displayUclkPinSysctl(int *on, bool set)
+{
+    if (!fDispLock)
+        return ENXIO;
+    IOLockLock(fDispLock);
+    if (!fUclkPin) {
+        IOLockUnlock(fDispLock);
+        return ENXIO;
+    }
+    if (!set) {
+        *on = fUclkPinOn ? 1 : 0;
+        IOLockUnlock(fDispLock);
+        return 0;
+    }
+    bool was = fUclkPinOn;
+    fUclkPinOn = *on != 0;
+    if (!fUclkPin->ready)
+        LOG("display power: UCLK pin (N74): debug.rdna3_uclk_pin %d -> %d: NOT applied now (%s); the next bring-up "
+            "uses it", was ? 1 : 0, fUclkPinOn ? 1 : 0,
+            fUclkPin->gave_up ? "the pin gave up after refused messages" : "no PMFW mailbox: the bring-up is down");
+    else
+        LOG("display power: UCLK pin (N74): debug.rdna3_uclk_pin %d -> %d", was ? 1 : 0, fUclkPinOn ? 1 : 0);
+    displayUclkPinUpdate("sysctl");
+    IOLockUnlock(fDispLock);
+    return 0;
 }

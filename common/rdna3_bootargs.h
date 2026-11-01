@@ -68,6 +68,18 @@ static inline int rd3_vblirq_on(void)
     return rd3_arg("rdna3vblirq", 1) != 0;
 }
 
+/* DRIVER-PLAN N68: a copied IOP frame goes into the head's buffer the
+ * panel does not scan and is flipped to at the latch
+ * (debug.rdna3accel_iop_latch). On unless rdna3ioplatch=0 since the
+ * bare-metal round 3 (2026-11-01: it fixed the torn window drag at ~1/4
+ * height with BAR0 1 GiB, every frame latched, no fallbacks); without
+ * room for the second buffer (a 256 MiB BAR) each frame falls back to the
+ * direct copy, counted (iop_latch_fb_vram) and logged. */
+static inline int rd3_iop_latch_on(void)
+{
+    return rd3_arg("rdna3ioplatch", 1) != 0;
+}
+
 /* A3 and WindowServer's display framebuffers (rdna3_a3_display.h): kept
  * out of A3 unless rdna3a3display=1 (card run 58: the swap scans out the
  * legacy surface's own VRAM, so a BO over the IOSurface's never reached

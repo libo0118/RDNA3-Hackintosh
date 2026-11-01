@@ -130,11 +130,19 @@ int dcn32_smu_num_displays(rdna3_dev *d, uint32_t n)
 int dcn32_smu_set_hard_min(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t pmfw,
                            uint32_t *got_khz)
 {
+    return dcn32_smu_set_hard_min_ex(d, ppclk, mhz, pmfw, got_khz, NULL);
+}
+
+int dcn32_smu_set_hard_min_ex(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t pmfw,
+                              uint32_t *got_khz, int *taken)
+{
     uint32_t resp = 0, check = RD_CHECK_HARD_MIN_CLK_DPREFCLK, total_delay_us = 0, read_delay_us, bits = 0;
     int no_timeout = 0;
     int r = dcn32_smu_send(d, RD_DALSMC_MSG_SetHardMinByFreq, (ppclk << 16) | (mhz & 0xffff), &resp);
     if (got_khz)
         *got_khz = resp;
+    if (taken)
+        *taken = r == RDNA3_OK;
     if (r)
         return r;
     /* dcn32_get_hard_min_status_supported (GC 11.0.3) and

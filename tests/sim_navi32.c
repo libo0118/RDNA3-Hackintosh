@@ -373,6 +373,12 @@ typedef struct sim {
      * logged in order with the DMCUB's VBIOS command count and OTG 2's
      * H_TOTAL at that moment */
     unsigned dal_dpm_n, dal_dpm[8], dal_ignore_hard_min;
+    /* N74: the PMFW refuses DAL message 'dal_refuse' (0 = none) with
+     * DALSMC_Result_Failed */
+    unsigned dal_refuse, dal_refused;
+    /* N74: the PMFW never answers DAL message 'dal_silent' (0 = none), and
+     * ReturnHardMinStatus leaves out the bits of 'dal_status_omit' */
+    unsigned dal_silent, dal_silenced, dal_status_omit;
     unsigned dal_norder, dal_order[8], dal_order_nseq[8], dal_order_htotal[8];
     /* the PMFW stops answering once the DMCUB ran this many VBIOS commands
      * (0 = never), as it did on the card after the clone */
@@ -4892,6 +4898,17 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (dw == RD_DAL_MSG_REG) {
         uint32_t arg = S.reg[RD_DAL_ARG_REG];
         S.dal_msgs++;
+        if (S.dal_silent && v == S.dal_silent) {
+            S.dal_silenced++;
+            *R(dw) = v;          /* taken, never answered: RESP stays 0 */
+            return;
+        }
+        if (S.dal_refuse && v == S.dal_refuse) {
+            S.dal_refused++;
+            S.reg[RD_DAL_RESP_REG] = 0xff;   /* DALSMC_Result_Failed */
+            *R(dw) = v;
+            return;
+        }
         S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;
         if (v == RD_DALSMC_MSG_NumOfDisplays)
             S.dal_displays = arg;
@@ -4924,7 +4941,7 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             S.reg[RD_DAL_ARG_REG] = (arg & 0xff) == 0xff ? S.dal_dpm_n
                                   : (arg & 0xff) < S.dal_dpm_n ? S.dal_dpm[arg & 0xff] : 0;
         } else if (v == RD_DALSMC_MSG_ReturnHardMinStatus)
-            S.reg[RD_DAL_ARG_REG] = 0x3f;
+            S.reg[RD_DAL_ARG_REG] = 0x3f & ~S.dal_status_omit;
         else
             S.reg[RD_DAL_RESP_REG] = 0xfe;   /* DALSMC_Result_UnknownCmd */
         *R(dw) = v;
@@ -13716,6 +13733,7 @@ static void run(const char *fwdir)
             test_dc_k(&dev, &dm);
             test_dc_freesync(&dev, &dm);
             test_dc_pstate(&dev, &dm);
+            test_uclk_pin(&dev);   /* N74 (sim_display_pstate.inc) */
             S.dcn_pg = 0;
         }
         /* attach (rdna3dmub=3): no reset, no load, the running firmware's

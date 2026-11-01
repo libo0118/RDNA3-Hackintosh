@@ -171,6 +171,9 @@ public:
     void displayMirror(struct rdna3_dmub *dm, bool probe = false, bool reinit = false);
     /* rdna3mall=1: display power after the DMCUB runs (RDNA3DisplayPower.cpp) */
     void displayPowerInit(struct rdna3_dev *d, struct rdna3_dmub *dm, uint64_t wmTableOff);
+    /* N74, rdna3mall 0 (the default): UCLK's hard minimum at the top while
+     * two or more heads are lit (RDNA3DisplayPower.cpp) */
+    void displayUclkPinInit(struct rdna3_dev *d);
     void displayMirrorOff(struct rdna3_dmub *dm);
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
@@ -426,6 +429,7 @@ public:
     static const uint32_t kDispIrqAllHeads = 0xfu;   /* RD3K_MAX_HEADS heads (asserted in RDNA3DisplayIrq.cpp) */
     int           displayIrqSysctl(int *on, bool set);         /* debug.rdna3_vblirq */
     int           displayIrqReport(char *buf, size_t len);     /* debug.rdna3_dispirq */
+    int           displayUclkPinSysctl(int *on, bool set);     /* N74: debug.rdna3_uclk_pin */
 private:
     bool          displayInit(const amd_discovery *disc);
     void          displayFree();
@@ -468,9 +472,23 @@ private:
     void          displayPowerFlip(uint32_t head, uint64_t addr, bool immediate, int when);
     void          displayPowerQuiesce(bool pin);
     void          displayPowerSuspend();
-    void          displayPowerWake(bool powerLost);
+    void          displayPowerWake(bool powerLost, bool pmfwBack = true);
     void          displayPowerFree();
     static void   displayPowerTick(void *owner, void *);
+    /* N74: the default path's UCLK pin (rdna3mall 0; boot-arg rdna3uclkpin,
+     * sysctl debug.rdna3_uclk_pin). The state outlives a bring-up teardown
+     * (fUclkPinEver: a minimum this driver sent may still be in place) */
+    struct rdna3_uclk_pin *fUclkPin = nullptr;
+    bool          fUclkPinOn   = true;          /* the switch (boot-arg / sysctl) */
+    bool          fUclkPinEver = false;         /* a pin went through since the start */
+    bool          fUclkPinSysctl = false;
+    bool          fUclkPinNoDevLogged = false;
+    uint32_t      displayUclkPinLit(int *mirrorPipe, uint32_t upMask, uint32_t goneMask);
+    void          displayUclkPinUpdate(const char *why, uint32_t goneMask = 0);
+    void          displayUclkPinRaise(const char *why, uint32_t upMask, uint32_t extra);
+    void          displayUclkPinApply(const char *why, uint32_t lit, int mirror);
+    void          displayUclkPinStop(const char *why);
+    void          displayUclkPinFree();
     /* rdna3hdmi=1 / 3: DC's HDMI stream on TMDS heads (hw/dcn32_hdmi.c), the
      * sink's HDMI caps from the EDID of the last mode list */
     struct rdna3_hdmi_cfg *fHdmiCfg[4] = {};

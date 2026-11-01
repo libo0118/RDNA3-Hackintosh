@@ -822,6 +822,33 @@ at idle, `rdna3_modetest cycle` as in `modeset2`. Then mark `mall` passed.
 | `not updated: the mirror's pipe is not a head` | `rdna3mirror=1` (clone without its own head) | expected; use `rdna3mirror=2` |
 | `not updated (..): no voltage state supports the heads` | DML found no state (bandwidth / prefetch) | the `pstate:` lines; report with the modes |
 
+### Two heads: the UCLK pin of the default path (N74)
+
+Without `rdna3mall` (the default) the core pins UCLK's hard minimum at the
+top level while two or more heads are lit (amdgpu's `dcn32_update_clocks`
+for `p_state_change_support` false: two unsynchronised heads have no
+shared vblank for the PMFW's switch). Lines: `display power: UCLK pin
+(N74): PMFW 0x.., UCLK 4 levels 96..1218 MHz, on ...` at the bring-up,
+then one per decision: `display power: UCLK pinned (two heads,
+unsynchronised, no FPO / SubVP: no shared vblank) at 1218 MHz: hard min
+sent now (<why>, decision n, pins p, releases r, fails f)` or `UCLK
+switching (one head: ...)`; the same text in ioreg `RDNA3,DCNPower`,
+`RDNA3,UclkPinned` 0 (switching) / 1 (pinned) / 2 (pinned, accepted but not
+confirmed by ReturnHardMinStatus; after the first such one the status wait
+is skipped: `status wait skipped` in the text). Switch: boot-arg `rdna3uclkpin=0`, live
+`sudo sysctl -w debug.rdna3_uclk_pin=0|1`. Triage row `UCLK pin (N74)`.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| the secondary's top flashes black while the main display changes, `RDNA3,DCNPower` says `UCLK pinned` | not UCLK after all: check `rdna3_pmctl` that UCLK really stays at 1218 MHz | the `DAL SMU: hard min clock 2` line; if UCLK still moves, the PMFW ignores the DAL minimum: report (A/B with `rdna3_pmctl levels mclk 8`) |
+| flashes and `UCLK switching (...; two heads lit)` | the switch is off (`switched off`) or a head was not counted (blanked by `rdna3dpms`, a clone without its own head) | `debug.rdna3_uclk_pin`; the `display power: UCLK` lines around the mode set |
+| `UCLK pin FAILED (...): SetHardMinByFreq(UCLK, 1218 MHz) ... -> -5 (refused by the PMFW)` / `-> -62 (no answer from the DAL mailbox)` | the PMFW refused it, or the mailbox wait timed out | the `uclk pin:` / `DAL SMU` lines; tried again at the next decision, 3 in a row and it gives up; report |
+| `UCLK pin GAVE UP (...)` | 3 refused / unanswered minimums in a row: no DAL message until the next bring-up (each wait holds the display lock up to 2 s) | the `uclk pin:` lines; report |
+| `hard min sent now, accepted, NOT confirmed by ReturnHardMinStatus` (`unconfirmed n`) | the PMFW took the message but its status never showed UCLK (0x20) in 2 s; taken as set, not resent (amdgpu only prints then) | `rdna3_pmctl`: is UCLK at 1218 MHz? If not, the PMFW ignores the DAL minimum: report |
+| `UCLK pin (N74) unavailable (wake): ... the bring-up did not resume` | the card went down in a system sleep and `rdna3resume` is 0 (or the resume failed) | expected without `rdna3resume=1`; nothing is sent to the dead PMFW |
+| `UCLK pin (N74) unavailable` | GetSmuVersion or the UCLK levels over the DAL mailbox unanswered at the bring-up | the `uclk pin:` lines; UCLK stays the PMFW's (two heads may flash) |
+| idle power ~20 W higher with two heads | expected while pinned | `rdna3mall=2` (DC's DET split) is amdgpu's way to let it drop with 2x1080p60 (N74 OPEN (a)) |
+
 ### SubVP (`subvp`)
 
 `subvp` = `mall` + `rdna3subvp=1` with one monitor (`rdna3mirror=0`), its

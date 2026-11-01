@@ -971,6 +971,20 @@ bool RDNA3Bringup::hwInit()
                     BLOG("DAL SMU: SetAlwaysWaitDmcubResp 0 -> %d", r);
                     publish("RDNA3,DMUBWaitAckResult", (uint64_t)(int64_t)r);
                 }
+            }
+        }
+        /* DRIVER-PLAN N74 (rdna3mall 0, the default): UCLK's hard minimum at
+         * the top while two or more heads are lit (dcn32_update_clocks with
+         * p_state_change_support false). Only the PMFW's DAL mailbox, so also
+         * without a DMCUB; amdgpu's order: the DMCUB (dm_dmub_hw_init) and
+         * its SetAlwaysWaitDmcubResp above first, then dc_hardware_init's
+         * clock manager (the first hard minimum); before the clone below
+         * (rdna3mirror, step 9b), so its displayUclkPinRaise pins UCLK before
+         * the second head fetches and its "mirror on" update counts it. */
+        if (!rd3_arg("rdna3mall", 0))
+            fOwner->displayUclkPinInit(fDev);
+        if (fDmubMode) {
+            if (fDmub && fDmub->hw_init) {
                 fOwner->displayMirror(fDmub, true, fReinit);   /* rdna3mirror=1: step 9b */
                 /* rdna3mall=1 (step mall): display power, item O. The
                  * PMFW fetches the watermark range table from VRAM

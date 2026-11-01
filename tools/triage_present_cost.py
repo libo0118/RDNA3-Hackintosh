@@ -246,7 +246,9 @@ def iop_latch_rows(c):
     if on and not latched and sum(c.get("iop_vbl_n_h%d" % h, 0) for h in heads):
         why.append("it is ON but no frame was latched (the fallback reasons)")
     if c.get("iop_latch_vram_refused", 0):
-        why.append("the visible VRAM heap refused the second buffer (`iop latch: ... no VRAM` lines)")
+        why.append("the visible VRAM heap refused the second buffer (`iop latch: ... no VRAM` lines; the latch is on by "
+                   "default since the bare-metal round 3: with a 256 MiB BAR there is no room, so the frames fell back "
+                   "to the direct copy - a bigger BAR (ResizeAppleGpuBars) or rdna3ioplatch=0)")
     if c.get("iop_latch_fb_refused", 0) or c.get("iop_latch_fb_geom", 0):
         why.append("flips refused or buffers of the wrong shape (`iop latch:` lines)")
     if not on and c.get("iop_latch_vram_bytes", 0):

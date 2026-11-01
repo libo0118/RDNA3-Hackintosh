@@ -781,7 +781,9 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
             for (uint32_t i = 0; i < a->fDcn->nheads && i < 4; i++)
                 if (a->fHeadLinkDown[i] && !a->fHeadBlank[i])
                     a->displayLinkUp(i);
-        a->displayPowerWake(powerLost || suspended);   /* item O: after the heads are back (hwInit reloaded the DMCUB) */
+        /* item O: after the heads are back (hwInit reloaded the DMCUB); N74:
+         * after an IP-down sleep the PMFW answers only if the resume ran */
+        a->displayPowerWake(powerLost || suspended, !(powerLost || suspended) || resumed);
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);

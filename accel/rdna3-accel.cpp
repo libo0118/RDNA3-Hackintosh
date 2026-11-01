@@ -284,9 +284,10 @@ static int gSwapAsync = 1;
 static int gIopQueue = 1;
 /* DRIVER-PLAN N68 (common/rdna3_iop_latch.h): an IOP frame the display pipe copies (l10r, or a BGRA frame that is not
  * flipped) goes into the head's buffer the panel does not scan and is flipped to through the present queue, the
- * transaction complete at the latch (debug.rdna3accel_iop_latch, boot-arg rdna3ioplatch, default 0: the copy into
- * the live scanout as before) */
-static int gIopLatch = 0;
+ * transaction complete at the latch (debug.rdna3accel_iop_latch, boot-arg rdna3ioplatch, default 1 since the
+ * bare-metal round 3 (rd3_iop_latch_on); 0: the copy into the live scanout as before). No room for the second
+ * buffer (a small BAR): each frame takes the direct copy, counted (iop_latch_fb_vram) and logged */
+static int gIopLatch = 1;
 /* that zero-copy flip only for VRAM the Metal plugin wrote (its dirty mark
  * recorded this allocation: rd3_iop_flip_ok), else the copy
  * (debug.rdna3accel_iop_wrote, boot-arg rdna3iopwrote, default 1) */
@@ -1247,11 +1248,12 @@ public:
         gSwapSameNoFlip = rd3_arg("rdna3swapsamenoflip", 1) ? 1 : 0;
         gSwapAsync = rd3_arg("rdna3swapasync", 1) ? 1 : 0;
         gIopQueue = rd3_arg("rdna3iopqueue", 1) ? 1 : 0;
-        gIopLatch = rd3_arg("rdna3ioplatch", 0) ? 1 : 0;
+        gIopLatch = rd3_iop_latch_on() ? 1 : 0;   /* N68: default 1 since the bare-metal round 3 */
         ALOG("iop latch (N68): a copied IOP frame goes %s (boot-arg rdna3ioplatch, sysctl debug.rdna3accel_iop_latch; "
              "counters debug.rdna3accel_iop_latch_* / iop_txn_* / iop_vbl_*)",
              gIopLatch ? "into the buffer the panel does not scan and is flipped to at the next vblank, the transaction "
-                         "complete at the latch" : "straight into the head's live scanout, the transaction complete at once (0)");
+                         "complete at the latch (the default; rdna3ioplatch=0 turns it off)"
+                       : "straight into the head's live scanout, the transaction complete at once (rdna3ioplatch=0)");
         gIopWrote = rd3_arg("rdna3iopwrote", 1) ? 1 : 0;
         gPerfStats = rd3_arg("rdna3perfstats", 1) ? 1 : 0;
         gVmSticky = rd3_arg("rdna3vmsticky", 1) ? 1 : 0;
@@ -7297,8 +7299,8 @@ static int rdna3accel_iop_latch_sysctl SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_iop_latch, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
             rdna3accel_iop_latch_sysctl, "I",
             "N68: 1 = a copied IOP frame goes into the head's buffer the panel does not scan and is flipped to through "
-            "the present queue, the transaction complete at the latch; 0 (default, boot-arg rdna3ioplatch) = copied "
-            "into the live scanout, complete at once");
+            "the present queue, the transaction complete at the latch (default since the bare-metal round 3; boot-arg "
+            "rdna3ioplatch); 0 = copied into the live scanout, complete at once");
 RD3ACCEL_CNT4(rdna3accel_iop_txn_n, gCntIopTxnN, "N68 K1: IOP transactions timed (every one past the head lookup)");
 RD3ACCEL_CNT4(rdna3accel_iop_txn_us, gCntIopTxnUs, "N68 K1: microseconds from performTransaction's entry to its exit, summed");
 RD3ACCEL_CNT4(rdna3accel_iop_txn_max_us, gCntIopTxnMaxUs, "N68 K1: the longest transaction, microseconds");
