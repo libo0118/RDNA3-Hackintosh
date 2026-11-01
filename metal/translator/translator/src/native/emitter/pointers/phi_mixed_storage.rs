@@ -117,6 +117,13 @@ impl Emitter {
                     }
                 }
                 LlValue::Local(local) if network && self.mixed_storage_network.is_member(local) => {
+                    // A member already emitted without its split (it was
+                    // declined): its arms will never exist.
+                    if !self.pointer_not_seen(local) {
+                        return Err(format!(
+                            "native emitter: mixed-storage pointer phi {name} takes member {local}, which was emitted without its split; this network is not supported (N75)"
+                        ));
+                    }
                     let cond_name = self.mixed_storage_network.cond_name(local).ok_or_else(|| {
                         format!(
                             "native emitter: mixed-storage pointer phi {name}: member {local} has no selector phi"
@@ -167,6 +174,9 @@ impl Emitter {
             return Ok(false);
         }
         self.refuse_split_pointer_consumers(name)?;
+        if network {
+            self.refuse_multi_root_network(name)?;
+        }
         let mut arm_values = Vec::with_capacity(incoming.len());
         for (position, ((value, _), edge)) in incoming.iter().zip(&mut edges).enumerate() {
             arm_values.push(match edge {
@@ -458,6 +468,13 @@ impl Emitter {
         if let Some(select) = selected_by {
             return Err(format!(
                 "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds pointer select {select}; nested mixed phis are not supported (N72)"
+            ));
+        }
+        // The same through a copy of it (a bitcast taken by such a phi or
+        // select).
+        if self.mixed_storage_network.has_outside_consumer(name) {
+            return Err(format!(
+                "native emitter: mixed-storage pointer phi {name} (Function vs Private) feeds a pointer phi or select outside its network; nested mixed phis are not supported (N72, N75)"
             ));
         }
         Ok(())

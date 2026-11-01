@@ -270,26 +270,122 @@ fn assert_noted(notes: &[String], kernel: &str, phi: &str) {
     );
 }
 
-/// The Private table (the module's Private variable) must really be
-/// addressed: an access chain based on it.
-fn assert_reads_the_table(asm: &str) {
-    let tables = asm
-        .lines()
-        .filter(|line| line.contains("OpVariable") && line.contains(" Private"))
-        .filter_map(|line| line.split('=').next().map(|id| id.trim().to_string()))
-        .collect::<Vec<_>>();
-    let reads = asm
-        .lines()
-        .filter(|line| line.contains("AccessChain"))
-        .filter(|line| {
-            let base = line.split_whitespace().nth(4).unwrap_or_default();
-            tables.iter().any(|table| table == base)
+/// `%id = Op... operands` lines by result id.
+fn definitions(asm: &str) -> std::collections::HashMap<&str, Vec<&str>> {
+    asm.lines()
+        .filter_map(|line| {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            (tokens.get(1) == Some(&"=")).then(|| (tokens[0], tokens))
         })
-        .count();
-    assert!(
-        reads > 0,
-        "no access into the Private table {tables:?}\n{asm}"
-    );
+        .collect()
+}
+
+/// The variable a pointer is based on, through access chains.
+fn base_variable<'a>(
+    defs: &std::collections::HashMap<&'a str, Vec<&'a str>>,
+    mut id: &'a str,
+) -> Option<&'a str> {
+    for _ in 0..16 {
+        let tokens = defs.get(id)?;
+        match tokens[2] {
+            "OpVariable" => return Some(id),
+            op if op.contains("AccessChain") => id = tokens[4],
+            "OpCopyObject" => id = tokens[4],
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The split pointer's per-arm loads (`OpBranchConditional %sel %t %f`
+/// whose two blocks each start with an OpLoad): for each, the true arm
+/// reads a Function variable and the false arm the Private variable named
+/// `table` (not merely "some" Private access). Returns how many there are.
+fn assert_arm_roots(asm: &str, table: &str) -> usize {
+    let defs = definitions(asm);
+    let named = |id: &str, name: &str| asm.contains(&format!("OpName {id} \"{name}\""));
+    let lines = asm.lines().collect::<Vec<_>>();
+    let first_load_after = |label: &str| {
+        let start = lines
+            .iter()
+            .position(|line| line.trim() == format!("{label} = OpLabel"))?;
+        lines[start + 1..]
+            .iter()
+            .take_while(|line| !line.contains("OpLabel"))
+            .find(|line| line.contains("= OpLoad"))
+            .and_then(|line| line.split_whitespace().nth(4))
+    };
+    let mut pairs = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        if tokens.first() != Some(&"OpBranchConditional")
+            || index == 0
+            || !lines[index - 1].contains("OpSelectionMerge")
+        {
+            continue;
+        }
+        let (Some(true_ptr), Some(false_ptr)) =
+            (first_load_after(tokens[2]), first_load_after(tokens[3]))
+        else {
+            continue;
+        };
+        let (Some(true_var), Some(false_var)) = (
+            base_variable(&defs, true_ptr),
+            base_variable(&defs, false_ptr),
+        ) else {
+            continue;
+        };
+        let storage = |var: &str| defs[var].last().copied().unwrap_or_default();
+        let is_function = |var: &str| defs[var].contains(&"Function");
+        if !is_function(true_var) && !named(false_var, table) {
+            continue;
+        }
+        assert!(
+            is_function(true_var),
+            "the selector's true arm must read the Function variable, reads {true_var} ({})\n{asm}",
+            storage(true_var)
+        );
+        assert!(
+            defs[false_var].contains(&"Private") && named(false_var, table),
+            "the selector's false arm must read the Private table {table}, reads {false_var}\n{asm}"
+        );
+        pairs += 1;
+    }
+    assert!(pairs > 0, "no per-arm load of the split pointer\n{asm}");
+    pairs
+}
+
+/// The table must be read, through the split's per-arm loads.
+fn assert_reads_the_table(asm: &str) {
+    assert_arm_roots(asm, "weights");
+}
+
+/// The translation must be refused with this text (never a module, never
+/// a bare undefined id).
+fn assert_refused(ll: &str, expected: &str) {
+    match translate_sanitized_native(ll, Stage::Kernel, &tmp()) {
+        Ok(_) => panic!("must be refused with {expected:?}"),
+        Err(error) => assert!(
+            error.contains(expected) && !error.contains("undefined id"),
+            "expected {expected:?}; got: {error}"
+        ),
+    }
+}
+
+const TABLE2: &str = "@weights2 = internal constant [9 x float] [float 11.0, float 12.0, float 13.0, float 14.0, float 15.0, float 16.0, float 17.0, float 18.0, float 19.0], align 4\n";
+const LOCAL2: &str =
+    "  %local2 = alloca [9 x float], align 4\n  store float 5.0, ptr %local2, align 4\n";
+
+fn with_table2(ll: String) -> String {
+    ll.replacen("define void", &format!("{TABLE2}define void"), 1)
+}
+
+fn with_local2(ll: String) -> String {
+    ll.replacen(
+        "  br label %loop\nloop:",
+        &format!("{LOCAL2}  br label %loop\nloop:"),
+        1,
+    )
 }
 
 #[test]
@@ -398,11 +494,161 @@ fn an_arm_without_a_zero_path_is_refused_with_its_reason() {
             "%acc = phi float [ 0.0, %entry ]",
             "%acc = phi float [ 0.0, %left ], [ 0.0, %right ]",
         );
-    match translate_sanitized_native(&ll, Stage::Kernel, &tmp()) {
-        Ok(_) => {}
-        Err(error) => assert!(
-            error.contains("(N75)") && !error.contains("undefined id"),
-            "the refusal must name its reason; got: {error}"
+    assert_refused(
+        &ll,
+        "mixed-storage pointer phi %p: Function arm's index domain cannot take the arm's structural zero path (N75)",
+    );
+}
+
+// HIGH-1 of the ECC review of 14081f6: an arm is one index-domain phi on one
+// root; a network with two roots of one storage was translated reading the
+// first root only. Each must be refused by name.
+
+#[test]
+fn a_second_private_table_on_the_back_edge_is_refused() {
+    assert_refused(
+        &with_table2(carried_merge("mr_p", "%g0", "%local", "@weights2")),
+        "mixed-storage pointer phi %p: its network has more than one Private root (@weights, @weights2) (N75)",
+    );
+}
+
+#[test]
+fn a_second_alloca_on_the_back_edge_is_refused() {
+    assert_refused(
+        &with_local2(carried_merge("mr_f", "%slot", "%local2", "@weights")),
+        "mixed-storage pointer phi %p: its network has more than one Function root (%local, %local2) (N75)",
+    );
+}
+
+#[test]
+fn a_second_private_table_in_a_construct_tree_case_is_refused() {
+    assert_refused(
+        &with_table2(construct_tree(
+            "mr_ctp",
+            "  %g2 = getelementptr inbounds [9 x float], ptr @weights2, i32 0, i32 %i",
+            "%g2",
+            "4",
+        )),
+        "mixed-storage pointer phi %metal2vulkan.ct.slot.0: its network has more than one Private root (@weights, @weights2) (N75)",
+    );
+}
+
+#[test]
+fn a_second_alloca_in_a_construct_tree_case_is_refused() {
+    assert_refused(
+        &construct_tree(
+            "mr_ctf",
+            "  %l2a = alloca [9 x float], align 4\n  %l2 = getelementptr inbounds [9 x float], ptr %l2a, i32 0, i32 %i",
+            "%l2",
+            "4",
         ),
+        "mixed-storage pointer phi %metal2vulkan.ct.slot.0: its network has more than one Function root (%l2a, %local) (N75)",
+    );
+}
+
+// N75 OPEN (b), outside mixed networks: a loop phi whose back edge is a
+// forward phi of another root of the same storage was reserved on the entry
+// value's root and read it (spirv-val green). Now refused when that phi is
+// emitted.
+
+#[test]
+fn a_function_loop_with_a_second_alloca_on_the_back_edge_is_refused() {
+    assert_refused(
+        &with_local2(carried_merge("fr_f", "%slot", "%local2", "%local2")),
+        "pointer phi %q was taken on root %local by an earlier use, but its values come from %local2 (N75)",
+    );
+}
+
+#[test]
+fn a_private_loop_with_a_second_table_on_the_back_edge_is_refused() {
+    assert_refused(
+        &with_table2(carried_merge("fr_p", "%g0", "@weights2", "@weights2")),
+        "pointer phi %q was taken on root @weights by an earlier use, but its values come from @weights2 (N75)",
+    );
+}
+
+#[test]
+fn single_storage_loops_still_translate() {
+    // No regression from the network analysis or the root check: one root
+    // per loop, Function-only and Private-only.
+    for ll in [
+        single_loop(
+            "one_f",
+            "%slot",
+            "  %pn = getelementptr inbounds [9 x float], ptr %local, i32 0, i32 %n1",
+            "%pn",
+        ),
+        carried_merge("one_fm", "%slot", "%local", "%local"),
+    ] {
+        let spv = translate_sanitized_native(&ll, Stage::Kernel, &tmp())
+            .unwrap_or_else(|error| panic!("a Function-only loop must translate: {error}"));
+        tools::spirv_val_bytes(&spv, &tmp()).expect("spirv-val");
     }
+    for ll in [
+        single_loop(
+            "one_p",
+            "%g0",
+            "  %pn = getelementptr inbounds [9 x float], ptr @weights, i32 0, i32 %n1",
+            "%pn",
+        ),
+        carried_merge("one_pm", "%g0", "@weights", "@weights"),
+    ] {
+        let spv = translate_sanitized_native(&ll, Stage::Kernel, &tmp())
+            .unwrap_or_else(|error| panic!("a Private-only loop must translate: {error}"));
+        tools::spirv_val_bytes(&spv, &tmp()).expect("spirv-val");
+        let asm = disassemble(&spv).expect("disassemble");
+        let defs = definitions(&asm);
+        let reads_table = asm
+            .lines()
+            .filter(|line| line.contains("= OpLoad"))
+            .filter_map(|line| line.split_whitespace().nth(4))
+            .filter_map(|ptr| base_variable(&defs, ptr))
+            .any(|var| asm.contains(&format!("OpName {var} \"weights\"")));
+        assert!(reads_table, "the loop must load from the table\n{asm}");
+    }
+}
+
+#[test]
+fn a_store_through_a_loop_carried_split_pointer_is_guarded_per_arm() {
+    let ll = single_loop(
+        "store",
+        "%slot",
+        "  store float %acc1, ptr %p, align 4\n  %pn = getelementptr inbounds [9 x float], ptr @weights, i32 0, i32 %n1",
+        "%pn",
+    )
+    .replace("internal constant", "internal global");
+    let (asm, _) = assert_split(&ll);
+    assert_reads_the_table(&asm);
+    let defs = definitions(&asm);
+    let stored_to = asm
+        .lines()
+        .filter(|line| line.trim_start().starts_with("OpStore"))
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter_map(|ptr| base_variable(&defs, ptr))
+        .collect::<Vec<_>>();
+    assert!(
+        stored_to.iter().any(|var| defs[var].contains(&"Function"))
+            && stored_to.iter().any(|var| defs[var].contains(&"Private")),
+        "one guarded store per arm (Function and Private) {stored_to:?}\n{asm}"
+    );
+}
+
+#[test]
+fn a_phi_that_also_takes_a_loaded_pointer_is_refused() {
+    // `%w` merges a member with a pointer of unknown storage (loaded from
+    // memory): it is outside the network and cannot take the split.
+    let ll = carried_merge("outside", "%slot", "%local", "@weights")
+        .replacen(
+            "  br label %loop\nloop:",
+            "  %pp = alloca ptr, align 8\n  store ptr %slot, ptr %pp, align 8\n  %u = load ptr, ptr %pp, align 8\n  br label %loop\nloop:",
+            1,
+        )
+        .replace(
+            "done:\n",
+            "done:\n  br i1 %c, label %pick, label %tail\npick:\n  br label %tail\ntail:\n  %w = phi ptr [ %u, %done ], [ %q, %pick ]\n  %wv = load float, ptr %w, align 4\n  %wi = bitcast float %wv to i32\n  store i32 %wi, ptr addrspace(1) %o0\n",
+        );
+    assert_refused(
+        &ll,
+        "mixed-storage pointer phi %q (Function vs Private) feeds another pointer phi; nested mixed phis are not supported (N72)",
+    );
 }

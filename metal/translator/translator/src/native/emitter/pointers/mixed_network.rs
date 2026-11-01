@@ -28,6 +28,7 @@
 
 use super::*;
 use crate::native::tir::TirOpcode;
+use std::collections::BTreeSet;
 
 pub(super) const ARM_TAG: &str = ".metal2vulkan.mixarm";
 
@@ -35,6 +36,8 @@ const FUNCTION_BIT: u8 = 1;
 const PRIVATE_BIT: u8 = 2;
 const UNKNOWN_BIT: u8 = 4;
 const MIXED_BITS: u8 = FUNCTION_BIT | PRIVATE_BIT;
+/// Enough to tell one root from several and to name two of them.
+const MAX_ROOTS: usize = 3;
 
 #[derive(Clone, Debug)]
 enum NetDef {
@@ -50,6 +53,11 @@ enum NetDef {
 pub(in crate::native::emitter) struct MixedStorageNetwork {
     defs: HashMap<String, NetDef>,
     bits: HashMap<String, u8>,
+    /// The roots (alloca names, address-space-0 global names) every value
+    /// can come from, at most `MAX_ROOTS` kept: an arm can only be built on
+    /// one root, and a forward reservation must be on one of these.
+    roots: HashMap<String, BTreeSet<String>>,
+    private_globals: HashSet<String>,
     /// Members taken by a pointer phi or select that is not a member itself
     /// (a phi that also merges an unknown pointer): such a consumer cannot be
     /// built from a split pointer.
@@ -63,6 +71,29 @@ impl MixedStorageNetwork {
 
     pub(super) fn has_outside_consumer(&self, name: &str) -> bool {
         self.outside_consumers.contains(name)
+    }
+
+    /// The roots of one storage a value can come from (sorted, at most
+    /// `MAX_ROOTS`).
+    pub(super) fn storage_roots(&self, name: &str, storage: StorageClass) -> Vec<&str> {
+        self.roots
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|root| {
+                (storage == StorageClass::Private) == self.private_globals.contains(*root)
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Every root a value can come from, when the TIR knows them all (no
+    /// pointer of unknown origin flows into it).
+    fn known_roots(&self, name: &str) -> Option<&BTreeSet<String>> {
+        let bits = *self.bits.get(name)?;
+        (bits & UNKNOWN_BIT == 0 && bits != 0)
+            .then(|| self.roots.get(name))
+            .flatten()
     }
 
     /// The single storage of a value that is not a member (Function or
@@ -147,6 +178,60 @@ fn network_users(defs: &HashMap<String, NetDef>) -> HashMap<String, Vec<String>>
         }
     }
     users
+}
+
+/// The roots of every value (see `MixedStorageNetwork::roots`), over the
+/// same worklist as the storages: sets only grow and are capped.
+fn network_roots(
+    defs: &HashMap<String, NetDef>,
+    users: &HashMap<String, Vec<String>>,
+    private_globals: &HashSet<&str>,
+) -> HashMap<String, BTreeSet<String>> {
+    let mut roots: HashMap<String, BTreeSet<String>> = defs
+        .iter()
+        .map(|(name, def)| {
+            let initial = match def {
+                NetDef::Root(_) => BTreeSet::from([name.clone()]),
+                _ => BTreeSet::new(),
+            };
+            (name.clone(), initial)
+        })
+        .collect();
+    let mut keys = defs.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    let mut queue = std::collections::VecDeque::from(keys);
+    while let Some(name) = queue.pop_front() {
+        let sources: Vec<&LlValue> = match &defs[&name] {
+            NetDef::Root(_) | NetDef::Unknown => continue,
+            NetDef::Gep(gep) => vec![&gep.base.value],
+            NetDef::Copy(source) => vec![source],
+            NetDef::Phi(incoming) => incoming.iter().map(|(value, _)| value).collect(),
+        };
+        let mut grown = Vec::new();
+        for source in sources {
+            match source {
+                LlValue::Local(local) => {
+                    grown.extend(roots.get(local).into_iter().flatten().cloned());
+                }
+                LlValue::Global(global) if private_globals.contains(global.as_str()) => {
+                    grown.push(global.clone());
+                }
+                _ => {}
+            }
+        }
+        let current = roots.get_mut(&name).expect("every def has roots");
+        let mut changed = false;
+        for root in grown {
+            if current.len() >= MAX_ROOTS {
+                break;
+            }
+            changed |= current.insert(root);
+        }
+        if changed {
+            queue.extend(users.get(&name).into_iter().flatten().cloned());
+        }
+    }
+    roots
 }
 
 fn value_bits(value: &LlValue, bits: &HashMap<String, u8>, private_globals: &HashSet<&str>) -> u8 {
@@ -248,13 +333,21 @@ impl Emitter {
                 queue.extend(users.get(&name).into_iter().flatten().cloned());
             }
         }
+        let roots = network_roots(&defs, &users, &private_globals);
+        let private_globals = private_globals
+            .into_iter()
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
         let network = MixedStorageNetwork {
             defs,
             bits,
+            roots,
+            private_globals,
             outside_consumers: HashSet::new(),
         };
         if !network.bits.values().any(|bits| *bits == MIXED_BITS) {
-            self.mixed_storage_network = MixedStorageNetwork::default();
+            // No member: kept only for the forward-reservation root check.
+            self.mixed_storage_network = network;
             return;
         }
         let mut outside_consumers = HashSet::new();
@@ -268,6 +361,7 @@ impl Emitter {
             for (value, _) in incoming {
                 if let LlValue::Local(local) = value {
                     if network.is_member(local) {
+                        outside_consumers.insert(network.arm_owner(local).to_string());
                         outside_consumers.insert(local.clone());
                     }
                 }
@@ -277,6 +371,7 @@ impl Emitter {
             for value in operands {
                 if let LlValue::Local(local) = value {
                     if network.is_member(&local) {
+                        outside_consumers.insert(network.arm_owner(&local).to_string());
                         outside_consumers.insert(local);
                     }
                 }
@@ -297,11 +392,11 @@ impl Emitter {
     fn mixed_network_pointees(&self, network: &MixedStorageNetwork) -> HashMap<String, LlType> {
         let mut pointees: HashMap<String, LlType> = HashMap::new();
         let users = network_users(&network.defs);
-        let mut queue = network
-            .defs
-            .keys()
-            .cloned()
-            .collect::<std::collections::VecDeque<_>>();
+        // Sorted, so the pointee a phi of mixed pointees takes does not
+        // depend on hash order.
+        let mut keys = network.defs.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        let mut queue = std::collections::VecDeque::from(keys);
         while let Some(name) = queue.pop_front() {
             if pointees.contains_key(&name) {
                 continue;
@@ -391,6 +486,66 @@ impl Emitter {
                 self.pointer_storage.insert(arm, storage);
             }
         }
+    }
+
+    /// A member phi whose arm would merge two roots of one storage: one
+    /// index-domain arm has one root, and a forward value of the other root
+    /// would be read through the first one. Refused by name.
+    pub(super) fn refuse_multi_root_network(&self, name: &str) -> Result<(), String> {
+        for storage in [StorageClass::Function, StorageClass::Private] {
+            let roots = self.mixed_storage_network.storage_roots(name, storage);
+            if roots.len() > 1 {
+                return Err(format!(
+                    "native emitter: mixed-storage pointer phi {name}: its network has more than one {storage:?} root ({}) (N75)",
+                    roots.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A pointer phi whose provenance an earlier forward use reserved on a
+    /// root (`prior_root`) that none of its values comes from (open (b) of
+    /// N75: the use would read the wrong variable). Refused by name; only
+    /// when the TIR knows every root of the phi and `prior_root` is itself
+    /// an alloca or a Private global, so an alias root is never refused.
+    pub(in crate::native::emitter) fn refuse_reserved_on_foreign_root(
+        &self,
+        name: &str,
+        prior_root: Word,
+    ) -> Result<(), String> {
+        let network = &self.mixed_storage_network;
+        let Some(roots) = network.known_roots(name) else {
+            return Ok(());
+        };
+        let root_id = |root: &str| {
+            if network.private_globals.contains(root) {
+                self.global_values.get(root).map(|(id, _)| *id)
+            } else {
+                self.values.get(root).map(|(id, _)| *id)
+            }
+        };
+        if roots.iter().any(|root| root_id(root) == Some(prior_root)) {
+            return Ok(());
+        }
+        let mut candidates = network
+            .defs
+            .iter()
+            .filter(|(_, def)| matches!(def, NetDef::Root(_)))
+            .map(|(root, _)| root.as_str())
+            .chain(network.private_globals.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        let Some(foreign) = candidates
+            .into_iter()
+            .find(|root| root_id(root) == Some(prior_root))
+        else {
+            return Ok(());
+        };
+        Err(format!(
+            "native emitter: pointer phi {name} was taken on root {foreign} by an earlier use, but its values come from {} (N75)",
+            roots.iter().cloned().collect::<Vec<_>>().join(", ")
+        ))
     }
 
     /// A network member emitted without its split, after a phi already
