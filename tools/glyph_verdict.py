@@ -1,4 +1,4 @@
-"""Automatic glyph verdict for the A/B ladder's scanout looks (DRIVER-PLAN N50, docs/AFTER-TESTS.md "The whole ladder in one card run").
+"""Automatic glyph verdict for the A/B ladder's scanout looks (DRIVER-PLAN N50, docs/AFTER-TESTS.html "The whole ladder in one card run").
 
 The ladder's Terminal prints one tick line a second; every tick line ends in the same text (`... abcdefghijklmnopqrstuvwxyz`, the time stamp is
 at the left). Drawn right, two tick lines are the same picture of that text. Drawn wrong (card run 2026-10-25f: glyph quads or atlas cells that

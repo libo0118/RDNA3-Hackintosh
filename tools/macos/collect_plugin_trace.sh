@@ -9,7 +9,7 @@
 #   <dir>/31-plugin-trace/<process>-<pid>.trace   every process that loaded the plugin wrote one
 #                                                (metal/plugin/nvmtl_trace.h); 31-plugin-trace/info.txt lists them
 #   <dir>/32-log-nvmtl-windowserver.txt           WindowServer's NVMTL os_log lines of this boot, unfiltered
-# Decode on the host with tools/plugin_trace.py <report>.tar.gz (docs/AFTER-TESTS.md "Plugin frame trace").
+# Decode on the host with tools/plugin_trace.py <report>.tar.gz (docs/AFTER-TESTS.html "Plugin frame trace").
 # Read-only except for the two outputs; never fails the report (always exits 0).
 #   --traces-only   no log show (autoreport.sh's snapshots during the A/B: seconds, not minutes)
 #   --only NAME     only files whose name starts with NAME (e.g. WindowServer)

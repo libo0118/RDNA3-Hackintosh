@@ -71,7 +71,7 @@ def coh_rows(cohtxt, log):
         eng = ", ".join("%s (%s jobs)" % (b, c.get("jobs_" + b, "?")) for b in on)
         rows.append(("WARN", "coherence switches", "ON at the end of the run: %s - this run does not show the default "
                      "driver; a picture that is right with a switch and wrong without it names the kernel rule "
-                     "(docs/AFTER-TESTS.md 'Kernel coherence switches')" % eng))
+                     "(docs/AFTER-TESTS.html 'Kernel coherence switches')" % eng))
     else:
         ran = [b for b in COH_BITS if isinstance(c.get("jobs_" + b), int) and c.get("jobs_" + b) > 0]
         if ran:
@@ -279,7 +279,7 @@ def coh_ladder_rows(ladder_txt, rungs, problems=(), glyphs=None):
         rows.append(("WARN", "ladder-coh verdict", "no conclusion: the baseline rung is not a clean default (see its row)"))
     elif base[0] == "broken" and cured:
         rows.append(("FAIL", "ladder-coh verdict", "the baseline's text is broken and CLEAN with %s: that kernel rule is the cause "
-                     "(docs/DRIVER-PLAN.md N54: make it the default after a confirming run)" % ", ".join(cured)))
+                     "(docs/DRIVER-PLAN.html N54: make it the default after a confirming run)" % ", ".join(cured)))
     elif base[0] == "broken" and allv == ("clean", True):
         rows.append(("FAIL", "ladder-coh verdict", "clean only with EVERY switch on (coh-all), with none alone: two rules together; "
                      "bisect the mask (debug.rdna3_coh_mask)"))

@@ -305,7 +305,7 @@ play-agdcscaler rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3a
 vblirq rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3play=1 rdna3vblirq=1
 vblirq-off rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3play=1 rdna3vblirq=0
 # DRIVER-PLAN N50: the A/B ladder for the broken glyphs / tile blocks in ONE run (autoreport.sh
-# ladder_run, docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"). The play step's profile (the
+# ladder_run, docs/AFTER-TESTS.html "Rendering artefacts: the A/B ladder"). The play step's profile (the
 # desktop on the Metal plugin) with rdna3ladder=1 instead of rdna3play=1: nothing else runs; per rung
 # Terminal + Chess are opened as new instances with that rung's NVMTL_ switches in their environment
 # (`open -n -a APP --env ...`), looked at (320 wide and hi-res at native size) and their plugin log kept; rdna3mtl.conf is
@@ -318,16 +318,16 @@ ladder-ws rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1
 # ladder-glyphs: the same step with rdna3ladder=3, the glyph hunt after card run 2026-10-25f (NVMTL_PARANOID did not clean Terminal's text):
 # 13 rungs of ~95 s (two hi-res looks each), strongest first: baseline, managed-whole, managed-check (the undeclared-write detector), no-surface-share,
 # no-surface-pageoff, fbfetch-zero, managed-pages, managed-eager-zero, no-texbuf, no-bindless, dontcare-clears, skip-empty-0, paranoid (the negative control).
-# docs/AFTER-TESTS.md "The glyph hunt in one run".
+# docs/AFTER-TESTS.html "The glyph hunt in one run".
 ladder-glyphs rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3ladder=3
 # ladder-coh (DRIVER-PLAN N54): the same step with rdna3ladder=4: the KERNEL's coherence switches, one per rung (sysctl
 # debug.rdna3_coh_<name>, set before the rung's Terminal + Chess start and put back after): baseline, coh-all (every switch: the
 # positive control), fence-sys, pipe-sync, wait-idle, uc, fence-inv, sdma-gcr, vm-flush, hdp-end; 10 rungs of ~95 s, two hi-res
-# looks each. docs/AFTER-TESTS.md "Kernel coherence switches".
+# looks each. docs/AFTER-TESTS.html "Kernel coherence switches".
 ladder-coh rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3ladder=4
 # apps (the app survey, autoreport.sh APPS block): the same step with rdna3ladder=5. DEFAULT driver and plugin settings (no NVMTL_ switch, no sysctl,
 # no conf edit): real apps opened one after another with content the run makes itself (Chess, Terminal, TextEdit, Calculator, Notes, Safari with a text / canvas /
 # WebGL page, Preview with a PDF and a JPEG, Maps, System Settings panes, App Store, Photos, Image Capture, QuickTime Player with a generated movie, Mission Control,
 # Launchpad / Apps). Per app: a 320-wide and a hi-res look of both pipes, whether it ran / crashed, the plugin and WindowServer state, its log slice; the apps are
-# quit again. About 25 min. docs/TESTING-HW.html, docs/AFTER-TESTS.md "The app survey".
+# quit again. About 25 min. docs/TESTING-HW.html, docs/AFTER-TESTS.html "The app survey".
 apps rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3ladder=5

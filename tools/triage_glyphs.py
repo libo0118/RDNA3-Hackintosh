@@ -2,7 +2,7 @@
 The plugin gained a set of A/B switches and counters for those artefacts; this module reads their lines from the plugin logs
 (26-log-metal-plugin.txt = the other processes, 24-log-coredisplay.txt = WindowServer; lines `... Name[pid:tid] (RDNA3MTLDriver) NVMTL: msg`,
 process names may contain blanks: "Activity Monitor"), so that a report says which profile it was taken with and what the counters saw.
-Kept in a module of its own so that tools/triage_reports.py only gains one call. docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"
+Kept in a module of its own so that tools/triage_reports.py only gains one call. docs/AFTER-TESTS.html "Rendering artefacts: the A/B ladder"
 explains every line. Also per-rung summaries of the ladder (`parse_ladder` + `ladder_rows`, tools/vm/macos/autoreport.sh ladder_run: 41-ladder.txt, 41-ladder-<rung>.log)."""
 import glob
 import os
@@ -255,7 +255,7 @@ def n50_plugin_rows(text=""):
         off = {k for k in radv if k not in on}
         if on:
             rows.append(("WARN", "radv debug", "RADV_DEBUG / RADV_PERFTEST were SET in %s (%s): this run does not show the default driver; a picture that is right with it and "
-                         "wrong without it is compression metadata (docs/AFTER-TESTS.md, Rendering artefacts)%s" % (
+                         "wrong without it is compression metadata (docs/AFTER-TESTS.html, Rendering artefacts)%s" % (
                              names(on), "; ".join(sorted({"%s: RADV_DEBUG=%s RADV_PERFTEST=%s" % (k[0], v[0] or "unset", v[1] or "unset") for k, v in on.items()}))[:240],
                              ("; unset in " + names(off)) if off else "")))
         else:
@@ -354,7 +354,7 @@ def n50_plugin_rows(text=""):
     rows.extend(_ud_rows(mg))
     rows.extend(_same_image_rows(ab))
     rows.extend(_census_rows(cen))
-    # N51: the surface-in cache (docs/AFTER-TESTS.md "Surface-in cost and the cache")
+    # N51: the surface-in cache (docs/AFTER-TESTS.html "Surface-in cost and the cache")
     for key, d in sorted(sin.items()):
         calls, fast, br = d.get("calls", 0), d.get("fast", 0), d.get("bufcopy", 0)
         miss = d.get("miss_unsynced", 0) + d.get("miss_seed", 0) + d.get("miss_gen", 0)
@@ -778,7 +778,7 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
                 tail = ("; no ENGAGED knob of this glyph hunt is the cure (engaged: %s)" % (", ".join(eng_ok) or "none"))
                 if eng_no:
                     tail += ("; %d rung(s) did NOT engage their knob or could not show it (%s): they exclude nothing" % (len(eng_no), ", ".join(eng_no)))
-                tail += ("; read the `undeclared writes`, `surface census`, `same-image copy` and `fence early` rows of the baseline rung for what is left (docs/AFTER-TESTS.md)")
+                tail += ("; read the `undeclared writes`, `surface census`, `same-image copy` and `fence early` rows of the baseline rung for what is left (docs/AFTER-TESTS.html)")
             rows.append(("INFO", "ladder glyphs", "the baseline glyphs were BROKEN and no rung made them clean%s" % tail))
         elif gv_.get("baseline") == "clean":
             rows.append(("INFO", "ladder glyphs", "the baseline glyphs were CLEAN in this run: the artefact did not show, the other rungs prove nothing"))
@@ -802,7 +802,7 @@ def ladder_rows(rungs, variant=1, problems=(), glyphs=None):
     ans = {n: rungs[n].get("verdict") for n in names if n in rungs}
     if ans.get("baseline") == "n":
         fixed = [n for n, v in ans.items() if v == "y"]
-        rows.append(("INFO", "ladder", ("the baseline picture was broken and the picture was RIGHT with: %s - that switch is the discriminator (docs/AFTER-TESTS.md)" % ", ".join(fixed)) if fixed
+        rows.append(("INFO", "ladder", ("the baseline picture was broken and the picture was RIGHT with: %s - that switch is the discriminator (docs/AFTER-TESTS.html)" % ", ".join(fixed)) if fixed
                      else "the baseline picture was broken and no rung made it right"))
     elif ans.get("baseline") == "y":
         rows.append(("INFO", "ladder", "the baseline picture was right in this run: the artefact did not show, the other rungs prove nothing"))

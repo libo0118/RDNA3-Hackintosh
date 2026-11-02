@@ -16,7 +16,7 @@ Damaged input never raises: Trace.problems names the file and byte.
 
 tools/triage_reports.py imports it: verdicts per hypothesis (H-COPY,
 H-B2, H-STALE, H-GEN, H-FLIPPATH, H-FREE, copy forward errors), the A/B side by side, the coverage
-self-check of docs/AFTER-TESTS.md's questions Q1-Q11 and the last events
+self-check of docs/AFTER-TESTS.html's questions Q1-Q11 and the last events
 per head.
 """
 import re
@@ -1504,7 +1504,7 @@ def wall_of(trace, e):
 
 
 def coverage(trace, ctx=None):
-    """[(question, ok, text)]: can the report answer Q1-Q11 (docs/AFTER-TESTS.md)?
+    """[(question, ok, text)]: can the report answer Q1-Q11 (docs/AFTER-TESTS.html)?
     ctx: swaps (the counters' swap count), swaps_window ({head: the counters'
     swaps over the A/B}), cf_calls, ab_ran (autoreport ran the A/B),
     core_expected (Metal / RADV ran), size_problems ([text]: stream files

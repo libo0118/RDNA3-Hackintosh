@@ -5,7 +5,7 @@ The VM uploads bootwatch-<YYYYMMDD-HHMMSS>-<n>.txt while WindowServer has no use
 in (first at rdna3bootwatch=N s, default 75, then every 60 s): `BOOTWATCH:` header, ps, ioreg essentials, the plugin conf,
 `sample WindowServer 5` (or spindump), `log show --last 3m`. When WindowServer opens the GPU (or somebody logs in) after all, the
 last file is `BOOTWATCH-END: state=gpu|login ...`; state gave-up / timeout means the watch ended with WindowServer still without
-the GPU. Kept in a module of its own so that tools/triage_reports.py only gains one call; docs/AFTER-TESTS.md "WindowServer
+the GPU. Kept in a module of its own so that tools/triage_reports.py only gains one call; docs/AFTER-TESTS.html "WindowServer
 never opened the GPU" explains the rows."""
 import glob
 import os
@@ -245,6 +245,6 @@ def bootwatch_rows(*dirs):
                           (stamp, notes or "sample and spindump gave nothing: read the file's '== sample' section"))
         if snaps:
             detail.append("   bootwatch-%s-N.txt: ps, ioreg, plugin conf, sample, log show of WindowServer / loginwindow / RDNA3 / NVMTL "
-                          "(docs/AFTER-TESTS.md, WindowServer never opened the GPU)" % stamp)
+                          "(docs/AFTER-TESTS.html, WindowServer never opened the GPU)" % stamp)
         rows.append((level, "BOOTWATCH", text, detail))
     return rows
