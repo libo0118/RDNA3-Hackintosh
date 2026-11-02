@@ -55,8 +55,12 @@ Every HTML doc uses the style and header layout of
 [docs/doc-template.html](docs/doc-template.html) (copy its `<style>` block and
 its `<script id="forgejo-links">` verbatim: Forgejo renders `.html` in an iframe
 whose URL encodes the path's last slash, and the script keeps relative links
-working there) and is listed in `docs/index.html`. Brief every agent that writes
-docs accordingly.
+working there) and is listed in `docs/index.html`. The working docs
+(`docs/DRIVER-PLAN.html` rows `nNN`, `docs/AFTER-TESTS.html`, `docs/CODEMAP.html`)
+have exact row formats, written in `CLAUDE_SUBAGENT.md`; `tools/docrows.py`
+gives the next N and an empty row (`next`, `snippet`) and checks every doc
+(`check`: tags, ids, links, rows; also in `make test`). Brief every agent that
+writes docs accordingly.
 
 ## How we work: a company
 
