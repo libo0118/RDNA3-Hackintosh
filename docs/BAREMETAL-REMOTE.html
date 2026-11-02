@@ -94,6 +94,7 @@ footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px soli
 </ol>
 </li>
 <li><a href="#round-5-plan">Round 5 plan (N68 mailbox, N76, N71 drag, N74 watch)</a></li>
+<li><a href="#round-5b-plan">Round 5b plan (N77 cursor, N74 rdna3mall=2 A/B)</a></li>
 <li><a href="#how-to-add-the-next-round">How to add the next round</a>
 </li>
 </ol></nav>
@@ -1200,6 +1201,45 @@ of the secondary's top with the time and the UCLK level around it. Set <code>=1<
 
 <h3 id="round-5-plan-report">5. Report</h3>
 <p>One <code>report.sh</code> at the end (with <code>debug.rdna3accel_trace_dump</code> as the script does). Push the findings section to Forgejo.</p>
+</section>
+
+<section id="round-5b-plan">
+<h2>Round 5b plan (Linux session, 2026-11-02): N77 cursor, N74 rdna3mall=2 A/B; build 614c796 (the next full run)</h2>
+<p>The next green full <code>build.yml</code> run on 614c796 (dispatched 2026-11-02, the first after run 127) has everything of
+run 127 plus N77 and N74 OPEN (a). <strong>If round 5 has not started yet, install that run instead of 127</strong> and do round 5,
+then this. If round 5 ran on 127, install the new run (kexts and core only changed; reboot) and do only this section.
+Take only a run whose jobs are all green.</p>
+
+<h3 id="round-5b-plan-n77">1. N77: the cursor line at boot</h3>
+<ul>
+<li>The boot log no longer has <code>RDNA3-fb: cursor: head 0/1 move to 0,0 hidden FAILED in the core</code> (round 4 item 5): WindowServer's
+first hidden move before the first cursor image is accepted now (port of <code>hubp2_cursor_set_position</code>).</li>
+<li>The cursor shows and moves normally on both displays, also after a display sleep and wake.</li>
+<li>A real refusal would log <code>RDNA3: display: head H cursor op OP (...) refused (R): pipe P image N px #K</code>: copy it if seen.</li>
+</ul>
+
+<h3 id="round-5b-plan-n74">2. N74 OPEN (a): rdna3mall=2 instead of the UCLK pin (A/B, optional, the owner's call)</h3>
+<p>The sim, with the card's own bounding box (16 channels, 400 us DRAM change), says DC's full path with the DET split 9+9
+lets UCLK switch during active for the two 1080p60 heads (margin ~832 us, against ~76 us with today's DET 3+3, which explains
+the round-3 flashes at the slow 772/1218 MHz switches). <strong>rdna3mall has never run on the card</strong>, so this is a first run of
+DC's watermark table, the DET grow on lit pipes and the idle CAB. The exact steps are in
+<a href="DRIVER-PLAN.html#n74">DRIVER-PLAN n74</a> ("CARD A/B"); in short:</p>
+<ol>
+<li>Back up the stick's config.plist as <code>config-before-mall2.plist</code>, add <code>rdna3mall=2</code> to the boot-args, reboot.</li>
+<li><code>ioreg -lw0 | grep -E 'RDNA3,(DCNPowerInit|DCNPower|DCNPowerFallback|UclkPinInit|Head[0-9],PState|UclkPinned)'</code>:
+<code>DCNPowerInit</code> starts with <code>0: PMFW 0x505c00</code>; <code>DCNPower</code> says <code>state 0, UCLK switching ... (vactive)</code>;
+<code>Head0/1,PState</code> say <code>DET 576 KiB, active margin ~832 us</code>; there is <strong>no</strong> <code>RDNA3,DCNPowerFallback</code> (if there is one,
+DC's path did not come up and the pin runs instead: the A/B is void, copy its text).</li>
+<li><code>rdna3_pmctl levels mclk 15</code>, sample UCLK every 0.5 s, and watch the secondary's top tenth through idle, two long streamed
+Claude replies, 30 s of scrolling and dragging, and horizon-client (UCLK up to 1218 MHz and back). Note every flash with the
+time and the UCLK level.</li>
+<li>Afterwards <code>rdna3_drminfo --scanout</code>: no HUBP underflow on either pipe. Idle power vs round 4 (50 W pinned, 28 W unpinned).
+Display sleep and a click: <code>display wake: state 0 ... switching</code>.</li>
+<li><strong>Fallback:</strong> live <code>rdna3_pmctl levels mclk 8</code> (UCLK held at the top); for good, restore <code>config-before-mall2.plist</code>
+and reboot (over SSH if the desktop is dark). Take a <code>report.sh</code> before the reboot.</li>
+</ol>
+<p>If it holds (no flash, no underflow, idle power near 28 W), the Linux session proposes rdna3mall=2 as the default for two heads
+instead of the pin.</p>
 </section>
 
 <section id="how-to-add-the-next-round">
