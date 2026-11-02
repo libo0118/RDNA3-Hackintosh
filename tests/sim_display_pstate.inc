@@ -332,6 +332,99 @@ static void sp_head_of(sp_head *h, const rdna3_pstate_plane *p)
     h->bpp = p->bpp;
 }
 
+/* DRIVER-PLAN N74 OPEN (a): the full DC path (rdna3mall=1 / 2) on the
+ * bare-metal two-head setup, as displayPowerUpdate runs it: two Samsung
+ * C24F390 at 1920x1080@60 (CEA 148.5 MHz, 2200 x 1125), the second head the
+ * extended clone (rdna3mirror=2, the profile) with the arbiter's p-state
+ * allow forced (rdna3pstate=1, the default: keep_force), each pipe with the
+ * three DET segments the GOP and the clone left (the card's "clone: ... DET
+ * 3/3 -> 3/3", DET0_CTRL 0x303). The planes come from the registers
+ * (dcn32_pstate_planes_from_heads); rdna3mall=1 keeps those DETs,
+ * rdna3mall=2 plans DC's split first (dcn32_set_det_allocations). */
+static void test_n74_full_path(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn32_power *pw, uint64_t wm_off)
+{
+    static rdna3_dcn dcx;
+    static rdna3_pstate_ctx m1, m2;
+    const uint32_t arb_force = DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_PSTATE_CHANGE_FORCE_ENABLE_MASK |
+                               DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_PSTATE_CHANGE_FORCE_VALUE_MASK;
+    uint32_t pclk[RD_DCN_MAX_PIPES] = { 148500, 148500, 0, 0 }, cur[RD_DCN_MAX_PIPES] = { 0 }, k;
+    sp_head heads[2];
+
+    memset(&dcx, 0, sizeof(dcx));
+    dcx.nheads = 2;
+    for (k = 0; k < 2; k++) {
+        rdna3_pstate_plane pl;
+        rdna3_dcn_head *h = &dcx.head[k];
+        sp_plane(&pl, k, 148500, 1920, 1080, 2200, 1125, 4, 5);
+        pl.det_kb = 3 * 64;
+        sp_head_regs(&pl);
+        sp_head_of(&heads[k], &pl);
+        h->pipe = h->otg = k;
+        h->format = RD_DCN_FMT_ARGB8888;
+        h->width = h->h_active = 1920;
+        h->height = h->v_active = 1080;
+        h->h_total = 2200;
+        h->v_total = 1125;
+        h->v_front = 4;
+        h->v_sync = 5;
+    }
+
+    /* displayPowerInit with the clone lit: the arbiter's allow forced by the
+     * mirror (rdna3pstate=1) stays, the CRB read as the GOP / clone left it */
+    S.reg[DCN_B2 + regDCHUBBUB_ARB_DRAM_STATE_CNTL] |= arb_force;
+    CHECK(dcn32_power_init(dev, pw, NULL, wm_off, 1) == RDNA3_OK && pw->keep_force && pw->hubbub.det_segs[0] == 3 &&
+          pw->hubbub.det_segs[1] == 3);
+
+    /* rdna3mall=1: the DETs as they run */
+    CHECK(dcn32_pstate_planes_from_heads(dev, &dcx, pclk, cur, &m1) == 2 && m1.plane[0].det_kb == 192 &&
+          m1.plane[1].det_kb == 192 && !m1.compbuf_kb);
+    CHECK(dcn32_pstate_validate(&pw->soc, &pw->bw, &m1) == RDNA3_OK);
+    printf("sim_navi32: N74 rdna3mall=1 2x1080p60 DET 3+3: state %u %s, margins %d/%d us, WM A p-state %u ns\n",
+           m1.vlevel, dcn32_dram_change_name(m1.dram_change), m1.dml.active_margin_ns[0] / 1000,
+           m1.dml.active_margin_ns[1] / 1000, m1.wm[RD_WM_A].pstate_change_ns);
+    /* DC's answer even with the GOP's DETs: both switch in active at the
+     * lowest state, but with a thin margin (~70 us over the 420 us set A
+     * watermark) */
+    CHECK(m1.vlevel == 0 && m1.p_state_change_support && m1.dram_change == RD_DRAM_CHANGE_VACTIVE &&
+          m1.dml.active_margin_ns[0] > 0 && m1.dml.active_margin_ns[0] < 200000);
+
+    /* rdna3mall=2: DC's split */
+    CHECK(dcn32_pstate_planes_from_heads(dev, &dcx, pclk, cur, &m2) == 2);
+    dcn32_set_det_allocations(&m2);
+    CHECK(m2.det_segs[0] == 9 && m2.det_segs[1] == 9 && m2.plane[0].det_kb == 576 && m2.compbuf_kb == 1280 - 18 * 64);
+    CHECK(dcn32_pstate_validate(&pw->soc, &pw->bw, &m2) == RDNA3_OK);
+    printf("sim_navi32: N74 rdna3mall=2 2x1080p60 DET 9+9: state %u %s, margins %d/%d us, WM A p-state %u ns\n",
+           m2.vlevel, dcn32_dram_change_name(m2.dram_change), m2.dml.active_margin_ns[0] / 1000,
+           m2.dml.active_margin_ns[1] / 1000, m2.wm[RD_WM_A].pstate_change_ns);
+    /* DC's split: vactive at state 0 with a margin of more than the switch
+     * itself on both heads */
+    CHECK(m2.vlevel == 0 && m2.p_state_change_support && m2.dram_change == RD_DRAM_CHANGE_VACTIVE &&
+          m2.dml.active_margin_ns[0] > 400000 && m2.dml.active_margin_ns[1] > 400000 && m2.fclk_p_state_change_support);
+
+    /* applied as displayPowerUpdate does on the Mac: the mirror's forced
+     * allow kept (keep_force: only vactive passes), the DETs grown to 9 + 9
+     * after the compbuf shrank, UCLK's hard minimum at the lowest level (the
+     * PMFW may switch: nothing pins it) */
+    CHECK(dcn32_power_apply(dev, dm, pw, &m2) == RDNA3_OK && m2.p_state_change_support);
+    CHECK(S.dal_hard_min[RD_PPCLK_UCLK] == SP.uclk[0]);
+    CHECK((S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] & 0x1f) == 9 && (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] & 0x1f) == 9);
+    /* the switch at any moment (the arbiter forced to allow): no head at
+     * risk with a 400 us switch, and none with a switch twice as long */
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] = 0x909;
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] = 0x909;
+    CHECK((S.reg[DCN_B2 + regDCHUBBUB_ARB_DRAM_STATE_CNTL] & arb_force) == arb_force);
+    CHECK(sp_underflow_risk(heads, 2, 400) == 0 && sp_underflow_risk(heads, 2, 800) == 0);
+    /* the same with the GOP's 3 + 3 DETs (rdna3mall=1) holds 400 us, not 800 */
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] = 0x303;
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] = 0x303;
+    CHECK(sp_underflow_risk(heads, 2, 400) == 0 && sp_underflow_risk(heads, 2, 800) == 2);
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] = 0x909;
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] = 0x909;
+    /* back to the caller's state: no forced allow, a fresh init */
+    S.reg[DCN_B2 + regDCHUBBUB_ARB_DRAM_STATE_CNTL] &= ~arb_force;
+    CHECK(dcn32_power_init(dev, pw, NULL, wm_off, 0) == RDNA3_OK && !pw->keep_force);
+}
+
 static void test_dc_pstate(rdna3_dev *dev, rdna3_dmub *dm)
 {
     static uint32_t save[MMIO_LEN / 4];
@@ -465,6 +558,9 @@ static void test_dc_pstate(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK(dcn32_power_prepare(dev, dm, &pw, &c2) == RDNA3_OK && !c2.p_state_change_support &&
           S.dal_hard_min[RD_PPCLK_UCLK] == 1218);
     pw.keep_force = 0;
+    CHECK(dcn32_power_apply(dev, dm, &pw, &ctx) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_UCLK] == SP.uclk[0]);
+
+    test_n74_full_path(dev, dm, &pw, wm_off);
     CHECK(dcn32_power_apply(dev, dm, &pw, &ctx) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_UCLK] == SP.uclk[0]);
 
     /* ---- one 3840x2160 head at 144 Hz: no natural switch, SubVP ---- */

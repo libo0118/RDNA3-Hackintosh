@@ -416,11 +416,25 @@ SYSCTL_PROC(_debug, OID_AUTO, rdna3_uclk_pin, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG
 
 /* the bring-up (rdna3mall 0, the PMFW up): the UCLK levels, then the first
  * decision. 'd' is the bring-up's device; the updates use fDispDev (the
- * same registers). */
-void RDNA3Accel::displayUclkPinInit(rdna3_dev *d)
+ * same registers). 'fallback' (rdna3mall=1/2, after displayPowerInit): only
+ * when DC's path is not on (fPowerOn), so the alternative never leaves two
+ * heads unguarded; said in RDNA3,DCNPowerInit and the log. */
+void RDNA3Accel::displayUclkPinInit(rdna3_dev *d, bool fallback)
 {
-    if (rd3_arg("rdna3mall", 0) || !d || !fDispLock || !fDcn)
+    const uint32_t mall = rd3_arg("rdna3mall", 0);
+    if ((mall && !fallback) || (!mall && fallback))
         return;
+    if (fallback && fPowerOn)
+        return;   /* DC's display power path runs: no pin */
+    if (!d || !fDispLock || !fDcn) {
+        if (fallback)
+            LOG("display power: rdna3mall=%u: DC's path is off and the UCLK pin (N74) fallback cannot start (%s): "
+                "UCLK left to the PMFW (two heads may flash)", mall, !d ? "no device" : "no display state");
+        return;
+    }
+    if (fallback)
+        LOG("display power: rdna3mall=%u: DC's display power path did not come up (see display power: init): the "
+            "UCLK pin (N74) instead", mall);
     rdna3_uclk_pin *fresh = nullptr;
     if (!fUclkPin) {
         fresh = (rdna3_uclk_pin *)IOMalloc(sizeof(rdna3_uclk_pin));
@@ -431,21 +445,22 @@ void RDNA3Accel::displayUclkPinInit(rdna3_dev *d)
         }
         bzero(fresh, sizeof(*fresh));
     }
-    char val[200];
+    char val[320];
     IOLockLock(fDispLock);
     if (fresh) {
         fUclkPin = fresh;
         fUclkPinOn = rd3_arg("rdna3uclkpin", 1) != 0;
     }
     int r = dcn32_uclk_pin_init(d, fUclkPin, fUclkPinEver ? 1 : 0);
+    const char *fb = fallback ? " (the fallback: rdna3mall's DC path did not come up)" : "";
     if (r == RDNA3_OK)
-        snprintf(val, sizeof(val), "UCLK pin (N74): PMFW 0x%x, UCLK %u levels %u..%u MHz, %s%s", fUclkPin->pmfw,
+        snprintf(val, sizeof(val), "UCLK pin (N74)%s: PMFW 0x%x, UCLK %u levels %u..%u MHz, %s%s", fb, fUclkPin->pmfw,
                  fUclkPin->n_memclk, fUclkPin->min_mhz, fUclkPin->max_mhz,
                  fUclkPinOn ? "on (rdna3uclkpin, debug.rdna3_uclk_pin)" : "OFF (rdna3uclkpin=0)",
                  fUclkPin->resync ? ", the first decision sent (a bring-up again after a pin)" : "");
     else
-        snprintf(val, sizeof(val), "UCLK pin (N74) unavailable: %d (the PMFW's DAL mailbox: GetSmuVersion / UCLK "
-                 "levels, last %d); UCLK left to the PMFW", r, fUclkPin->last_err);
+        snprintf(val, sizeof(val), "UCLK pin (N74) unavailable%s: %d (the PMFW's DAL mailbox: GetSmuVersion / UCLK "
+                 "levels, last %d); UCLK left to the PMFW", fb, r, fUclkPin->last_err);
     setProperty("RDNA3,DCNPowerInit", val);
     LOG("display power: %s", val);
     displayUclkPinUpdate("init");

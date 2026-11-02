@@ -80,5 +80,23 @@ def uclk_pin_rows(props, log=""):
         if extra:
             return [("WARN", NAME, v + ": " + "; ".join(extra) + seen)]
         return [("INFO", NAME, v + seen)]
-    # rdna3mall=1/2: DC's whole decision (item O), not this path
+    # rdna3mall=1/2: DC's whole decision (item O), not this path; since N74 OPEN (a) also the alternative to the pin
+    # for two heads (the sim's DML: 2x1080p60 with DC's 9 + 9 DET split switches in active at state 0)
+    if v.startswith("not updated"):
+        if heads >= 2:
+            return [("WARN", NAME, "rdna3mall path (item O): " + v + ": no DC decision with %d heads, UCLK as the PMFW "
+                     "has it (the secondary's top may flash at each switch); the `display power:` / `pstate:` lines"
+                     % heads + seen)]
+        return [("INFO", NAME, "rdna3mall path (item O): " + v + seen)]
+    m = re.search(r"UCLK switching at \d+ MHz \(([^)]*)\)", v)
+    if m and heads >= 2:
+        if m.group(1).startswith("vactive"):
+            return [("INFO", NAME, "rdna3mall path (item O), the N74 alternative: " + v + " - every head switches in "
+                     "active (DET margin, RDNA3,Head<n>,PState); watch the secondary's top for flashes" + seen)]
+        return [("WARN", NAME, "rdna3mall path (item O): " + v + ": %d unsynchronised heads but the switch needs %s "
+                 "(not in active): the secondary's top may flash; RDNA3,Head<n>,PState margins" % (heads, m.group(1))
+                 + seen)]
+    if "UCLK pinned" in v and heads >= 2:
+        return [("INFO", NAME, "rdna3mall path (item O): " + v + " - DC's decision pinned UCLK (no state switches in "
+                 "active with these DETs; rdna3mall=2 plans DC's DET split, the N74 alternative)" + seen)]
     return [("INFO", NAME, "rdna3mall path (item O): " + v + seen)]

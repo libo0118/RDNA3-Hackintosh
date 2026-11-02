@@ -65,6 +65,20 @@ check(level({"DisplayHeads": 2}) == "WARN", "two heads without RDNA3,DCNPower is
 check(level({"DisplayHeads": 1, "ExtendHead": 1}) == "WARN", "the extended clone head counts as a second head")
 check(level({"DisplayHeads": 1}) is None, "one head without the property: no row")
 check(level({"DCNPower": MALL}) == "INFO", "the rdna3mall path is INFO")
+# N74 OPEN (a): rdna3mall=2 as the alternative to the pin
+r = uclk_pin_rows({"DCNPower": MALL, "DisplayHeads": 1, "ExtendHead": 1})[0]
+check(r[0] == "INFO" and "N74 alternative" in r[2] and "switches in active" in r[2],
+      "the rdna3mall path switching in vactive with two heads is INFO, named as the N74 alternative")
+MALL_NOT = "not updated: a head's refresh rate is unknown"
+check(level({"DCNPower": MALL_NOT, "DisplayHeads": 2}) == "WARN",
+      "the rdna3mall path without a decision and two heads is a WARN (UCLK left to the PMFW)")
+check(level({"DCNPower": MALL_NOT, "DisplayHeads": 1}) == "INFO", "the rdna3mall path without a decision, one head: INFO")
+MALL_VBLANK = MALL.replace("(vactive)", "(vblank)")
+check(level({"DCNPower": MALL_VBLANK, "DisplayHeads": 2}) == "WARN",
+      "the rdna3mall path switching in vblank only with two unsynchronised heads is a WARN")
+MALL_PIN = MALL.replace("UCLK switching at 96 MHz (vactive)", "UCLK pinned at 1218 MHz (unsupported)")
+r = uclk_pin_rows({"DCNPower": MALL_PIN, "DisplayHeads": 2})[0]
+check(r[0] == "INFO" and "rdna3mall=2" in r[2], "DC's decision pinning UCLK is INFO with the DET-split hint")
 check(level({"DCNPower": PINNED_AFTER_FAIL}) == "WARN", "pinned after failed messages is a WARN")
 check("2 SetHardMinByFreq" in uclk_pin_rows({"DCNPower": PINNED_AFTER_FAIL})[0][2], "the earlier failures counted")
 check(level({"DCNPower": PINNED_UNCONF}) == "WARN", "an unconfirmed pin is a WARN")

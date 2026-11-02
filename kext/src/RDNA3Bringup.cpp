@@ -1005,6 +1005,12 @@ bool RDNA3Bringup::hwInit()
                 }
             }
         }
+        /* N74 OPEN (a): rdna3mall=1/2 is DC's whole decision instead of the
+         * pin; when that path did not come up (no DMCUB, no DAL answer, no
+         * VRAM for the table) the pin is set up after all, so two heads are
+         * never left to the PMFW's switch unguarded (logged as the fallback) */
+        if (rd3_arg("rdna3mall", 0))
+            fOwner->displayUclkPinInit(fDev, true);
     }
 
     /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in

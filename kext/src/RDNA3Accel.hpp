@@ -172,8 +172,10 @@ public:
     /* rdna3mall=1: display power after the DMCUB runs (RDNA3DisplayPower.cpp) */
     void displayPowerInit(struct rdna3_dev *d, struct rdna3_dmub *dm, uint64_t wmTableOff);
     /* N74, rdna3mall 0 (the default): UCLK's hard minimum at the top while
-     * two or more heads are lit (RDNA3DisplayPower.cpp) */
-    void displayUclkPinInit(struct rdna3_dev *d);
+     * two or more heads are lit (RDNA3DisplayPower.cpp). 'fallback': called
+     * with rdna3mall=1/2 after displayPowerInit; sets the pin up only when
+     * DC's path did not come up (no DMCUB, no DAL answer, no VRAM) */
+    void displayUclkPinInit(struct rdna3_dev *d, bool fallback = false);
     void displayMirrorOff(struct rdna3_dmub *dm);
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
