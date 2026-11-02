@@ -27,7 +27,7 @@
   github.com/phracker/MacOSX-SDKs releases); run it before pushing kext changes.
 - **When the user sends hardware-test reports** (`rdna3-report-*.tar.gz`,
   `serial-*.log`, `host-*.log`, `*-tests.txt`): follow
-  [docs/AFTER-TESTS.md](docs/AFTER-TESTS.md) step by step.
+  [docs/AFTER-TESTS.html](docs/AFTER-TESTS.html) step by step.
 - Test procedures the user runs: `docs/TESTING-VM.html`, `docs/TESTING-HW.html`.
 - README status (`docs/status/`): run `python3 tools/progress.py` before every
   commit that changes driver code (CI checks it). A ladder step that passed
@@ -146,7 +146,7 @@ fit, in parallel and in the background: `ecc:code-reviewer` or
 report logs, so a failure without a log line is a bug) and
 `ecc:pr-test-analyzer` (what `make test` could cover). Fix what they
 confirm, add the tests they find missing, record what stays open in
-docs/DRIVER-PLAN.md, and say in the commit that ECC reviewed it. Use
+docs/DRIVER-PLAN.html, and say in the commit that ECC reviewed it. Use
 ECC's planning agents for larger features and its build resolvers when
 CI is red. Use its other agents and
 skills where they fit (planning, code review, security review, TDD on the
@@ -162,7 +162,7 @@ host tests). Where ECC and this file disagree, this file wins:
   the standard library, GoogleTest/CMake and clang-format do not apply.
 - Tests are `make test` (simulator, UAPI, host tools) and the card runs;
   the 80% coverage and E2E rules do not apply. Hardware fixes still follow
-  "port, don't invent" (docs/AFTER-TESTS.md) rather than ECC's research
+  "port, don't invent" (docs/AFTER-TESTS.html) rather than ECC's research
   step.
 - CI is only the owner's Forgejo runners above.
 
