@@ -12686,6 +12686,22 @@ static void run(const char *fwdir)
             const uint32_t dpp = regCNVC_CUR1_CURSOR0_CONTROL - regCNVC_CUR0_CURSOR0_CONTROL;
             uint32_t cc, dc_ctl;
             CHECK(dcn32_cursor_set_position(&dev, &dc, 0, 10, 10, 1) == RDNA3_EINVAL);   /* no image */
+            /* bare-metal round 4 item 5: WindowServer's first setCursorState
+             * (0,0 hidden) comes before the first image. hubp2_cursor_set_position
+             * returns when curs_attr.address is 0 (nothing programmed, no
+             * error; amdgpu_dm handle_cursor_update turns a hidden cursor off,
+             * never fails): a hidden move without an image succeeds and
+             * touches no register */
+            {
+                const uint32_t pos0 = S.reg[HUBP(regCURSOR0_0_CURSOR_POSITION, 1)] = 0x12345678u;
+                const uint32_t ctl0 = S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)];
+                CHECK(dcn32_cursor_set_position(&dev, &dc, 0, 0, 0, 0) == RDNA3_OK);
+                CHECK(dcn32_cursor_set_position(&dev, &dc, 0, -20, 4000, 0) == RDNA3_OK);
+                CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_POSITION, 1)] == pos0 &&
+                      S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)] == ctl0 && !dc.cursor_on[1]);
+                CHECK(dcn32_cursor_set_position(&dev, &dc, 9, 0, 0, 0) == RDNA3_EINVAL);   /* no such head */
+                S.reg[HUBP(regCURSOR0_0_CURSOR_POSITION, 1)] = 0;
+            }
             CHECK(dcn32_cursor_set_image(&dev, &dc, 0, FB_START + 0x7000000, 100) == RDNA3_EINVAL);
             CHECK(dcn32_cursor_set_image(&dev, &dc, 0, FB_START + 0x7000080, 64) == RDNA3_EINVAL);
             CHECK(dcn32_cursor_set_image(&dev, &dc, 0, FB_START + 0x7000000, 256) == RDNA3_OK);

@@ -802,8 +802,17 @@ static int cursor_position(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_head *h,
                                 : (int32_t)h->width;
     int on;
     size = dc->cursor_size[p];
+    /* hubp2_cursor_set_position: "if (hubp->curs_attr.address.quad_part ==
+     * 0) return;" -- no attributes yet, nothing to program. A hidden cursor
+     * is no error then (amdgpu_dm handle_cursor_update turns a cursor
+     * without a position/fb off and never fails it; WindowServer's first
+     * setCursorState is (0,0) hidden before the first image, bare-metal
+     * round 4 item 5). A SHOWN move without attributes stays an error: the
+     * framebuffer asks to show only after the core accepted the image, so
+     * here the core lost it (amdgpu would silently draw nothing) and the
+     * caller logs it. */
     if (!size)
-        return RDNA3_EINVAL;   /* hubp2_cursor_set_position: no attributes yet */
+        return visible ? RDNA3_EINVAL : RDNA3_OK;
     /* the hardware draws the image with its hot spot at POSITION, so the
      * top-left corner is POSITION - HOT_SPOT. POSITION is unsigned: a
      * cursor hanging off the top/left edge gets POSITION 0 and the

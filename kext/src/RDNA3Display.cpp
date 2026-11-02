@@ -2070,6 +2070,24 @@ IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
     }
     else if (c->op == RD3K_CURSOR_OP_MOVE)
         r = dcn32_cursor_set_position(fDispDev, fDcn, c->head, c->x, c->y, c->visible != 0);
+    if (r != RDNA3_OK) {
+        /* the reason next to the framebuffer's "FAILED in the core" line: a
+         * hidden move without an image is no failure any more
+         * (hubp2_cursor_set_position's no-attributes return); what is left
+         * is a shown move with no image programmed, a refused surface or a
+         * bad op. Under fDispLock: the counters need no atomics; one
+         * budget per head and op (image / move / other), so one head's
+         * stream does not hide another's first refusal */
+        static uint32_t cursorFails[RD_DCN_MAX_PIPES][3];
+        const uint32_t pipe = fDcn->head[c->head].pipe;
+        const uint32_t hi = c->head < RD_DCN_MAX_PIPES ? c->head : RD_DCN_MAX_PIPES - 1;
+        const uint32_t oi = c->op == RD3K_CURSOR_OP_IMAGE ? 0 : c->op == RD3K_CURSOR_OP_MOVE ? 1 : 2;
+        const uint32_t n = ++cursorFails[hi][oi];
+        if (n <= 8 || (n & 1023) == 0)
+            LOG("display: head %u cursor op %u (%d,%d %s, size %u) refused (%d): pipe %u image %u px #%u", c->head,
+                c->op, c->x, c->y, c->visible ? "shown" : "hidden", c->size, r, pipe,
+                pipe < RD_DCN_MAX_PIPES ? fDcn->cursor_size[pipe] : 0u, n);
+    }
     IOLockUnlock(fDispLock);
     c->result = r;
     return r ? kIOReturnBadArgument : kIOReturnSuccess;

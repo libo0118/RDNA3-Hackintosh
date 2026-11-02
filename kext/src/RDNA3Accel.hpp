@@ -172,8 +172,11 @@ public:
     /* rdna3mall=1: display power after the DMCUB runs (RDNA3DisplayPower.cpp) */
     void displayPowerInit(struct rdna3_dev *d, struct rdna3_dmub *dm, uint64_t wmTableOff);
     /* N74, rdna3mall 0 (the default): UCLK's hard minimum at the top while
-     * two or more heads are lit (RDNA3DisplayPower.cpp) */
-    void displayUclkPinInit(struct rdna3_dev *d);
+     * two or more heads are lit (RDNA3DisplayPower.cpp). 'fallback': called
+     * with rdna3mall=1/2 after the bring-up's DMCUB block; sets the pin up
+     * only when DC's path is not on (fPowerOn), 'cause' says why it did not
+     * start when displayPowerInit never ran (else its own reason is used) */
+    void displayUclkPinInit(struct rdna3_dev *d, bool fallback = false, const char *cause = nullptr);
     void displayMirrorOff(struct rdna3_dmub *dm);
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
@@ -465,6 +468,7 @@ private:
     struct rdna3_pstate_ctx  *fPowerCtx = nullptr;   /* the update's scratch */
     struct rdna3_pstate_ctx  *fPowerCtxMin = nullptr;   /* the same without SubVP (minimal transition) */
     bool          fPowerOn     = false;
+    char          fPowerInitWhy[96] = {};   /* why displayPowerInit left DC's path off (N74 fallback) */
     volatile bool fPowerStop   = false;
     struct rd3_tcall *fPowerIdleCall = nullptr;
     uint32_t      fPowerUpdates = 0, fPowerIdles = 0;

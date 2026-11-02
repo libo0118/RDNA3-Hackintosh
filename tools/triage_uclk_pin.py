@@ -8,7 +8,8 @@ says so in ioreg RDNA3,DCNPower ("UCLK pinned (two heads, ...)", "UCLK switching
 uclk_pin_rows(props, log) -> [(level, name, text)]: FAIL when the PMFW refused or did not answer the minimum, or the
 pin gave up; WARN when two heads are lit and UCLK switches (not switched off), when earlier messages failed or a
 minimum was not confirmed (counters `fails n`, `unconfirmed n`), when the pin is unavailable, or when a two-head
-report has no RDNA3,DCNPower at all; INFO otherwise. 'props' is triage_reports.parse_props()'s dict (keys without "RDNA3,")."""
+report has no RDNA3,DCNPower at all, or when RDNA3,DCNPowerFallback says rdna3mall's DC path did not come up (the pin
+ran instead; its own row follows); INFO otherwise. 'props' is triage_reports.parse_props()'s dict (keys without "RDNA3,")."""
 import re
 
 NAME = "UCLK pin (N74)"
@@ -27,6 +28,16 @@ def _count(text, key):
 
 
 def uclk_pin_rows(props, log=""):
+    fb = props.get("DCNPowerFallback")
+    if fb is not None:
+        # rdna3mall=1/2 asked, DC's path did not come up: the pin runs instead (the bring-up's displayUclkPinInit
+        # fallback); the pin's own row follows, so its failures still show
+        return [("WARN", NAME, str(fb) + ": the rdna3mall A/B is void for this boot; the `display power:` / `pstate:` "
+                 "lines")] + _pin_rows(props, log)
+    return _pin_rows(props, log)
+
+
+def _pin_rows(props, log=""):
     v = props.get("DCNPower")
     heads = props.get("DisplayHeads", 0)
     heads = heads if isinstance(heads, int) else 0
@@ -80,5 +91,23 @@ def uclk_pin_rows(props, log=""):
         if extra:
             return [("WARN", NAME, v + ": " + "; ".join(extra) + seen)]
         return [("INFO", NAME, v + seen)]
-    # rdna3mall=1/2: DC's whole decision (item O), not this path
+    # rdna3mall=1/2: DC's whole decision (item O), not this path; since N74 OPEN (a) also the alternative to the pin
+    # for two heads (the sim's DML: 2x1080p60 with DC's 9 + 9 DET split switches in active at state 0)
+    if v.startswith("not updated"):
+        if heads >= 2:
+            return [("WARN", NAME, "rdna3mall path (item O): " + v + ": no DC decision with %d heads, UCLK as the PMFW "
+                     "has it (the secondary's top may flash at each switch); the `display power:` / `pstate:` lines"
+                     % heads + seen)]
+        return [("INFO", NAME, "rdna3mall path (item O): " + v + seen)]
+    m = re.search(r"UCLK switching at \d+ MHz \(([^)]*)\)", v)
+    if m and heads >= 2:
+        if m.group(1).startswith("vactive"):
+            return [("INFO", NAME, "rdna3mall path (item O), the N74 alternative: " + v + " - every head switches in "
+                     "active (DET margin, RDNA3,Head<n>,PState); watch the secondary's top for flashes" + seen)]
+        return [("WARN", NAME, "rdna3mall path (item O): " + v + ": %d unsynchronised heads but the switch needs %s "
+                 "(not in active): the secondary's top may flash; RDNA3,Head<n>,PState margins" % (heads, m.group(1))
+                 + seen)]
+    if "UCLK pinned" in v and heads >= 2:
+        return [("INFO", NAME, "rdna3mall path (item O): " + v + " - DC's decision pinned UCLK (no state switches in "
+                 "active with these DETs; rdna3mall=2 plans DC's DET split, the N74 alternative)" + seen)]
     return [("INFO", NAME, "rdna3mall path (item O): " + v + seen)]
