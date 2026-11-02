@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code map - RDNA3 Hackintosh</title>
+<style>
+/* RDNA3-Hackintosh doc style v1: copy this block verbatim into every doc (CLAUDE.md "Documentation format") */
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#dcdcdf;--card:#ffffff;--accent:#c4302b;--accent2:#1f6feb;
+--ok:#1a7f37;--warn:#9a6700;--fail:#cf222e;--code:#f2f2f0;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111214;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2d31;
+--card:#18191c;--accent:#ff6b5e;--accent2:#58a6ff;--ok:#3fb950;--warn:#d29922;--fail:#f85149;--code:#1f2024}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--sans)}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+header.doc{border-bottom:1px solid var(--line);margin-bottom:20px;padding-bottom:12px}
+header.doc .crumbs{font-size:13px;color:var(--muted)}header.doc .crumbs a{color:var(--muted)}
+h1{font-size:28px;line-height:1.2;margin:8px 0 4px}h2{font-size:21px;margin:32px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:22px 0 6px}h4{font-size:15px;margin:16px 0 4px}
+a{color:var(--accent2)}p,ul,ol{margin:8px 0}li{margin:2px 0}
+code,kbd,pre{font-family:var(--mono);font-size:13.5px}code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.fail{color:var(--fail)}.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent2);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+.warnbox{border-left:4px solid var(--warn);background:var(--card);padding:8px 14px;margin:12px 0;border-radius:0 8px 8px 0}
+nav.toc{font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+nav.toc ol{margin:4px 0;padding-left:20px}
+details{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:8px 0;background:var(--card)}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}figure{margin:14px 0}figcaption{font-size:13px;color:var(--muted)}
+footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+</style>
+<style id="page-extra">
+/* page extras; the first <style> block above is the verbatim house style */
+td{min-width:8em}
+td pre,th pre{margin:4px 0}
+tr:target td,h2:target,h3:target,h4:target{background:var(--code)}
+nav.toc details{margin:2px 0;padding:2px 10px}
+nav.toc details ol{padding-left:18px}
+</style>
+</head>
+<body>
+<main>
+<header class="doc">
+  <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / <a href="index.html">docs</a> / Code map</div>
+  <h1>Code map</h1>
+  <p class="muted">Directories, key files and functions, where the logs, counters, report members and triage rows live, the tests and CI jobs, and a "where to change X" table. Read at the start of every task.</p>
+</header>
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#1-top-level-layout">1. Top-level layout</a></li>
+<li><a href="#2-subsystems">2. Subsystems</a>
+<details><summary>8 subsections</summary><ol>
+<li><a href="#21-core-kext-kextsrc">2.1 Core kext (<code>kext/src/</code>)</a></li>
+<li><a href="#22-hw-ip-blocks-portable-c99-ported-from-amdgpu">2.2 <code>hw/</code> IP blocks (portable C99, ported from amdgpu)</a></li>
+<li><a href="#23-common-and-uapi">2.3 <code>common/</code> and <code>uapi/</code></a></li>
+<li><a href="#24-accelerator-accel">2.4 Accelerator (<code>accel/</code>)</a></li>
+<li><a href="#25-framebuffer-and-agdc">2.5 Framebuffer and AGDC</a></li>
+<li><a href="#26-libdrm_xnu-and-userspace">2.6 libdrm_xnu and userspace</a></li>
+<li><a href="#27-translator-metaltranslator">2.7 Translator (<code>metal/translator/</code>)</a></li>
+<li><a href="#28-metal-plugin-metalplugin">2.8 Metal plugin (<code>metal/plugin/</code>)</a></li>
+</ol></details></li>
+<li><a href="#3-diagnostics-where-to-look">3. Diagnostics: where to look</a></li>
+<li><a href="#4-tests-and-ci">4. Tests and CI</a></li>
+<li><a href="#5-where-to-change-x">5. Where to change X</a></li>
+</ol></nav>
+<p>Last updated: 2026-10-26 (branch <code>stage1-kext</code>). Read at the start of every task.</p>
+<ul>
+<li>The N-numbers (<a href="DRIVER-PLAN.html#n38">N38</a>, <a href="DRIVER-PLAN.html#n54">N54</a>, ...) and "card run &lt;date&gt;" in comments and docs are the
+history: <code>docs/DRIVER-PLAN.html</code> has one row per N, <code>docs/AFTER-TESTS.html</code> the
+procedure per symptom. They tell you why a file exists, not where it is.</li>
+<li>For a precise lookup use the code graph, not grep: <code>graphify query "&lt;question&gt;" --budget 1500</code>, <code>graphify explain "&lt;symbol&gt;"</code>, <code>graphify path "&lt;A&gt;" "&lt;B&gt;"</code>,
+<code>graphify affected "&lt;symbol&gt;"</code>. This map says which directory and file; the
+graph says which function calls what.</li>
+<li>Keep this file current: whoever adds a subsystem, a file family or a report
+member updates it in the same commit.</li>
+<li>Line counts below are rough (2026-10-26); the big files are one translation unit
+each, so search them by function name, do not read them whole.</li>
+</ul>
+<h2 id="1-top-level-layout">1. Top-level layout</h2>
+<table id="1-top-level-layout-t1">
+<thead><tr><th>Path</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>kext/</code></td><td>Core kext <code>RDNA3Accel.kext</code> (id <code>io.github.voten641.RDNA3Accel</code>): <code>kext/src/*.cpp</code> plus the portable C of <code>hw/</code>, <code>common/</code>, <code>uapi/</code> (<code>kext/Makefile</code> lists the sources). Bring-up, DRM bridge, display, PM.</td></tr>
+<tr><td><code>accel/</code></td><td><code>RDNA3Accelerator.kext</code>: IOGraphicsAccelerator2 subclass (NullMoth import, AMD adaptation, <code>PROVENANCE.md</code>). One 10k-line file <code>rdna3-accel.cpp</code>.</td></tr>
+<tr><td><code>fb/</code></td><td><code>RDNA3Framebuffer.kext</code>: IOFramebuffer, one head per instance (<code>rdna3-fb.cpp</code>; leaf class <code>AMDRDNA3Framebuffer</code>).</td></tr>
+<tr><td><code>agdc/</code></td><td><code>RDNA3AGDC.kext</code>: AppleGraphicsDeviceControl answers for IOPresentment (<code>rdna3-agdc.cpp</code>).</td></tr>
+<tr><td><code>hw/</code></td><td>Portable C99 hardware layer, one file family per amdgpu IP block, ported from named amdgpu functions. No kernel headers.</td></tr>
+<tr><td><code>hw/gen/</code></td><td>Generated register headers (<code>tools/gen_regs.py</code> from <code>tools/linux/regs</code>; <code>gc_11_0_0_*.h</code>, <code>dcn_3_2_*.h</code>, ...). Do not hand-edit.</td></tr>
+<tr><td><code>common/</code></td><td>Portable C: discovery/firmware parsers (<code>amd_*.c</code>), allocators, and the <code>rdna3_*.h</code> decision headers (pure logic the kexts include, each with a host test).</td></tr>
+<tr><td><code>uapi/</code></td><td><code>rdna3_drm.c/.h</code>: the Linux DRM + amdgpu ioctl UAPI, OS-independent (BOs, VMs, CS, fences, user queues, scanout readback).</td></tr>
+<tr><td><code>userspace/</code></td><td>Mac-side programs: <code>libdrm_xnu/</code> (DRM fd shim), <code>rdna3_drminfo.c</code>, <code>rdna3_modetest.c</code>, <code>rdna3_pmctl.c</code>, <code>rdna3_vktest.c</code>, <code>mtlprobe.m</code>, <code>mesa/</code> (RADV build script, <code>patches/0001..</code>).</td></tr>
+<tr><td><code>metal/plugin/</code></td><td>The Metal driver bundle's code (Metal -&gt; Vulkan -&gt; RADV), NullMoth import. One translation unit (see 2.8).</td></tr>
+<tr><td><code>metal/translator/</code></td><td>AIR -&gt; SPIR-V translator (Rust, LGPL): <code>translator/</code> (library, <code>src/</code>, <code>tests/</code>) and <code>wrapper/</code> (cdylib <code>nvmtl_translate</code>, shipped as <code>librdna3mtl_translate.dylib</code>).</td></tr>
+<tr><td><code>metal/bundle/</code>, <code>metal/Makefile</code>, <code>metal/rdna3mtl-allow.txt</code></td><td>Bundle <code>Info.plist</code>, plugin + translator build, default list of processes that get the Metal device.</td></tr>
+<tr><td><code>third_party/</code></td><td>Vendored headers: <code>amd/</code> (amdgpu UAPI, ucode headers, clearstate, PSP interface), <code>libdrm/</code> (libdrm sources for libdrm_xnu).</td></tr>
+<tr><td><code>tools/</code></td><td>Host tools (Python, shell, small C); see 3 and 4. <code>tools/vm/</code> (card VM on Linux), <code>tools/macos/</code> (on the Mac), <code>tools/ci/</code> (CI helpers), <code>tools/linux/</code> (amdgpu reference dumps), <code>tools/probe/</code> (one-off macOS probes run by <code>probe.yml</code>), <code>tools/progress/</code> (README status data), <code>tools/cts/</code> (Vulkan CTS patterns).</td></tr>
+<tr><td><code>tests/</code></td><td><code>make test</code> sources: simulator, host tests, parity/triage tests, fixtures (<code>tests/data</code>, <code>tests/stub/pexpert</code>).</td></tr>
+<tr><td><code>docs/</code></td><td><code>HANDOFF.html</code>, <code>DRIVER-PLAN.html</code>, <code>AFTER-TESTS.html</code>, <code>TESTING-VM.html</code>, <code>TESTING-HW.html</code>, <code>STAGE0..7.html</code>, <code>ROADMAP.html</code>, <code>PLAN-NEXT.html</code>, <code>FIRMWARE.html</code>, <code>status/</code> (generated README status), <code>INSTALL-OPENCORE.html</code>.</td></tr>
+<tr><td><code>tools/baremetal/</code></td><td>The bare-metal macOS 26 installer USB for the owner's B550 / 5800X PC: <code>fetch.sh</code> (pinned downloads, <code>pins.txt</code>, <code>SOURCE</code>, macOS recovery), <code>build_efi.py</code> (OpenCore EFI + <code>config.plist</code> installer / <code>config-driver.plist</code>, AMD_Vanilla incl. the IOPCIFamily 10-bit tags patches via <code>tools/vm/vmtool.py amd_patches(iopci=True)</code>, the codeless <code>RDNA3MCEReporterDisabler.kext</code>, GRUB through <code>BlessOverride</code>, <code>--debug</code>), <code>make_usb.sh</code> (refuses non-USB disks, 7 numbered steps, progress; copies <code>stick/</code> and <code>DIR/rdna3/</code> to <code>&lt;stick&gt;/rdna3/</code>), <code>stick/</code> (<code>install.sh</code>, <code>report.sh</code>, <code>metal.sh</code>: the helper scripts the owner runs inside macOS, Polish messages). Procedure: <code>docs/BAREMETAL.html</code>; tests <code>tests/test_baremetal.sh</code> + <code>tests/test_baremetal_efi.py</code>.</td></tr>
+<tr><td><code>package/</code></td><td>Installer: <code>make_pkg.sh</code> (.pkg + tarball), <code>install.sh</code>, <code>uninstall.sh</code>, <code>firmware.sh</code>, <code>oc_install.sh</code> (OpenCore injection, <code>--step</code>), <code>oc_snippet.py</code>, <code>pkg/</code>.</td></tr>
+<tr><td><code>.github/workflows/</code></td><td><code>build.yml</code> (CI, runs on Forgejo runners), <code>probe.yml</code>.</td></tr>
+<tr><td><code>reports/</code></td><td>Git-ignored. Unpacked card/VM results, one directory per run (<code>2026-10-26c/</code>, ...), used for triage and as test fixtures by date.</td></tr>
+<tr><td><code>reference/</code></td><td>Git-ignored. <code>macos-26.4.1/</code>: dumps of the target macOS (kernel collection, dyld, metallib, extensions) for reverse engineering.</td></tr>
+<tr><td><code>build/</code></td><td>Git-ignored build output (<code>build/host</code> = <code>make test</code>). <code>graphify-out/</code> = the code graph.</td></tr>
+<tr><td>Root</td><td><code>Makefile</code> (host build + <code>make test</code>), <code>CLAUDE.md</code>, <code>CLAUDE_SUBAGENT.md</code>, <code>README.md</code>, <code>NOTICE</code>.</td></tr>
+</tbody></table>
+<h2 id="2-subsystems">2. Subsystems</h2>
+<h3 id="21-core-kext-kextsrc">2.1 Core kext (<code>kext/src/</code>)</h3>
+<p>Loaded levels <code>rdna3lvl=0..8</code> (boot-arg, see <code>RDNA3Accel.hpp</code> header comment): 0 PCI config, 1 BAR5 + VRAM size,
+2 discovery, 3 GC read, 4 PSP + firmware, 5 SMU/PM, 6 GMC + IH, 7 SDMA, 8 GFX + KIQ/KCQ (+ MES with
+<code>rdna3mes=1</code>). Levels 4-8 run on a kernel thread in <code>RDNA3Bringup</code>.</p>
+<table id="21-core-kext-kextsrc-t1">
+<thead><tr><th>File</th><th>Holds</th><th>Key entry points</th></tr></thead>
+<tbody>
+<tr><td><code>RDNA3Accel.cpp/.hpp</code></td><td>The IOService: matching, PCI/BAR mapping, levels 0-3, power state, IORegistry identity.</td><td><code>probe</code>, <code>start</code>, <code>setPowerState</code>, <code>mapMmio</code>, <code>readVramSize</code>, <code>readDiscovery</code>, <code>publishDiscovery</code>; BAR0 GTT backing class in the header</td></tr>
+<tr><td><code>RDNA3Bringup.cpp/.hpp</code></td><td>Everything from level 4: the biggest file (4.9k lines).</td><td><code>run</code> (thread body), <code>hwInit</code> (levels 4-8, also re-run after a reset), <code>postIfNeeded</code>, <code>loadFirmware</code>, <code>pmInit</code>/<code>pmCtl*</code>, <code>dmubInit</code>, <code>vcn*</code>, <code>vmCreate</code>/<code>vmMap</code>/<code>vmFlush</code>, <code>submit</code> -&gt; <code>submitRing</code>, <code>fenceWait</code>/<code>fenceSignaled</code>/<code>forceFences</code>, <code>recover</code> (hang), <code>gpuReset</code>/<code>bacoCycle</code>/<code>mode1Reset</code>, <code>reinitFromLevel4</code>, <code>systemSuspend</code>/<code>resumeAfterPowerLoss</code>, <code>userq*</code>, <code>ivCallback</code>/<code>handleInterrupt</code>/<code>setupInterrupt</code></td></tr>
+<tr><td>coherence (<a href="DRIVER-PLAN.html#n54">N54</a>) in <code>RDNA3Bringup.cpp</code></td><td>Kernel GPU-memory coherence switches, selftest, fence system copy, skew counters (decisions in <code>common/rdna3_coh.h</code>).</td><td><code>cohInit</code>, <code>cohSetup</code>, <code>cohSelftest</code>, <code>cohFence</code>, <code>cohSync</code>, <code>cohWaitIdle</code>, <code>cohPte</code>, <code>cohRingsForced</code>, <code>cohVmFlushForced</code>; sysctls <code>debug.rdna3_coh*</code></td></tr>
+<tr><td>GPU busy credit in <code>RDNA3Bringup.cpp</code></td><td>Per-ring / per-process busy time for Activity Monitor (logic in <code>common/rdna3_gpu_busy.h</code>).</td><td><code>busySubmit</code>, <code>busyObserve</code>, <code>busyEndAll</code>, <code>busyTake</code>; served to the accelerator by <code>platformGpuBusy</code></td></tr>
+<tr><td><code>RDNA3Drm.cpp</code></td><td>DRM bridge: <code>rdna3_drm_ops</code> callbacks into Bringup, BO memory, CPU mapping (<code>IOMemoryMap</code>, <a href="DRIVER-PLAN.html#n47">N47</a> <code>common/rdna3_bo_map.h</code>), the drm trace ring.</td><td><code>drmInit</code>/<code>drmFree</code>, <code>drmOpen</code>/<code>drmClose</code>/<code>drmIoctl</code>, <code>drmBoAlloc</code>/<code>drmBoFree</code>/<code>drmBoUserptr</code>/<code>gttAlloc</code>, <code>drmVmCreate</code>/<code>drmVmMap</code>, <code>drmSubmit</code>, <code>drmFenceWait</code>, <code>drmBoMap*</code>/<code>drmMemoryForOffset</code>, <code>drmScanout</code> (readback); header <code>RDNA3Trace.h</code></td></tr>
+<tr><td><code>RDNA3BarMap.h</code></td><td><a href="DRIVER-PLAN.html#n62">N62</a>: the kernel window of BAR0 (the VRAM aperture), mapped like Apple's <code>ATIController::mapPCISubRange</code>; the reason when BAR0 has none.</td><td><code>rd3MapBar0Window</code> (struct <code>Rd3BarWindow</code>), <code>rd3ReBarBar0Mib</code>, <code>rd3CpuIsVmm</code>; rules in <code>common/rdna3_bar_window.h</code></td></tr>
+<tr><td><code>RDNA3UserClient.cpp/.hpp</code></td><td><code>IOAccelRDNA3Bridge</code> user client: one DRM file per open; selectors for ioctl and pmctl.</td><td><code>externalMethod</code>, <code>ioctlMethod</code>, <code>pmMethod</code>, <code>clientMemoryForType</code>, <code>clientClose</code></td></tr>
+<tr><td><code>RDNA3Platform.cpp</code></td><td>Core's answers to the other kexts over <code>callPlatformFunction</code> (ABI = <code>accel/rdna3k_abi.h</code>): VRAM heap, GPU VA, surface copies, GPU busy, display calls, new client.</td><td><code>callPlatformFunction</code> (dispatch by function name), <code>platformVramAlloc/Free/Ref</code>, <code>platformGpuVa</code>, <code>platformPageoff</code>, <code>platformCopyVram</code>, <code>platformIopSdma</code> (<a href="DRIVER-PLAN.html#n63">N63</a> <code>rdna3IopSdma</code>: bind / copy / unbind a presented surface's GART range), <code>platformGpuBusy</code>, <code>vramSysctl*</code> (<code>debug.rdna3_vram</code>)</td></tr>
+<tr><td><code>RDNA3Display.cpp</code></td><td>DCN 3.2 display side: heads the GOP lit, mode set, flips, cursor, gamma, EDID, clone/mirror, MST, VRR, audio.</td><td><code>displayInit</code>, <code>displayInfo</code>, <code>displayFlip</code>, <code>displayStatus</code>, <code>displaySetMode</code>, <code>displayModes</code>, <code>displayCursor</code>, <code>displayGamma</code>, <code>displayEdid</code>, <code>displayMirror*</code>, <code>displayDpLink</code>, <code>displayMstTakeover</code></td></tr>
+<tr><td><code>RDNA3DisplayIrq.cpp</code></td><td><a href="DRIVER-PLAN.html#n42">N42</a>: vblank / page-flip interrupts to the framebuffer.</td><td><code>displayIrqInit</code>, <code>displayIrq</code>, <code>displayIrqSync</code>; sysctls <code>debug.rdna3_dispirq</code>, <code>debug.rdna3_vblirq</code></td></tr>
+<tr><td><code>RDNA3DisplayPower.cpp</code></td><td>Item O: p-state, MALL, SubVP, idle optimisations (<code>rdna3mall</code>, <code>rdna3pstate</code>); <a href="DRIVER-PLAN.html#n74">N74</a>, without <code>rdna3mall</code> (the default): UCLK's hard minimum at the top while two or more heads are lit (<code>hw/dcn32_pstate.c</code> <code>dcn32_uclk_pin_*</code>; boot-arg <code>rdna3uclkpin</code>, sysctl <code>debug.rdna3_uclk_pin</code>, ioreg <code>RDNA3,DCNPower</code> / <code>RDNA3,UclkPinned</code>).</td><td><code>displayPowerInit</code>, <code>displayPowerUpdate</code>, <code>displayPowerFlip</code>, <code>displayPowerTick</code>, <code>displayUclkPinInit</code>, <code>displayUclkPinUpdate</code></td></tr>
+<tr><td><code>RDNA3Hotplug.cpp</code></td><td>D6: HPD polling/filter, monitor plug after boot (<code>rdna3hotplug=1</code>).</td><td><code>hotplugInit</code>, <code>hotplugTick</code>, <code>hotplugHandle</code>, <code>displayHotplugQuery</code></td></tr>
+<tr><td><code>RDNA3Resume.cpp</code></td><td>D4: display state snapshot, DPMS, restore after reset / sleep.</td><td><code>displayStateSave*</code>, <code>displayStateRestore</code>, <code>displayAfterReset</code>, <code>displayWillSleep</code>, <code>displayDidWake</code>, <code>displayTxCheck</code></td></tr>
+<tr><td><code>RDNA3Evict.cpp</code></td><td>VRAM -&gt; system pages before S3, back after (<code>rdna3resume=1</code>).</td><td><code>vramEvict</code>, <code>vramRestore</code></td></tr>
+<tr><td><code>RDNA3Regs.h</code>, <code>RDNA3Trace.h</code>, <code>kmod_info.c</code></td><td>Register helpers, drm trace API, kmod stub.</td><td>-</td></tr>
+</tbody></table>
+<p>PM/SMU: <code>RDNA3Bringup::pmInit</code> (PPTable, DPM, fan, thermal), <code>pmCtl*</code>/<code>pmctl</code>/<code>sensor</code>
+(userspace control, <code>common/rdna3_pmctl.h</code>), <code>gfxOff*</code>, <code>idleCap*</code>, <code>smuIrq</code>, <code>bacoCycle</code>; the
+register layer is <code>hw/smu13.c</code>.</p>
+<p>Boot-args: read with <code>rd3_arg()</code> from <code>common/rdna3_bootargs.h</code> (default profile, shared by core,
+accelerator and framebuffer); test <code>tests/test_bootargs.c</code>.</p>
+<h3 id="22-hw-ip-blocks-portable-c99-ported-from-amdgpu">2.2 <code>hw/</code> IP blocks (portable C99, ported from amdgpu)</h3>
+<table id="22-hw-ip-blocks-portable-c99-ported-from-amdgpu-t1">
+<thead><tr><th>Files</th><th>Block</th><th>Typical entry points</th></tr></thead>
+<tbody>
+<tr><td><code>rdna3_hw.c/.h</code>, <code>navi3x_regs.h</code></td><td>Device context, MMIO/SMN access, VRAM window and VRAM allocator, HDP, NBIO remap</td><td><code>rdna3_dev_init</code>, <code>rdna3_rreg</code>, <code>rdna3_vram_alloc</code>, <code>rdna3_vram_fill</code>, <code>rdna3_hdp_flush</code></td></tr>
+<tr><td><code>psp13.c/.h</code></td><td>PSP 13.0.x: bootloader, sOS, TMR, ring, firmware load</td><td><code>psp13_hw_init</code></td></tr>
+<tr><td><code>smu13.c/.h</code></td><td>SMU 13.0.10 (PMFW): mailbox, PPTable, features, metrics</td><td><code>smu13_send_msg</code>, <code>smu13_pm_init</code>, <code>smu13_read_metrics</code></td></tr>
+<tr><td><code>gmc11.c/.h</code>, <code>mmhub302.c</code></td><td>GMC 11, GFXHUB 3.0.3 + MMHUB GART, VM faults</td><td><code>gmc11_init</code>, <code>gmc11_gart_map</code>, <code>gmc11_gart_tlb_flush</code>, <code>gmc11_decode_vm_fault</code></td></tr>
+<tr><td><code>gpuvm.c/.h</code></td><td>Per-process GPU page tables (amdgpu_vm / vm_pt)</td><td><code>gpuvm_vm_init</code>, <code>gpuvm_map</code>, <code>gpuvm_unmap</code>, <code>gpuvm_lookup</code>, <code>gpuvm_map_fragment</code> (the PTE fragment a VRAM mapping gets, <a href="DRIVER-PLAN.html#n57">N57</a>); default path: <code>ptb_fragment</code> / <code>ptb_write</code> (amdgpu_vm_pte_fragment steps in PTB PTEs, boot-arg <code>rdna3vmfrag</code>), <code>ptb_refrag_edges</code> (a cut fragment re-fragmented)</td></tr>
+<tr><td><code>ih60.c/.h</code></td><td>IH 6.0 interrupt ring and IV decode</td><td><code>ih60_init</code>, <code>ih60_process</code>, <code>ih60_decode_iv</code></td></tr>
+<tr><td><code>sdma60.c/.h</code></td><td>SDMA 6.0 ring, copy / fill / fence packets, soft reset</td><td><code>sdma60_start</code>, <code>sdma60_commit</code>, <code>sdma60_emit_copy</code>, <code>sdma60_test_ring</code></td></tr>
+<tr><td><code>gfx11.c/.h</code>, <code>gfx11_info.c/.h</code></td><td>GFX 11: RLC/RS64, KGQ/KCQ/KIQ, MES, reset, ring tests, CU/RB info after harvest</td><td><code>gfx11_hw_init</code>, <code>gfx11_kgq_start</code>, <code>gfx11_kiq_start</code>, <code>gfx11_mes_*</code>, <code>gfx11_soft_reset</code>, <code>gfx11_ring_test_ib</code></td></tr>
+<tr><td><code>xfer.c/.h</code></td><td>VRAM &lt;-&gt; scattered system pages through a GART window (TTM copy); <a href="DRIVER-PLAN.html#n63">N63</a>: system pages bound to a GART range and the pitched copy from it into VRAM (the IOP copy by SDMA)</td><td><code>rdna3_copy_vram_to_pages</code>, <code>rdna3_copy_pages_to_vram</code>, <code>rdna3_gart_bind_pages</code>, <code>rdna3_gart_unbind_pages</code>, <code>rdna3_copy_gart_rect_to_vram</code></td></tr>
+<tr><td><code>doorbell.c/.h</code></td><td>NBIO 4.3 doorbell aperture, SOC21 doorbell indices</td><td>-</td></tr>
+<tr><td><code>soc21_cg.c/.h</code></td><td>SOC21 common init, ASPM, clock gating outside GC</td><td><code>soc21_program_aspm</code>, <code>soc21_set_clock_gating</code></td></tr>
+<tr><td><code>vcn40.c/.h</code></td><td>VCN 4.0 + JPEG 4.0 incl. DPG</td><td><code>vcn40_hw_init</code>, <code>vcn40_suspend</code>, <code>vcn40_resume</code></td></tr>
+<tr><td><code>vbios.c/.h</code>, <code>atom.c/.h</code></td><td>VBIOS read, data tables, AtomBIOS interpreter</td><td><code>vbios_read</code>, <code>vbios_parse</code></td></tr>
+<tr><td><code>dmub32.c/.h</code></td><td>DMCUB service (DCN 3.2)</td><td><code>dmub32_hw_init</code>, <code>dmub32_attach</code></td></tr>
+<tr><td><code>dcn32.c</code>, <code>dcn32_*.c/.h</code></td><td>DCN 3.2 display core pieces: mode/clone/modeset, clk, otg, odm, opp, color, gamma, hdmi, hpo, dp, dp_mst, dsc, audio, hwseq, pstate, subvp, freesync, state, txstate</td><td><code>dcn32_scanout_info</code>, <code>dcn32_flip</code>, <code>dcn32_modeset_plan/apply</code>, <code>dcn32_notify_wm_ranges</code></td></tr>
+<tr><td><code>dcaux.c</code>, <code>dchpd.c</code>, <code>dcirq.c</code>, <code>dp_mst.c</code>, <code>edid.c</code></td><td>AUX/DPCD/I2C, HPD filter, DC interrupt sources, MST topology helper, EDID parser</td><td><code>dchpd_program_filter</code>, <code>dcirq_set</code>, <code>dcirq_ack</code></td></tr>
+</tbody></table>
+<p>Rules: each function carries the amdgpu name it ports; add a file to <code>HW</code> in the root <code>Makefile</code> and to
+<code>CSRC</code> in <code>kext/Makefile</code>; the register model lives in <code>tests/sim_navi32.c</code> (+ <code>tests/sim_*.inc</code> for
+display). New amdgpu sources to track: <code>tools/progress/sources.txt</code>.</p>
+<h3 id="23-common-and-uapi">2.3 <code>common/</code> and <code>uapi/</code></h3>
+<p><code>common/amd_discovery.c</code>, <code>amd_fw.c</code>, <code>range_alloc.c</code>, <code>amd_mqd.h</code>: parsers and allocators (tests
+<code>test_discovery</code>, <code>test_fw</code>, <code>test_range_alloc</code>). The <code>rdna3_*.h</code> headers are kernel-free decision logic
+with one host test each (<code>tests/test_&lt;name&gt;.c</code>):</p>
+<table id="23-common-and-uapi-t1">
+<thead><tr><th>Header</th><th>Decides</th></tr></thead>
+<tbody>
+<tr><td><code>rdna3_bootargs.h</code></td><td>boot-arg defaults</td></tr>
+<tr><td><code>rdna3_coh.h</code></td><td><a href="DRIVER-PLAN.html#n54">N54</a> coherence switches (<code>debug.rdna3_coh_&lt;name&gt;</code>, mask, all)</td></tr>
+<tr><td><code>rdna3_attr_ring.h</code></td><td><a href="DRIVER-PLAN.html#n57">N57</a>: does a DISCARDABLE BO (the GFX11 attribute ring) hold what SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE assumes (VRAM, 64 KiB aligned and congruent, PTE fragment &gt;= 4); the kext's <code>GEM DISCARDABLE</code> / <code>GEM_VA DISCARDABLE</code> lines</td></tr>
+<tr><td><code>rdna3_gpu_busy.h</code>, <code>rdna3_gpu_util.h</code></td><td>GPU busy time per ring / process; Activity Monitor utilisation window</td></tr>
+<tr><td><code>rdna3_bo_map.h</code>, <code>rdna3_vram_place.h</code>, <code>rdna3_vram_park.h</code>, <code>rdna3_surf_pending.h</code></td><td>CPU mapping holds its BO (<a href="DRIVER-PLAN.html#n47">N47</a>); where VRAM goes; surface VRAM kept across dealloc/alloc (<a href="DRIVER-PLAN.html#n41">N41</a>); WindowServer's pending GPU writes</td></tr>
+<tr><td><code>rdna3_bar_window.h</code></td><td><a href="DRIVER-PLAN.html#n62">N62</a>: how much of BAR0 the kernel maps (<code>rdna3vramwin</code>, default 1 GiB, halved on a failed map) and why BAR0 got no IODeviceMemory (VM above 4 GiB, BAR above 1 GiB); used by <code>kext/src/RDNA3BarMap.h</code> <code>rd3MapBar0Window</code> (<code>RDNA3Accel::drmInit</code>, <code>RDNA3Bringup::mapVram</code>)</td></tr>
+<tr><td><code>rdna3_a3_display.h</code>, <code>rdna3_swap_front.h</code>, <code>rdna3_swap_copy.h</code>, <code>rdna3_write_gen.h</code>, <code>rdna3_flip_latch.h</code>, <code>rdna3_flip_queue.h</code></td><td>which surfaces A3 keeps out; swap buffer / copy forward source; swap as copy; write generation (<a href="DRIVER-PLAN.html#n65">N65</a>: <code>rd3_wg_cpu_rule</code>, a CPU-compositing WindowServer's SAME / OLDER backs present: <code>swap_gen_cpu</code>, <code>swap_gen_wsmetal</code>, <code>swaps_genhold_{same,older,unwritten}_h&lt;N&gt;</code>, <code>swaps_gencpu_h&lt;N&gt;</code>); flip latch; present queue (<a href="DRIVER-PLAN.html#n38">N38</a>)</td></tr>
+<tr><td><code>rdna3_vbl_irq.h</code>, <code>rdna3_fb_policy.h</code>, <code>rdna3_tcall.h</code></td><td><a href="DRIVER-PLAN.html#n42">N42</a> vblank path; framebuffer policy (<a href="DRIVER-PLAN.html#n65">N65</a>: <code>rd3fb_core_wait</code> / <code>rd3fb_core_late</code>, head 0 started before the core: <code>RDNA3Framebuffer::findCore</code> / <code>armCoreLate</code> / <code>coreLate</code>); stoppable thread call (<a href="DRIVER-PLAN.html#n47">N47</a>, public KPIs only)</td></tr>
+<tr><td><code>rdna3_fbgate.h</code></td><td><a href="DRIVER-PLAN.html#n58">N58</a>: the framebuffers' IOGraphics controller gates the accelerator closes (once per workloop, head order) before it calls the display machine itself (<code>RDNA3Accelerator::runInFbGates</code>; lock order fRegLock -&gt; controller gates -&gt; accelerator lock)</td></tr>
+<tr><td><code>rdna3_iop_stale.h</code></td><td><a href="DRIVER-PLAN.html#n59">N59</a>: an IOP copy of a buffer whose IOSurface seeds did not move since the head last copied it (STALE), the bounded wait and its budget (<code>rd3AccelIopStaleGate</code> / <code>rd3AccelIopStaleNote</code> in <code>accel/rdna3-accel.cpp</code>, <code>debug.rdna3accel_iop_stale*</code>)</td></tr>
+<tr><td><code>rdna3_iop_latch.h</code></td><td><a href="DRIVER-PLAN.html#n68">N68</a>: the IOP transactions' timing (K1 <code>rd3_il_txn_slow</code>, K2 <code>rd3_il_vbl_class</code> / <code>rd3_il_scan_bin</code>: the head's OTG frame / scanline at the copy's end) and the latched copy (<code>rd3_il_pick</code>: home or the second buffer D, whichever the panel does not scan; <a href="DRIVER-PLAN.html#n68">N68</a> (a) the mailbox <code>rd3_il_mb_pick</code>: home / D / the third buffer E, a free one or the queued frame taken back (<code>rd3_fq_take_queued</code> in <code>rdna3_flip_queue.h</code>), the transaction complete at the copy; <code>rd3_il_d_freeable</code>; fallback reasons <code>rd3_il_fb</code>); kext side <code>rd3AccelIopTxnEnd</code>, <code>rd3AccelIopVblNote</code>, <code>rd3AccelIopLatchCopy</code>, <code>rd3AccelIopLbChoose</code>, <code>rd3AccelIopLbTake</code>, <code>rd3AccelIopLbEnsureBuf</code> / <code>rd3AccelIopLbFreeBuf</code> in <code>accel/rdna3-accel.cpp</code>, switches <code>debug.rdna3accel_iop_latch</code> (boot-arg <code>rdna3ioplatch</code>) and <code>debug.rdna3accel_iop_latch_mbox</code> (boot-arg <code>rdna3iopmbox</code>), counters <code>debug.rdna3accel_iop_{txn,vbl,latch}_*</code>, trace event <code>RD3_TR_IOP</code> (<code>tools/rdna3_trace.py</code>, joined by <code>tools/plugin_trace.py --kernel</code>), triage rows <code>IOP timing</code> / <code>IOP latch</code> (<code>tools/triage_present_cost.py</code>, runnable on a sysctl dump)</td></tr>
+<tr><td><code>rdna3_iop_copy.h</code></td><td><a href="DRIVER-PLAN.html#n61">N61</a>: the IOP copy of a presented surface into the scanout (8 bytes per access when everything is 8-aligned) and its cost (<code>rd3AccelIopCopyNote</code> / <code>rd3AccelIopGateNote</code> in <code>accel/rdna3-accel.cpp</code>, <code>debug.rdna3accel_iop_copy_*</code>, <code>iop_gate_us*</code>, log <code>iop: copy #N</code>). <a href="DRIVER-PLAN.html#n63">N63</a>, the copy by SDMA: the core's GART range table <code>rd3_ig_*</code> (<code>RDNA3Bringup::iopGart*</code>), the page list <code>rd3_iop_pages_add</code>, fallback reasons, read-back samples (accelerator <code>rd3AccelIopBySdma</code> / <code>rd3AccelIopSdmaBind</code> / <code>rd3AccelIopSdmaUnbind</code>, <code>debug.rdna3accel_iop_sdma</code>, <code>iop_copy_sdma_*</code>, logs <code>iop: sdma copy #N</code>, <code>iop: sdma -&gt; CPU</code>). <a href="DRIVER-PLAN.html#n65">N65</a>: the surface formats (<code>rd3_iop_fmt_kind</code>) and the CPU conversion of 10-bit <code>l10r</code> into the 8-bit scanout (<code>rd3_iop_convert_l10r_rows</code>; <code>iop_copy_fmt_l10r</code> / <code>_fmt_l10r_seen</code> / <code>_fmt_other</code> / <code>_fmt_other_last</code>, <code>iop_flip_fmt</code>, fallback reason <code>format</code>; triage <code>IOP formats</code>)</td></tr>
+<tr><td><code>rdna3_strip.h</code></td><td><a href="DRIVER-PLAN.html#n59">N59</a>: the frame-order strip (marker, 12 bits, inverted bits, magenta end): found and read by <code>rdna3_drminfo --scanout-strip</code>, painted by the loopback (<code>RDNA3_LB_STRIP=1</code>), decoded by <code>tools/frame_order.py</code></td></tr>
+<tr><td><code>rdna3_trace.h</code></td><td>binary per-frame trace format (decoder <code>tools/rdna3_trace.py</code>, parity test <code>tests/test_trace_parity.py</code>)</td></tr>
+<tr><td><code>rdna3_pmctl.h</code>, <code>rdna3_gamma_judge.h</code></td><td>pmctl ABI; modetest gamma verdict</td></tr>
+</tbody></table>
+<p><code>uapi/rdna3_drm.c</code> (4.6k lines): <code>rdna3_drm_ioctl</code> dispatches the amdgpu ioctls; <code>rdna3_drm_device_init</code>
+and <code>rdna3_drm_device_set_*</code> take what the OS layer knows (<code>rdna3_drm_ops</code> = submit, VM, fences);
+<code>rdna3_drm_file_open/close</code>, <code>rdna3_drm_bo_get/put</code>, <code>rdna3_drm_bomap_charge</code>, <code>rdna3_vmid_admit</code>,
+<code>rdna3_drm_device_vm_replay</code>, <code>rdna3_drm_device_userq_*</code>. Private ioctls (<code>RD_NR_XNU_*</code>, root only), e.g.
+scanout readback <code>RD_NR_XNU_SCANOUT</code> (<code>struct rd_xnu_scanout</code>, filled by <code>drmScanout</code> in <code>RDNA3Display.cpp</code>,
+read by <code>rdna3_drminfo --scanout</code>). Tests: <code>tests/test_uapi.c</code>.</p>
+<h3 id="24-accelerator-accel">2.4 Accelerator (<code>accel/</code>)</h3>
+<p><code>accel/rdna3-accel.cpp</code> is one file. Classes: <code>RDNA3Accelerator : IOGraphicsAccelerator2</code> (probe/start,
+<code>newUserClient</code> -&gt; core's <code>rdna3NewAccelClient</code>, <code>callPlatformFunction</code>), <code>IOAccelRDNA3Carrier</code>,
+<code>RD3EventMachine</code>, <code>RD3DisplayMachine</code>, <code>RD3Task</code>, <code>RD3MemoryMap</code>; the family's Resource / SysMemory /
+VidMemory / Surface / DisplayPipe / contexts are generated vendor subclasses
+(<code>accel/gen_stubs.py</code> -&gt; <code>rdna3accel_stubs.h</code>). Function families (<code>rd3Accel&lt;Prefix&gt;*</code>):</p>
+<table id="24-accelerator-accel-t1">
+<thead><tr><th>Prefix</th><th>What</th></tr></thead>
+<tbody>
+<tr><td><code>Pq</code></td><td>present queue (<a href="DRIVER-PLAN.html#n38">N38</a>): off-thread flips, <code>rd3AccelInstallSysctlPq</code></td></tr>
+<tr><td><code>Latch</code>, <code>Wg</code>, <code>Swap</code>, <code>Cf</code>, <code>Copy</code></td><td>flip latch, write generation, legacy swap, copy forward, SDMA copy of surfaces</td></tr>
+<tr><td><code>Iop</code></td><td>IOPresentment flip path (<code>rdna3accel_iop*</code>)</td></tr>
+<tr><td><code>Surf</code>, <code>Res</code>, <code>Vm</code> (<code>rd3Vm*</code>), <code>Share</code></td><td>surfaces / resources, VRAM parking (<a href="DRIVER-PLAN.html#n41">N41</a>); <a href="DRIVER-PLAN.html#n71">N71</a> (c) WindowServer's read-only shared import: <code>rd3AccelShareRecord</code> (the producer's record, plane flag <code>RD3K_SS_PLANE_SHARE</code>), <code>rd3AccelShareFault</code> (<code>RD3K_SS_PLANE_SHARE_FAULT</code>), <code>rd3AccelSurfGem</code> (RD3KSurfGem v2, <code>RD3K_SG_SHARED_RO</code>); decisions in <code>common/rdna3_a3_display.h</code></td></tr>
+<tr><td><code>Perf</code></td><td>GPU busy credit: <code>rd3AccelPerfUpdate</code> writes PerformanceStatistics (Device Utilization %), <code>rd3AccelPerfCreditOne</code> adds GPU time to each process's <code>IOAccelSubmitter2</code> <code>accumulatedGPUTime</code> (<a href="DRIVER-PLAN.html#n38">N38</a>, <a href="DRIVER-PLAN.html#n49">N49</a>)</td></tr>
+<tr><td><code>Trace</code>, <code>Sc</code> (<code>ScPost</code>/<code>ScApply</code>), <code>Scan</code></td><td>per-frame trace (<code>debug.rdna3accel_trace*</code>); the swap-as-copy head state posted by non-swap paths and applied under the family lock; scans of other surfaces</td></tr>
+<tr><td><code>rd3AccelInstallSysctl*</code></td><td>registers the <code>debug.rdna3accel_*</code> counters (<code>RD3ACCEL_CNT</code>)</td></tr>
+<tr><td><code>RD3_HOOK_ASM</code> (end of file)</td><td>naked wrappers that call the family's own methods; slots checked by <code>tools/check_accel_slots.py</code></td></tr>
+</tbody></table>
+<p>Support: <code>rdna3k_abi.h</code> (cross-kext ABI: function names, structs, <code>RD3K_UC_TYPE_BASE</code>),
+<code>iofam/</code>, <code>re/</code> (reconstructed IOAccelerator family headers), <code>tahoe_fwd.h</code> (generated by
+<code>gen_tahoe_fwd.py</code>, macOS 26 vtable forwarding). The user client is the core's <code>RDNA3UserClient</code>.</p>
+<h3 id="25-framebuffer-and-agdc">2.5 Framebuffer and AGDC</h3>
+<p><code>fb/rdna3-fb.cpp</code>: <code>RDNA3Framebuffer</code> (IOFramebuffer plumbing, connection table, aperture, VBL from the
+core's interrupt, power states) and <code>RDNA3_FB_CLASS</code> = <code>AMDRDNA3Framebuffer</code>; talks to the core only through
+<code>rdna3Display*</code> calls (<code>accel/rdna3k_abi.h</code>); decisions in <code>common/rdna3_fb_policy.h</code>,
+<code>common/rdna3_vbl_irq.h</code>. Counters are IORegistry properties (<code>RDNA3,FBStats</code>).
+<code>agdc/rdna3-agdc.cpp</code>: <code>RDNA3AGDC</code> + <code>RD3DeviceControl</code>; <code>rdna3_agdc_k5.h</code> (0x921 link config, 0x711
+plane scaler), <code>rdna3_agdc_n48.h</code> (Navi48-MacOS answers), <code>AppleGraphicsDeviceControl_re.h</code>; sysctls
+<code>debug.rdna3agdc*</code>. Build-id hashes: <code>FB_SRC_HASH</code> / <code>AGDC_SRC_HASH</code> / <code>ACCEL_SRC_HASH</code> in the three
+Makefiles must list the same files as <code>tools/triage_reports.py</code> (<code>*_HASH_FILES</code>; tests
+<code>test_accel_hash_parity.py</code>, <code>test_fb_agdc_hash_parity.py</code>). A new header included by a kext goes into both.</p>
+<h3 id="26-libdrm_xnu-and-userspace">2.6 libdrm_xnu and userspace</h3>
+<p><code>userspace/libdrm_xnu/</code>: <code>drm_xnu.c/.h</code> (a DRM fd = pipe read end; <code>drm_xnu_open/ioctl/mmap</code>),
+<code>xf86drm_xnu.c</code>, transports <code>backend_iokit.c</code> (to <code>RDNA3UserClient</code>) and <code>backend_loopback.c</code> (runs
+<code>uapi/rdna3_drm.c</code> in-process: host tests, <code>tools/radv_host.sh</code>), <code>override/libdrm_macros.h</code>. Real
+libdrm sources are in <code>third_party/libdrm</code>. Programs: <code>rdna3_drminfo</code> (UAPI acceptance, <code>--dma-test</code>,
+<code>--gfx-test</code>, <code>--scanout[-hires]</code>, <code>--scanout-strip FILE SECONDS</code> (<a href="DRIVER-PLAN.html#n59">N59</a>), <code>--vcn-test</code>), <code>rdna3_modetest</code>, <code>rdna3_pmctl</code>, <code>rdna3_vktest</code>
+(RADV smoke test), <code>mtlprobe</code> (Metal compute/render). RADV build + patches: <code>userspace/mesa/</code> (<code>patches/0010</code>: <code>RADV_ATTR_RING_BIG_PAGE=0</code>, <a href="DRIVER-PLAN.html#n57">N57</a>).</p>
+<h3 id="27-translator-metaltranslator">2.7 Translator (<code>metal/translator/</code>)</h3>
+<p><code>translator/src/lib.rs</code> + <code>main.rs</code> (CLI <code>in -&gt; out.spv</code>), passes in <code>src/passes/</code>, reflection in
+<code>src/reflect/</code>, SPIR-V in <code>src/spirv_*</code>, <code>mesh_lower.rs</code>, <code>fc_specialize.rs</code>, <code>air_intrinsics.rs</code>;
+visible functions linked at pipeline creation in <code>linked_functions.rs</code> (references, tables, dylib
+externs) and <code>visible_stubs.rs</code> (stubs found by suffix, the per-link report the plugin logs as
+<code>link: "&lt;kernel&gt;" visible functions: ...</code> via <code>nvmtl_link_report</code>); integration tests
+<code>translator/tests/*.rs</code> (CI runs only these, not the <code>src/</code> unit tests). <code>wrapper/src/*.rs</code>: the C-callable dylib the plugin loads
+(<code>align_guard</code>, <code>buffer_addresses</code>, <code>linearize</code>, <code>table_ubo</code>, <code>wide_loads</code>, <code>g2_inline</code>). Built by
+<code>make -C metal translator</code>; CI job <code>translator</code> (Linux) and <code>metal</code> (macOS dylib).</p>
+<h3 id="28-metal-plugin-metalplugin">2.8 Metal plugin (<code>metal/plugin/</code>)</h3>
+<p>Single translation unit: <code>NVMTLDevice.m</code> <code>#import</code>s <code>NVMTLObjects.h/.m</code>, <code>NVMTLTrace.m</code>,
+<code>NVMTLDevice_contract.m</code>, <code>NVMTLForward.m</code>, <code>NVMTLLibraryLoad.m</code>, <code>NVMTLGL.m</code>, <code>NVMTLEmbedded.m</code>,
+<code>NVMTLVendorCompiler.m</code> and <code>#include</code>s <code>nvmtl_vk.c</code>; <code>NVMTLObjects.m</code> pulls in <code>NVMTLEventSync.m</code>,
+<code>nvmtl_ab_switch.h</code>, <code>nvmtl_capture.h</code>, <code>nvmtl_ci_refl.h</code> (CoreImage's reading of a visible function: <code>nvmtl_ci_resolved</code> in <code>NVMTLObjects.m</code>, <a href="DRIVER-PLAN.html#n60">N60</a>), <code>nvconv_lib.h</code> (<code>NVMTLObjects.h</code> includes <code>nvmtl_surfin_cache.h</code>; <code>NVMTLTrace.m</code> includes <code>nvmtl_surf_census.h</code>). Built by <code>make -C metal plugin</code> into
+<code>RDNA3MTLDriver.bundle</code>. Everything is named <code>NVMTL*</code> / <code>nvmtl_*</code> (NullMoth heritage), including <code>nvlog</code>.</p>
+<table id="28-metal-plugin-metalplugin-t1">
+<thead><tr><th>File</th><th>Holds</th></tr></thead>
+<tbody>
+<tr><td><code>NVMTLDevice.m</code></td><td><code>NVMTLDevice</code> (MTLDevice), <code>nvlog</code> / <code>nvlog_uncapped</code>, process allow decision (<code>rdna3mtl_allow_policy.h</code>), arms the shared 10 s SUMMARY timer</td></tr>
+<tr><td><code>NVMTLObjects.m</code> (6k lines)</td><td>Metal objects: buffers, textures, heaps, fences, libraries, pipeline states, render/compute/blit encoders, command buffer and queue; <code>rdna3mtl.conf</code> knob loading (<code>RDNA3MTL_CONF</code>), managed-buffer logic, surface-in cache, capture hook, the SUMMARY timer</td></tr>
+<tr><td><code>nvmtl_vk.c</code> (8.6k lines)</td><td>The Vulkan backend: <code>nvmtl_vk_*</code> (init, buffers, images, pipelines, passes, copies, submit, surface dirty/mark, ms copies, fbfetch)</td></tr>
+<tr><td><code>NVMTLEventSync.m</code></td><td>Command-buffer submission, MTLEvent / shared-event sync, pending surface writes</td></tr>
+<tr><td><code>NVMTLLibraryLoad.m</code></td><td>AIR library loading, function lookup, translation via the translator dylib, dynamic libraries, binary archives, mesh, intersection tables</td></tr>
+<tr><td><code>NVMTLTrace.m</code></td><td>ObjC half of the frame trace and the surface census (<code>nvmtl_cen_note</code>)</td></tr>
+<tr><td><code>NVMTLEmbedded.m</code>, <code>NVMTLForward.m</code>, <code>NVMTLGL.m</code>, <code>NVMTLVendorCompiler.m</code>, <code>NVMTLDevice_contract.m</code></td><td>embedded plans, forwarding installer, Apple GL over the plugin, vendor compiler plug-in, MTLDevice contract answers</td></tr>
+<tr><td><code>nvconv.metal</code>, <code>nvconv_lib.h</code>, <code>nvmtl_*_spv.h</code>, <code>nvmtl_visibility_sum_spv.h</code></td><td>Compiled helper shaders / SPIR-V arrays (generated, do not edit)</td></tr>
+<tr><td><code>rdna3mtl_config.h</code>, <code>rdna3mtl_allow_policy.h</code></td><td>AMD constants and paths (<code>/Library/GPUBundles/rdna3mtl/rdna3mtl.conf</code>); which processes get the device (test <code>test_mtl_allow</code>)</td></tr>
+</tbody></table>
+<p>Helper headers (pure C, each with a host test) by feature:</p>
+<table id="28-metal-plugin-metalplugin-t2">
+<thead><tr><th>Feature</th><th>Headers</th></tr></thead>
+<tbody>
+<tr><td>Drawable copy-out deferred to the present (<a href="DRIVER-PLAN.html#n69">N69</a>)</td><td><code>nvmtl_drawable_defer.h</code>; <code>nvmtl_seal_surfaces</code> in <code>NVMTLEventSync.m</code>; <code>_soDrawable</code>, <code>_presentRoots</code></td></tr>
+<tr><td>A/B switches (<a href="DRIVER-PLAN.html#n50">N50</a>)</td><td><code>nvmtl_ab_switch.h</code> (<code>nvmtl_ab_knobs[]</code>: the switches a process logs in <code>vk: ab switches</code>; managed-buffer page logic)</td></tr>
+<tr><td>Framebuffer fetch (<a href="DRIVER-PLAN.html#n48">N48</a>)</td><td><code>nvmtl_fbfetch_plan.h</code> (<a href="DRIVER-PLAN.html#n64">N64</a>: <code>nvmtl_fbf_barrier_mode</code>, the image barrier before a reading draw, <code>NVMTL_FBF_MEMBAR</code>), <code>nvmtl_spirv_fbfetch.h</code></td></tr>
+<tr><td>Shared VRAM drawables, read-only for WindowServer (<a href="DRIVER-PLAN.html#n71">N71</a> (c) steps 3-4)</td><td>producer <code>nvmtl_surface_share.h</code> (the gate <code>nvmtl_surface_share_kept_private</code>, the share record decision <code>nvmtl_ps_decide</code> / <code>nvmtl_ps_result</code>, <code>pr_*</code> counters; <code>nvmtl_vk_surface_share_after_gpu</code> in <code>nvmtl_vk.c</code>, called from <code>nvmtl_ps_after_gpu</code> in <code>NVMTLObjects.m</code> at the part loop of <code>NVMTLEventSync.m</code>); consumer <code>nvmtl_ws_share.h</code> (eligibility, <code>nvmtl_wss_plan</code>, <code>nvmtl_wss_wrapper_action</code>, <code>nvmtl_wss_import_verdict</code>, the R1 detector <code>nvmtl_wss_hazard</code>, demotion, <code>sh_*</code> counters); <code>NVMTLDevice.m</code> (<code>nvmtl_surface_image_create</code> read-only branch, <code>nvmtl_ro_cache</code>, <code>NVMTLShareGen</code> IOSurface value), <code>NVMTLObjects.m</code> (<code>nvmtl_ro_sample</code> / <code>nvmtl_ro_commit</code> / <code>nvmtl_ro_complete</code> / <code>nvmtl_ro_write</code>), <code>nvmtl_vk_image_create_buffer_alias_ro</code>; triage row <code>ws share</code> (<code>ws_share_rows</code> in <code>tools/triage_present_cost.py</code>); knob <code>NVMTL_WS_SHARE</code></td></tr>
+<tr><td>What a frame costs (<a href="DRIVER-PLAN.html#n64">N64</a>)</td><td><code>nvmtl_ws_frame.h</code> (<code>vk: ws frame: SUMMARY</code>, <code>nvmtl_wf_note</code> / <code>nvmtl_vk_wf_upload</code> in <code>nvmtl_vk.c</code>)</td></tr>
+<tr><td>A drawable's way back (<a href="DRIVER-PLAN.html#n73">N73</a>)</td><td><code>nvmtl_drawable_life.h</code> (<code>vk: drawable: SUMMARY</code>; the <code>-[CAMetalLayer nextDrawable]</code> hook and the IOSurface keep ring <code>nvmtl_keep_put</code> / <code>nvmtl_keep_prune</code> in <code>NVMTLDevice.m</code>, the present note in <code>NVMTLEventSync.m</code> <code>nvmtlFinishExecution</code>, <code>nvmtl_dl_summary</code> in <code>NVMTLObjects.m</code>)</td></tr>
+<tr><td>Multisample copies (<a href="DRIVER-PLAN.html#n48">N48</a>/<a href="DRIVER-PLAN.html#n52">N52</a>)</td><td><code>nvmtl_msupload.h</code>, <code>nvmtl_msdl.h</code>, <code>nvmtl_msbuf.h</code>, <code>nvmtl_msstat.h</code>, <code>*_spv.h</code>; plain copies <code>nvmtl_copy_pack.h</code></td></tr>
+<tr><td>Surface-in cache (<a href="DRIVER-PLAN.html#n51">N51</a>), census (<a href="DRIVER-PLAN.html#n50">N50</a>)</td><td><code>nvmtl_surfin_cache.h</code>, <code>nvmtl_surf_census.h</code></td></tr>
+<tr><td>Draw capture (<a href="DRIVER-PLAN.html#n55">N55</a>)</td><td><code>nvmtl_capture.h</code> (<code>NVMTL_CAPTURE_DRAW</code>), decoder <code>tools/capture_decode.py</code></td></tr>
+<tr><td>Hand-offs (<a href="DRIVER-PLAN.html#n59">N59</a>)</td><td><code>nvmtl_handoff.h</code> (command buffers whose scheduled point was seen before their IOSurface write was published; <code>vk: handoff: SUMMARY</code>; knob <code>NVMTL_SCHED_AFTER_PUBLISH</code>)</td></tr>
+<tr><td>Present cost, GPU copy-out (<a href="DRIVER-PLAN.html#n61">N61</a>)</td><td><code>nvmtl_present_cost.h</code> (copy-out / surface-in counters, <code>vk: present cost: SUMMARY</code>, the GPU copy-out geometry <code>nvmtl_so_plan</code>; knob <code>NVMTL_SURFOUT_DMA</code>); in <code>NVMTLObjects.m</code> <code>nvmtl_surface_dma_record</code> (at a part's seal: the copy into the IOSurface's imported pages, <code>nvmtl_vk_cmd_surface_dma</code>), <code>-nvmtlSurfaceOutDMA</code> (the publish), <code>nvmtl_so_import</code></td></tr>
+<tr><td>Logging</td><td><code>nvmtl_log_cap.h</code> (first N per format literal), <code>nvmtl_log_failure.h</code> (what reaches syslog in release)</td></tr>
+<tr><td>Trace</td><td><code>nvmtl_trace.h</code> (format + emitters, <code>/var/tmp/rdna3-nvmtl/&lt;proc&gt;-&lt;pid&gt;.trace</code>)</td></tr>
+<tr><td>Misc</td><td><code>nvmtl_gpu_time_queue.h</code> (one queue per process for GPU time), <code>nvmtl_linear_pitch.h</code>, <code>nvmtl_sampler_*.h</code>, <code>nvmtl_sample_*.h</code>, <code>nvmtl_physical_bounds.h</code>, <code>nvmtl_fd_token.h</code>, <code>nvmtl_readonly_metadata.h</code>, <code>nvmtl_independent_helpers.h</code></td></tr>
+</tbody></table>
+<h2 id="3-diagnostics-where-to-look">3. Diagnostics: where to look</h2>
+<p>Log prefixes (kernel log / <code>log show</code>):</p>
+<table id="3-diagnostics-where-to-look-t1">
+<thead><tr><th>Prefix</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td><code>RDNA3: </code></td><td>core kext (<code>BLOG</code>/<code>LOG</code>; <code>RDNA3: hang: ...</code> recovery, <code>RDNA3: coherence: ...</code> <a href="DRIVER-PLAN.html#n54">N54</a>)</td></tr>
+<tr><td><code>RDNA3Accelerator: </code> (<code>iop:</code>, <code>perfstats:</code>, <code>present queue:</code>)</td><td><code>accel/rdna3-accel.cpp</code> (<code>ALOG</code>; capped by <code>RD3IOPLOG</code> etc.)</td></tr>
+<tr><td><code>RDNA3-fb: </code> / <code>RDNA3FB: </code></td><td><code>fb/rdna3-fb.cpp</code></td></tr>
+<tr><td><code>RDNA3-agdc: </code></td><td><code>agdc/rdna3-agdc.cpp</code></td></tr>
+<tr><td><code>NVMTL: </code> (process <code>Name[pid:tid] (RDNA3MTLDriver)</code>)</td><td>Metal plugin <code>nvlog</code>; capped per format literal, so kinds that matter need their own literal</td></tr>
+</tbody></table>
+<p>Counters and state:</p>
+<ul>
+<li>Core: <code>debug.rdna3_coh*</code> (<a href="DRIVER-PLAN.html#n54">N54</a> switches + counters), <code>debug.rdna3_vram</code> (visible-VRAM heap),
+<code>debug.rdna3_dispirq</code>, <code>debug.rdna3_vblirq</code>, <code>debug.rdna3_drmtrace[_stream]</code> (binary), <code>debug.rdna3_uclk_pin</code> (<a href="DRIVER-PLAN.html#n74">N74</a> switch).</li>
+<li>Accelerator: <code>debug.rdna3accel_*</code> (<code>swap*</code>, <code>swaps_*</code>, <code>perf_*</code>, <code>vm_*</code>, <code>surface_wait*</code>, <code>iop_*</code>,
+<code>cf_*</code>, <code>present_*</code>, <code>flipbuf*</code>, <code>trace[_sec|_stream]</code>, <code>a3*</code>; <a href="DRIVER-PLAN.html#n71">N71</a> (c): switch <code>a3share</code> + <code>a3share_*</code>, triage
+<code>A3 share</code>); AGDC: <code>debug.rdna3agdc*</code>.</li>
+<li>IORegistry: <code>RDNA3,*</code> properties on the core, <code>RDNA3,FBStats</code> on the framebuffer.</li>
+<li>Plugin SUMMARY lines (<code>nvlog_uncapped</code>, key=value, newest line per process counts): <code>managed: SUMMARY</code>,
+<code>census: SUMMARY</code>, <code>vk: ab: SUMMARY</code>, <code>vk: fbfetch: SUMMARY</code>, <code>vk: surfin: SUMMARY[2]</code>, <code>msdl: SUMMARY</code>,
+<code>msupload: SUMMARY</code>, <code>vk: handoff: SUMMARY</code> (<a href="DRIVER-PLAN.html#n59">N59</a>), <code>vk: present cost: SUMMARY</code> (<a href="DRIVER-PLAN.html#n61">N61</a>), <code>vk: ws frame: SUMMARY</code> (<a href="DRIVER-PLAN.html#n64">N64</a>), <code>vk: drawable: SUMMARY</code> (<a href="DRIVER-PLAN.html#n73">N73</a>). Plugin traces: <code>tools/plugin_trace.py</code> (decoder), <code>NVMTL_TRACE=0</code> turns off.</li>
+<li>Kernel frame trace decoder: <code>tools/rdna3_trace.py</code>.</li>
+</ul>
+<p>Report pipeline:</p>
+<table id="3-diagnostics-where-to-look-t2">
+<thead><tr><th>Step</th><th>File</th></tr></thead>
+<tbody>
+<tr><td>Collect on the Mac</td><td><code>tools/macos/collect.sh [label]</code> -&gt; <code>~/rdna3-report-&lt;label&gt;-&lt;stamp&gt;.tar.gz</code>; members <code>NN-name.txt</code>: <code>00</code>-<code>06</code> system/boot-args/kexts/PCI, <code>10</code>-<code>19</code> ioreg + sysctls (<code>17</code> agdc, <code>18</code> irq, <code>16</code> pairing), <code>20</code>-<code>28</code> logs (<code>20-log-rdna3</code>, <code>24-log-coredisplay</code>, <code>26-log-metal-plugin</code>), <code>29-surface-vram</code> (accelerator sysctl dump), <code>31</code>-<code>33</code> drminfo/vulkaninfo/pmctl, <code>34</code>-<code>35</code> plugin conf/build stamps, <code>36</code> frame trace, <code>37</code>/<code>31-plugin-trace/</code> plugin traces (<code>collect_plugin_trace.sh</code>), <code>38-vram-heap</code>, <code>39-bisect</code>, <code>40-*</code> crashes, <code>41-ladder*</code> A/B ladder, <code>42-coherence</code></td></tr>
+<tr><td>Drive a test boot</td><td><code>tools/vm/macos/autoreport.sh</code> (LaunchDaemon on the VM, <code>--standalone</code> on bare metal): runs collect, DMA/GFX tests, uploads to the host. <code>bisect_run</code> (display bisect: <code>--bisect[-plugin|-agdc]</code>), <code>ladder_run</code> (A/B ladder).</td></tr>
+<tr><td>Boot watchdog</td><td><code>bootwatch_start</code> / <code>bootwatch_run</code> / <code>bw_collect</code> (<code># BOOTWATCH-BEGIN</code> block of <code>tools/vm/macos/autoreport.sh</code>, background from the start of a VM boot): WindowServer without a GPU user client in the ioreg and nobody logged in after <code>rdna3bootwatch=N</code> s (default 75, 0 = off) -&gt; uploads <code>bootwatch-&lt;stamp&gt;-&lt;n&gt;.txt</code> (ps, ioreg, plugin conf, <code>sample WindowServer</code>, <code>log show</code>, dmesg) every 60 s; <code>BOOTWATCH-END</code> when it recovered. Host: the share keeps them, <code>rdna3vm result</code> packs them; also <code>bootwatch-&lt;stamp&gt;-&lt;n&gt;.spindump</code> (every process, user and kernel stacks); triage: <code>tools/triage_bootwatch.py</code> (<code>bootwatch_rows</code>, a top-level FAIL with the stack's top frames; <code>spindump_deadlocks</code>: the kernel's <code>Deadlock:</code> verdicts and the images of the deadlocked threads, <a href="DRIVER-PLAN.html#n58">N58</a>). Tests <code>test_bootwatch.sh</code>, <code>test_triage_bootwatch.py</code>; <code>docs/AFTER-TESTS.html</code> "WindowServer never opened the GPU".</td></tr>
+<tr><td>Ladder variants</td><td>1 <code>ladder</code> (<code>LADDER_RUNGS</code>: app rungs), 2 <code>ladder-ws</code> (+ WindowServer rungs), 3 <code>ladder-glyphs</code> (plugin knobs, <a href="DRIVER-PLAN.html#n50">N50</a>), 4 <code>ladder-coh</code> (kernel coherence sysctls, <a href="DRIVER-PLAN.html#n54">N54</a>), 5 <code>apps</code> (the app survey: the APPS block of <code>autoreport.sh</code>, <code>APPS_RUNGS</code>, <code>apps_rung</code> / <code>apps_stage</code> / <code>apps_do</code>; default driver, one real app per rung; rows from <code>tools/triage_apps.py</code>). Rung -&gt; knob: <code>ladder_rung_env</code> (<code>NAME=value</code> env or <code>sysctl:NAME=VALUE</code>). Looks: <code>rdna3_drminfo --scanout[-hires]</code>.</td></tr>
+<tr><td>VM host</td><td><code>tools/vm/rdna3vm</code> (bash, 2.4k lines): <code>check</code>, <code>prepare</code>, <code>window</code>, <code>step N</code>, <code>args "BOOT-ARGS"</code>, <code>queue</code>, <code>approve</code> (once per framebuffer build), <code>reports</code>, <code>result</code> (all of a run in <code>~/Downloads/rdna3-result.tar.xz</code> + per-test PASS/FAIL, <code>--show</code>), <code>update</code> (git pull + newest CI artifact + prepare), <code>cts</code>. Steps and boot-args: <code>tools/ladder-steps.txt</code> (<code>@smbios=</code>, <code>@gpubus=</code> host-only tokens). Helpers: <code>vmtool.py</code> (OpenCore plist edits), <code>queue_journal.py</code>, <code>ocpatchsim.py</code>.</td></tr>
+<tr><td>CPU mode</td><td><code>CPU_MODEL=host</code> in the VM config (<a href="DRIVER-PLAN.html#n53">N53</a>): QEMU <code>-cpu host</code> on the Ryzen; <code>vmtool.py plist --amd-cpu CORES</code> adds the AMD Vanilla patches (<code>tools/vm/data/amd_vanilla-*.plist</code>); <code>CPUS</code>, <code>CPU_THREADS</code>; the same mode injects RestrictEvents + Lilu for the CPU name in About This Mac (<code>vmtool.py ockexts</code> fetches the pinned releases, <code>oc_cpu_kexts</code> in <code>rdna3vm</code> puts them in / takes them out, pins in <code>tools/vm/data/oc_kexts.SOURCE</code>); tests <code>test_vm_amd_cpu.sh</code>, <code>test_ocpatchsim.py</code>.</td></tr>
+<tr><td>Triage</td><td><code>tools/triage_reports.py</code> (5.7k lines; <code>report()</code> builds rows <code>(LEVEL, name, text)</code>; <code>read_member(tar, "NN-...")</code> reads a member). Helpers it imports: <code>triage_tar.py</code> (archive read once), <code>triage_par.py</code> (<code>pmap</code>, parallel looks), <code>triage_glyphs.py</code> (<a href="DRIVER-PLAN.html#n50">N50</a> rows, ladder rows), <code>triage_apps.py</code> (<code>app &lt;name&gt;</code> rows of the app survey, <code>apps_rows</code>), <code>frame_order.py</code> (<a href="DRIVER-PLAN.html#n59">N59</a>: <code>iop stale</code>, <code>handoff</code> and <code>frame order</code> rows with the displayed / page fps (<a href="DRIVER-PLAN.html#n61">N61</a>); the survey's <code>41-ladder-frameorder-&lt;burst&gt;.log</code>), <code>triage_present_cost.py</code> (<a href="DRIVER-PLAN.html#n61">N61</a>: <code>present cost</code> and <code>IOP copy</code> rows; <a href="DRIVER-PLAN.html#n64">N64</a>: <code>ws frame</code>; <a href="DRIVER-PLAN.html#n73">N73</a>: <code>drawable</code>), <code>triage_n48.py</code> (<a href="DRIVER-PLAN.html#n48">N48</a>/<a href="DRIVER-PLAN.html#n52">N52</a> plugin copy rows), <code>triage_coherence.py</code> (<a href="DRIVER-PLAN.html#n54">N54</a> rows, <code>coh_ladder_rows</code>), <code>triage_attr_ring.py</code> (<a href="DRIVER-PLAN.html#n57">N57</a> <code>attribute ring</code> / <code>attr ring switch</code> rows; reads the newest <code>serial-*.log</code> next to the report too, <code>report_serial</code>), <code>triage_uclk_pin.py</code> (<a href="DRIVER-PLAN.html#n74">N74</a> <code>UCLK pin (N74)</code> row from ioreg <code>RDNA3,DCNPower</code>), <code>triage_bar.py</code> (<a href="DRIVER-PLAN.html#n62">N62</a> <code>VRAM aperture</code> row: BAR0, the kernel window, the visible heap; also from a serial log alone), <code>triage_bisect.py</code>, <code>triage_bootwatch.py</code> (boot watchdog files), <code>glyph_verdict.py</code> (automatic glyph verdict of looks), <code>lookimg.py</code> (PPM/PNG looks), <code>plugin_trace.py</code>, <code>rdna3_trace.py</code>, <code>capture_decode.py</code>, <code>result_checklist.py</code> (turns triage text into PASS/FAIL lines: <code>classify()</code> rules).</td></tr>
+<tr><td>Procedure</td><td><code>docs/AFTER-TESTS.html</code> (sections per step and per symptom: <a href="DRIVER-PLAN.html#n42">N42</a> VBL, <a href="DRIVER-PLAN.html#n48">N48</a> copies, <a href="DRIVER-PLAN.html#n50">N50</a> ladder, <a href="DRIVER-PLAN.html#n51">N51</a> surf-in, <a href="DRIVER-PLAN.html#n54">N54</a> coherence, <a href="DRIVER-PLAN.html#n55">N55</a> capture, plugin frame trace)</td></tr>
+</tbody></table>
+<h2 id="4-tests-and-ci">4. Tests and CI</h2>
+<p><code>make test</code> (root <code>Makefile</code>; builds into <code>build/host</code>, ASan/UBSan, <code>-Werror</code>; <code>RDNA3_FW_DIR</code> adds real
+firmware checks). Each test is its own target <code>t.&lt;name&gt;</code> (lists <code>C_TESTS</code>/<code>PY_TESTS</code>/<code>SH_TESTS</code> and the
+<code>TEST_RULE</code> calls in the Makefile; a new test goes into one of them), run in parallel: one job per hardware
+thread unless <code>-jN</code> or <code>JOBS=N</code> says otherwise (<code>make -j1 test</code> / <code>JOBS=1</code> is serial). Each test's output is
+<code>build/test-logs/&lt;name&gt;.log</code> (<code>tests/run_one.sh</code>); failed logs and one summary line come last
+(<code>tests/test_summary.sh</code>). A test must use its own <code>mktemp -d</code> (or a <code>build/host</code> name only it uses): tests run
+in any order beside each other; steps that depend on each other are one target (<code>tests/test_scanout.sh</code>,
+<code>tests/test_capture_decode.sh</code>). The three slow step tests (<code>test_bisect_step.sh</code>, <code>test_ladder_step.sh</code>,
+<code>test_apps_step.sh</code>) run in parts, one target <code>t.&lt;script&gt;.&lt;part&gt;</code> each (<code>PARTS</code> in the script, sourced helper
+<code>tests/split_parts.sh</code>; <code>tests/test_x.sh --parts</code> lists them, <code>tests/test_x.sh PART</code> runs one, no argument runs
+all); a new scenario goes into an existing part or a new part name. It runs, by area:</p>
+<table id="4-tests-and-ci-t1">
+<thead><tr><th>Area</th><th>Tests</th></tr></thead>
+<tbody>
+<tr><td>Hardware model</td><td><code>sim_navi32</code> (Navi 32 register model: PSP/SMU/GMC/IH/SDMA/GFX/DCN; <code>tests/sim_*.inc</code>), <code>test_discovery</code>, <code>test_fw</code>, <code>test_range_alloc</code></td></tr>
+<tr><td>UAPI / libdrm</td><td><code>test_uapi</code>, <code>test_bo_map</code>, <code>test_bo_map_race</code>, <code>test_libdrm_amdgpu</code> (real libdrm over <code>backend_loopback</code>), <code>rdna3_drminfo_host</code> (<code>--scanout</code>, DMA/GFX tests)</td></tr>
+<tr><td>Accelerator / display logic</td><td><code>test_a3_display</code>, <code>test_swap_front</code>, <code>test_attr_ring</code>, <code>test_swap_copy</code>, <code>test_write_gen</code>, <code>test_flip_latch</code>, <code>test_iop_stale</code>, <code>test_iop_copy</code>, <code>test_strip</code>, <code>test_flip_queue</code>, <code>test_vbl_irq</code>, <code>test_tcall</code>, <code>test_fbgate</code>, <code>test_gpu_busy</code>, <code>test_vram_park</code>, <code>test_vram_place</code>, <code>test_bar_window</code>, <code>test_surf_pending</code>, <code>test_trace</code>, <code>test_coh</code>, <code>test_fb_policy</code>, <code>test_bootargs</code>, <code>test_gamma_judge</code>, <code>test_agdc_k5</code>, <code>test_agdc_n48</code></td></tr>
+<tr><td>Metal plugin helpers</td><td><code>test_mtl_allow</code>, <code>test_handoff</code>, <code>test_present_cost</code>, <code>test_ws_frame</code>, <code>test_surface_share</code>, <code>test_ws_share</code>, <code>test_linear_pitch</code>, <code>test_gpu_time_queue</code>, <code>test_ab_switch</code>, <code>test_drawable_defer</code>, <code>test_gsub_empty</code>, <code>test_surf_census</code>, <code>test_surfin_cache</code>, <code>test_copy_pack</code>, <code>test_capture</code> (+ <code>tools/capture_decode.py --check</code>), <code>test_msupload</code>, <code>test_msdl</code>, <code>test_spirv_fbfetch</code>, <code>test_fbfetch_plan</code>, <code>test_ci_refl</code></td></tr>
+<tr><td>Python / source checks</td><td><code>test_accel_hash_parity.py</code>, <code>test_fb_agdc_hash_parity.py</code>, <code>test_trace_parity.py</code>, <code>test_accel_slots.py</code> (<code>tools/check_accel_slots.py</code>), <code>test_accel_locks.py</code>, <code>test_kext_kpi_versions.py</code>, <code>test_kmutil_kpi_guard.py</code></td></tr>
+<tr><td>Triage / tools</td><td><code>test_triage_*.py</code> / <code>.sh</code> (fixtures in <code>reports/&lt;date&gt;</code> and <code>tests/trace_fixture.py</code>), <code>test_bootwatch.sh</code>, <code>test_glyph_verdict.py</code>, <code>test_lookimg.py</code>, <code>test_plugin_trace.sh</code>, <code>test_result_checklist.sh</code>, <code>test_bisect_step.sh</code>, <code>test_ladder_step.sh</code>, <code>test_apps_step.sh</code>, <code>test_triage_apps.py</code>, <code>test_frame_order.sh</code> (<a href="DRIVER-PLAN.html#n59">N59</a>: strips end to end on the loopback, <code>tools/frame_order.py</code>), <code>test_play_step.sh</code>, <code>test_approve_gate.sh</code>, <code>test_vm_*.sh</code>, <code>test_forgejo_update.sh</code></td></tr>
+<tr><td>Packaging</td><td><code>test_oc_install.sh</code>, <code>test_make_pkg.sh</code>, <code>test_coredisplay_prefs.sh</code>, <code>test_prune_traces.sh</code>, <code>test_membw_load.sh</code></td></tr>
+</tbody></table>
+<p>Not in <code>make test</code>: probes that need a Vulkan device (<code>tests/vk_*_probe.c</code>: <code>vk_fbfetch_probe</code>,
+<code>vk_meta_probe</code>, <code>vk_msdl_probe</code>, <code>vk_msupload_probe</code>, <code>vk_same_image_probe</code>, <code>vk_cpu_write_probe</code>; build
+line in each header comment), <code>tools/radv_host.sh</code> (RADV on the host over loopback), and the card runs.
+<code>tools/kext_check.sh</code>: <code>MACOS_SDK=&lt;MacOSX11.3.sdk&gt; tools/kext_check.sh [files]</code> type-checks kext, fb, agdc
+and the C they build on Linux (no link). <code>python3 tools/progress.py [--check]</code> regenerates <code>docs/status/</code>.</p>
+<p>CI: <code>.github/workflows/build.yml</code> (dispatch on Forgejo, labels <code>linux</code> / <code>macOS</code> only):</p>
+<table id="4-tests-and-ci-t2">
+<thead><tr><th>Job</th><th>Runs on</th><th>What</th></tr></thead>
+<tbody>
+<tr><td><code>changes</code></td><td>linux</td><td>sets <code>metal</code> (a <code>metal/</code> change or <code>full</code>) and <code>radv</code> (<code>userspace/</code>, <code>third_party/libdrm/</code>) flags that gate <code>metal</code> / <code>radv-macos</code></td></tr>
+<tr><td><code>host-tests</code></td><td>linux</td><td><code>make test</code>, firmware load plan, host tools, README status check</td></tr>
+<tr><td><code>kext</code></td><td>macOS</td><td>Xcode build of the four kexts (Sequoia + Tahoe layouts), <code>kextlibs</code>, KPI guard, userspace tools, installer <code>.pkg</code> artifact</td></tr>
+<tr><td><code>macos-tests</code></td><td>macOS</td><td><code>make test</code> on macOS</td></tr>
+<tr><td><code>metal</code></td><td>macOS</td><td>plugin bundle + translator dylib (when <code>metal/</code> changed or <code>full</code>)</td></tr>
+<tr><td><code>translator</code></td><td>linux</td><td>Rust tests of <code>metal/translator</code></td></tr>
+<tr><td><code>radv-macos</code></td><td>macOS</td><td>RADV against libdrm_xnu, <code>rdna3_vktest</code>, loopback <code>vulkaninfo</code></td></tr>
+<tr><td><code>cts-macos</code></td><td>macOS</td><td>Vulkan CTS subset build (only with <code>cts: true</code>)</td></tr>
+</tbody></table>
+<p><code>probe.yml</code>: one-off macOS probes, triggered by changes under <code>tools/probe/</code>.</p>
+<h2 id="5-where-to-change-x">5. Where to change X</h2>
+<table id="5-where-to-change-x-t1">
+<thead><tr><th>Task</th><th>Files to touch</th></tr></thead>
+<tbody>
+<tr><td>Add a core kext boot-arg</td><td>default in <code>common/rdna3_bootargs.h</code> (+ <code>tests/test_bootargs.c</code>); read with <code>rd3_arg()</code>; document in <code>docs/TESTING-HW.html</code> / <code>AFTER-TESTS.html</code></td></tr>
+<tr><td>Add an accelerator sysctl counter and its triage row</td><td><code>RD3ACCEL_CNT(rdna3accel_&lt;name&gt;, gVar, "desc")</code> in <code>accel/rdna3-accel.cpp</code> + <code>sysctl_register_oid(&amp;sysctl__debug_rdna3accel_&lt;name&gt;)</code> in the matching <code>rd3AccelInstallSysctl*</code> (the accelerator has no unregister); a new name prefix must match the <code>grep -E</code> in <code>tools/macos/collect.sh</code> (29-surface-vram) and <code>a3_sysctls</code> in <code>tools/vm/macos/autoreport.sh</code>; row in <code>tools/triage_reports.py</code> (or a helper module), classify rule in <code>tools/result_checklist.py</code> if the row text needs one, fixture + test in <code>tests/test_triage_*</code>, <code>docs/AFTER-TESTS.html</code></td></tr>
+<tr><td>Add a core kext counter / sysctl</td><td>next to the <code>debug.rdna3_coh*</code> / <code>rdna3_vram</code> code in <code>kext/src/RDNA3Bringup.cpp</code> / <code>RDNA3Platform.cpp</code>; collect it in <code>tools/macos/collect.sh</code> (a new <code>NN-</code> member or an existing one) and read it in triage</td></tr>
+<tr><td>Add a plugin A/B switch (<code>NVMTL_*</code>)</td><td>read it with <code>getenv</code> (and the conf-file path) in <code>metal/plugin</code>; append the name to <code>nvmtl_ab_knobs[]</code> in <code>nvmtl_ab_switch.h</code> (+ <code>tests/test_ab_switch.c</code>); to make triage name it, <code>tools/triage_glyphs.py</code></td></tr>
+<tr><td>Add a ladder rung</td><td>variant 1/2/3: add to <code>LADDER_*_RUNGS</code> and a <code>case</code> in <code>ladder_rung_env</code> (<code>tools/vm/macos/autoreport.sh</code>); <code>LADDER_GLYPHS_RUNGS</code> + hint text in <code>tools/triage_glyphs.py</code> (variant 4: <code>LADDER_COH_RUNGS</code> in <code>tools/triage_coherence.py</code>); expected knob in <code>tests/test_ladder_step.sh</code> and <code>tests/test_triage_glyphs.py</code> / <code>test_triage_coherence.py</code>; <code>docs/AFTER-TESTS.html</code> ladder section</td></tr>
+<tr><td>Add an app to the survey</td><td><code>APPS_RUNGS</code> and the <code>case</code> tables <code>apps_proc</code> / <code>apps_stages</code> / <code>apps_do</code> / <code>apps_settle</code> (and <code>apps_helpers</code> / <code>apps_extra</code>) in the APPS block of <code>tools/vm/macos/autoreport.sh</code>; content it opens goes into <code>apps_assets</code> (a binary: <code>tools/apps_assets.py</code>); <code>APPS_RUNGS</code> / <code>APPS_TITLE</code> in <code>tools/triage_apps.py</code>; the stage list in <code>tests/test_apps_step.sh</code>; the table in <code>docs/AFTER-TESTS.html</code> "The app survey"</td></tr>
+<tr><td>Add a ladder step (<code>rdna3vm step X</code>)</td><td>line in <code>tools/ladder-steps.txt</code>; table row in <code>docs/TESTING-HW.html</code>; section in <code>docs/AFTER-TESTS.html</code>; <code>tests/test_ladder_step.sh</code></td></tr>
+<tr><td>Add a report member</td><td><code>run NN-name.txt ...</code> or a <code>{ ... } &gt; "$dir/NN-name.txt"</code> block in <code>tools/macos/collect.sh</code> (unused number, keep the order comment); read it with <code>read_member(tar, "NN-name.txt")</code> in <code>tools/triage_reports.py</code> or a helper; tests; <code>docs/AFTER-TESTS.html</code></td></tr>
+<tr><td>Port an amdgpu function into <code>hw/</code></td><td>function in the matching <code>hw/&lt;ip&gt;.c/.h</code> with the amdgpu name in its comment; add new files to <code>HW</code> in <code>Makefile</code> and <code>CSRC</code> in <code>kext/Makefile</code>; model the registers in <code>tests/sim_navi32.c</code> first (<code>make test</code> must pass); call it from <code>RDNA3Bringup.cpp</code>; register source in <code>tools/progress/sources.txt</code> + <code>python3 tools/progress/update_index.py</code>, then <code>python3 tools/progress.py</code>; a passed ladder step goes into <code>docs/status/hw-verified.txt</code></td></tr>
+<tr><td>Add a generated register header</td><td><code>tools/gen_regs.py --out hw/gen/&lt;name&gt;.h ...</code> from <code>tools/linux/regs</code></td></tr>
+<tr><td>Add a UAPI ioctl</td><td><code>uapi/rdna3_drm.h/.c</code> (<code>rdna3_drm_ioctl</code> switch), OS callbacks via <code>rdna3_drm_ops</code> -&gt; <code>RDNA3Drm.cpp</code> / <code>RDNA3Bringup.cpp</code>; <code>tests/test_uapi.c</code>; libdrm side in <code>userspace/libdrm_xnu</code></td></tr>
+<tr><td>Add a cross-kext call</td><td>name + struct in <code>accel/rdna3k_abi.h</code>; answer in <code>RDNA3Platform.cpp::callPlatformFunction</code>; caller in <code>accel/</code> or <code>fb/</code>; if <code>rdna3k_abi.h</code> changes the build ids change (it is in the hash lists)</td></tr>
+<tr><td>Add a pure-logic header shared by a kext</td><td><code>common/rdna3_&lt;x&gt;.h</code> + <code>tests/test_&lt;x&gt;.c</code> + a rule in <code>Makefile</code> and its <code>test:</code> line; if accel / fb / agdc include it, add it to that <code>*_SRC_HASH</code> in its Makefile and to <code>*_HASH_FILES</code> in <code>tools/triage_reports.py</code></td></tr>
+<tr><td>Add a host test</td><td><code>$(BUILD)/test_&lt;x&gt;: tests/test_&lt;x&gt;.c &lt;headers&gt; | $(BUILD)</code> rule in <code>Makefile</code>, the binary in the <code>test:</code> prerequisites and a run line in its recipe (C); Python / shell tests are a recipe line (<code>python3 -I -B tests/test_&lt;x&gt;.py</code>, <code>tests/test_&lt;x&gt;.sh</code>)</td></tr>
+<tr><td>Add a Metal plugin helper header</td><td><code>metal/plugin/nvmtl_&lt;x&gt;.h</code> (pure C), include it from <code>nvmtl_vk.c</code> / <code>NVMTLObjects.m</code>, test as above with <code>-Imetal/plugin</code></td></tr>
+<tr><td>Change what runs in CI</td><td><code>.github/workflows/build.yml</code> (jobs stay on <code>runs-on: linux</code> / <code>macOS</code>)</td></tr>
+<tr><td>Add a source file to a kext</td><td><code>CXXSRC</code> / <code>CSRC</code> in <code>kext/Makefile</code> (or <code>accel/</code>, <code>fb/</code>, <code>agdc/</code> Makefile); also <code>tools/kext_check.sh</code> defaults and, for accel/fb/agdc, the hash lists</td></tr>
+</tbody></table>
+<footer class="doc">RDNA3-Hackintosh documentation.</footer>
+</main>
+<script id="forgejo-links">
+/* Forgejo renders an .html file in an iframe at .../render/<ref>/docs%2Fname.html: the encoded slash makes
+   the browser resolve relative links against the ref root (404). Inside that iframe only, resolve them against
+   the file's real directory. Does nothing when the page is opened from a checkout or anywhere else. */
+(function () {
+  var p = location.pathname;
+  if (p.indexOf('/render/') < 0 || p.indexOf('%2F') < 0) return;
+  var dir = decodeURIComponent(p);
+  dir = dir.slice(0, dir.lastIndexOf('/') + 1);
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var h = a.getAttribute('href');
+    if (!h || /^([a-z][a-z0-9+.-]*:|#|\/)/i.test(h)) return;
+    e.preventDefault();
+    var u = new URL(h, location.origin + dir);
+    if (!/\.html?$/i.test(u.pathname)) u.pathname = u.pathname.replace('/render/', '/src/');
+    location.href = u.href;
+  });
+})();
+</script>
+</body>
+</html>
