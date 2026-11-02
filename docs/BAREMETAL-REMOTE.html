@@ -219,7 +219,7 @@ docs/INSTALL-OPENCORE.html section 7 and DRIVER-PLAN N65).</p>
 <section id="round-1-plan">
 <h2>The first round (build 6f55f46, CI run 91)</h2>
 <p>What 124d309 + 6f55f46 changed and what the run must show (DRIVER-PLAN N65,
-docs/AFTER-TESTS.md &quot;Bare metal: two heads, 10-bit surfaces, the framebuffer
+docs/AFTER-TESTS.html &quot;Bare metal: two heads, 10-bit surfaces, the framebuffer
 before the core&quot;):</p>
 <ol>
 <li><code>config-driver</code> (no plugin): Terminal text appears while typing (was
@@ -411,7 +411,7 @@ artifact from the ONE full <code>build.yml</code> run on fe04d3c: <code>RDNA3-pk
 <code>iop_txn_overlap*</code>, trace event <code>RD3_TR_IOP</code>, plugin <code>held_us_max</code>) and an
 opt-in latched copy: <code>sudo sysctl -w debug.rdna3accel_iop_latch=1</code> (live,
 default 0; boot-arg <code>rdna3ioplatch</code>). Details and the expected numbers:
-docs/AFTER-TESTS.md &quot;Presents at 60 Hz but a dragged window steps unevenly&quot;.</li>
+docs/AFTER-TESTS.html &quot;Presents at 60 Hz but a dragged window steps unevenly&quot;.</li>
 <li>N67: the Metal translator links visible functions (Geekbench 7 GPU / MPS).</li>
 <li><code>metal/rdna3mtl-allow.txt</code> carries <code>geekbench_avx2</code>.</li>
 <li><code>report.sh</code> now also saves <code>trace-stream.bin</code>, <code>trace-sec.bin</code>,

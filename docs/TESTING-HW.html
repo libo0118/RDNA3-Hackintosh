@@ -535,7 +535,7 @@ block. <code>rdna3resume=1</code> (step <code>sleep</code>, <code>big4</code>) i
 the clients' VRAM saved to system memory and the IPs suspended
 (<code>amdgpu_device_suspend</code>) before the sleep, the GPU posted and brought up
 again on the wake, the VRAM and the display state restored; the machine
-then idles to sleep like with any other GPU (see <code>docs/DRIVER-PLAN.md</code>,
+then idles to sleep like with any other GPU (see <code>docs/DRIVER-PLAN.html</code>,
 D4, for what is still missing).</p>
 <p>Sensors: once the SMU is up (level 6 and higher) <code>RDNA3Accel</code> publishes
 <code>PerformanceStatistics</code> every 2 s, with the keys AMD's macOS drivers use
@@ -634,16 +634,16 @@ through the whole run (<code>…-trace-stream.bin</code>, <code>…-drmtrace-str
 <code>36-stream-*.bin</code>; the VM also sends WindowServer's plugin trace after each
 A/B phase as <code>…-plugin-ab1-WindowServer-&lt;pid&gt;.trace</code> and the like). Send
 all of them; they are what
-<a href="AFTER-TESTS.md">AFTER-TESTS</a> expects from the VM.</p>
+<a href="AFTER-TESTS.html">AFTER-TESTS</a> expects from the VM.</p>
 <p>The rendering-artefact A/B (DRIVER-PLAN N50) is one command there too, in a Terminal on the Mac that has the card:
 <code>sudo sh &quot;/Library/Application Support/RDNA3/autoreport.sh&quot; --standalone --ladder</code> (about 29 minutes; <code>--ladder-ws</code> adds the two WindowServer
 rungs): Terminal and Chess open and close by themselves with one <code>NVMTL_*</code> switch per rung (right after the baseline <code>attrring</code>, DRIVER-PLAN N57: <code>NVMTL_ATTR_RING_BIG_PAGE=0</code>, RADV's GFX11 attribute ring without SPI_ATTRIBUTE_RING_SIZE.BIG_PAGE), it asks <code>y</code> / <code>n</code> / Enter for each rung's picture,
-and the report (<code>41-ladder.txt</code>, one triage row per rung, an automatic glyph verdict from each rung's hi-res look) says which switch made it right (<a href="AFTER-TESTS.md">AFTER-TESTS</a>, &quot;The whole ladder in one card run&quot;). <code>--ladder-glyphs</code> (about 25 minutes) is the glyph hunt (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...).</p>
+and the report (<code>41-ladder.txt</code>, one triage row per rung, an automatic glyph verdict from each rung's hi-res look) says which switch made it right (<a href="AFTER-TESTS.html">AFTER-TESTS</a>, &quot;The whole ladder in one card run&quot;). <code>--ladder-glyphs</code> (about 25 minutes) is the glyph hunt (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...).</p>
 <p>The app survey is the same machinery with the default driver: <code>sudo sh &quot;/Library/Application Support/RDNA3/autoreport.sh&quot; --standalone --apps</code> (VM: <code>rdna3vm step apps</code>, about 25 minutes).
 It opens Chess, Terminal, TextEdit, Calculator, Notes, Safari (a text / CSS page, a canvas animation, a WebGL cube; all made by the run, no network), Preview (a PDF and a JPEG), Maps,
 System Settings (three panes), App Store, Photos, Image Capture, QuickTime Player (a generated movie), Mission Control and Launchpad (Apps on macOS 26) one after another, takes a
 320-wide and a hi-res look of both screens per app (<code>…-scanoutapps-&lt;app&gt;[-&lt;stage&gt;]a|h-pipe&lt;N&gt;.ppm</code>), says whether each ran, crashed or never opened, whether WindowServer survived, and
-quits it. Look at the pictures: the report says an app ran, not that it drew (<a href="AFTER-TESTS.md">AFTER-TESTS</a>, &quot;The app survey&quot;).</p>
+quits it. Look at the pictures: the report says an app ran, not that it drew (<a href="AFTER-TESTS.html">AFTER-TESTS</a>, &quot;The app survey&quot;).</p>
 <p>Only the collection, without running any test:
 <code>&quot;$R/tools/macos/collect.sh&quot; &lt;label&gt;</code> (writes <code>~/rdna3-report-&lt;label&gt;-&lt;date&gt;.tar.gz</code>).</p>
 <p><strong>Black screens, windows that do not appear or flash, flicker?</strong> Instead of

@@ -40,7 +40,7 @@ footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px soli
 <header class="doc">
   <div class="crumbs"><a href="../README.md">RDNA3-Hackintosh</a> / docs</div>
   <h1>Documentation index</h1>
-  <p class="muted">Every document of the project with one line each. Open the HTML files in a browser from a local checkout; the Markdown ones are being converted.</p>
+  <p class="muted">Every document of the project with one line each. Open the HTML files in a browser from a local checkout; Every document is HTML now.</p>
 </header>
 <nav class="toc"><strong>Contents</strong><ol><li><a href="#start">Start here</a></li><li><a href="#stages">Stages</a></li><li><a href="#testing">Testing</a></li><li><a href="#install">Installing and bare metal</a></li><li><a href="#reference">Reference</a></li></ol></nav>
 <div class="note">Rules for agents live in <code>CLAUDE.md</code> and <code>CLAUDE_SUBAGENT.md</code> in the repository root (Markdown on purpose). A new document is written as HTML from <a href="doc-template.html">doc-template.html</a> and added to this table.</div>
@@ -50,7 +50,7 @@ footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px soli
 <tr><td><a href="status/STATUS.html">Porting status</a><br><code>status/STATUS.html</code></td><td><span class="badge ok">HTML</span></td><td>Generated status of the amdgpu port: works / ported / to do per block, treemap, item lists (tools/progress.py).</td></tr>
 <tr><td><a href="HANDOFF.html">Session handoff</a><br><code>HANDOFF.html</code></td><td><span class="badge ok">HTML</span></td><td>The state of the work, what the last session learned and left to do.</td></tr>
 <tr><td><a href="ROADMAP.html">Plan (roadmap)</a><br><code>ROADMAP.html</code></td><td><span class="badge ok">HTML</span></td><td>The staged plan 0-8 with the state of each stage and the order of work for stages 1-2.</td></tr>
-<tr><td><a href="DRIVER-PLAN.md">Driver plan</a><br><code>DRIVER-PLAN.md</code></td><td><span class="badge warn">Markdown</span></td><td>What a finished driver needs: what exists, what is open (Markdown, converts later).</td></tr>
+<tr><td><a href="DRIVER-PLAN.html">Driver plan</a><br><code>DRIVER-PLAN.html</code></td><td><span class="badge ok">HTML</span></td><td>What a finished driver needs: what exists, what is open; one card per N row (status badge, search, sort).</td></tr>
 <tr><td><a href="PLAN-NEXT.html">Plan: what is left</a><br><code>PLAN-NEXT.html</code></td><td><span class="badge ok">HTML</span></td><td>The log of the 2026-10-10 night: items done, open findings, the order for the next sessions.</td></tr>
 </tbody></table>
 <h2 id="stages">Stages</h2>
@@ -68,7 +68,7 @@ footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px soli
 <table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
 <tr><td><a href="TESTING-VM.html">Test in a VM</a><br><code>TESTING-VM.html</code></td><td><span class="badge ok">HTML</span></td><td>Linux host with the card as its only GPU, macOS in a VM with passthrough (tools/vm/rdna3vm).</td></tr>
 <tr><td><a href="TESTING-HW.html">Hardware test ladder</a><br><code>TESTING-HW.html</code></td><td><span class="badge ok">HTML</span></td><td>The step-by-step test procedure on a hackintosh.</td></tr>
-<tr><td><a href="AFTER-TESTS.md">After the tests</a><br><code>AFTER-TESTS.md</code></td><td><span class="badge warn">Markdown</span></td><td>Agent playbook for acting on hardware-test reports (Markdown, converts later).</td></tr>
+<tr><td><a href="AFTER-TESTS.html">After the tests</a><br><code>AFTER-TESTS.html</code></td><td><span class="badge ok">HTML</span></td><td>Agent playbook for acting on hardware-test reports: intake, fix loop, decision tables per step, findings per card run.</td></tr>
 </tbody></table>
 <h2 id="install">Installing and bare metal</h2>
 <table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
@@ -78,7 +78,7 @@ footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px soli
 </tbody></table>
 <h2 id="reference">Reference</h2>
 <table><thead><tr><th>Document</th><th>Format</th><th>What it is</th></tr></thead><tbody>
-<tr><td><a href="CODEMAP.md">Code map</a><br><code>CODEMAP.md</code></td><td><span class="badge warn">Markdown</span></td><td>Directories, key files and functions, where the logs and counters live (Markdown, converts later).</td></tr>
+<tr><td><a href="CODEMAP.html">Code map</a><br><code>CODEMAP.html</code></td><td><span class="badge ok">HTML</span></td><td>Directories, key files and functions, where the logs and counters live, tests, where to change X.</td></tr>
 <tr><td><a href="FIRMWARE.html">AMD firmware</a><br><code>FIRMWARE.html</code></td><td><span class="badge ok">HTML</span></td><td>The microcode files Navi 32 needs, where they come from, the licence.</td></tr>
 <tr><td><a href="NULLMOTH-ANALYSIS.html">NullMoth analysis</a><br><code>NULLMOTH-ANALYSIS.html</code></td><td><span class="badge ok">HTML</span></td><td>Analysis of the NullMoth NVIDIA driver and what it means for RDNA3, with the upstream updates.</td></tr>
 <tr><td><a href="doc-template.html">Document template</a><br><code>doc-template.html</code></td><td><span class="badge ok">HTML</span></td><td>The style and header layout every HTML document copies (CLAUDE.md, Documentation format).</td></tr>

@@ -13,7 +13,7 @@ Linux amdgpu: the kexts (`kext/`, `fb/`, `accel/`; portable hardware code
 in `hw/`, `common/`, `uapi/`), the Metal plugin WindowServer and apps run
 on (`metal/plugin/`, Metal -> Vulkan -> RADV -> our DRM), libdrm_xnu and
 tools. The owner tests on the real card in a VM and sends reports
-(`reports/<date>/`, never committed); `docs/AFTER-TESTS.md` explains how
+(`reports/<date>/`, never committed); `docs/AFTER-TESTS.html` explains how
 they are read. Nobody can run the hardware but the owner, so every card
 run is expensive: work that needs one must be right the first time.
 
@@ -25,14 +25,68 @@ boots the same disk (`mac_hdd_ng.img`) as the card VM `rdna3vm` runs, and
 two machines on one disk corrupt it. If ssh does not answer, say so in
 your report and let the manager ask the owner; build on CI instead.
 
-## Know where things are: docs/CODEMAP.md
+## Know where things are: docs/CODEMAP.html
 
-Read docs/CODEMAP.md before anything else in the code: the directories,
+Read docs/CODEMAP.html before anything else in the code: the directories,
 each subsystem's key files and functions, where the logs, counters,
 report members and triage rows live, the tests and CI jobs, and a "where
 to change X" table. Go straight to the files it names; search only for
 what it does not cover. Whoever adds a subsystem, a file family, a report
-member or a counter family updates it in the same commit.
+member or a counter family updates it in the same commit (the row format
+is in "The working docs are HTML" below).
+
+## The working docs are HTML: the exact row formats
+
+`docs/DRIVER-PLAN.html`, `docs/AFTER-TESTS.html` and `docs/CODEMAP.html` are
+machine-read and edited every day; edit them as HTML, by hand, in these
+shapes (never convert them back to Markdown). In text, `<`, `>` and `&` are
+written `&lt;`, `&gt;`, `&amp;` (a placeholder is `&lt;date&gt;`, not
+`<date>`); a path, command, counter or log line goes in `<code>...</code>`,
+a multi-line command in `<pre><code>...</code></pre>`, keeping every byte.
+Tools: `python3 tools/docrows.py next` (the next free N), `snippet N [SIZE]`
+(an empty row), `fix` (re-syncs the badges), `check` (the same check as
+`make test`: tags balanced, ids unique, links and #anchors between the
+docs resolve, N rows well formed).
+
+**DRIVER-PLAN, a new N row** (append it as the last `<section>` inside
+`<div class="rows" id="n-rows">`; the number is `docrows.py next`):
+
+```html
+<section class="row" id="n77" data-n="77" data-status="open" data-size="M">
+<div class="rowhead"><a class="rid" href="#n77">N77</a> <span class="badge st-open gen">open</span></div>
+<p class="rowtext">What is missing: the evidence, the cause, what was done, what stays open.</p>
+<dl class="rowmeta"><dt class="gen">Where it shows</dt><dd>accel, kext</dd><dt class="gen">Size</dt><dd>M</dd><dt class="gen">Status</dt><dd>open</dd></dl>
+</section>
+```
+
+`data-status` is the one field that counts: `open`, `card` (done, the card run
+is open), `partial`, `done`, `superseded` or `unknown`; when it changes, set
+the `<dd>` Status text too and run `python3 tools/docrows.py fix` (the badge
+follows). To update a row, edit its `<p class="rowtext">` / Status in place
+(find it with `grep -n 'id="n68"' docs/DRIVER-PLAN.html`); a reference to
+another row is `<a href="#n68">N68</a>`. The work-item tables (P, S, V, A,
+M, R) and the "Done" tables are ordinary tables: a row is
+`<tr id="p6"><td>P6</td><td>Item</td><td>amdgpu source</td><td>S</td><td>1 boot</td></tr>`
+(lower-case id; the "Done" tables have no ids).
+
+**AFTER-TESTS**: a symptom row is
+`<tr><td>symptom</td><td>likely cause</td><td>action</td></tr>` appended to
+the `<tbody>` of the step's table (every table has a stable id, e.g.
+`id="step-4-t1"`; sections: `<h3 id="slug">`, the slug being the title
+lower-cased with everything but letters, digits, `_`, `-` and spaces removed
+and spaces turned into `-`, plus an alias `<span id="step-4"></span>` /
+`<span id="card-run-60"></span>` as the first child for steps and card runs).
+A new section is an `<h3 id="slug">` with its table or list under it and an
+entry in the `<nav class="toc">` at the top (the section's `<li><a
+href="#slug">`); a new card run is `<h3 id="slug"><span
+id="card-run-NN"></span>Card run NN (...)</h3>`. Other docs link to these
+ids (`AFTER-TESTS.html#the-whole-ladder-in-one-card-run-rdna3vm-step-ladder`):
+never rename a heading that is linked, `grep -rn` the old id first.
+
+**CODEMAP**: one table per area; a new file or family is a row
+`<tr><td><code>path/file.cpp</code></td><td>what it holds</td><td><code>entry points</code></td></tr>`
+in the table of its area (the columns are the table's header), and the
+"Last updated" line at the top gets the date.
 
 ## Find code through the graph first
 
@@ -119,8 +173,10 @@ must print them: missing data is a loud WARN/FAIL, never silence.
    (`accel/Makefile`, `ACCEL_HASH_FILES` in `tools/triage_reports.py`,
    `tests/test_accel_hash_parity.py`).
 5. A new test is wired into the Makefile's `test` target.
-6. Docs: `docs/AFTER-TESTS.md` (symptom -> counters -> action) and
-   `docs/DRIVER-PLAN.md` (what stays open) when behaviour changed.
+6. Docs: `docs/AFTER-TESTS.html` (symptom -> counters -> action) and
+   `docs/DRIVER-PLAN.html` (what stays open) when behaviour changed, in
+   the row formats below; then `python3 tools/docrows.py check` (it runs
+   in `make test` as `test_docs_html`) prints `docs: ok`.
 
 Never dispatch CI, never use GitHub-hosted runners, never commit
 `reports/`, firmware or anything with serial numbers or EDIDs.

@@ -259,7 +259,7 @@ C_TESTS := test_discovery test_uapi test_range_alloc test_vram_place test_bo_map
     test_flip_latch test_iop_stale test_iop_copy test_iop_latch test_handoff test_present_cost test_ws_frame test_drawable_life test_vbl_irq \
     test_tcall test_fbgate test_flip_queue test_gpu_busy test_coh test_fb_policy test_swap_copy test_write_gen \
     test_vram_park test_surf_pending test_trace test_libdrm_amdgpu test_strip
-PY_TESTS := test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash_parity \
+PY_TESTS := test_docs_html test_glyph_verdict test_lookimg test_triage_parallel test_accel_hash_parity \
     test_fb_agdc_hash_parity test_trace_parity test_triage_park test_triage_n43 test_triage_gpuq \
     test_triage_n48 test_triage_bootwatch test_triage_glyphs test_triage_coherence test_triage_attr_ring \
     test_triage_bar test_triage_present_cost test_triage_write_gen test_fb_class test_triage_iop_log \

@@ -5,7 +5,7 @@
  * it on the host.
  *
  * What Activity Monitor reads (macOS 26.4.1, read from the binaries; the
- * evidence is in docs/DRIVER-PLAN.md N49):
+ * evidence is in docs/DRIVER-PLAN.html N49):
  *  - Window > GPU History: SafeEjectGPU.framework's -[SafeEjectGPUSession
  *    getPercentUtilization] reads the accelerator's "PerformanceStatistics"
  *    dictionary, key "Device Utilization %" (IORegistryEntryCreateCFProperty

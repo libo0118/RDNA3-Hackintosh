@@ -141,7 +141,7 @@ void nvlog_uncapped(const char *fmt, ...) {
     va_list a; va_start(a, fmt); nvlog_emit(fmt, 0, a); va_end(a);
 }
 
-/* the per-process frame trace (docs/AFTER-TESTS.md "Plugin frame trace"; nvmtl_trace.h is included above) */
+/* the per-process frame trace (docs/AFTER-TESTS.html "Plugin frame trace"; nvmtl_trace.h is included above) */
 #define NVMTL_OOM_STREAK      32
 #define NVMTL_OOM_COOLDOWN_NS (250ull * 1000ull * 1000ull)
 static _Atomic uint64_t g_oom_streak, g_oom_until;

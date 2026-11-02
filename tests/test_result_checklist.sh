@@ -90,7 +90,7 @@ SUMMARY of the newest report (rdna3-report-test.tar.gz)
   idle cap               4 cap(s), e.g. PM: idle, GFXCLK capped at 500 MHz (0)
   something new          a row no rule knows
 ==============================================================================
-RESULT: something failed - start at the first FAIL (docs/AFTER-TESTS.md)
+RESULT: something failed - start at the first FAIL (docs/AFTER-TESTS.html)
 FIX
 
 python3 -I -B "$ROOT/tools/result_checklist.py" --no-color --width 200 "$T/triage.txt" > "$T/out.txt" || fail "exit status"

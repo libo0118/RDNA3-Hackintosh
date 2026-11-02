@@ -493,7 +493,7 @@ steps:</p>
 <tr id="vmstep-apps">
 <td><code>apps</code></td>
 <td>the app survey: fifteen real apps (Chess, Terminal, TextEdit, Calculator, Notes, Safari with a text / canvas / WebGL page, Preview with a PDF and a JPEG, Maps, System Settings, App Store, Photos, Image Capture, QuickTime Player, Mission Control, Launchpad) opened one after another on the DEFAULT driver, a look of both screens each (about 25 min; <a href="#the-app-survey-step-apps">The app survey</a>)</td>
-<td>read the <code>app &lt;name&gt;</code> rows and look at the <code>scanoutapps-*</code> pictures; <a href="AFTER-TESTS.md">AFTER-TESTS</a> &quot;The app survey&quot;</td>
+<td>read the <code>app &lt;name&gt;</code> rows and look at the <code>scanoutapps-*</code> pictures; <a href="AFTER-TESTS.html">AFTER-TESTS</a> &quot;The app survey&quot;</td>
 </tr>
 </tbody>
 </table>
@@ -1161,7 +1161,7 @@ start, so a boot-arg step is the clean A/B.</p>
 <pre><code class="language-sh">rdna3vm step ladder       # the app rungs: about 29 minutes
 rdna3vm step ladder-ws    # and the two WindowServer rungs: about 45 minutes, you log in after each restart
 rdna3vm step ladder-glyphs     # the glyph hunt: 13 rungs, about 25 minutes (managed uploads whole / in pages, the undeclared-write detector, the shared window surface, page-off, framebuffer fetch, ...)
-rdna3vm step ladder-coh        # the kernel coherence switches (DRIVER-PLAN N54): 10 rungs, about 17 minutes (baseline, all, then one sysctl debug.rdna3_coh_&lt;name&gt; each; docs/AFTER-TESTS.md "Kernel coherence switches")</code></pre>
+rdna3vm step ladder-coh        # the kernel coherence switches (DRIVER-PLAN N54): 10 rungs, about 17 minutes (baseline, all, then one sysctl debug.rdna3_coh_&lt;name&gt; each; docs/AFTER-TESTS.html "Kernel coherence switches")</code></pre>
 <p>The step is the <code>play</code> profile (the desktop on the Metal plugin) with <code>rdna3ladder=1</code> / <code>2</code> instead of <code>rdna3play=1</code>; no other test runs. Per rung
 (<code>baseline</code>, <code>attrring</code> (DRIVER-PLAN N57: <code>NVMTL_ATTR_RING_BIG_PAGE=0</code>, RADV's attribute ring without BIG_PAGE), <code>radv</code>, <code>sync</code>, <code>managed</code>, <code>alignguard</code>, <code>paranoid</code>, <code>loadbarrier</code>) the guest opens Terminal (colour text, a tick line every second) and Chess as
 new instances with that rung's <code>NVMTL_*</code> switches in their environment (<code>open -n -a APP --env ...</code>; the plugin reads the environment as well as <code>rdna3mtl.conf</code>),
@@ -1170,12 +1170,12 @@ Terminal's text is a colour listing, then a tick line a second in ONE fixed colo
 line of mixed glyphs (upper case, digits, punctuation). The Terminal is opened with <code>-ApplePersistenceIgnoreState YES</code>: without it the new instance restores the windows
 the previous rung's Terminal had saved, which show the text of the rung before, static and drawn clean, next to the live one (card run 2026-10-25f: that is what looked
 like a clean <code>paranoid</code> rung). The report's triage reads each rung's hi-res look and prints an automatic glyph verdict
-(<a href="AFTER-TESTS.md#the-whole-ladder-in-one-card-run-rdna3vm-step-ladder">The whole ladder in one card run</a>).
+(<a href="AFTER-TESTS.html#the-whole-ladder-in-one-card-run-rdna3vm-step-ladder">The whole ladder in one card run</a>).
 In the guest's Terminal, by hand (a tty: it also asks y / n / Enter per rung):</p>
 <pre><code class="language-sh">sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder      # or --ladder-ws or --ladder-glyphs</code></pre>
 <p><code>ladder-ws</code> edits <code>rdna3mtl.conf</code> and restarts WindowServer for <code>radv-ws</code> and <code>paranoid-ws</code>, and puts the conf back exactly (also on Ctrl-C and, after a dead run,
 at the next start of <code>autoreport.sh</code>). The report: <code>41-ladder.txt</code>, <code>41-ladder-&lt;rung&gt;.log</code>, the looks <code>scanoutladder-&lt;rung&gt;[a|h]-pipe*.ppm</code>; the triage prints a row per
-rung (docs/AFTER-TESTS.md, &quot;The whole ladder in one card run&quot;). The host tests are <code>tests/test_ladder_step.sh</code> and <code>tests/test_glyph_verdict.py</code>.</p>
+rung (docs/AFTER-TESTS.html, &quot;The whole ladder in one card run&quot;). The host tests are <code>tests/test_ladder_step.sh</code> and <code>tests/test_glyph_verdict.py</code>.</p>
 <p><code>ladder-glyphs</code> (<code>rdna3ladder=3</code>, <code>--ladder-glyphs</code>, 13 rungs of about 95 s) is the glyph hunt after card run 2026-10-25f, where NVMTL_PARANOID did not cure Terminal's text
 (it replaced the earlier <code>ladder-paranoid</code>, which was for the day PARANOID did). Rungs, the strongest suspect first so that a run cut short keeps them: <code>baseline</code>;
 <code>managed-whole</code> (<code>NVMTL_MANAGED_WHOLE=1</code>: every managed-buffer flush uploads the whole buffer, not the declared range); <code>managed-check</code> (<code>NVMTL_MANAGED_CHECK=1</code>: the undeclared-write
@@ -1194,7 +1194,7 @@ app is still running (a death is a crash when a report appeared), whether the Me
 TERM, KILL; an instance you had open before the run is left alone). The report: <code>41-ladder.txt</code> (variant 5), <code>41-ladder-&lt;app&gt;.log</code>, <code>41-ladder-&lt;app&gt;-sys.log</code>,
 <code>41-ladder-&lt;app&gt;-crash.log</code>, the looks <code>scanoutapps-&lt;app&gt;[-&lt;stage&gt;]a|h-pipe*.ppm</code>; the triage prints a row per app. What it cannot do headless: type or click in an app (System Events
 needs Accessibility / Automation consent), record the screen (Screen Recording consent), sign in (App Store, Photos, Notes may show a welcome or sign-in sheet: that is recorded by the
-look). Whether an app drew is for the pictures. How to read it: <a href="AFTER-TESTS.md">AFTER-TESTS</a>, &quot;The app survey&quot;. The host tests are <code>tests/test_apps_step.sh</code> and
+look). Whether an app drew is for the pictures. How to read it: <a href="AFTER-TESTS.html">AFTER-TESTS</a>, &quot;The app survey&quot;. The host tests are <code>tests/test_apps_step.sh</code> and
 <code>tests/test_triage_apps.py</code>; the PDF and the movie the run carries are made by <code>tools/apps_assets.py</code>.</p>
 <h3 id="tests-that-already-passed">Tests that already passed</h3>
 <p>The report does not run a long test again (scaled modes, gamma, the
@@ -1369,7 +1369,7 @@ anything: <code>rdna3vm result --show</code>.</p>
 <p>With the first submission also include the <code>linux-reference</code> directory (not in the result file).</p>
 <p>Want a first look yourself? <code>python3 ~/RDNA3-Hackintosh/tools/triage_reports.py ~/rdna3-vm/reports</code>
 prints PASS / FAIL per step. What happens with the reports next is in
-<a href="AFTER-TESTS.md">AFTER-TESTS</a>.</p>
+<a href="AFTER-TESTS.html">AFTER-TESTS</a>.</p>
 <h2 id="new-driver-version">New driver version</h2>
 <p><code>rdna3vm update</code> does steps 1-2 in one go: <code>git pull</code> in the checkout, the
 newest successful CI build's artifact over <code>~/Downloads/RDNA3Accel-kext.zip</code>,

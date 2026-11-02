@@ -38,7 +38,7 @@ fi
 
 dmesg | grep -iE "amdgpu|drm" > "$out/dmesg-amdgpu.txt" 2>/dev/null || true
 
-# what the kext's bring-up gets compared with (docs/AFTER-TESTS.md):
+# what the kext's bring-up gets compared with (docs/AFTER-TESTS.html):
 # DPM levels per clock domain, current link, VBIOS, fan/temps
 for f in pp_dpm_sclk pp_dpm_mclk pp_dpm_fclk pp_dpm_socclk pp_dpm_dcefclk pp_dpm_pcie \
          pp_power_profile_mode power_dpm_force_performance_level vbios_version \

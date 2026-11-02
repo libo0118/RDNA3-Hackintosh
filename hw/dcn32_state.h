@@ -50,7 +50,7 @@
  * (dcn32_clone_link). A DP head goes through its link the same way
  * (dcn32_dp_link_set_dpms_off / _on: trained again).
  *
- * Not covered (see docs/DRIVER-PLAN.md, D4): the gamma LUT RAM (only the
+ * Not covered (see docs/DRIVER-PLAN.html, D4): the gamma LUT RAM (only the
  * mode is kept; after a power loss a RAM LUT goes to bypass and the restore
  * logs it, the caller loads its table again), VPG infoframe contents
  * (infoframes off, as the clone and the mode set leave them), DP MST heads

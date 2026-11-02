@@ -1,7 +1,7 @@
 """Triage rows of DRIVER-PLAN N48 / N52 (Metal plugin: blit copies, buffer -> multisample upload, multisample -> buffer download, [[color(n)]] framebuffer fetch).
 Read from 26-log-metal-plugin.txt (every process that loaded the plugin; lines `... Name[pid:tid] (RDNA3MTLDriver) NVMTL: msg`).
 Kept in a module of its own so that tools/triage_reports.py only gains one call. The lines are the plugin's
-(metal/plugin/nvmtl_vk.c, NVMTLObjects.m); docs/AFTER-TESTS.md "Metal plugin: blit copies ..." explains them."""
+(metal/plugin/nvmtl_vk.c, NVMTLObjects.m); docs/AFTER-TESTS.html "Metal plugin: blit copies ..." explains them."""
 import collections
 import re
 
@@ -228,7 +228,7 @@ def n48_plugin_rows(pluginlog=""):
             by.setdefault("%s %s: %s" % (proc, call, reason), n)
         rows.append(("WARN", "plugin copy refused",
                      "%d logged refusal line(s) (a lower bound: the plugin logs the first few of each kind): the copy was DROPPED, the destination keeps "
-                     "its old bytes (see docs/AFTER-TESTS.md, Metal plugin: blit copies): %s" %
+                     "its old bytes (see docs/AFTER-TESTS.html, Metal plugin: blit copies): %s" %
                      (sum(refused.values()), "; ".join("%s (%d)" % (k, n) for k, n in list(by.items())[:8]))))
     # the totals (SUMMARY, not capped) win over the first lines of each kind (capped at 8 per literal)
     for (proc, pid), v in sorted(sums["msupload"].items()):

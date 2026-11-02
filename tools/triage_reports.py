@@ -10,7 +10,7 @@ Reads every rdna3-report-*.tar.gz (tools/macos/collect.sh), the matching
 and host-*.log (tools/vm/rdna3vm), oldest first, and prints per boot:
 boot-args, the bring-up stage reached, every check below as PASS / FAIL /
 -- (not reached at that level), the kext's ERROR lines and the tail of
-the serial log. The first FAIL is where docs/AFTER-TESTS.md starts.
+the serial log. The first FAIL is where docs/AFTER-TESTS.html starts.
 The pictures of what each display pipe scanned (<report>-scanout-pipe<N>.ppm,
 rdna3_drminfo --scanout) are turned into PNGs next to them (a look that is a PNG
 already - `rdna3vm result` without xz packs PNGs - is read as it is; tools/lookimg.py).
@@ -5583,7 +5583,7 @@ def main():
             glob.glob(os.path.join(d, "rdna3-result", "rdna3-report-*")):
         d = os.path.join(d, "rdna3-result")
     show_all = "--all" in sys.argv
-    # linux-reference/ sits next to rdna3-result/ (docs/AFTER-TESTS.md intake)
+    # linux-reference/ sits next to rdna3-result/ (docs/AFTER-TESTS.html intake)
     load_linux_reference(d0)
     if d != d0:
         load_linux_reference(d)
@@ -6023,7 +6023,7 @@ def main():
         except (OSError, tarfile.TarError, ValueError) as e:
             print("summary: " + str(e))
     print("=" * 78)
-    print("RESULT:", "something failed - start at the first FAIL (docs/AFTER-TESTS.md)"
+    print("RESULT:", "something failed - start at the first FAIL (docs/AFTER-TESTS.html)"
           if failed else "every reached check passed")
     sys.exit(1 if failed else 0)
 

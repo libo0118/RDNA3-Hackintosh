@@ -1077,7 +1077,7 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
 # BISECT-END
 
 # LADDER-BEGIN (tests/test_ladder_step.sh runs this block, with the BISECT block's helpers, on the host)
-# The A/B ladder of DRIVER-PLAN N50 in ONE card run (docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"): the rungs that used to be a
+# The A/B ladder of DRIVER-PLAN N50 in ONE card run (docs/AFTER-TESTS.html "Rendering artefacts: the A/B ladder"): the rungs that used to be a
 # conf line, a restart and a report each. `rdna3vm step ladder` (boot-arg rdna3ladder=1: the play step's boot-args, no desktop to drive) or by
 # hand: sudo sh autoreport.sh --standalone --ladder. Per rung: Terminal gets text (a colored listing, then a line a second so that it draws
 # all the time) and Chess a game, both as NEW instances (`open -n -a APP --env NVMTL_X=1`: the plugin reads its switches from the environment
@@ -2134,7 +2134,7 @@ early_window() {
 #    waits in /var/db/rdna3-pending-* for the next boot when the host did not answer. Again every BW_REPEAT s while WindowServer
 #    has no GPU client, at most BW_MAXN times and BW_MAXSEC s. `sync` after every round so the unified log persists.
 #  - missing tools are skipped with a line in the file; every failure is a line in $BW_LOG.
-# tools/triage_bootwatch.py reads the files; docs/AFTER-TESTS.md "WindowServer never opened the GPU".
+# tools/triage_bootwatch.py reads the files; docs/AFTER-TESTS.html "WindowServer never opened the GPU".
 BW_PIDFILE=/var/run/rdna3-bootwatch.pid
 BW_LOG=/var/db/rdna3-bootwatch.log
 BW_PEND=/var/db/rdna3-pending-
@@ -3541,7 +3541,7 @@ safe_outdir() {   # safe_outdir <dir>: prints the directory to use
     echo "$_t"
 }
 if [ -n "$STANDALONE" ]; then
-    # the names the VM's uploads get (docs/AFTER-TESTS.md reads them)
+    # the names the VM's uploads get (docs/AFTER-TESTS.html reads them)
     out=/Users/Shared/rdna3-reports
     out=$(safe_outdir "$out") || { echo "!! cannot make a report directory in /Users/Shared: the report stays in $HOME"; out=$HOME; }
     cp "$extra" "$out/$base-tests.txt"

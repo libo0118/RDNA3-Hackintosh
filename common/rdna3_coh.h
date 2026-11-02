@@ -11,7 +11,7 @@
  * to the strongest form, at runtime (sysctl debug.rdna3_coh_<name>), so one
  * card run can tell which one, if any, cures the picture. Default: the
  * behaviour before N54 (0), except where amdgpu does it (those are not
- * switches, see docs/DRIVER-PLAN.md N54).
+ * switches, see docs/DRIVER-PLAN.html N54).
  *
  * The amdgpu functions each switch strengthens:
  *   fence_sys  amdgpu_fence_driver_start_ring: the ring's fence lives in
