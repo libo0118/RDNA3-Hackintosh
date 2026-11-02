@@ -93,6 +93,7 @@ footer.doc{margin-top:40px;font-size:13px;color:var(--muted);border-top:1px soli
 <li><a href="#round-4b-findings-for-the-linux-session-round-4-open-work">For the Linux session (round 4 open work)</a></li>
 </ol>
 </li>
+<li><a href="#round-5-plan">Round 5 plan (N68 mailbox, N76, N71 drag, N74 watch)</a></li>
 <li><a href="#how-to-add-the-next-round">How to add the next round</a>
 </li>
 </ol></nav>
@@ -1142,6 +1143,65 @@ turning it on by default.</li>
 <li>Push these commits to GitHub (the Pi pushes only to Forgejo).</li>
 </ol>
 </section>
+<section id="round-5-plan">
+<h2>Round 5 plan (Linux session, 2026-11-02): N68 mailbox, N76 Geekbench, N71 (c) drag, N74 watch; build be83c4d (run 127)</h2>
+<p>Install everything from the ONE green full <code>build.yml</code> run 127 on be83c4d (workflow_dispatch, full; later
+commits are docs only): kexts, core, tarball, <code>RDNA3MTL</code>, <code>radv-macos-logs</code>. As before: <code>rm</code> the old plugin
+first, the repo's <code>install.sh</code> / <code>metal.sh</code> / <code>metal/rdna3mtl-allow.txt</code>, reboot (WindowServer loads the plugin
+at its start). The docs are HTML now: this guide is <code>docs/BAREMETAL-REMOTE.html</code>; write the findings as a new
+<code>&lt;section id="round-5-findings"&gt;</code> as described in <a href="#how-to-add-the-next-round">How to add the next round</a>.</p>
+
+<h3 id="round-5-plan-n68">1. N68 (a): the latch with a third buffer (the 120 fps cap)</h3>
+<p>Default on: <code>debug.rdna3accel_iop_latch</code> 1 and <code>debug.rdna3accel_iop_latch_mbox</code> 1 (boot-arg
+<code>rdna3iopmbox=0</code> / the sysctl 0 = the round-4 two-buffer scheme). DRIVER-PLAN N68 OPEN (a), AFTER-TESTS N68 rows.</p>
+<ol>
+<li>Boot log: <code>iop latch (N68 a): mailbox ON ...</code> and per head <code>iop latch: head H: third scanout buffer phys ...</code>
+(+8 MiB per head); no <code>no VRAM for the third scanout buffer</code>.</li>
+<li>horizon-client, sky, standing, Claude app hidden, 45 s with <code>~/meas4.sh</code>, a3share 0: fps should be near the
+latch-off numbers of round 4b (~430-450), not 120. Then live <code>sysctl -w debug.rdna3accel_iop_latch_mbox=0</code>:
+120 fps comes back at once; <code>=1</code>: gone again.</li>
+<li>Counters (<code>sysctl -a | grep iop_latch</code>): <code>iop_latch_wait_h&lt;N&gt;</code> ~0, <code>iop_latch_replaced_h&lt;N&gt;</code> large,
+<code>iop_latch_mbox_h&lt;N&gt;</code> ~ the latched frames, <code>swaps_pq_latched_h&lt;N&gt;</code> not above the refresh rate,
+<code>iop_latch_two_h&lt;N&gt;</code> 0, all <code>iop_latch_hubp_unknown_*</code> 0, <code>iop_latch_hubp_wait_to_h&lt;N&gt;</code> 0.</li>
+<li>The owner: a fast window drag in the top quarter shows no split (round 3 item 9); a 240 fps video only if it looks wrong.
+The <code>IOP timing</code> triage row: no new mid-scan copies.</li>
+</ol>
+
+<h3 id="round-5-plan-n76">2. N76: Geekbench 7 GPU (Metal)</h3>
+<p>The translator now handles <code>depthwiseConv_3x3</code> (it was not a mixed-storage phi: a Function pointer in a lambda
+capture struct); locally it translates in 0.6 s to ~94 KB of SPIR-V and validates. Run Geekbench 7 GPU from the app and check:</p>
+<ul>
+<li><code>translator note: depthwiseConv_3x3: ... spliced 5 call(s) that hand a local struct of pointers ... (DRIVER-PLAN N76)</code>,
+plus the notes <code>... local pointer field load(s) forwarded ...</code> and <code>... pointer phi ... emitted as an alias ...</code>;</li>
+<li>no <code>link FAILED: "depthwiseConv_3x3"</code>; <code>link cache: miss ...</code> in seconds, not minutes; no MPS SIGABRT in
+<code>EncodeDWConv</code>;</li>
+<li>then either a GPU score (compare with Linux ~145k) or the NEXT kernel's <code>link FAILED</code> text: copy it whole; an N76
+refusal names its shape (<code>... (N76)</code>); take a new <code>NVMTL_LINK_DUMP</code> of that kernel to the Pi and copy it to the
+Linux PC as in round 4 (<code>~/Downloads/</code>, evidence only, never committed).</li>
+</ul>
+
+<h3 id="round-5-plan-n71">3. N71 (c): drag and resize with a3share on (round 4b left it untried)</h3>
+<ol>
+<li><code>sudo sysctl -w debug.rdna3accel_a3share=1</code>, restart horizon-client.</li>
+<li>Drag the game window around both displays and resize it for ~30 s; the owner watches for stale, black or torn content.</li>
+<li><code>ws frame: SUMMARY</code>: <code>sh_war</code>, <code>sh_wr</code>, <code>sh_rw</code>, <code>sh_refused</code>, <code>sh_pdem</code>, <code>sh_off</code> stay 0; <code>sh_reimp</code>
+may grow on a resize (a new drawable size = a new allocation); no fault lines (<code>surfshare: VM fault</code>,
+<code>GEM: VM fault at VA ... inside the read-only shared import</code>, <code>[gfxhub] page fault</code>).</li>
+<li>Also with the latch mailbox on (item 1): the same fps gain as round 4b (a3share 1 vs 0).</li>
+<li>Stop at once and set <code>a3share=0</code> on any wrong content or fault line, after <code>report.sh</code>. Leave it at 0 at the end.
+If all is clean, the Linux session proposes a3share 1 as the default.</li>
+</ol>
+
+<h3 id="round-5-plan-n74">4. N74: a longer watch without the UCLK pin</h3>
+<p>The owner keeps the pin on by default (+22 W idle). To decide for good: <code>sudo sysctl -w debug.rdna3_uclk_pin=0</code>, then
+10-15 minutes of normal use on both displays (Claude app streaming, scrolling, a video, window drags), sampling
+<code>pp_dpm_mclk</code> every 0.5 s with <code>rdna3_pmctl</code> (which levels UCLK visits: 96 / 456 / 772 / 1218 MHz). Note every flash
+of the secondary's top with the time and the UCLK level around it. Set <code>=1</code> again at the end.</p>
+
+<h3 id="round-5-plan-report">5. Report</h3>
+<p>One <code>report.sh</code> at the end (with <code>debug.rdna3accel_trace_dump</code> as the script does). Push the findings section to Forgejo.</p>
+</section>
+
 <section id="how-to-add-the-next-round">
 <h2>How to add the next round</h2>
 <div class="warnbox">
