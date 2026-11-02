@@ -340,7 +340,17 @@ static void sp_head_of(sp_head *h, const rdna3_pstate_plane *p)
  * three DET segments the GOP and the clone left (the card's "clone: ... DET
  * 3/3 -> 3/3", DET0_CTRL 0x303). The planes come from the registers
  * (dcn32_pstate_planes_from_heads); rdna3mall=1 keeps those DETs,
- * rdna3mall=2 plans DC's split first (dcn32_set_det_allocations). */
+ * rdna3mall=2 plans DC's split first (dcn32_set_det_allocations).
+ * Modelled from the card: the bounding box its runs logged (latencies,
+ * 16 channels; no VBIOS overrides). NOT modelled, the card decides: the
+ * PMFW's real DPM tables (the sim's DCFCLK / FCLK levels are made up; the
+ * card has DCFCLK 145..1563 MHz in 2 levels, FCLK 601..2301 MHz in 8, 15
+ * states), the refresh the kext measures and the clone's planned pixel
+ * clock (taken as exactly 148.5 MHz here), the cursor's bytes (0 here; a
+ * 256 x 256 cursor adds its MALL / DET need), SubVP (off), keep_force
+ * changing per update (fixed on here), the fPowerOn gating and the
+ * fallback (kext only), and how long the PMFW's switch really takes (the
+ * underflow model's 400 / 800 us are assumptions). */
 static void test_n74_full_path(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn32_power *pw, uint64_t wm_off)
 {
     static rdna3_dcn dcx;
@@ -374,6 +384,16 @@ static void test_n74_full_path(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn32_power
     S.reg[DCN_B2 + regDCHUBBUB_ARB_DRAM_STATE_CNTL] |= arb_force;
     CHECK(dcn32_power_init(dev, pw, NULL, wm_off, 1) == RDNA3_OK && pw->keep_force && pw->hubbub.det_segs[0] == 3 &&
           pw->hubbub.det_segs[1] == 3);
+    /* the card's bounding box as its runs logged it (serial 2026-10-11 /
+     * 10-12, rdna3mall=1 with the clone: "pstate: PMFW 0x00505c00: ... 16 x
+     * 2-byte channels, latencies 400000 / 42970 / 49940 ns", no "(VBIOS)"):
+     * the latencies are the defaults the sim uses, the VBIOS's UMC_INFO gives
+     * 16 channels (the sim's VBIOS-less default is 24) */
+    CHECK(pw->soc.dram_clock_change_latency_ns == 400000 && pw->soc.sr_exit_ns == 42970 &&
+          pw->soc.sr_enter_plus_exit_ns == 49940 && !pw->soc.vbios_bb);
+    pw->soc.num_chans = 16;
+    pw->soc.mall_avail_chans = 16;
+    CHECK(dcn32_build_soc_states(&pw->soc, &pw->bw) == 0 && pw->bw.nstates > 0);
 
     /* rdna3mall=1: the DETs as they run */
     CHECK(dcn32_pstate_planes_from_heads(dev, &dcx, pclk, cur, &m1) == 2 && m1.plane[0].det_kb == 192 &&
@@ -383,10 +403,14 @@ static void test_n74_full_path(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn32_power
            m1.vlevel, dcn32_dram_change_name(m1.dram_change), m1.dml.active_margin_ns[0] / 1000,
            m1.dml.active_margin_ns[1] / 1000, m1.wm[RD_WM_A].pstate_change_ns);
     /* DC's answer even with the GOP's DETs: both switch in active at the
-     * lowest state, but with a thin margin (~70 us over the 420 us set A
-     * watermark) */
+     * lowest state, but with a thin margin. The card's own rdna3mall=1 runs
+     * (VM, 2026-10-11 / 10-12, the same two heads) logged exactly this:
+     * "pstate: state 0: UCLK switches (vactive ...) WM A urgent 16972
+     * p-state 416972" and "pstate: pipe 1 ... DET 192 KiB: active margin
+     * 75 us": the model matches the card here */
     CHECK(m1.vlevel == 0 && m1.p_state_change_support && m1.dram_change == RD_DRAM_CHANGE_VACTIVE &&
-          m1.dml.active_margin_ns[0] > 0 && m1.dml.active_margin_ns[0] < 200000);
+          m1.dml.active_margin_ns[0] >= 70000 && m1.dml.active_margin_ns[0] <= 80000 &&
+          m1.wm[RD_WM_A].pstate_change_ns == 416972 && m1.wm[RD_WM_A].urgent_ns == 16972);
 
     /* rdna3mall=2: DC's split */
     CHECK(dcn32_pstate_planes_from_heads(dev, &dcx, pclk, cur, &m2) == 2);

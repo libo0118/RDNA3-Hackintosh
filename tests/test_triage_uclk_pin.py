@@ -66,6 +66,15 @@ check(level({"DisplayHeads": 1, "ExtendHead": 1}) == "WARN", "the extended clone
 check(level({"DisplayHeads": 1}) is None, "one head without the property: no row")
 check(level({"DCNPower": MALL}) == "INFO", "the rdna3mall path is INFO")
 # N74 OPEN (a): rdna3mall=2 as the alternative to the pin
+FALLBACK = ("rdna3mall=2 but DC's display power path did not come up (dcn32_power_init -62: the PMFW's DAL mailbox "
+            "did not answer): the N74 pin runs instead")
+rows = uclk_pin_rows({"DCNPowerFallback": FALLBACK, "DCNPower": PINNED, "DisplayHeads": 2})
+check(rows[0][0] == "WARN" and "did not come up" in rows[0][2] and "void" in rows[0][2],
+      "the rdna3mall fallback to the pin is a WARN naming the cause")
+check(len(rows) == 2 and rows[1][0] == "INFO" and rows[1][2].startswith("UCLK pinned"),
+      "the fallback pin's own row still follows")
+rows = uclk_pin_rows({"DCNPowerFallback": FALLBACK, "DCNPower": GAVE_UP})
+check([r[0] for r in rows] == ["WARN", "FAIL"], "a fallback pin that gave up is still a FAIL")
 r = uclk_pin_rows({"DCNPower": MALL, "DisplayHeads": 1, "ExtendHead": 1})[0]
 check(r[0] == "INFO" and "N74 alternative" in r[2] and "switches in active" in r[2],
       "the rdna3mall path switching in vactive with two heads is INFO, named as the N74 alternative")

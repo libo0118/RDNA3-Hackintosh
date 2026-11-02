@@ -59,8 +59,13 @@ extern "C" {
 void RDNA3Accel::displayPowerInit(rdna3_dev *d, rdna3_dmub *dm, uint64_t wmTableOff)
 {
     uint32_t mall = rd3_arg("rdna3mall", 0);
-    if (!mall || !fDcn || !fDispDev || !fDispLock || !d || !dm || !dm->hw_init)
+    if (!mall)
         return;
+    if (!fDcn || !fDispDev || !fDispLock || !d || !dm || !dm->hw_init) {
+        snprintf(fPowerInitWhy, sizeof(fPowerInitWhy), "displayPowerInit: %s",
+                 !dm || !dm->hw_init ? "the DMCUB is not up" : "no display state / device");
+        return;
+    }
     if (!fPower)
         fPower = (rdna3_dcn32_power *)IOMalloc(sizeof(rdna3_dcn32_power));
     if (!fSubvp)
@@ -71,6 +76,7 @@ void RDNA3Accel::displayPowerInit(rdna3_dev *d, rdna3_dmub *dm, uint64_t wmTable
         fPowerCtxMin = (rdna3_pstate_ctx *)IOMalloc(sizeof(rdna3_pstate_ctx));
     if (!fPower || !fSubvp || !fPowerCtx || !fPowerCtxMin) {
         setProperty("RDNA3,DCNPowerInit", "failed: no memory");
+        snprintf(fPowerInitWhy, sizeof(fPowerInitWhy), "displayPowerInit: no memory");
         return;
     }
     bzero(fSubvp, sizeof(*fSubvp));
@@ -79,6 +85,11 @@ void RDNA3Accel::displayPowerInit(rdna3_dev *d, rdna3_dmub *dm, uint64_t wmTable
     bool keep = fMirrorOn && fMirror && (fMirror->pstate_force & 1);
     int r = dcn32_power_init(d, fPower, fDispVbios, wmTableOff, keep ? 1 : 0);
     fPowerOn = fPower->bw.smu_present && fPower->bw.nstates > 0;
+    if (fPowerOn)
+        fPowerInitWhy[0] = 0;
+    else
+        snprintf(fPowerInitWhy, sizeof(fPowerInitWhy), "dcn32_power_init %d: %s", r,
+                 !fPower->bw.smu_present ? "the PMFW's DAL mailbox did not answer" : "no voltage states");
     char val[200];
     snprintf(val, sizeof(val), "%d: PMFW 0x%x, %u states, UCLK %u..%u MHz, FCLK %u..%u MHz, DCFCLK %u..%u MHz, "
              "latency %u us, %u channels%s%s", r, fPower->bw.pmfw, fPower->bw.nstates, fPower->bw.memclk_mhz[0],
@@ -419,22 +430,24 @@ SYSCTL_PROC(_debug, OID_AUTO, rdna3_uclk_pin, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG
  * same registers). 'fallback' (rdna3mall=1/2, after displayPowerInit): only
  * when DC's path is not on (fPowerOn), so the alternative never leaves two
  * heads unguarded; said in RDNA3,DCNPowerInit and the log. */
-void RDNA3Accel::displayUclkPinInit(rdna3_dev *d, bool fallback)
+void RDNA3Accel::displayUclkPinInit(rdna3_dev *d, bool fallback, const char *cause)
 {
     const uint32_t mall = rd3_arg("rdna3mall", 0);
     if ((mall && !fallback) || (!mall && fallback))
         return;
     if (fallback && fPowerOn)
         return;   /* DC's display power path runs: no pin */
-    if (!d || !fDispLock || !fDcn) {
-        if (fallback)
-            LOG("display power: rdna3mall=%u: DC's path is off and the UCLK pin (N74) fallback cannot start (%s): "
-                "UCLK left to the PMFW (two heads may flash)", mall, !d ? "no device" : "no display state");
-        return;
+    char why[128];
+    if (fallback) {
+        snprintf(why, sizeof(why), "%s", cause ? cause : fPowerInitWhy[0] ? fPowerInitWhy : "DC's path is off");
+        char fbv[220];
+        snprintf(fbv, sizeof(fbv), "rdna3mall=%u but DC's display power path did not come up (%s): the N74 pin runs "
+                 "instead%s", mall, why, !d || !fDispLock || !fDcn ? " - NOT started either (no display state)" : "");
+        setProperty("RDNA3,DCNPowerFallback", fbv);
+        LOG("display power: %s", fbv);
     }
-    if (fallback)
-        LOG("display power: rdna3mall=%u: DC's display power path did not come up (see display power: init): the "
-            "UCLK pin (N74) instead", mall);
+    if (!d || !fDispLock || !fDcn)
+        return;
     rdna3_uclk_pin *fresh = nullptr;
     if (!fUclkPin) {
         fresh = (rdna3_uclk_pin *)IOMalloc(sizeof(rdna3_uclk_pin));
@@ -452,7 +465,7 @@ void RDNA3Accel::displayUclkPinInit(rdna3_dev *d, bool fallback)
         fUclkPinOn = rd3_arg("rdna3uclkpin", 1) != 0;
     }
     int r = dcn32_uclk_pin_init(d, fUclkPin, fUclkPinEver ? 1 : 0);
-    const char *fb = fallback ? " (the fallback: rdna3mall's DC path did not come up)" : "";
+    const char *fb = fallback ? " (the fallback for rdna3mall, RDNA3,DCNPowerFallback)" : "";
     if (r == RDNA3_OK)
         snprintf(val, sizeof(val), "UCLK pin (N74)%s: PMFW 0x%x, UCLK %u levels %u..%u MHz, %s%s", fb, fUclkPin->pmfw,
                  fUclkPin->n_memclk, fUclkPin->min_mhz, fUclkPin->max_mhz,
@@ -461,7 +474,8 @@ void RDNA3Accel::displayUclkPinInit(rdna3_dev *d, bool fallback)
     else
         snprintf(val, sizeof(val), "UCLK pin (N74) unavailable%s: %d (the PMFW's DAL mailbox: GetSmuVersion / UCLK "
                  "levels, last %d); UCLK left to the PMFW", fb, r, fUclkPin->last_err);
-    setProperty("RDNA3,DCNPowerInit", val);
+    /* the fallback keeps RDNA3,DCNPowerInit as displayPowerInit left it */
+    setProperty(fallback ? "RDNA3,UclkPinInit" : "RDNA3,DCNPowerInit", val);
     LOG("display power: %s", val);
     displayUclkPinUpdate("init");
     IOLockUnlock(fDispLock);

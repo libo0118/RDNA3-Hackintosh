@@ -983,18 +983,24 @@ bool RDNA3Bringup::hwInit()
          * the second head fetches and its "mirror on" update counts it. */
         if (!rd3_arg("rdna3mall", 0))
             fOwner->displayUclkPinInit(fDev);
+        /* N74 fallback: why DC's display power path was not started here
+         * (nullptr: displayPowerInit ran and keeps its own reason) */
+        const char *dcOff = fDmubMode ? "the DMCUB did not start (hw_init false)" : "rdna3dmub is off: no DMCUB";
         if (fDmubMode) {
             if (fDmub && fDmub->hw_init) {
+                dcOff = rd3_arg("rdna3mall", 0) ? nullptr : "rdna3mall is 0";
                 fOwner->displayMirror(fDmub, true, fReinit);   /* rdna3mirror=1: step 9b */
                 /* rdna3mall=1 (step mall): display power, item O. The
                  * PMFW fetches the watermark range table from VRAM
                  * (dcn32_notify_wm_ranges) */
                 if (rd3_arg("rdna3mall", 0)) {
                     uint64_t wm = rdna3_vram_alloc(fDev, 4096, 4096, "dal-wm-table");
-                    if (wm != UINT64_MAX)
+                    if (wm != UINT64_MAX) {
                         fOwner->displayPowerInit(fDev, fDmub, wm);
-                    else
+                    } else {
+                        dcOff = "no VRAM for the watermark range table";
                         BLOG("display power: no VRAM for the watermark range table");
+                    }
                 }
                 /* does the PMFW still move a table to DRAM with the clone lit? */
                 if (fPmUp && fSmu) {
@@ -1006,11 +1012,15 @@ bool RDNA3Bringup::hwInit()
             }
         }
         /* N74 OPEN (a): rdna3mall=1/2 is DC's whole decision instead of the
-         * pin; when that path did not come up (no DMCUB, no DAL answer, no
-         * VRAM for the table) the pin is set up after all, so two heads are
-         * never left to the PMFW's switch unguarded (logged as the fallback) */
+         * pin. When DC's path is not on after this block (fPowerOn: no
+         * DMCUB, no DAL answer, no VRAM for the table) the pin is set up
+         * instead, after the clone (the clone itself is not guarded by a
+         * raise then), logged and in RDNA3,DCNPowerFallback. Decided here
+         * only: a later power loss (displayPowerWake) turns DC's path off
+         * without a pin, and a re-bring-up that does not reach
+         * displayPowerInit keeps the fPowerOn of the one before. */
         if (rd3_arg("rdna3mall", 0))
-            fOwner->displayUclkPinInit(fDev, true);
+            fOwner->displayUclkPinInit(fDev, true, dcOff);
     }
 
     /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in

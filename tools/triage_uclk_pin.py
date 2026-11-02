@@ -8,7 +8,8 @@ says so in ioreg RDNA3,DCNPower ("UCLK pinned (two heads, ...)", "UCLK switching
 uclk_pin_rows(props, log) -> [(level, name, text)]: FAIL when the PMFW refused or did not answer the minimum, or the
 pin gave up; WARN when two heads are lit and UCLK switches (not switched off), when earlier messages failed or a
 minimum was not confirmed (counters `fails n`, `unconfirmed n`), when the pin is unavailable, or when a two-head
-report has no RDNA3,DCNPower at all; INFO otherwise. 'props' is triage_reports.parse_props()'s dict (keys without "RDNA3,")."""
+report has no RDNA3,DCNPower at all, or when RDNA3,DCNPowerFallback says rdna3mall's DC path did not come up (the pin
+ran instead; its own row follows); INFO otherwise. 'props' is triage_reports.parse_props()'s dict (keys without "RDNA3,")."""
 import re
 
 NAME = "UCLK pin (N74)"
@@ -27,6 +28,16 @@ def _count(text, key):
 
 
 def uclk_pin_rows(props, log=""):
+    fb = props.get("DCNPowerFallback")
+    if fb is not None:
+        # rdna3mall=1/2 asked, DC's path did not come up: the pin runs instead (the bring-up's displayUclkPinInit
+        # fallback); the pin's own row follows, so its failures still show
+        return [("WARN", NAME, str(fb) + ": the rdna3mall A/B is void for this boot; the `display power:` / `pstate:` "
+                 "lines")] + _pin_rows(props, log)
+    return _pin_rows(props, log)
+
+
+def _pin_rows(props, log=""):
     v = props.get("DCNPower")
     heads = props.get("DisplayHeads", 0)
     heads = heads if isinstance(heads, int) else 0
