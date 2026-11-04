@@ -14171,7 +14171,7 @@ static void test_navi33_gfx(void)
     CHECK(gh11.reads[0x79a2] == 1 && gh11.writes[0x79a2] == 1 && gh11.reg[0x79a2] == 0x7a5a1234);
     gfxhub11_gart_disable(&dev, &gmc);
 out:
-    free(dev.vram_cpu);
+    free((void *)dev.vram_cpu);
 }
 
 static void test_navi33_vram_info(void)
