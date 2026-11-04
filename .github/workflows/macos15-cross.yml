@@ -29,11 +29,10 @@ jobs:
             'EXPERIMENTAL CROSS-COMPILE: x86_64 target on an ARM host; NOT HARDWARE VERIFIED.' \
             "Commit: $GITHUB_SHA" \
             'Supplement only: the existing macos-15-intel jobs are neither replaced nor cancelled.' \
-            'Core/framebuffer/AGDC: fixed native name-level guard contract must not expand.' \
-            'Accelerator: compile/import contract only; the native baseline had 7 unresolved imports, NOT validated binding.' \
+            'Core/accelerator/framebuffer/AGDC: fixed native name-level guard contract must not expand.' \
             'This job never runs kmutil/kextlibs, creates a KC, installs or loads a kext, or downloads GPU firmware.' \
             'No ABI/vtable, boot, DisplayPort, Metal, RADV, firmware execution or real-GPU result is claimed.' \
-            'Baseline: https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41824849834/job/126556846479' \
+            'Baseline: https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41896280472/job/126806539895' \
             | tee build/ci-logs/EXPERIMENTAL.txt >> "$GITHUB_STEP_SUMMARY"
           test "$(uname -m)" = arm64
           test "$(sw_vers -productVersion | cut -d. -f1)" = 15

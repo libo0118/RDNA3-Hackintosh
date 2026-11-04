@@ -34,7 +34,7 @@ Status: implemented
 
 收益是正式生产构建能发出已在原生环境测得的七个命名枚举符号，buildID 能区分本轮修正，持续 CI 不再把 unresolved 当通过。代价是严格 guard 会如实阻断未来无法绑定的导入；测试只锁 enum 的类型/存储约束，并不证明 family 的完整调用约定或布局。
 
-固定 cross manifest、工具与 workflow 本轮保持不动。七个新名称超出旧 baseline 时必须失败；只有后续真实 native 生产构建及 strict guard 成功后，才由独立审查刷新其固定证据，不能偷偷加入 allowlist。
+生产提交 `fce68dbc2cb932a75cf5fd989c22cac4900910ff` 的 [run 41896280472 / Intel job 126806539895](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41896280472/job/126806539895) 已真实成功：core 484/484、accelerator 914/914、framebuffer 398/398、AGDC 351/351 均通过 strict 名称级 guard，host 为 153 passed / 0 failed / 6 skipped（159 tests）。[固定 cross 契约](../process/2026-11-05-macos15-cross-native-contract.md)据这次正式生产制品和 API digest 刷新，四模块统一名称级范围；七个新名称来自真实 Mach-O 捕获，不从历史候选或隔离探针偷偷加入 allowlist，ABI / vtable、KC、加载与硬件仍未证明。
 
 新建前检索 proposed / implemented / rejected：探针笔记部分重叠并双向互链，保留其隔离选择、正面证据和限制；既有 GitHub CI 与 cross-contract 笔记部分重叠但由主代理汇合同步，本轮不改。Navi33 SMU / GFXHUB / UAPI 笔记只共享 macOS 15 验证边界，与本修正无关，保持不动；无须吸收、归档或废弃提案。
 

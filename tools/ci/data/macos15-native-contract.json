@@ -2,32 +2,32 @@
   "baseline": {
     "artifacts": {
       "binaries.zip": {
-        "digest": "sha256:f3d6d0fd8b79e47c75608ab16d0b738ef9643bf890dc920834ca8ecbfb0b38e4",
-        "id": 13318597464,
+        "digest": "sha256:683cea32997d54fd3aced5cab577def0e91c97039cc64d7d4f0b41bd99060d36",
+        "id": 13356645862,
         "name": "experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED"
       },
       "compile-logs.zip": {
-        "digest": "sha256:9d1d586b636e2a3b59a748c8cea8d5542784c855ff2360bc513c8b0441993db2",
-        "id": 13318682317,
+        "digest": "sha256:5ffd537ee5e6c5edb48902b5226f1bb31f17e13c6860b6393a0ea09bfde5376d",
+        "id": 13354609881,
         "name": "experimental-macos15-compile-logs"
       }
     },
-    "commit": "4712d9141572e2d5d88ea57e13d32e51bfc9408a",
-    "job_id": 126556846479,
-    "job_log_sha256": "f793400407489952eb7b7440ed812703ea3982c7e7c84e2af52ab82c3e7f80dd",
-    "job_url": "https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41824849834/job/126556846479",
+    "commit": "fce68dbc2cb932a75cf5fd989c22cac4900910ff",
+    "job_id": 126806539895,
+    "job_log_sha256": "a8a63e623065dae5e46fa2b62b12e0b2a46e1e82fa4831b885566571201297ec",
+    "job_url": "https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41896280472/job/126806539895",
     "os_build": "24G830",
     "os_version": "15.7.9",
     "repository": "libo0118/RDNA3-Hackintosh",
-    "run_id": 41824849834,
+    "run_id": 41896280472,
     "sdk": "15.5",
-    "tar_sha256": "90e361ccb28ed11288fb28c00159f934be9602db216a130a34507356f8f94de9",
+    "tar_sha256": "a33547e51918040663dd2fe719d8695d526073a9cd6f953eeae1d85bd20d643f",
     "xcode": "16.4",
     "xcode_build": "16F6"
   },
   "bundles": {
     "RDNA3AGDC": {
-      "binary_sha256": "50ddf026a667c6e21df06cdb8dc5c08a31089049899c25c5fab855a03e6228d3",
+      "binary_sha256": "adaeab6b5d02f5a3bf91abc23186a9eccb86b86241e440828c177721f76b368a",
       "info_plist": {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "RDNA3AGDC",
@@ -436,7 +436,7 @@
       ]
     },
     "RDNA3Accel": {
-      "binary_sha256": "1b22b7b0d767f4517a16133f8a75c2162ec8d7b3d06d3ed62dc836b34468bc1f",
+      "binary_sha256": "363ead855267472a5a2fd47f19c0c08f6dbcd5b787508379e510ea80671b2a4d",
       "info_plist": {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "RDNA3Accel",
@@ -981,7 +981,7 @@
       ]
     },
     "RDNA3Accelerator": {
-      "binary_sha256": "da23c243c367c604e1f57046df9337125623ad4b3590ffcc6e6b40c47d273bcc",
+      "binary_sha256": "83bb65b84a5bc95a9b8bbcf8243ea02e8c8e27f4b79ae8236fd124b8528c54e4",
       "info_plist": {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "RDNA3Accelerator",
@@ -1014,9 +1014,9 @@
           "com.apple.kpi.mach": "19.0",
           "com.apple.kpi.unsupported": "19.0"
         },
-        "RDNA3SourceHash": "3fd305652c"
+        "RDNA3SourceHash": "60fcb24544"
       },
-      "info_sha256": "01f35d1203292a38c9bb4604ce9bbc037c9d6512ef79f3727ebd963bf03da514",
+      "info_sha256": "ab10486c4262033d1bca4ccc3f96ec6d4f0187a98ccd6b27a303376f9e363493",
       "native_guard": {
         "declared_libraries": [
           "com.apple.iokit.IOAcceleratorFamily2",
@@ -1030,17 +1030,9 @@
           "com.apple.kpi.unsupported"
         ],
         "imports": 914,
-        "resolved": 907,
-        "scope": "compile-and-import-contract-only",
-        "unresolved_symbols": [
-          "__ZN14IOAccelSurface20surface_lock_optionsEjjP25IOAccelSurfaceInformationy",
-          "__ZN14IOAccelSurface22surface_unlock_optionsEjj",
-          "__ZN14IOAccelSurface28set_shape_backing_length_extEjjyjyP19IOAccelDeviceRegiony",
-          "__ZN14IOAccelSurface9set_shapeEjjP19IOAccelDeviceRegiony",
-          "__ZN17IOAccelGLContext211processSwapEj",
-          "__ZN24IOAccelLegacyDisplayPipe9setStereoEj",
-          "__ZN27IOAccelLegacyDisplayMachine9setStereoEjj"
-        ],
+        "resolved": 914,
+        "scope": "native-name-level-guard",
+        "unresolved_symbols": [],
         "xnu_tag": "xnu-12377.101.15"
       },
       "target": {
@@ -1179,9 +1171,9 @@
         "__ZN14IOAccelSurface14reset_req_bitsEv",
         "__ZN14IOAccelSurface19add_context_to_listEP15IOAccelContext2",
         "__ZN14IOAccelSurface20orphanClientMappingsEP5OSSet",
-        "__ZN14IOAccelSurface20surface_lock_optionsEjjP25IOAccelSurfaceInformationy",
+        "__ZN14IOAccelSurface20surface_lock_optionsE9eLockTypejP25IOAccelSurfaceInformationy",
         "__ZN14IOAccelSurface22isSurfaceSizeSupportedEss",
-        "__ZN14IOAccelSurface22surface_unlock_optionsEjj",
+        "__ZN14IOAccelSurface22surface_unlock_optionsE9eLockTypej",
         "__ZN14IOAccelSurface24_RESERVEDIOAccelSurface0Ev",
         "__ZN14IOAccelSurface24_RESERVEDIOAccelSurface1Ev",
         "__ZN14IOAccelSurface24_RESERVEDIOAccelSurface2Ev",
@@ -1190,8 +1182,8 @@
         "__ZN14IOAccelSurface24_RESERVEDIOAccelSurface5Ev",
         "__ZN14IOAccelSurface24remove_context_from_listEP15IOAccelContext2",
         "__ZN14IOAccelSurface25surface_control_with_lockEjjPj",
-        "__ZN14IOAccelSurface28set_shape_backing_length_extEjjyjyP19IOAccelDeviceRegiony",
-        "__ZN14IOAccelSurface9set_shapeEjjP19IOAccelDeviceRegiony",
+        "__ZN14IOAccelSurface28set_shape_backing_length_extE24eIOAccelSurfaceShapeBitsjyjyP19IOAccelDeviceRegiony",
+        "__ZN14IOAccelSurface9set_shapeE24eIOAccelSurfaceShapeBitsjP19IOAccelDeviceRegiony",
         "__ZN14IODeviceMemory9withRangeEyy",
         "__ZN15IOAccelContext210invalidateEv",
         "__ZN15IOAccelContext211contextStopEv",
@@ -1413,7 +1405,7 @@
         "__ZN17IOAccelCLContext2C2EPK11OSMetaClass",
         "__ZN17IOAccelCLContext2D2Ev",
         "__ZN17IOAccelGLContext210gMetaClassE",
-        "__ZN17IOAccelGLContext211processSwapEj",
+        "__ZN17IOAccelGLContext211processSwapE7eDoSwap",
         "__ZN17IOAccelGLContext226_RESERVEDIOAccelGLContext0Ev",
         "__ZN17IOAccelGLContext226_RESERVEDIOAccelGLContext1Ev",
         "__ZN17IOAccelGLContext226_RESERVEDIOAccelGLContext2Ev",
@@ -1630,7 +1622,7 @@
         "__ZN24IOAccelLegacyDisplayPipe22isHardwareMirrorOfPipeEPS_",
         "__ZN24IOAccelLegacyDisplayPipe30isCurrentModeAcceleratorBackedEv",
         "__ZN24IOAccelLegacyDisplayPipe34needsSecondaryFramebufferResourcesEv",
-        "__ZN24IOAccelLegacyDisplayPipe9setStereoEj",
+        "__ZN24IOAccelLegacyDisplayPipe9setStereoE17IOAccelStereoMode",
         "__ZN24IOAccelLegacyDisplayPipeC2EPK11OSMetaClass",
         "__ZN24IOAccelLegacyDisplayPipeD2Ev",
         "__ZN24IOBufferMemoryDescriptor11withOptionsEjmm",
@@ -1656,7 +1648,7 @@
         "__ZN27IOAccelLegacyDisplayMachine41isCurrentFramebufferModeAcceleratorBackedEj",
         "__ZN27IOAccelLegacyDisplayMachine4stopEv",
         "__ZN27IOAccelLegacyDisplayMachine5startEP11IOPCIDevice",
-        "__ZN27IOAccelLegacyDisplayMachine9setStereoEjj",
+        "__ZN27IOAccelLegacyDisplayMachine9setStereoEj17IOAccelStereoMode",
         "__ZN27IOAccelLegacyDisplayMachineC2EPK11OSMetaClass",
         "__ZN27IOAccelLegacyDisplayMachineD2Ev",
         "__ZN8OSNumber10withNumberEyj",
@@ -1972,7 +1964,7 @@
       ]
     },
     "RDNA3Framebuffer": {
-      "binary_sha256": "6e38d5f6b6a11ec3c4019071aa973928cbfdfd1d1b9296ea25b41d3366ab7b26",
+      "binary_sha256": "6fe49f639fbe31f7b30f2c2c7400b65e4806683dc678471ad2e59a286cc37f35",
       "info_plist": {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "RDNA3Framebuffer",

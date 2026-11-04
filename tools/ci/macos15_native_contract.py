@@ -24,20 +24,20 @@ import kmutil_kpi_guard as kpi
 
 BASELINE = {
     "repository": "libo0118/RDNA3-Hackintosh",
-    "run_id": 41824849834,
-    "job_id": 126556846479,
-    "commit": "4712d9141572e2d5d88ea57e13d32e51bfc9408a",
+    "run_id": 41896280472,
+    "job_id": 126806539895,
+    "commit": "fce68dbc2cb932a75cf5fd989c22cac4900910ff",
 }
 ARTIFACTS = {
     "binaries.zip": {
-        "id": 13318597464,
+        "id": 13356645862,
         "name": "experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED",
-        "digest": "sha256:f3d6d0fd8b79e47c75608ab16d0b738ef9643bf890dc920834ca8ecbfb0b38e4",
+        "digest": "sha256:683cea32997d54fd3aced5cab577def0e91c97039cc64d7d4f0b41bd99060d36",
     },
     "compile-logs.zip": {
-        "id": 13318682317,
+        "id": 13354609881,
         "name": "experimental-macos15-compile-logs",
-        "digest": "sha256:9d1d586b636e2a3b59a748c8cea8d5542784c855ff2360bc513c8b0441993db2",
+        "digest": "sha256:5ffd537ee5e6c5edb48902b5226f1bb31f17e13c6860b6393a0ea09bfde5376d",
     },
 }
 BUNDLES = ("RDNA3Accel", "RDNA3Accelerator", "RDNA3Framebuffer", "RDNA3AGDC")
@@ -185,7 +185,7 @@ def capture(directory):
             and job["head_sha"] == BASELINE["commit"] and job["labels"] == ["macos-15-intel"]
             and job["status"] == "completed" and job["conclusion"] == "success", "wrong/non-Intel baseline job")
     for step in ("Require macOS 15 Intel and the macOS 15 SDK", "Strict KPI guards (core, framebuffer and AGDC)",
-                 "Accelerator import report (unresolved imports are not verified)"):
+                 "Strict accelerator KPI guard (names and providers only)"):
         require(any(s["name"] == step and s["status"] == "completed" and s["conclusion"] == "success"
                     for s in job["steps"]), "baseline step not successful: " + step)
     for expected in ARTIFACTS.values():
@@ -209,8 +209,8 @@ def capture(directory):
     summaries = {}
     for logname in ("kpi-strict.log", "kpi-accelerator-report.log"):
         text = logs[logname].decode()
-        require("kmutil_kpi_guard: FAIL" not in text and "kmutil_kpi_guard: ERROR" not in text,
-                "baseline KPI guard failed")
+        require(not any("kmutil_kpi_guard: " + level in text for level in ("FAIL", "ERROR", "WARN")),
+                "baseline KPI guard failed or warned")
         for line in text.splitlines():
             require(line in joblog, "artifact guard log not found in native job log")
         for name, count, resolved, tag, libs in SUMMARY.findall(text):
@@ -233,18 +233,10 @@ def capture(directory):
                 and summary["declared_libraries"] == sorted(info["OSBundleLibraries"]),
                 "parser/native guard count or Info libraries disagree: " + name)
         require(target["kmod_info"]["name"] == info["CFBundleIdentifier"], "baseline kmod_info/Info name mismatch")
-        if name == "RDNA3Accelerator":
-            report = logs["kpi-accelerator-report.log"].decode()
-            unresolved = re.findall(r"^kmutil_kpi_guard: WARN RDNA3Accelerator\.kext: (\S+) is exported by no kext", report, re.M)
-            require(set(unresolved) <= imports and len(set(unresolved)) == len(imports) - summary["resolved"],
-                    "accelerator unresolved report/parser mismatch")
-            scope = "compile-and-import-contract-only"
-        else:
-            require(summary["imports"] == summary["resolved"], "strict baseline imports did not all resolve")
-            unresolved, scope = [], "native-name-level-guard"
+        require(summary["imports"] == summary["resolved"], "strict baseline imports did not all resolve: " + name)
         result["bundles"][name] = {"binary_sha256": sha256(binary), "info_sha256": sha256(raw_info),
             "target": target, "info_plist": info, "undefined_symbols": sorted(imports),
-            "native_guard": {**summary, "scope": scope, "unresolved_symbols": sorted(unresolved)}}
+            "native_guard": {**summary, "scope": "native-name-level-guard", "unresolved_symbols": []}}
     nm_lines = logs["kext.log"].decode().split("undefined symbols (must all come from the OSBundleLibraries in Info.plist):\n", 1)[1]
     nm_symbols = set(re.findall(r"^(_\S+)$", nm_lines, re.M))
     require(nm_symbols == set(result["bundles"]["RDNA3Accel"]["undefined_symbols"]),
@@ -263,16 +255,16 @@ def compare_bundle(name, expected, raw_info, binary):
     tag, private, unsupported = kpi.load_xnu_lists()
     bad = kpi.xnu_verdicts(imports, set(info["OSBundleLibraries"]), private, unsupported)
     require(not bad, name + ": current " + tag + " KPI policy rejects: " + repr(bad))
-    scope = "compile-and-import-contract-only" if name == "RDNA3Accelerator" else "native-name-level-guard"
-    require(expected["native_guard"]["scope"] == scope, name + ": invalid baseline validation scope")
+    guard = expected["native_guard"]
+    require(guard["scope"] == "native-name-level-guard"
+            and guard["imports"] == guard["resolved"] == len(expected["undefined_symbols"])
+            and guard["unresolved_symbols"] == [], name + ": invalid baseline validation scope/counts")
     stamp = ""
     if name != "RDNA3Accel":
         stamp = "; generated RDNA3SourceHash baseline=%s current=%s" % (
             expected["info_plist"]["RDNA3SourceHash"], info["RDNA3SourceHash"])
-    boundary = ("compile/import contract only; unresolved imports NOT validated"
-                if name == "RDNA3Accelerator" else "fixed native name-level guard contract not expanded")
-    return imports, "%s: %d/%d imports; %s; current %s policy checked%s" % (
-        name, len(imports), len(expected["undefined_symbols"]), boundary, tag, stamp)
+    return imports, "%s: %d/%d imports; fixed native name-level guard contract not expanded; current %s policy checked%s" % (
+        name, len(imports), len(expected["undefined_symbols"]), tag, stamp)
 
 
 def check(directory, manifest, use_nm=False):
@@ -316,7 +308,7 @@ def main():
         if args.command == "capture":
             args.output.write_text(json.dumps(capture(args.evidence), indent=2, sort_keys=True) + "\n",
                                    encoding="utf-8", newline="\n")
-            print("Captured immutable Intel baseline; accelerator unresolved imports remain unverified.")
+            print("Captured immutable Intel baseline; all four bundles have strict native name-level guards.")
         else:
             check(args.build, json.loads(args.manifest.read_bytes()), args.nm)
     except (OSError, ValueError, KeyError, IndexError, struct.error, zipfile.BadZipFile,

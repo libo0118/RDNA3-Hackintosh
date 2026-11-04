@@ -51,8 +51,8 @@ def info(name="RDNA3Accel"):
 def expected(name="RDNA3Accel", imports=("_public",)):
     target, symbols = c.macho(fixture(imports, name))
     return {"target": target, "info_plist": info(name), "undefined_symbols": sorted(symbols),
-            "native_guard": {"scope": "compile-and-import-contract-only" if name == "RDNA3Accelerator"
-                             else "native-name-level-guard"}}
+            "native_guard": {"scope": "native-name-level-guard", "imports": len(symbols),
+                             "resolved": len(symbols), "unresolved_symbols": []}}
 
 
 class MachOTests(unittest.TestCase):
@@ -147,14 +147,16 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target/kmod_info changed"):
             self.compare(binary=changed)
 
-    def test_accelerator_never_claims_native_binding(self):
-        _, report = self.compare("RDNA3Accelerator")
-        self.assertIn("compile/import contract only; unresolved imports NOT validated", report)
-        self.assertNotIn("native name-level guard", report)
-        baseline = expected("RDNA3Accelerator")
-        baseline["native_guard"]["scope"] = "native-name-level-guard"
-        with self.assertRaisesRegex(ValueError, "invalid baseline validation scope"):
-            self.compare("RDNA3Accelerator", baseline=baseline)
+    def test_all_bundles_require_strict_native_name_level_scope(self):
+        for name in c.BUNDLES:
+            _, report = self.compare(name)
+            self.assertIn("fixed native name-level guard contract not expanded", report)
+            for key, value in (("scope", "compile-and-import-contract-only"), ("resolved", 0),
+                               ("unresolved_symbols", ["_public"])):
+                baseline = expected(name)
+                baseline["native_guard"][key] = value
+                with self.subTest(name=name, key=key), self.assertRaisesRegex(ValueError, "invalid baseline"):
+                    self.compare(name, baseline=baseline)
 
     def test_current_xnu_export_policy_is_rechecked(self):
         empty = (set(), [], set())
@@ -196,6 +198,79 @@ class ContractTests(unittest.TestCase):
         struct.pack_into("<I", changed, 32, 0x25)
         with self.assertRaisesRegex(ValueError, "non-macOS target version"):
             c.macho(changed)
+
+
+class CaptureTests(unittest.TestCase):
+    def setUp(self):
+        self.run = {"id": c.BASELINE["run_id"], "head_sha": c.BASELINE["commit"],
+                    "repository": {"full_name": c.BASELINE["repository"]},
+                    "status": "completed", "conclusion": "success"}
+        self.job = {"id": c.BASELINE["job_id"], "run_id": c.BASELINE["run_id"],
+                    "head_sha": c.BASELINE["commit"], "labels": ["macos-15-intel"],
+                    "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/job",
+                    "steps": [{"name": name, "status": "completed", "conclusion": "success"} for name in (
+                        "Require macOS 15 Intel and the macOS 15 SDK",
+                        "Strict KPI guards (core, framebuffer and AGDC)",
+                        "Strict accelerator KPI guard (names and providers only)")]}
+        self.artifacts = {"artifacts": [{**entry, "workflow_run": {
+            "id": c.BASELINE["run_id"], "head_sha": c.BASELINE["commit"]}} for entry in c.ARTIFACTS.values()]}
+        self.logs = {"toolchain.log": b"ProductVersion: 15.7.9\nBuildVersion: 24G830\nXcode 16.4\n"
+                     b"Build version 16F6\n/SDKs/MacOSX15.5.sdk\nTarget: x86_64-apple-darwin24.6.0\n",
+                     "kpi-strict.log": b"", "kpi-accelerator-report.log": b"",
+                     "kext.log": b"undefined symbols (must all come from the OSBundleLibraries in Info.plist):\n_public\n"}
+        self.files = {}
+        for name in c.BUNDLES:
+            prefix = name + ".kext/Contents/"
+            self.files[prefix + "Info.plist"] = plistlib.dumps(info(name))
+            self.files[prefix + "MacOS/" + name] = fixture(name=name)
+            log = "kpi-accelerator-report.log" if name == "RDNA3Accelerator" else "kpi-strict.log"
+            self.logs[log] += ("kmutil_kpi_guard: ok %s.kext: 1 imports, 1 resolved by kmutil, "
+                               "checked against fixture-xnu too, libraries declared: com.apple.kpi.libkern\n" % name).encode()
+
+    def capture(self):
+        with tempfile.TemporaryDirectory(prefix="native-capture-test-") as temp:
+            directory = Path(temp)
+            for name, value in (("run.json", self.run), ("job.json", self.job), ("artifacts.json", self.artifacts)):
+                (directory / name).write_text(json.dumps(value), encoding="utf-8")
+            (directory / "native-job.log").write_bytes(b"".join(self.logs.values()))
+            binaries = {"rdna3-experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED.tar.gz": b"fixture tar"}
+            with patch.object(c, "read_zip", side_effect=[self.logs, binaries]), \
+                    patch.object(c, "read_tar", return_value=self.files):
+                return c.capture(directory)
+
+    def test_capture_requires_all_imports_resolved_without_warnings(self):
+        result = self.capture()
+        for name in c.BUNDLES:
+            guard = result["bundles"][name]["native_guard"]
+            self.assertEqual((guard["imports"], guard["resolved"], guard["unresolved_symbols"]), (1, 1, []))
+            self.assertEqual(guard["scope"], "native-name-level-guard")
+        logname = "kpi-accelerator-report.log"
+        original = self.logs[logname]
+        for text, message in ((original.replace(b"1 resolved", b"0 resolved"), "did not all resolve"),
+                              (original.replace(b"1 imports", b"2 imports"), "count or Info libraries disagree"),
+                              (b"kmutil_kpi_guard: WARN RDNA3Accelerator.kext: _public is exported by no kext\n"
+                               + original, "baseline KPI guard")):
+            with self.subTest(message=message), patch.dict(self.logs, {logname: text}), \
+                    self.assertRaisesRegex(ValueError, message):
+                self.capture()
+
+    def test_capture_rejects_wrong_provenance(self):
+        for mapping, key, value, message in (
+                (self.run, "id", 0, "wrong baseline run"),
+                (self.run, "head_sha", "0" * 40, "wrong baseline run"),
+                (self.job, "labels", ["macos-15"], "wrong/non-Intel baseline job"),
+                (self.artifacts["artifacts"][0], "digest", "sha256:" + "0" * 64, "wrong baseline artifact"),
+                (self.artifacts["artifacts"][0]["workflow_run"], "head_sha", "0" * 40, "wrong baseline artifact")):
+            with self.subTest(key=key, message=message), patch.dict(mapping, {key: value}), \
+                    self.assertRaisesRegex(ValueError, message):
+                self.capture()
+
+    def test_capture_rejects_missing_or_unsuccessful_strict_steps(self):
+        for step in self.job["steps"]:
+            for key, value in (("name", "old/non-strict step"), ("status", "in_progress"), ("conclusion", "failure")):
+                with self.subTest(step=step["name"], key=key), patch.dict(step, {key: value}), \
+                        self.assertRaisesRegex(ValueError, "baseline step not successful"):
+                    self.capture()
 
 
 class ArchiveTests(unittest.TestCase):
@@ -240,9 +315,12 @@ class ArchiveTests(unittest.TestCase):
             entry = manifest["bundles"][name]
             guard = entry["native_guard"]
             self.assertEqual(guard["imports"], len(entry["undefined_symbols"]))
-            self.assertEqual(guard["imports"] - guard["resolved"], len(guard["unresolved_symbols"]))
-            self.assertEqual(guard["scope"], "compile-and-import-contract-only" if name == "RDNA3Accelerator"
-                             else "native-name-level-guard")
+            self.assertEqual(guard["imports"], guard["resolved"])
+            self.assertEqual(guard["unresolved_symbols"], [])
+            self.assertEqual(guard["scope"], "native-name-level-guard")
+        accelerator = manifest["bundles"]["RDNA3Accelerator"]
+        self.assertEqual(accelerator["target"]["kmod_info"]["version"], "0.1")
+        self.assertEqual(accelerator["info_plist"]["CFBundleVersion"], "0.1.0")
 
 
 if __name__ == "__main__":

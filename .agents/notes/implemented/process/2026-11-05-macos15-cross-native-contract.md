@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-GitHub `macos-15-intel` 曾因 hosted runner 未领取任务失败，新的 Intel 任务仍排队。用户需要继续验证 RX 7600 XT / Navi33 / macOS 15 x86_64 源码，但不能把更容易获得的 ARM 主机当成 x86_64 内核环境，或为通过编译删掉目标功能。原生 `kmutil_kpi_guard.py` 本来就是静态符号名与 provider 检查，不创建 KC，也不检查父类 vtable、二进制 ABI 或实际加载。
+GitHub `macos-15-intel` 曾因 hosted runner 未领取任务失败，补充 cross 流程因此保留；现在生产枚举修正已取得真实 Intel 成功证据，固定契约需要随之刷新，而不是继续继承七个未解析名称。用户需要继续验证 RX 7600 XT / Navi33 / macOS 15 x86_64 源码，但不能把更容易获得的 ARM 主机当成 x86_64 内核环境，或为通过编译删掉目标功能。原生 `kmutil_kpi_guard.py` 本来就是静态符号名与 provider 检查，不创建 KC，也不检查父类 vtable、二进制 ABI 或实际加载。
 
 ## Decision
 
@@ -16,19 +16,19 @@ GitHub `macos-15-intel` 曾因 hosted runner 未领取任务失败，新的 Inte
 - `macos15_native_contract.py` 必须将当前每个 bundle 的全部 undefined symbols 与同 bundle 固定基线比较，允许子集，任何新增 import 都硬失败。失败表示未被这个证据覆盖，不表示该符号一定不兼容；更新基线需要真正的 Intel 验证与明确审查，CI 不自动捕获新 allowlist。
 - manifest 保留完整 Info 字典。身份、版本、全部 `OSBundleLibraries`、personalities、匹配、provider、`OSBundleRequired` 和其他元数据必须完全相同，包括值类型。仅 `accel` / `fb` / `agdc` 的 Makefile 明确插入的顶层 `RDNA3SourceHash` 是非绑定 buildstamp，允许其有效的 10 位十六进制值变化，并在日志记录基线值与当前值；不忽略任何其他字段，也不对 core 作此豁免。
 - 同时从真实 `_kmod_info` 定义的文件映射读取名称、版本、info_version，逐项保持基线身份，不能只相信 plist。当前 undefined symbols 还必须重新通过现有 `load_xnu_lists()` / `xnu_verdicts()` 的最新仓库导出策略；旧基线不能绕过以后更新的清单。
-- core / fb / agdc 只称“固定原生名称级 guard 契约未扩大”；accelerator 只称“编译和 import 契约未扩大，已有未解析导入仍未验证”，绝不称全量绑定通过。
+- 四个 bundle 的基线一律要求 imports 等于 resolved、无 WARN 或 unresolved，scope 均为 `native-name-level-guard`。新构建只称“固定原生名称级 guard 契约未扩大”，绝不称当前系统全量绑定、ABI 或硬件通过；不保留 accelerator 的旧报告特判或基线兼容路径。
 - 只使用 `contents: read`。基线已离线捕获并提交，CI 不需要 `actions: read` 或 GitHub token 下载旧制品。沿用既有固定 SHA 的 checkout / upload-artifact，制品名称明确标记 `CROSSCOMPILED-NOT-HARDWARE-VERIFIED`，附日志、许可证、来源与 libdrm 的原文许可材料；不下载或打包 GPU firmware，不安装或加载 kext。
 
 ### 不可变原生基线
 
-来源是 [run 41824849834 / job 126556846479](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41824849834/job/126556846479)，提交 `4712d9141572e2d5d88ea57e13d32e51bfc9408a`。GitHub API 的 run、Intel job 和对应 guard steps 均为成功，真实日志为 macOS `15.7.9` / build `24G830`、Xcode `16.4` / `16F6`、SDK `15.5`。
+来源是正式生产 [run 41896280472 / job 126806539895](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41896280472/job/126806539895)，提交 `fce68dbc2cb932a75cf5fd989c22cac4900910ff`，不是隔离候选。GitHub API 的 run、Intel job 和对应 guard steps 均为成功，真实日志为 macOS `15.7.9` / build `24G830`、Xcode `16.4` / `16F6`、SDK `15.5`。
 
 | 真实制品 | artifact ID | GitHub API digest（下载后逐字节核对） |
 | --- | --- | --- |
-| `experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED` | `13318597464` | `sha256:f3d6d0fd8b79e47c75608ab16d0b738ef9643bf890dc920834ca8ecbfb0b38e4` |
-| `experimental-macos15-compile-logs` | `13318682317` | `sha256:9d1d586b636e2a3b59a748c8cea8d5542784c855ff2360bc513c8b0441993db2` |
+| `experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED` | `13356645862` | `sha256:683cea32997d54fd3aced5cab577def0e91c97039cc64d7d4f0b41bd99060d36` |
+| `experimental-macos15-compile-logs` | `13354609881` | `sha256:5ffd537ee5e6c5edb48902b5226f1bb31f17e13c6860b6393a0ea09bfde5376d` |
 
-`capture` 只接受上述固定 run / job / commit / artifact ID / digest。捕获前检查每个 ZIP 成员的 CRC、原始及标准化路径、重复项和链接；TAR 同样检查路径和成员类型，不向工作区直接解压。manifest 额外保留 TAR、原 job 日志、每个 executable / Info 的 SHA256，完整导入集合、Info 和实际 Mach-O 身份，不手写“预期都通过”。
+`capture` 只接受上述固定 run / job / commit / artifact ID / digest。成功步骤必须包含真实 job 的 `Require macOS 15 Intel and the macOS 15 SDK`、`Strict KPI guards (core, framebuffer and AGDC)` 和 `Strict accelerator KPI guard (names and providers only)`；对应 ZIP 仍使用 `kpi-strict.log` / `kpi-accelerator-report.log`，日志路径不代表放宽 accelerator。捕获前检查每个 ZIP 成员的 CRC、原始及标准化路径、重复项和链接；TAR 同样检查路径和成员类型，不向工作区直接解压。manifest 额外保留 TAR、原 job 日志、每个 executable / Info 的 SHA256，完整导入集合、Info 和实际 Mach-O 身份，不手写 symbol list 或“预期都通过”。
 
 Windows 无 `nm`，捕获器使用 bounds-checked stdlib Mach-O64 parser，读取 `LC_SYMTAB` 中非 STAB、`N_UNDF`、`n_value == 0` 的符号。core 的完整集合与原 `kext.log` 的真实 `nm -u` 输出完全相同；四个数量均与同一 job 的 guard 日志交叉核验。Mac 新构建还强制要求 `xcrun nm -arch x86_64 -u` 与 parser 的集合相同。
 
@@ -37,19 +37,22 @@ Windows 无 `nm`，捕获器使用 bounds-checked stdlib Mach-O64 parser，读�
 | core | 484 | 484 | 严格名称级 guard |
 | framebuffer | 398 | 398 | 严格名称级 guard |
 | AGDC | 351 | 351 | 严格名称级 guard |
-| accelerator | 914 | 907 | 编译和报告；7 个 unresolved，完整名单保存在 manifest |
+| accelerator | 914 | 914 | 严格名称级 guard |
 
-原 core `kextlibs` 曾找不到全部 484 个符号，原脚本明确未将它计作验证；严格结果来自后续真实 `kmutil` guard，不能把这个跳过改称成功。原 accelerator 的实际 `kmod_info.version` 为 `0.1`，Info 的 `CFBundleVersion` 为 `0.1.0`；本工具如实保留这两个既有值，不改 driver 或凭格式相近宣称二者相同。
+本次 core `kextlibs` 仍找不到全部 484 个符号，原脚本明确未将它计作验证；严格结果来自后续真实 `kmutil` guard，不能把这个跳过改称成功。本次真实 accelerator 的 `kmod_info.version` 仍为 `0.1`，Info 的 `CFBundleVersion` 为 `0.1.0`；本工具如实捕获这两个既有值，不改 driver 或凭格式相近宣称二者相同。
+
+历史差异来源保留为 [旧 run 41824849834 / job 126556846479](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41824849834/job/126556846479)，提交 `4712d9141572e2d5d88ea57e13d32e51bfc9408a`；旧 manifest SHA256 为 `52abe8bccc5c3c3f126090dfc68d71d73359038885d0cbdb12bff77f805e9f3b`，accelerator 为 914 imports / 907 resolved，七个 unresolved 使用 typedef 编码的名称。新旧真实集合比较恰好删除七个旧名称、加入七个命名枚举名称，其他三个 bundle 的 import 集合不变；除已限定的 accelerator SourceHash 从 `3fd305652c` 变为 `60fcb24544` 外，完整 Info 契约及实际 Mach-O / kmod 身份均不变。差异依据是[生产枚举修复](../bug-fix/2026-11-05-macos15-accel-enum-types.md)后的真实制品，不从隔离探针复制允许集合。
 
 四个基线 `MH_KEXT_BUNDLE` 均没有 `LC_BUILD_VERSION` / `LC_VERSION_MIN_MACOSX`。因此不能声称从 kext 读到了 SDK 15.5；它们保持相同版本命令状态，并由实际 SDK 断言与显式 `SDK` 编译参数约束。五个用户工具则必须在实际 Mach-O 版本命令中记录 macOS 15.0 deployment / SDK 15.5。
 
 ### Testing
 
-- Windows 已实际执行 `python -I -B tools/ci/test_macos15_native_contract.py`，17 个测试通过，覆盖截断 / bad load command / 字符串边界、架构 / SDK 目标、实际 kmod 身份、子集、新 import、完整 Info 类型与内容变化、限定 SourceHash 豁免、accelerator 范围、最新 XNU 策略、nm 不一致，以及 artifact digest / CRC / 路径 / symlink 拒绝。
-- 对真实下载证据重新运行 `capture` 得到逐字节相同的 manifest；SHA256 为 `52abe8bccc5c3c3f126090dfc68d71d73359038885d0cbdb12bff77f805e9f3b`。证据目录的 `run.json` / `job.json` / `artifacts.json` 分别来自对应 GitHub API，`native-job.log` 来自 job logs API，两个 ZIP 来自固定 artifact archive API。认证只在进程内获取，对离开 `api.github.com` 的 HTTPS 重定向移除 Authorization，令牌不落盘、不打印。
-- 对经摘要和路径核验后置于独占临时目录的原生四个 kext 与五个用户工具运行 `python -B tools/ci/macos15_native_contract.py check <baseline-build>`，全部通过。这是旧二进制的离线交叉核验，不是 Windows 编译，也没有在 Windows 执行 Mac `nm`。
-- 既有 `tests/test_kmutil_kpi_guard.py` / `tests/test_kext_kpi_versions.py` 均通过；workflow 经已安装 PyYAML 解析，手动触发、只读权限、runner 和 action SHA 断言通过，6 个 `run` block 全部通过 Git Bash `bash -n`。三项 Note 门禁均实际通过。
-- 复现捕获：准备上述六份 API / artifact 文件后执行 `python3 tools/ci/macos15_native_contract.py capture <evidence-dir> tools/ci/data/macos15-native-contract.json`。新 workflow 执行 selftests、真实交叉编译和 `check build --nm`；本地没有 clang / make / Xcode，不提前声称这个新 workflow 已编译成功。
+- 生产 run 的 host 日志为 `153 passed, 0 failed, 6 skipped, 159 tests`，另有当时的 17 项 contract selftests；这证明 `fce68dbc` 的生产源码，不代替刷新后的 cross 执行。
+- Windows 已实际执行 `python -I -B tools/ci/test_macos15_native_contract.py`，20 个测试通过，保留截断 / bad load command / 字符串边界、架构 / SDK 目标、实际 kmod 身份、子集、新 import、完整 Info 类型与内容变化、限定 SourceHash 豁免、最新 XNU 策略、nm 不一致，以及 artifact digest / CRC / 路径 / symlink 拒绝。新增实际 `capture` 路径的无警告全解析、数量不符、错误 provenance、缺失或失败 strict step 拒绝；四模块均拒绝旧报告 scope、未完全 resolved 或非空 unresolved。
+- 从保存的真实六份 API / artifact 输入生成 manifest，再独立重复两次 `capture`，三者逐字节相同；SHA256 为 `867fa9715caae05f37a43f59cb83407322dd36c1da5a5e02bbf25f4be92d7261`。`run.json` / `job.json` / `artifacts.json`、`native-job.log` 和两个 ZIP 的原始证据保持不动；本轮仅离线读取，重新核对固定 artifact digest，不进行认证或网络下载。
+- 对经摘要和路径核验后置于独占临时目录的真实生产四个 kext 与五个用户工具运行 `python -B tools/ci/macos15_native_contract.py check <baseline-build>`，全部通过；重复 capture、check 日志及验证摘要保留。这是原生制品的离线交叉核验，不是 Windows 编译，也没有在 Windows 执行 Mac `nm`。
+- 两个修改的 Python 文件通过 AST 检查，既有 `tests/test_kmutil_kpi_guard.py` / `tests/test_kext_kpi_versions.py` 均通过；workflow 经已安装的用户 site PyYAML 解析（`-I` 会屏蔽它），手动触发、只读权限、runner、action SHA 和未调用 ARM KPI 解析断言通过，6 个 `run` block 全部通过 Git Bash `bash -n`。三项 Note 门禁均实际通过。
+- 复现捕获：准备上述六份 API / artifact 文件后执行 `python3 tools/ci/macos15_native_contract.py capture <evidence-dir> tools/ci/data/macos15-native-contract.json`。workflow 继续执行 selftests、真实交叉编译和 `check build --nm`；刷新后的版本需由主代理提交后实际 dispatch，本地没有 Xcode，不提前声称这个版本已交叉编译成功。
 
 ## Alternatives considered
 
@@ -63,6 +66,6 @@ Windows 无 `nm`，捕获器使用 bounds-checked stdlib Mach-O64 parser，读�
 
 本篇与[既有 GitHub CI 决定](2026-11-04-github-hosted-validation.md)部分重叠，只增加补充手动证据，其 native / accelerator / 硬件边界仍保留。新建时检索所有活跃 Note；固件基础、SMU 状态、SMU PM 和 PSP ready 笔记只引用相同 CI 边界，与本篇流程决定无冲突，保持不动，无需吸收、归档或拒绝旧提案。
 
-[隔离枚举符号探针](2026-11-05-macos15-accel-symbol-probe.md) 另用真实 Intel 主机量测七个未解析方法的名称假设；它不修改这里的基线或扩大固定导入契约，也不把名称匹配当 ABI 或硬件完成。
+[隔离枚举符号探针](2026-11-05-macos15-accel-symbol-probe.md) 保留早期在真实 Intel 主机量测七个未解析方法名称假设的依据，其一次性入口已退役；它不是当前生产基线，也不把名称匹配当 ABI 或硬件完成。
 
-[生产枚举修复](../bug-fix/2026-11-05-macos15-accel-enum-types.md)使七个名称变更超出当前固定基线；在取得真实生产 native strict 证据前，本契约保持拒绝新增导入，不从隔离探针自动扩展允许集合。后续刷新须固定实际生产 run、job、制品与摘要。
+[生产枚举修复](../bug-fix/2026-11-05-macos15-accel-enum-types.md)的 `fce68dbc` 已取得上述真实生产 native strict 证据；本篇按相同固定证据流程刷新唯一基线，不改变补充 cross 决定，不增加多版本框架。以后的新增 import 仍须真实生产 Intel 验证与明确审查，不能从候选、探针或摘要自动扩展。
