@@ -12,7 +12,7 @@ Status: implemented
 
 - Ubuntu 执行完整离线 host 测试和工具构建；既有真实固件子用例的跳过会明确记录。
 - 独立的 Navi 32 / Navi 33 matrix 下载固定版本、SHA 校验的官方固件，并要求完整文件集和真实解析成功；下载或解析失败不能算作通过。
-- macOS 15 Intel / Xcode 16.4 编译四个 x86_64 kext 和必要用户态工具。core、framebuffer、AGDC 导入检查严格失败；accelerator 的私有未解析导入只报告，不冒充可加载验证。
+- macOS 15 Intel / Xcode 16.4 编译四个 x86_64 kext 和必要用户态工具。core、framebuffer、AGDC 和 accelerator 的导入检查均严格失败；accelerator 的旧“只报告”阶段已由[命名枚举修复](../bug-fix/2026-11-05-macos15-accel-enum-types.md)取代。名称/provider 检查仍不冒充 ABI 或可加载验证。
 - GPU 验证工作流只读仓库权限，不加载 kext、不访问实卡，不构建或验证 Metal / RADV / CTS。GPU 制品只包含二进制、plist 和日志，不含 GPU 固件；动态库必须以客户端的版本化 install name 一起打包。
 - [蓝牙候选](../../../../support/mtkbt/EXPERIMENT.md) 使用独立手动 workflow，先执行共享启动策略测试，再编译与核验内核导入。该作者加载器本来将未修改的 `_1_1` 固件嵌入二进制，因此制品保留全部原许可证和来源，不声称它是无固件制品；未知 ROM 或读取失败必须停止。CI 不安装或加载它，也不证明本机配对可用。
 - 无线辅助任务只编译与 U 盘 MtkWlan 0.12.1 相同提交的 `mtkwifi`。源码 ZIP 固定提交与 SHA，直接调用已审阅的编译命令，不运行第三方安装脚本、CLI 或 LaunchDaemon；制品保留许可证和未验证联网的说明。这补齐作者 release 缺少预编译 CLI 的实际缺口，不代表 WPA2 可用。

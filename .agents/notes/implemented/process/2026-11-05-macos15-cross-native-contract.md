@@ -64,3 +64,5 @@ Windows 无 `nm`，捕获器使用 bounds-checked stdlib Mach-O64 parser，读�
 本篇与[既有 GitHub CI 决定](2026-11-04-github-hosted-validation.md)部分重叠，只增加补充手动证据，其 native / accelerator / 硬件边界仍保留。新建时检索所有活跃 Note；固件基础、SMU 状态、SMU PM 和 PSP ready 笔记只引用相同 CI 边界，与本篇流程决定无冲突，保持不动，无需吸收、归档或拒绝旧提案。
 
 [隔离枚举符号探针](2026-11-05-macos15-accel-symbol-probe.md) 另用真实 Intel 主机量测七个未解析方法的名称假设；它不修改这里的基线或扩大固定导入契约，也不把名称匹配当 ABI 或硬件完成。
+
+[生产枚举修复](../bug-fix/2026-11-05-macos15-accel-enum-types.md)使七个名称变更超出当前固定基线；在取得真实生产 native strict 证据前，本契约保持拒绝新增导入，不从隔离探针自动扩展允许集合。后续刷新须固定实际生产 run、job、制品与摘要。

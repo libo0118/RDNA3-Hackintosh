@@ -7,10 +7,10 @@
 #pragma once
 #include <libkern/c++/OSObject.h>
 #include <IOKit/IOService.h>
-typedef unsigned int IOAccelStereoMode;
-typedef unsigned int eDoSwap;
-typedef unsigned int eIOAccelSurfaceShapeBits;
-typedef unsigned int eLockType;
+enum IOAccelStereoMode : unsigned int;
+enum eDoSwap : unsigned int;
+enum eIOAccelSurfaceShapeBits : unsigned int;
+enum eLockType : unsigned int;
 class IOAccelAllocationInfo;
 class IOAccelBounds;
 class IOAccelChannel2;

@@ -41,7 +41,6 @@ jobs:
           echo '::notice::Offline mode: real-firmware subcases are intentionally skipped, not hardware passes.'
           make test CC=clang JOBS=4 RDNA3_FW_DIR= 2>&1 | tee build/ci-logs/host-tests.log
           python3 -I -B tools/ci/test_macos15_native_contract.py 2>&1 | tee build/ci-logs/cross-contract-selftests.log
-          python3 -I -B tools/ci/test_macos15_accel_symbol_probe.py 2>&1 | tee build/ci-logs/accel-symbol-probe-selftests.log
       - name: Compile portable host tools
         run: make tools CC=clang 2>&1 | tee build/ci-logs/host-tools.log
       - name: Preserve test and compiler logs
@@ -153,7 +152,7 @@ jobs:
             'EXPERIMENTAL: compilation only; RX7600XT/Navi33 hardware is NOT verified.' \
             "Commit: $GITHUB_SHA" \
             'No kext is installed or loaded. No boot, DisplayPort, Metal, RADV or real-firmware validation.' \
-            'Only the macOS 15 accelerator layout is compiled. Accelerator unresolved imports are reported, not validated.' \
+            'Only the macOS 15 accelerator layout is compiled. All four kext import/provider checks are strict name-level guards.' \
             'Metal plugin/translator, Vulkan probes, RADV, CTS and installers are outside this CI; firmware headers are checked in separate jobs.' \
             | tee build/ci-logs/EXPERIMENTAL.txt >> "$GITHUB_STEP_SUMMARY"
           test "$(uname -m)" = x86_64
@@ -175,10 +174,10 @@ jobs:
           python3 tools/ci/kmutil_kpi_guard.py \
             build/RDNA3Accel.kext build/RDNA3Framebuffer.kext build/RDNA3AGDC.kext \
             2>&1 | tee build/ci-logs/kpi-strict.log
-      - name: Accelerator import report (unresolved imports are not verified)
-        # Upstream's macOS 15 layout relies on OpenCore binding non-exported IOAcceleratorFamily2 symbols.
+      - name: Strict accelerator KPI guard (names and providers only)
+        # Native enum names match current providers; this does not prove ABI/vtable, loading or hardware.
         run: |
-          python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3Accelerator.kext \
+          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accelerator.kext \
             2>&1 | tee build/ci-logs/kpi-accelerator-report.log
       - name: Compile native libdrm and diagnostic tools (do not run against a GPU)
         run: make -C userspace 2>&1 | tee build/ci-logs/userspace.log

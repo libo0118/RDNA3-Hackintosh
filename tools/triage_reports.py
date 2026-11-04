@@ -133,7 +133,7 @@ def bootarg_level(args):
 
 # accel/Makefile's ACCEL_SRC_HASH inputs, in its order (tests/test_accel_hash_parity.py keeps them equal)
 ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h", "accel/rdna3accel_stubs.h",
-                    "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
+                    "accel/iofam/iofam_types.h", "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
                     "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h", "common/rdna3_flip_queue.h",
                     "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h",

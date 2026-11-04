@@ -1,4 +1,4 @@
-# Agent Note: macOS 15 Intel accelerator 的隔离枚举符号名探针
+# Agent Note: macOS 15 Intel accelerator 的隔离枚举符号名探针（已完成并退役）
 
 Status: implemented
 
@@ -6,11 +6,15 @@ Status: implemented
 
 [原生 run 41880017271 / job 126749743304](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41880017271/job/126749743304) 的真实环境是 macOS 15.7.9 / build 24G830、Xcode 16.4 / SDK 15.5。accelerator 的 914 个导入只有 907 个得到 provider；七个未解析名称覆盖 `IOAccelSurface` 的四个 shape / lock 方法、`IOAccelGLContext2::processSwap` 和两个 legacy display 类的 `setStereo`，对应参数仍编码成 `j`。
 
-`accel/iofam/iofam_types.h` 的四个类型目前是 `unsigned int` typedef。`gen_tahoe_fwd.py` 关于 macOS 26 命名枚举的注释不能证明 macOS 15 的实际签名；直接修改生产头或搬入 Tahoe 虚表槽位会把名称假设误当 ABI 证据。
+实验基线 [b97c2812 的 `iofam_types.h`](https://github.com/libo0118/RDNA3-Hackintosh/blob/b97c2812a8ee60352b356ea952a3654a5f8bb828/accel/iofam/iofam_types.h) 中四个类型是 `unsigned int` typedef。`gen_tahoe_fwd.py` 关于 macOS 26 命名枚举的注释不能证明 macOS 15 的实际签名；在取得原生证据前直接修改生产头或搬入 Tahoe 虚表槽位会把名称假设误当 ABI 证据。
 
 ## Decision
 
-独立 `.github/workflows/macos15-accel-symbol-probe.yml` 只接受手动 `workflow_dispatch`，使用 `macos-15-intel`，固定 Xcode 16.4 build 16F6 / SDK 15.5，并在运行时检查原生 x86_64、macOS 15 和 Kernel headers。`toolchain.log` 分别记录真实 `uname -r` 与 `sysctl -n kern.osrelease`，要求两者相同且为 Darwin 24。条件不符即失败，不改用 ARM 或其他 SDK。权限仅 `contents: read`，沿用仓库已有 SHA 固定的 checkout / upload-artifact。
+该一次性探针已完成原生对照实验并退役。当前 HEAD 删除探针 workflow、实现及五项专用 selftests，同时移除 regular host CI 中的调用；生产修正和持续验证由[四类型枚举修正](../bug-fix/2026-11-05-macos15-accel-enum-types.md)接管。实验实现仍固定保存在 b97c2812 的 [workflow](https://github.com/libo0118/RDNA3-Hackintosh/blob/b97c2812a8ee60352b356ea952a3654a5f8bb828/.github/workflows/macos15-accel-symbol-probe.yml)、[探针工具](https://github.com/libo0118/RDNA3-Hackintosh/blob/b97c2812a8ee60352b356ea952a3654a5f8bb828/tools/ci/macos15_accel_symbol_probe.py)和 [selftests](https://github.com/libo0118/RDNA3-Hackintosh/blob/b97c2812a8ee60352b356ea952a3654a5f8bb828/tools/ci/test_macos15_accel_symbol_probe.py)，本地已核验的日志和制品不删除。生产头改变后，旧探针要求的 typedef 对照前提不再成立，不保留兼容开关。
+
+### 已完成实验的隔离规则
+
+历史独立 workflow 只接受手动 `workflow_dispatch`，使用 `macos-15-intel`，固定 Xcode 16.4 build 16F6 / SDK 15.5，并在运行时检查原生 x86_64、macOS 15 和 Kernel headers。`toolchain.log` 分别记录真实 `uname -r` 与 `sysctl -n kern.osrelease`，要求两者相同且为 Darwin 24。条件不符即失败，不改用 ARM 或其他 SDK。权限仅 `contents: read`，沿用仓库已有 SHA 固定的 checkout / upload-artifact。以下规则描述 b97c2812 实验，不是当前生产流程：
 
 - 先在 checkout 构建正常 accelerator，对实际 x86_64 executable 执行 `nm -u`，并运行真实 `kmutil libraries -p ... --undef-symbols`。
 - 用 `git archive "$GITHUB_SHA"` 将同一提交的全部公开源码解压到 `RUNNER_TEMP` 内 `mktemp -d` 独占目录，不读取或复制本机私有数据。工具拒绝 checkout、临时根目录、符号链接头文件和发生漂移的头。
@@ -22,20 +26,24 @@ Status: implemented
 
 ### Testing
 
-本地入口为 `python -I -B tools/ci/test_macos15_accel_symbol_probe.py`，覆盖四处精确替换、源码副本边界、checkout 不变、漂移 / 重复声明拒绝、真实 baseline 集合要求、差异两侧精确检查，以及共享 guard 的正面 / 候选未解析 / 正常构建额外违规和对应 JSON。fixture 的 provider 是合成输入，不是 Apple 真实导出证据；手动 workflow 自身也执行这组 selftests，既有 regular host CI 也持续运行这五项测试。
+历史入口 `python -I -B tools/ci/test_macos15_accel_symbol_probe.py` 覆盖四处精确替换、源码副本边界、checkout 不变、漂移 / 重复声明拒绝、真实 baseline 集合要求、差异两侧精确检查，以及共享 guard 的正面 / 候选未解析 / 正常构建额外违规和对应 JSON。fixture 的 provider 是合成输入，不是 Apple 真实导出证据；手动 workflow 与 regular host CI 在退役前均执行这五项测试。
 
-Windows 已实际运行上述 5 个单元测试及既有 `tests/test_kmutil_kpi_guard.py`，均通过；两个新 Python 文件通过 AST 语法检查。PyYAML 解析与手动触发、只读权限、Intel runner、固定工具链路径、action SHA、制品白名单断言通过，6 个 `run` block 全部通过 Git Bash `bash -n`；三项 Note 门禁通过。实际 Mac 编译及原生 provider 探针必须在后续推送后由主代理运行，本次实现不提前宣称运行成功。
+探针建立时，Windows 已实际运行上述 5 个单元测试及既有 `tests/test_kmutil_kpi_guard.py`，均通过；两个 Python 文件通过 AST 语法检查。PyYAML 解析与手动触发、只读权限、Intel runner、固定工具链路径、action SHA、制品白名单断言通过，6 个 `run` block 全部通过 Git Bash `bash -n`；三项 Note 门禁通过。
+
+[原生 run 41891434029 / job 126789573723](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41891434029/job/126789573723) 在 b97c2812、真实 macOS 15.7.9 / build 24G830、Darwin 24.6.0、Xcode 16.4 / build 16F6 / SDK 15.5 上完成两次构建：正常对照为 914 imports / 907 resolved；只改四声明的临时候选仍为 914 imports，移除和新增恰好各七个，七个新名称的实际 provider 全部是 `com.apple.iokit.IOAcceleratorFamily2`。候选 strict guard 为 914/914、exit 0，JSON 为 `names-match-only`。仓库 XNU 清单标签不是该主机内核版本。
+
+该 run 的 [artifact 13353846855](https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41891434029/artifacts/13353846855) 仅含日志、JSON、公开 patch 与来源/范围说明，SHA256 为 `a9c1b7c285c085105c2e8094c0021003f38d2ae8c6f6ddacfdc5b3533434e390`，已下载核对；不包含可部署候选二进制。
 
 ## Alternatives considered
 
-- 直接改生产 typedef：差异最短，也可能修正名称，但尚无 macOS 15 当前 provider 证据，且会改变 ABI 假设，所以先用不可部署的临时候选量测。
+- 在实验前直接改生产 typedef：差异最短，也可能修正名称，但当时尚无 macOS 15 当前 provider 证据，且会改变 ABI 假设，所以先用不可部署的临时候选量测；量测完成后的生产决定另见上述修正笔记。
 - 直接复用 Tahoe forwarder / 虚表：已有生成逻辑，能够回答 macOS 26 的问题，但那不是 macOS 15 vtable 证据，本探针只改四个类型声明。
 - 复用 ARM 交叉编译或旧 unresolved manifest 作通过依据：无需等待 Intel runner，但无法观测当前 x86_64 provider，故保留现有跨编译契约不动，另设手动原生实验。
 
 ## Consequences
 
-收益是用同提交、同工具链对照实验回答“七个候选符号名是否由当前声明库导出”，而不污染生产源码或发布候选。代价是额外一次正常和一次临时 accelerator 构建，并严格依赖可用的 Intel runner 与固定工具链；名称或既有未解析集合改变时必须重新审查探针，不能自动扩大允许范围。
+收益是用同提交、同工具链对照实验回答“七个候选符号名是否由当前声明库导出”，而不污染当时生产源码或发布候选。代价是额外一次正常和一次临时 accelerator 构建，并严格依赖可用的 Intel runner 与固定工具链。问题已回答，退役避免对已失效的 typedef 基线继续重复实验；未来不同名称问题须独立审查，不能自动扩大允许范围。
 
-即使探针成功，也只证明当前符号名与 provider 匹配，不证明 ABI、父类 vtable、KC 链接、签名加载、macOS 启动、DP、Metal、RADV 或 RX 7600 XT 实卡。候选不得部署至用户 U 盘或 production，生产修改仍须独立评审与验证。
+这次成功只证明该环境下符号名与 provider 匹配，不证明 ABI、父类 vtable、KC 链接、签名加载、macOS 启动、DP、Metal、RADV 或 RX 7600 XT 实卡。探针不发布可部署候选；生产修改仍须独立评审与验证，不能用实验结果替代当前生产构建的 strict guard。
 
 新建时检索活跃 Note：与[GitHub CI 决定](2026-11-04-github-hosted-validation.md)及[固定原生交叉编译契约](2026-11-05-macos15-cross-native-contract.md)部分重叠，保留其已有验证边界，本篇只增加原生名称假设实验；命中的 Navi33 SMU / GFXHUB / UAPI 笔记不属于本流程决定，不改、不吸收、不归档。
