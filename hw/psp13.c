@@ -10,7 +10,6 @@
 
 /* amdgpu_psp.h */
 #define MBOX_TOS_READY_FLAG (GFX_FLAG_RESPONSE)
-#define MBOX_TOS_READY_MASK (GFX_CMD_RESPONSE_MASK | GFX_CMD_STATUS_MASK)
 #define MBOX_TOS_RESP_FLAG  (GFX_FLAG_RESPONSE)
 #define MBOX_TOS_RESP_MASK  (GFX_CMD_RESPONSE_MASK | GFX_CMD_STATUS_MASK)
 #define PSP_RING_TYPE__KM   2u
@@ -282,7 +281,8 @@ int psp13_ring_create(rdna3_psp *psp)
     uint64_t mc = rdna3_vram_mc(d, psp->ring);
     int ret;
 
-    ret = rdna3_wait_reg(d, C2P(psp, 64), MBOX_TOS_READY_FLAG, MBOX_TOS_READY_MASK, 0, 0);
+    /* Prior command status is not this ring-create response: amdgpu waits only for readiness. */
+    ret = rdna3_wait_reg(d, C2P(psp, 64), MBOX_TOS_READY_FLAG, MBOX_TOS_READY_FLAG, 0, 0);
     if (ret) {
         RERR(d, "PSP: trust OS not ready for ring creation (C2PMSG_64=0x%08x)",
              rdna3_rreg(d, C2P(psp, 64)));

@@ -156,6 +156,7 @@ typedef struct sim {
     unsigned nipfw;
     int tmr_setup, toc_loaded, autoload, autoload_after_rlc_g, smu_loaded;
     int tmr_after_smu;
+    unsigned tmr_ipfw_count;
     int smu_after_tmr;            /* LOAD_IP_FW SMU came after SETUP_TMR */
     /* trusted applications (LOAD_TA / LOAD_ASD / INVOKE_CMD / UNLOAD_TA):
      * live sessions, what was refused, DESTROY_TMR, the register list */
@@ -3828,6 +3829,7 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
     case GFX_CMD_ID_SETUP_TMR:
         S.tmr_setup = 1;
         S.tmr_after_smu = S.smu_loaded;
+        S.tmr_ipfw_count = S.nipfw;
         S.tmr_mc = cmd->cmd.cmd_setup_tmr.buf_phy_addr_lo |
                    ((uint64_t)cmd->cmd.cmd_setup_tmr.buf_phy_addr_hi << 32);
         if (!cmd->cmd.cmd_setup_tmr.bitfield.virt_phy_addr || cmd->cmd.cmd_setup_tmr.buf_size != 0x600000)
@@ -13944,6 +13946,38 @@ static void run(const char *fwdir)
         gmc11_hw_fini(&dev);
         CHECK(!(S.reg[MM_BASE0 + regMMVM_L2_CNTL] & MMVM_L2_CNTL__ENABLE_L2_CACHE_MASK));
         dev.amdgpu_exact = 0;
+    }
+
+    /* PSP-only 13.0.7 ordering: these are transport fixtures, not Navi33 firmware acceptance. */
+    {
+        static rdna3_psp p5;
+        rdna3_ipver saved_mp0 = dev.ipver[HWIP_MP0];
+        int saved_exact = dev.amdgpu_exact;
+        dev.ipver[HWIP_MP0].major = 13;
+        dev.ipver[HWIP_MP0].minor = 0;
+        dev.ipver[HWIP_MP0].rev = 7;
+        for (unsigned exact = 0; exact < 2; exact++) {
+            uint32_t first, smu_loads = 0;
+            sim_mode1_reset();
+            rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
+            dev.amdgpu_exact = (int)exact;
+            CHECK(psp13_init(&p5, &dev, sos, sos_len) == RDNA3_OK);
+            CHECK(p5.pmfw_centralized_cstate_management && !p5.boot_time_tmr);
+            CHECK(psp13_bootloader_load_all(&p5) == RDNA3_OK);
+            *R(MP0(64)) = 0x11;
+            CHECK(psp13_ring_create(&p5) == RDNA3_ETIME && !p5.ring_created);
+            *R(MP0(64)) = 0x80000011u;
+            first = S.nipfw;
+            CHECK(psp13_hw_init(&p5, &plan, blobs) == RDNA3_OK);
+            CHECK(S.tmr_after_smu && !S.smu_after_tmr);
+            CHECK(S.tmr_ipfw_count == first + 1);
+            for (uint32_t n = first; n < S.nipfw; n++)
+                smu_loads += S.ip_fw_types[n] == GFX_FW_TYPE_SMU;
+            CHECK(smu_loads == 1);
+            CHECK(psp13_hw_fini(&p5) == RDNA3_OK);
+        }
+        dev.ipver[HWIP_MP0] = saved_mp0;
+        dev.amdgpu_exact = saved_exact;
     }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "
