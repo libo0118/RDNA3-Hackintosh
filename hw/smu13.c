@@ -17,6 +17,25 @@
 #define ARG(d)  SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_82)
 #define RESP(d) SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_90)
 
+/* Linux v6.12 smu_v13_0_7_ppt.c / smu13_driver_if_v13_0_7.h.
+ * shortcut: 13.0.7 is mailbox-only, lift this boundary with its own PM ABI port. */
+#define SMU13_0_7_DRIVER_IF_VERSION 0x35
+static int check_mp1(rdna3_dev *d, int need_pm)
+{
+    const rdna3_ipver *mp1 = &d->ipver[HWIP_MP1];
+    if (!mp1->present || !mp1->num_base || mp1->major != 13 || mp1->minor != 0 ||
+        (mp1->rev != 0 && mp1->rev != 7 && mp1->rev != 10)) {
+        RERR(d, "SMU: unsupported MP1 discovery (present %u, segments %u, IP %u.%u.%u)",
+             mp1->present, mp1->num_base, mp1->major, mp1->minor, mp1->rev);
+        return RDNA3_ENODEV;
+    }
+    if (need_pm && mp1->rev == 7) {
+        RERR(d, "SMU: MP1 13.0.7 PM/control not ported (firmware status and basic mailbox only)");
+        return RDNA3_EOPNOTSUPP;
+    }
+    return RDNA3_OK;
+}
+
 static int poll_resp(rdna3_dev *d, uint32_t *resp)
 {
     uint32_t i;
@@ -43,7 +62,14 @@ static int decode(uint32_t resp)
 int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out)
 {
     uint32_t resp;
-    int ret = poll_resp(d, &resp);
+    /* The common 13.0.7 query IDs are mapped by smu_v13_0_7_message_map.
+     * Other driver-mailbox callers (VCN, DALNotPresent) need the PM port;
+     * the independent DAL mailbox is guarded in dcn32_clk.c. */
+    int ret = check_mp1(d, msg != PPSMC_MSG_TestMessage && msg != PPSMC_MSG_GetSmuVersion &&
+                          msg != PPSMC_MSG_GetDriverIfVersion);
+    if (ret)
+        return ret;
+    ret = poll_resp(d, &resp);
     if (ret) {
         RERR(d, "SMU: not ready for msg 0x%x (resp 0)", msg);
         return ret;
@@ -69,7 +95,16 @@ int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out)
 int smu13_hello(rdna3_dev *d, uint32_t *smu_version, uint32_t *if_version)
 {
     uint32_t v = 0;
-    int ret = smu13_send_msg(d, PPSMC_MSG_TestMessage, 0x1234, &v);
+    uint32_t expected_if;
+    int ret;
+    /* smu_start_smc_engine checks status before the version handshake.
+     * 13.0.0/10 keep their existing check in smu13_pm_init. */
+    if (d->ipver[HWIP_MP1].rev == 7) {
+        ret = smu13_check_fw_status(d);
+        if (ret)
+            return ret;
+    }
+    ret = smu13_send_msg(d, PPSMC_MSG_TestMessage, 0x1234, &v);
     if (ret)
         return ret;
     ret = smu13_send_msg(d, PPSMC_MSG_GetSmuVersion, 0, smu_version);
@@ -81,18 +116,29 @@ int smu13_hello(rdna3_dev *d, uint32_t *smu_version, uint32_t *if_version)
     RLOG(d, "SMU: PMFW %u.%u.%u, driver interface 0x%x",
          (*smu_version >> 16) & 0xff, (*smu_version >> 8) & 0xff, *smu_version & 0xff,
          *if_version);
-    if (*if_version != SMU13_0_0_DRIVER_IF_VERSION)
+    expected_if = d->ipver[HWIP_MP1].rev == 7 ? SMU13_0_7_DRIVER_IF_VERSION
+                                              : SMU13_0_0_DRIVER_IF_VERSION;
+    if (*if_version != expected_if)
         RLOG(d, "SMU: driver interface 0x%x differs from the header's 0x%x "
-             "(amdgpu goes on with a warning too)", *if_version, SMU13_0_0_DRIVER_IF_VERSION);
+             "(amdgpu goes on with a warning too)", *if_version, expected_if);
+    if (d->ipver[HWIP_MP1].rev == 7)
+        RLOG(d, "SMU: MP1 13.0.7 mailbox ready; power management is not ported");
     return RDNA3_OK;
 }
 
 int smu13_check_fw_status(rdna3_dev *d)
 {
-    uint32_t flags = rdna3_smn_rreg(d, RD_SMN_MP1_FIRMWARE_FLAGS);
+    uint32_t addr, flags;
+    int ret = check_mp1(d, 0);
+    if (ret)
+        return ret;
+    /* smu_v13_0_7_check_fw_status vs smu_v13_0_check_fw_status. */
+    addr = d->ipver[HWIP_MP1].rev == 7 ? RD_SMN_MP1_13_0_7_FIRMWARE_FLAGS
+                                       : RD_SMN_MP1_FIRMWARE_FLAGS;
+    flags = rdna3_smn_rreg(d, addr);
     if (flags & MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK)
         return RDNA3_OK;
-    RERR(d, "SMU: MP1 firmware flags 0x%x, PMFW not running", flags);
+    RERR(d, "SMU: MP1 firmware flags at 0x%x = 0x%x, PMFW not running", addr, flags);
     return RDNA3_EIO;
 }
 
@@ -123,6 +169,9 @@ int smu13_table_read(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t arg
 int smu13_table_write(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t arg,
                       const void *src, uint32_t size)
 {
+    int ret = check_mp1(d, 1);
+    if (ret)
+        return ret;   /* before the CPU copies a 13.0.0 ABI table into VRAM */
     if (!s->driver_table || size > RD_SMU_DRIVER_TABLE_SIZE)
         return RDNA3_EINVAL;
     rdna3_vram_write(d, s->driver_table, src, size);
@@ -397,6 +446,9 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
 
     for (i = 0; i < sizeof(*s); i++)
         ((uint8_t *)s)[i] = 0;
+    ret = check_mp1(d, 1);
+    if (ret)
+        return ret;
     s->pcie_gen_cap = pcie_gen_cap;
     s->pcie_width_cap = pcie_width_cap;
     s->scpm = scpm;
@@ -589,6 +641,9 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
 
 int smu13_mode1_reset(rdna3_dev *d)
 {
+    int ret = check_mp1(d, 1);
+    if (ret)
+        return ret;
     /* smu_v13_0_0_set_mode1_reset_param: param 0, the RAS fatal error
      * flag (1 << 16) needs RAS, which this card does not have.
      * __smu_cmn_send_debug_msg: param, message, response = 0; the PMFW
@@ -602,6 +657,9 @@ int smu13_mode1_reset(rdna3_dev *d)
 
 int smu13_pm_fini(rdna3_dev *d, rdna3_smu *s)
 {
+    int ret = check_mp1(d, 1);
+    if (ret)
+        return ret;
     if (d->amdgpu_exact) {
         /* smu_hw_fini -> smu_smc_hw_cleanup's disable_thermal_alert, then
          * smu_reset_mp1_state: UNLOAD only on a 13.0.10 without display
@@ -756,6 +814,9 @@ int smu13_pm_query(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, int od_
 {
     const SkuTable_t *sku = &s->pptable.SkuTable;
     uint32_t cur = 0, def = 0, max = 0, min = 0;
+    int ret = check_mp1(d, 1);
+    if (ret)
+        return ret;
 
     /* Ported from smu_v13_0_0_check_powerplay_table: the bits the setup
      * did not take (platform caps, OD limits, fan) */
@@ -2037,6 +2098,11 @@ int smu13_pmctl(rdna3_dev *d, rdna3_smu *s, const rdna3_pmctl_req *rq, rdna3_pmc
         rp->err = RDNA3_EINVAL;
         return rp->err;
     }
+    ret = check_mp1(d, 1);
+    if (ret) {
+        rp->err = ret;
+        return ret;   /* no 13.0.0 table decoding or fabricated pm_up in INFO */
+    }
     for (i = 0; i < RD_PMCTL_MAX_ARGS + 1; i++)
         in[i] = i < n ? rq->a[i] : 0;
 
@@ -2187,13 +2253,19 @@ int smu13_set_jpeg_enable(rdna3_dev *d, int enable)
 
 int smu13_disable_pmfw_state(rdna3_dev *d)
 {
+    int ret = check_mp1(d, 1);
+    if (ret)
+        return ret;
+    /* smu_v13_0_7_set_mp1_state never calls disable_pmfw_state. */
     rdna3_smn_wreg(d, RD_SMN_MP1_FIRMWARE_FLAGS, 0);
     return rdna3_smn_rreg(d, RD_SMN_MP1_FIRMWARE_FLAGS) == 0 ? RDNA3_OK : RDNA3_EINVAL;
 }
 
 int smu13_set_mp1_state(rdna3_dev *d, rdna3_smu *s, int mp1_state)
 {
-    int ret;
+    int ret = check_mp1(d, 1);
+    if (ret)
+        return ret;
     switch (mp1_state) {
     case RD_PP_MP1_STATE_UNLOAD:
         ret = smu13_send_msg(d, PPSMC_MSG_PrepareMp1ForUnload, 0x55, NULL);

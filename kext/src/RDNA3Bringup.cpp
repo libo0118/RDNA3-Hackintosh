@@ -958,7 +958,7 @@ bool RDNA3Bringup::hwInit()
         fSmuVersion = smuv;
         publish("RDNA3,SMUVersion", smuv);
         publish("RDNA3,SMUDriverIF", ifv);
-        publishString("RDNA3,Stage2", ret ? "failed: SMU" : "PSP + SMU up");
+        publishString("RDNA3,Stage2", ret ? "failed: SMU" : "PSP + SMU mailbox ready");
         if (ret)
             return false;
         /* smu_hw_init: power management, before the GMC like soc21's IP order */

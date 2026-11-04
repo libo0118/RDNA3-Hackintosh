@@ -75,6 +75,8 @@
  * SMN byte address MP1_Public (0x03b00000) | smnMP1_FIRMWARE_FLAGS
  * (0x3010024); 13.0.7 has its own 0x3010028 ---- */
 #define RD_SMN_MP1_FIRMWARE_FLAGS       0x03b10024u
+/* smu_v13_0_7_check_fw_status (Linux v6.12): read-only in this port. */
+#define RD_SMN_MP1_13_0_7_FIRMWARE_FLAGS 0x03b10028u
 #define MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK 0x1
 
 /* ---- GC 11.0.3 (asic_reg/gc/gc_11_0_3_offset.h / _sh_mask.h) ---- */

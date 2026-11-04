@@ -47,6 +47,9 @@ $(BUILD)/amd_fw_dump: tools/amd_fw_dump.c $(COMMON) $(COMMON_H) | $(BUILD)
 $(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_audio.inc tests/sim_display_pstate.inc tests/sim_display_freesync.inc tests/sim_dc_irq.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/sim_navi32.c $(COMMON) $(HW) $(UAPI)
 
+$(BUILD)/test_smu13: tests/test_smu13.c $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_smu13.c $(COMMON) $(HW) $(UAPI)
+
 $(BUILD)/test_uapi: tests/test_uapi.c $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_uapi.c $(COMMON) $(UAPI)
 
@@ -252,7 +255,7 @@ TESTJOBS = $(if $(findstring -j,$(MAKEFLAGS)),,-j$(if $(JOBS),$(JOBS),$(NPROC)))
 
 # the tests without arguments: shell and python tests (the slow ones first, they need no build and run while the
 # binaries compile; make starts the targets in this order), then the binaries
-C_TESTS := test_discovery test_uapi test_range_alloc test_vram_place test_bo_map test_bo_map_race \
+C_TESTS := test_discovery test_smu13 test_uapi test_range_alloc test_vram_place test_bo_map test_bo_map_race \
     test_linear_pitch test_gpu_time_queue test_ab_switch test_drawable_defer test_gsub_empty test_surface_share test_ws_share test_surf_census test_surfin_cache test_ci_refl \
     test_copy_pack test_msupload test_msdl test_spirv_fbfetch test_fbfetch_plan test_agdc_k5 test_agdc_n48 \
     test_bootargs test_a3_display test_gamma_judge test_swap_front test_attr_ring test_bar_window \

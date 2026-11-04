@@ -1,0 +1,105 @@
+name: MtkBt guarded 7009 (offline build only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guarded-7009:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      MTKBT_COMMIT: 377ff232be3ec62ecd6548878edf769226a398cb
+      MTKBT_ARCHIVE_SHA256: 3254bc7f5b964201aa7b253bb06a209af970eac2da5a59c67e99b727190749e4
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout reviewed overlay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Verify toolchain and fixed author source, then apply patch
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/mtkbt-xcode.txt"
+          grep -qx 'Xcode 16.4' "$RUNNER_TEMP/mtkbt-xcode.txt"
+          test "$(uname -m)" = x86_64
+          archive="$RUNNER_TEMP/mtkbt-source.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --show-error --retry 2 --max-time 180 \
+            "https://codeload.github.com/watchthelight-labs/WTLMtkBluetooth/tar.gz/$MTKBT_COMMIT" -o "$archive"
+          printf '%s  %s\n' "$MTKBT_ARCHIVE_SHA256" "$archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          src="$RUNNER_TEMP/WTLMtkBluetooth-$MTKBT_COMMIT"
+          cp "$src/Info.plist" "$RUNNER_TEMP/mtkbt-original-Info.plist"
+          git -c core.autocrlf=false -C "$src" apply --check "$GITHUB_WORKSPACE/support/mtkbt/guarded-7009.patch"
+          git -c core.autocrlf=false -C "$src" apply "$GITHUB_WORKSPACE/support/mtkbt/guarded-7009.patch"
+
+      - name: Run shared startup policy host tests before building
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/WTLMtkBluetooth-$MTKBT_COMMIT"
+          xcrun clang++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            tests/startup-policy.cpp -o "$RUNNER_TEMP/mtkbt-startup-policy"
+          "$RUNNER_TEMP/mtkbt-startup-policy" | tee "$RUNNER_TEMP/mtkbt-host-test.txt"
+          python3 -I tests/check-plist.py "$RUNNER_TEMP/mtkbt-original-Info.plist" Info.plist
+
+      - name: Compile reviewed source in runner temp (no install or load)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/WTLMtkBluetooth-$MTKBT_COMMIT"
+          bash tools/build-mac.sh | tee "$RUNNER_TEMP/mtkbt-build.txt"
+
+      - name: Check signature, architecture, dependencies and exact match; package scope and licences
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/WTLMtkBluetooth-$MTKBT_COMMIT"
+          kext="$src/out/MtkBt.kext"
+          bin="$kext/Contents/MacOS/MtkBt"
+          dist="$RUNNER_TEMP/mtkbt-artifact"
+          mkdir -p "$dist"
+          codesign --force --sign - --timestamp=none "$kext"
+          codesign --verify --strict --verbose=2 "$kext"
+          codesign -d --verbose=4 "$kext" 2> "$dist/codesign.txt"
+          grep -q '^Signature=adhoc' "$dist/codesign.txt"
+          test "$(lipo -archs "$bin")" = x86_64
+          otool -hv "$bin" > "$dist/mach-header.txt"
+          grep -q KEXTBUNDLE "$dist/mach-header.txt"
+          otool -L "$bin" > "$dist/dylib-dependencies.txt"
+          if test -n "$(tail -n +2 "$dist/dylib-dependencies.txt")"; then
+            echo 'Unexpected dynamic-library dependency'; cat "$dist/dylib-dependencies.txt"; exit 1
+          fi
+          nm -u "$bin" > "$dist/undefined-symbols.txt"
+          if grep -Eq '(^|[[:space:]])_{2,3}(cxa_|Unwind|gxx_)' "$dist/undefined-symbols.txt"; then
+            echo 'Unexpected userspace C++ runtime symbols'; exit 1
+          fi
+          plutil -lint "$kext/Contents/Info.plist"
+          python3 -I "$src/tests/check-plist.py" "$RUNNER_TEMP/mtkbt-original-Info.plist" "$kext/Contents/Info.plist"
+          python3 "$GITHUB_WORKSPACE/tools/ci/kmutil_kpi_guard.py" "$kext" \
+            | tee "$dist/kernel-kpi-check.txt"
+          cp -R "$kext" "$dist/"
+          cp "$src/LICENSE" "$src/NOTICE.md" "$dist/"
+          cp -R "$src/LICENSES" "$dist/"
+          cp "$GITHUB_WORKSPACE/support/mtkbt/EXPERIMENT.md" "$dist/"
+          cp "$GITHUB_WORKSPACE/support/mtkbt/guarded-7009.patch" "$dist/"
+          cp "$RUNNER_TEMP/mtkbt-host-test.txt" "$RUNNER_TEMP/mtkbt-build.txt" "$dist/"
+          {
+            printf 'author-source-commit=%s\nsource-archive-sha256=%s\noverlay-commit=%s\n' \
+              "$MTKBT_COMMIT" "$MTKBT_ARCHIVE_SHA256" "$GITHUB_SHA"
+            xcodebuild -version
+            xcrun clang++ --version
+            shasum -a 256 "$dist/MtkBt.kext/Contents/MacOS/MtkBt" "$dist/MtkBt.kext/Contents/Info.plist" \
+              "$dist/guarded-7009.patch" "$src/firmware/BT_RAM_CODE_MT7925_1_1_hdr.bin"
+          } > "$dist/provenance.txt"
+
+      - name: Upload experimental build, not an installation
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: MtkBt-0.2.4-guarded-7009-x86_64
+          path: ${{ runner.temp }}/mtkbt-artifact/
+          if-no-files-found: error
+          retention-days: 7

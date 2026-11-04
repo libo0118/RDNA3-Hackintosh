@@ -1,0 +1,329 @@
+diff --git a/.agents/notes/implemented/bug-fix/2026-11-04-guarded-7009-startup.md b/.agents/notes/implemented/bug-fix/2026-11-04-guarded-7009-startup.md
+new file mode 100644
+index 0000000..2a98359
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-11-04-guarded-7009-startup.md
+@@ -0,0 +1,43 @@
++# Agent Note: 2c7c:7009 的 fail-closed 启动边界
++
++Status: implemented
++
++## Problem
++
++Linux 上游把 USB `2c7c:7009` 列为 MT7925，但 USB ID 不证明本机 ROM 修订与内置固件兼容。0.2.4 在 FW 版本读取失败时使用初始化的零值，非零 ROM 修订也继续发送唯一内置的 `_1_1` 固件；缺少接口端点或 interrupt pipe 时同样继续。仅增加匹配会把这些未知条件带到真实设备写入路径。
++
++## Decision
++
++- 以 `377ff232be3ec62ecd6548878edf769226a398cb` 为唯一基线，只增加真实 `2c7c:7009`、configuration 1、interface 0 的匹配，不伪装 ID，不改任何固件或寄存器常量。
++- 保留芯片低 16 位必须为 `7925` 的检查；FW 版本必须读取成功且低字节为零，才能使用 `_1_1`。FW flavor 的读取也必须成功，避免把失败读数发布为零。所有身份读取在既有 sleep-protection、下载、reset 和 FUNC_CTRL 写入之前完成。
++- 每次 session 都重新取端点，必须具有有效的 interrupt IN、bulk IN、bulk OUT 地址及可用的 interrupt pipe、buffer 和首次 read 提交。任何 post-open 失败都经过 `endSession()` 关闭接口并释放 pipe；复用的 buffer 仍由 `free()` 释放。`run()` 不再用笼统 open 错误覆盖具体 USB 错误。
++- `chipSeen` 只在上述身份检查成功后置位，拒绝的芯片或 ROM 不会在 stop / power-off 进入 FUNC_CTRL 0 路径。已有匹配在合法端点与支持 ROM 上保持原下载和恢复成功路径。
++- 三个小型边界谓词与端点地址校验位于 kernel-independent header，host assert 测试直接执行这些生产谓词，不搭建 IOKit 模拟架构。plist 检查与原始文件作完整字典比较，证明既有 ID 和依赖没有被改写。
++
++## Evidence
++
++- [Linux 精确 ID 提交](https://github.com/torvalds/linux/commit/7ed1d46c6bc2848469f8b0cefc43eef2c5d23536) 的描述符只是同 ID 样本，不作为本机端点实测。
++- [Linux 固定版本 btmtk.c](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/drivers/bluetooth/btmtk.c) 的 `btmtk_fw_get_filename` 对 MT7925 按 `(fw_ver & 0xff) + 1` 选择 `_1_x`，不是比较整个 FW 寄存器为零。
++- 新建前检查基线：无 `AGENTS.md` / `CLAUDE.md`，无活跃 `.agents/notes/` 或现成 ADR；无需合并、归档或废弃旧笔记。上游 `CONTRIBUTING.md` 要求小补丁与真实测试记录。
++
++## Alternatives considered
++
++- 只加 plist 匹配最小、也保持所有上游行为，但未知 ROM 和失败读数会继续下载，不能作为受保护候选。
++- 按 Linux 动态选择其他 `_1_x` 能覆盖更多 ROM，但本仓只有 `_1_1`，没有经审阅的其他固件与本机读数，因此拒绝未知版本，不引入下载器或兼容开关。
++- 完整模拟 IOKit 可覆盖异步生命周期，但成本远超这次边界修复；采用共同谓词的 host 测试加真实 macOS 编译，明确不把它们等同于 USB 实机测试。
++
++## Testing
++
++```sh
++clang++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/startup-policy.cpp -o /tmp/mtkbt-startup-policy
++/tmp/mtkbt-startup-policy
++python3 -I tests/check-plist.py /path/to/original/Info.plist Info.plist
++```
++
++host 测试覆盖支持版本、高位非零但低字节零、读失败、全部 255 个未知低字节、其他芯片、每种缺端点组合及非法地址。它执行共享判定与模拟下载计数，不执行 USB 请求，不证明内核异步清理或配对可用。Windows 准备环境没有 C/C++ 编译器，C++ 测试和 kext 编译必须由单独的 GitHub hosted macOS workflow 真正执行；本笔记不声称它们已通过。Python/plist、补丁应用、固件生成及笔记结构检查另有实际本地记录。
++
++## Consequences
++
++收益是未知芯片 / ROM / 缺端点不能进入固件写入，错误保留具体寄存器或端点信息，失败 session 不遗留独占 open。代价是先前容忍身份读取失败的设备现在拒绝启动，包括既有 USB ID；这是失败路径收窄，而不是兼容性承诺。
++
++候选仍包含上游的 sleep-protection、RAM 下载、warm-reboot reset 和 shutdown 写入；保护条件通过不代表这些硬件路径已获验证。本机真实 configuration / endpoints、芯片和 FW 寄存器未读取，CI 不提供这些证据。需要支持新的 ROM 时，应先取得实际读数、审阅对应固件，再更新唯一映像策略与测试；不能放宽当前保护。未增加 sleep / wake 支持，不声称 macOS 15 配对、音频或重启已可用。
+diff --git a/Info.plist b/Info.plist
+index 1341002..eb0a8b4 100644
+--- a/Info.plist
++++ b/Info.plist
+@@ -97,6 +97,23 @@
+ 			<key>idVendor</key>
+ 			<integer>3725</integer>
+ 		</dict>
++		<key>MT7925 Bluetooth, USB 2c7c:7009</key>
++		<dict>
++			<key>CFBundleIdentifier</key>
++			<string>org.watchthelight.MtkBt</string>
++			<key>IOClass</key>
++			<string>MtkBt</string>
++			<key>IOProviderClass</key>
++			<string>IOUSBHostInterface</string>
++			<key>bConfigurationValue</key>
++			<integer>1</integer>
++			<key>bInterfaceNumber</key>
++			<integer>0</integer>
++			<key>idVendor</key>
++			<integer>11388</integer>
++			<key>idProduct</key>
++			<integer>28681</integer>
++		</dict>
+ 	</dict>
+ 	<key>OSBundleLibraries</key>
+ 	<dict>
+diff --git a/src/MtkBt.cpp b/src/MtkBt.cpp
+index 15ae55b..61e8844 100644
+--- a/src/MtkBt.cpp
++++ b/src/MtkBt.cpp
+@@ -74,6 +74,7 @@
+ #include <kern/clock.h>
+ #include <stdarg.h>
+ #include <string.h>
++#include "MtkBtStartupPolicy.h"
+ 
+ extern "C" {
+ extern const unsigned int mtk_bt_fw_len;
+@@ -191,7 +192,7 @@ private:
+     bool subsysReset();
+     int funcOn();
+     void resyncEndpoints();
+-    void intrArm();
++    bool intrArm();
+     static void intrDone(void *owner, void *param, IOReturn status, uint32_t bytes);
+     void intrStopAndRelease();
+ };
+@@ -554,13 +555,18 @@ void MtkBt::intrDone(void *owner, void *, IOReturn status, uint32_t bytes) {
+ 
+ // HCI events the chip queues on the interrupt endpoint during setup are read and dropped (Linux has its interrupt
+ // URB running then too), so they cannot back up while the control endpoint is polled.
+-void MtkBt::intrArm() {
++bool MtkBt::intrArm() {
+     if (!intrPipe || !intrBuf || intrStop || aborted())
+-        return;
++        return false;
+     IOUSBHostCompletion c = {this, intrDone, nullptr};
+     intrBusy = true;
+-    if (intrPipe->io(intrBuf, (uint32_t)intrBuf->getLength(), &c, 0) != kIOReturnSuccess)
++    IOReturn r = intrPipe->io(intrBuf, (uint32_t)intrBuf->getLength(), &c, 0);
++    if (r != kIOReturnSuccess) {
+         intrBusy = false;
++        fail("interrupt ep %02x submit failed %08x", intrAddr, r);
++        return false;
++    }
++    return true;
+ }
+ 
+ void MtkBt::intrStopAndRelease() {
+@@ -577,6 +583,7 @@ void MtkBt::intrStopAndRelease() {
+ // Interface 0 endpoints from the configuration descriptor (bLength / bDescriptorType walk): interrupt IN for
+ // events, bulk IN/OUT for ACL. Only the interrupt pipe is used here; the bulk ones are only resynced after a reset.
+ void MtkBt::findEndpoints() {
++    intrAddr = bulkIn = bulkOut = 0;
+     const uint8_t *cfg = reinterpret_cast<const uint8_t *>(intf->getConfigurationDescriptor());
+     const uint8_t *idesc = reinterpret_cast<const uint8_t *>(intf->getInterfaceDescriptor());
+     if (!cfg || !idesc)
+@@ -623,16 +630,32 @@ bool MtkBt::openInterface(uint32_t timeoutMs) {
+ 
+ // Open interface 0 and start the interrupt drain. The caller holds lock.
+ bool MtkBt::beginSession(uint32_t timeoutMs) {
+-    if (!openInterface(timeoutMs))
++    if (!openInterface(timeoutMs)) {
++        if (!aborted())
++            fail("interface busy (open failed)");
++        return false;
++    }
++    step("endpoints");
++    findEndpoints();
++    if (!MtkBtStartupPolicy::hasRequiredEndpoints(intrAddr, bulkIn, bulkOut)) {
++        fail("invalid/missing interface 0 endpoints: intr-in %02x bulk-in %02x bulk-out %02x",
++             intrAddr, bulkIn, bulkOut);
++        endSession();
++        return false;
++    }
++    intrPipe = intf->copyPipe(intrAddr);
++    if (!intrBuf)
++        intrBuf = intf->createIOBuffer(kIODirectionIn, kIntrBufSize);
++    if (!intrPipe || !intrBuf) {
++        fail("interrupt ep %02x unavailable (pipe %s, buffer %s)", intrAddr,
++             intrPipe ? "ok" : "missing", intrBuf ? "ok" : "missing");
++        endSession();
++        return false;
++    }
++    intrStop = false;
++    if (!intrArm()) {
++        endSession();
+         return false;
+-    if (!intrAddr)
+-        findEndpoints();
+-    if (intrAddr) {
+-        intrPipe = intf->copyPipe(intrAddr);
+-        if (!intrBuf)
+-            intrBuf = intf->createIOBuffer(kIODirectionIn, kIntrBufSize);
+-        intrStop = false;
+-        intrArm();
+     }
+     return true;
+ }
+@@ -650,20 +673,27 @@ bool MtkBt::setup() {
+     step("chip id");
+     if (!regRead(kRegChipId, &devId))
+         return false;
+-    regRead(kRegFwVer, &fwVer);
+-    regRead(kRegFwFlavor, &flavor);
+     setProperty("MtkBtChipId", devId, 32);
+-    setProperty("MtkBtFwVersion", fwVer, 32);
+-    setProperty("MtkBtFwFlavor", (flavor & 0x80) >> 7, 32);
+-    say("chip %04x fw_ver %08x flavor %u", devId & 0xFFFF, fwVer, (flavor & 0x80) >> 7);
+-    if ((devId & 0xFFFF) != 0x7925) {
++    if (!MtkBtStartupPolicy::isMt7925(devId)) {
+         fail("not an MT7925, leaving it alone");
+         return false;
+     }
+-    chipSeen = true;   // from now on FUNC_CTRL 0 at shutdown makes sense
++    step("fw version");
++    bool versionRead = regRead(kRegFwVer, &fwVer);
+     // btmtk_fw_get_filename: mediatek/mt7925/BT_RAM_CODE_MT7925_1_%x_hdr.bin with (fw_ver & 0xff) + 1
+-    if ((fwVer & 0xFF) + 1 != 1)
+-        say("chip asks for BT_RAM_CODE_MT7925_1_%x_hdr.bin, carrying _1_1", (fwVer & 0xFF) + 1);
++    if (!MtkBtStartupPolicy::supportsFirmware(versionRead, fwVer)) {
++        if (versionRead)
++            fail("unsupported fw_ver %08x: needs BT_RAM_CODE_MT7925_1_%x_hdr.bin, carrying _1_1",
++                 fwVer, (fwVer & 0xFF) + 1);
++        return false;
++    }
++    setProperty("MtkBtFwVersion", fwVer, 32);
++    step("fw flavor");
++    if (!regRead(kRegFwFlavor, &flavor))
++        return false;
++    setProperty("MtkBtFwFlavor", (flavor & 0x80) >> 7, 32);
++    say("chip %04x fw_ver %08x flavor %u", devId & 0xFFFF, fwVer, (flavor & 0x80) >> 7);
++    chipSeen = true;   // only a supported chip/ROM may receive FUNC_CTRL 0 at shutdown
+ 
+     // pass 1 is the normal download; passes 2 .. kMaxResets + 1 each follow a subsystem reset
+     for (uint32_t pass = 1;; pass++) {
+@@ -762,7 +792,7 @@ void MtkBt::funcOff(const char *why) {
+     offDone = true;
+     offPath = true;
+     if (intf->isInactive() || !beginSession(kOffOpenTimeoutMs)) {
+-        say("%s: interface not free, func ctrl 0 skipped", why);
++        say("%s: session unavailable, func ctrl 0 skipped", why);
+     } else {
+         uint8_t off = 0, e[16] = {0};
+         int n = wmt(WMT_FUNC_CTRL, 0, &off, 1, e, sizeof(e));
+@@ -799,8 +829,6 @@ void MtkBt::run() {
+     state("loading");
+     step("open");
+     if (stopping || !beginSession(kOpenTimeoutMs)) {
+-        if (!stopping)
+-            fail("interface busy (open failed)");
+         state(stopping ? "stopped" : "error");
+         IOLockUnlock(lock);
+         return;
+diff --git a/src/MtkBtStartupPolicy.h b/src/MtkBtStartupPolicy.h
+new file mode 100644
+index 0000000..5dd81f1
+--- /dev/null
++++ b/src/MtkBtStartupPolicy.h
+@@ -0,0 +1,24 @@
++#ifndef MTK_BT_STARTUP_POLICY_H
++#define MTK_BT_STARTUP_POLICY_H
++
++#include <stdint.h>
++
++namespace MtkBtStartupPolicy {
++inline bool isMt7925(uint32_t chipId) { return (chipId & 0xFFFF) == 0x7925; }
++
++// btmtk_fw_get_filename: the embedded _1_1 image only covers a ROM revision of zero.
++inline bool supportsFirmware(bool versionRead, uint32_t fwVersion) {
++    return versionRead && (fwVersion & 0xFF) == 0;
++}
++
++inline bool validEndpoint(uint8_t address, bool input) {
++    return (address & 0x0F) != 0 && (address & 0x70) == 0 && ((address & 0x80) != 0) == input;
++}
++
++inline bool hasRequiredEndpoints(uint8_t interruptIn, uint8_t bulkIn, uint8_t bulkOut) {
++    return validEndpoint(interruptIn, true) && validEndpoint(bulkIn, true) &&
++           validEndpoint(bulkOut, false) && interruptIn != bulkIn;
++}
++} // namespace MtkBtStartupPolicy
++
++#endif
+diff --git a/tests/check-plist.py b/tests/check-plist.py
+new file mode 100644
+index 0000000..0916909
+--- /dev/null
++++ b/tests/check-plist.py
+@@ -0,0 +1,20 @@
++"""Check only the new match was added, preserving all existing personalities and KPI dependencies."""
++import plistlib
++import sys
++from pathlib import Path
++
++assert len(sys.argv) == 3, "usage: check-plist.py original-Info.plist candidate-Info.plist"
++original = plistlib.loads(Path(sys.argv[1]).read_bytes())
++candidate = plistlib.loads(Path(sys.argv[2]).read_bytes())
++assert candidate["IOKitPersonalities"].pop("MT7925 Bluetooth, USB 2c7c:7009") == {
++    "CFBundleIdentifier": "org.watchthelight.MtkBt",
++    "IOClass": "MtkBt",
++    "IOProviderClass": "IOUSBHostInterface",
++    "bConfigurationValue": 1,
++    "bInterfaceNumber": 0,
++    "idVendor": 0x2C7C,
++    "idProduct": 0x7009,
++}
++assert candidate == original, "existing matches, metadata or dependencies changed"
++assert "as.vit9696.Lilu" not in candidate["OSBundleLibraries"]
++print("plist: exact 2c7c:7009/configuration 1/interface 0 added; existing IDs and dependencies unchanged")
+diff --git a/tests/startup-policy.cpp b/tests/startup-policy.cpp
+new file mode 100644
+index 0000000..63367a2
+--- /dev/null
++++ b/tests/startup-policy.cpp
+@@ -0,0 +1,42 @@
++#include "../src/MtkBtStartupPolicy.h"
++#include <assert.h>
++#include <stdio.h>
++
++#ifdef NDEBUG
++#error These tests require assertions.
++#endif
++
++using namespace MtkBtStartupPolicy;
++
++// Simulated download boundary; the predicates here are the ones the kernel calls before any download.
++static unsigned downloadCalls(uint32_t chip, bool versionRead, uint32_t fw,
++                              uint8_t interruptIn = 0x81, uint8_t bulkIn = 0x82, uint8_t bulkOut = 0x02) {
++    unsigned calls = 0;
++    if (hasRequiredEndpoints(interruptIn, bulkIn, bulkOut) && isMt7925(chip) && supportsFirmware(versionRead, fw))
++        ++calls;
++    return calls;
++}
++
++int main() {
++    assert(downloadCalls(0x7925, true, 0) == 1);
++    assert(downloadCalls(0x8A007925, true, 0xABCD0100) == 1); // Linux selects by the low byte only.
++    assert(downloadCalls(0x7925, false, 0) == 0); // A failed read must not look like ROM revision zero.
++    assert(downloadCalls(0x7925, false, 0x12345678) == 0);
++    for (uint32_t revision = 1; revision <= 0xFF; ++revision)
++        assert(downloadCalls(0x7925, true, 0xABCD0000 | revision) == 0);
++    const uint32_t otherChips[] = {0, 0x7921, 0x7961, 0xFFFFFFFF};
++    for (uint32_t chip : otherChips)
++        assert(downloadCalls(chip, true, 0) == 0);
++
++    for (unsigned present = 0; present < 7; ++present)
++        assert(downloadCalls(0x7925, true, 0, (present & 1) ? 0x81 : 0,
++                             (present & 2) ? 0x82 : 0, (present & 4) ? 0x02 : 0) == 0);
++    assert(downloadCalls(0x7925, true, 0, 0x83, 0x84, 0x04) == 1); // No guessed endpoint numbers.
++    assert(!hasRequiredEndpoints(0x80, 0x82, 0x02)); // EP0 is control, never the event pipe.
++    assert(!hasRequiredEndpoints(0x01, 0x82, 0x02));
++    assert(!hasRequiredEndpoints(0x81, 0x02, 0x02));
++    assert(!hasRequiredEndpoints(0x81, 0x82, 0x82));
++    assert(!hasRequiredEndpoints(0x91, 0x82, 0x02));
++    assert(!hasRequiredEndpoints(0x81, 0x81, 0x02));
++    puts("startup-policy: supported ROM passes; failed/unknown ROM, other chips and missing/invalid endpoints reject");
++}

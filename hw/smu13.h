@@ -3,6 +3,8 @@
  * smu_cmn.c / smu_v13_0.c / smu_v13_0_0_ppt.c / amdgpu_smu.c (MIT). amdgpu
  * drives MP1 13.0.0 (Navi 31) and 13.0.10 (Navi 32) with smu_v13_0_0_ppt.c
  * and smu13_driver_if_v13_0_0.h.
+ * MP1 13.0.7 only has firmware-status and TestMessage/version queries here;
+ * its PM initialization, table transfers and mailbox controls are rejected.
  *
  * Mailbox: C2PMSG_66 = message, C2PMSG_82 = argument, C2PMSG_90 = response.
  *
@@ -91,11 +93,15 @@ extern "C" {
 #define PPSMC_MSG_EnableUCLKShadow      0x51
 #define PPSMC_MSG_DALNotPresent         0x4E
 
+/* Unknown/missing MP1 discovery fails before register access. 13.0.7 allows
+ * only TestMessage / GetSmuVersion / GetDriverIfVersion, not PM commands. */
 int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out);
 /* Waits for PMFW to be up (response register non-zero), then
- * TestMessage + GetSmuVersion + GetDriverIfVersion. */
+ * TestMessage + GetSmuVersion + GetDriverIfVersion. On 13.0.7 the firmware
+ * status check runs first, even when PM is disabled or not ported. */
 int smu13_hello(rdna3_dev *d, uint32_t *smu_version, uint32_t *if_version);
-/* smu_v13_0_check_fw_status: MP1_FIRMWARE_FLAGS.INTERRUPTS_ENABLED */
+/* smu_v13_0_check_fw_status / smu_v13_0_7_check_fw_status:
+ * MP1_FIRMWARE_FLAGS.INTERRUPTS_ENABLED at the discovered IP's address. */
 int smu13_check_fw_status(rdna3_dev *d);
 
 /* ---- power management ---- */

@@ -61,23 +61,6 @@ static uint32_t dal_wait(rdna3_dev *d)
     return r;
 }
 
-int dcn32_smu_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out)
-{
-    uint32_t r;
-    dal_wait(d);
-    rdna3_wreg(d, RD_DAL_RESP_REG, 0);
-    rdna3_wreg(d, RD_DAL_ARG_REG, arg);
-    rdna3_wreg(d, RD_DAL_MSG_REG, msg);
-    r = dal_wait(d);
-    if (r != RD_DALSMC_RESULT_OK) {
-        RERR(d, "DAL SMU message 0x%x(0x%x): %s 0x%x", msg, arg, r ? "answer" : "no answer", r);
-        return r ? RDNA3_EIO : RDNA3_ETIME;
-    }
-    if (out)
-        *out = rdna3_rreg(d, RD_DAL_ARG_REG);
-    return RDNA3_OK;
-}
-
 /* dcn32_smu_wait_for_response_delay: dal_wait adding up the time it waited */
 static uint32_t dal_wait_delay(rdna3_dev *d, uint32_t *total_delay_us)
 {
@@ -93,24 +76,50 @@ static uint32_t dal_wait_delay(rdna3_dev *d, uint32_t *total_delay_us)
     return r;
 }
 
+/* Both DAL send variants share this boundary; the driver mailbox's query
+ * whitelist cannot protect these independent, absolute registers. */
+static int dal_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out, uint32_t *total_delay_us)
+{
+    const rdna3_ipver *mp1 = &d->ipver[HWIP_MP1];
+    uint32_t r, delay1_us = 0, delay2_us = 0;
+    if (total_delay_us)
+        *total_delay_us = 2000000; /* a refusal must also end the status wait */
+    if (!mp1->present || !mp1->num_base || mp1->major != 13 || mp1->minor != 0 ||
+        (mp1->rev != 0 && mp1->rev != 10)) {
+        RERR(d, "DAL SMU: unsupported MP1 discovery (present %u, segments %u, IP %u.%u.%u); DAL ABI requires 13.0.0/10",
+             mp1->present, mp1->num_base, mp1->major, mp1->minor, mp1->rev);
+        return mp1->present && mp1->num_base && mp1->major == 13 && mp1->minor == 0 && mp1->rev == 7
+                   ? RDNA3_EOPNOTSUPP : RDNA3_ENODEV;
+    }
+    if (total_delay_us)
+        dal_wait_delay(d, &delay1_us);
+    else
+        dal_wait(d);
+    rdna3_wreg(d, RD_DAL_RESP_REG, 0);
+    rdna3_wreg(d, RD_DAL_ARG_REG, arg);
+    rdna3_wreg(d, RD_DAL_MSG_REG, msg);
+    r = total_delay_us ? dal_wait_delay(d, &delay2_us) : dal_wait(d);
+    if (total_delay_us)
+        *total_delay_us = delay1_us + (r == RD_DALSMC_RESULT_OK ? delay2_us : 2000000);
+    if (r != RD_DALSMC_RESULT_OK) {
+        RERR(d, "DAL SMU message 0x%x(0x%x): %s 0x%x", msg, arg, r ? "answer" : "no answer", r);
+        return r ? RDNA3_EIO : RDNA3_ETIME;
+    }
+    if (out)
+        *out = rdna3_rreg(d, RD_DAL_ARG_REG);
+    return RDNA3_OK;
+}
+
+int dcn32_smu_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out)
+{
+    return dal_send(d, msg, arg, out, NULL);
+}
+
 /* dcn32_smu_send_msg_with_param_delay: 1 when the PMFW answered OK; the
  * time spent (2 s added when it did not) */
 static int dcn32_smu_send_delay(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out, uint32_t *total_delay_us)
 {
-    uint32_t delay1_us, delay2_us;
-    *total_delay_us = 0;
-    dal_wait_delay(d, &delay1_us);
-    rdna3_wreg(d, RD_DAL_RESP_REG, 0);
-    rdna3_wreg(d, RD_DAL_ARG_REG, arg);
-    rdna3_wreg(d, RD_DAL_MSG_REG, msg);
-    if (dal_wait_delay(d, &delay2_us) == RD_DALSMC_RESULT_OK) {
-        if (out)
-            *out = rdna3_rreg(d, RD_DAL_ARG_REG);
-        *total_delay_us = delay1_us + delay2_us;
-        return 1;
-    }
-    *total_delay_us = delay1_us + 2000000;
-    return 0;
+    return dal_send(d, msg, arg, out, total_delay_us) == RDNA3_OK;
 }
 
 /* dcn32_smu_get_hard_min_status: the clocks whose hard minimum is in place */

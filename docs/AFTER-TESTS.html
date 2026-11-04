@@ -414,7 +414,9 @@ from the firmware (<code>dcn_3_2_0_dmcub.bin</code>).</p>
 <table id="step-5-t1" class="decision">
 <thead><tr><th>Symptom</th><th>Likely cause</th><th>Action</th></tr></thead>
 <tbody>
-<tr><td><code>MP1 firmware flags …, PMFW not running</code></td><td>PMFW not started</td><td>SMU blob in the plan; <code>smu_v13_0_check_fw_status</code></td></tr>
+<tr><td><code>MP1 firmware flags …, PMFW not running</code></td><td>PMFW not started</td><td>SMU blob in the plan; <code>smu_v13_0_check_fw_status</code> / <code>smu_v13_0_7_check_fw_status</code>. 13.0.7 的生产 <code>smu13_hello</code> 先检查 <code>0x03b10028</code>，失败时不发送查询，也不发布 mailbox ready；不能用旧 flags 或非零响应寄存器代替。</td></tr>
+<tr><td><code>discovery: MP1 X.Y.Z lacks register segment 0</code> / <code>unsupported MP1 discovery (present N, segments N, IP X.Y.Z)</code></td><td>缺少或不支持的 MP1 discovery / 实例 0 register segment</td><td>核对本卡 Linux discovery 的 MP1 base 数；停止 bring-up，不猜测 Navi 32 base。合法 base 0 与缺段不同。<code>test_smu13</code> 经真实 parser 检查两者，并验证拒绝时无 MMIO/SMN 访问。</td></tr>
+<tr><td><code>MP1 13.0.7 PM/control not ported</code> / <code>DAL ABI requires 13.0.0/10</code></td><td>刻意隔离的 Navi 33 PM 与独立 DAL mailbox ABI (<a href="DRIVER-PLAN.html#n78">N78</a>)</td><td>不启用 <code>7480</code>；取得本卡 Linux discovery / VBIOS 并移植独立 ABI。默认 UCLK pin 在 PM 初始化失败后仍会尝试启动，因此普通与 delay DAL 发送必须共同拒绝 13.0.7。<code>PSP + SMU mailbox ready</code> / IF <code>0x35</code> 不代表 PM、显示或 Metal 成功。</td></tr>
 <tr><td><code>not ready for msg … (resp 0)</code></td><td>mailbox offsets</td><td><code>smu_v13_0_0_init_msg_ctl</code> vs <code>hw/smu13.c</code></td></tr>
 <tr><td><code>SMUDriverIF</code> ≠ header version</td><td>PMFW vs <code>hw/gen/smu13_driver_if_v13_0_0.h</code></td><td>take the matching Linux header, regenerate, re-check struct sizes in the sim</td></tr>
 <tr><td><code>TransferTable…</code> / <code>EnableAllSmuFeatures failed</code></td><td>table address / mask</td><td>ask for a retest with <code>rdna3vm args "rdna3lvl=5 rdna3pmmask=&lt;minimal&gt;"</code>, then widen</td></tr>

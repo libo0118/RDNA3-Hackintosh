@@ -68,7 +68,8 @@ uint32_t dcn32_dentist_divider(uint32_t did);
 void dcn32_clk_read(rdna3_dev *d, rdna3_dcn_clocks *c);
 
 /* dcn32_smu_send_msg_with_param: 0, or RDNA3_ETIME when the PMFW does not
- * answer, RDNA3_EIO for any answer but OK */
+ * answer, RDNA3_EIO for any answer but OK. The DAL ABI is ported only for
+ * discovered MP1 13.0.0/10 with register segment 0; other IPs are refused. */
 int  dcn32_smu_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out);
 /* dcn30_smu_set_num_of_displays. NOT used: on the RX 7800 XT (PMFW 80.92,
  * driver interface 0x40) the driver mailbox stopped answering right after

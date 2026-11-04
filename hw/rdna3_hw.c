@@ -77,11 +77,17 @@ int rdna3_dev_set_discovery(rdna3_dev *d, const amd_discovery *disc)
             d->ipver[ip].minor = e->minor;
             d->ipver[ip].rev = e->revision;
             d->ipver[ip].present = 1;
+            d->ipver[ip].num_base = (uint8_t)k;
         }
     }
     if (!d->ipver[HWIP_GC].present || !d->ipver[HWIP_MP0].present ||
         !d->ipver[HWIP_NBIO].present) {
         RERR(d, "discovery lacks GC/MP0/NBIO");
+        return RDNA3_ENODEV;
+    }
+    if (d->ipver[HWIP_MP1].present && !d->ipver[HWIP_MP1].num_base) {
+        RERR(d, "discovery: MP1 %u.%u.%u lacks register segment 0",
+             d->ipver[HWIP_MP1].major, d->ipver[HWIP_MP1].minor, d->ipver[HWIP_MP1].rev);
         return RDNA3_ENODEV;
     }
     RLOG(d, "IP: GC %u.%u.%u MP0 %u.%u.%u MP1 %u.%u.%u NBIO %u.%u.%u HDP %u.%u.%u",

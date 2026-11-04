@@ -77,6 +77,7 @@ enum { RDNA3_LOG_ERR = 0, RDNA3_LOG_INFO = 1, RDNA3_LOG_DBG = 2 };
 typedef struct rdna3_ipver {
     uint8_t major, minor, rev;
     uint8_t present;
+    uint8_t num_base; /* retained segments of instance 0; base address 0 is valid */
 } rdna3_ipver;
 
 /* VRAM allocator: first-fit over a list of free ranges, no holes reuse
