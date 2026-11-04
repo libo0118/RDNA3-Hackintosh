@@ -7114,6 +7114,7 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
     ops.now_ns = uqo_now;
     make_discovery(&disc);
     rdna3_drm_device_init(&dd, &ops, &disc, 0x747E, 0xC8, 0, 16ull << 30, 256ull << 20, 8ull << 30);
+    rdna3_drm_device_set_asic_info(&dd, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20);
     CHECK(rdna3_drm_file_open(&dd, &f1) == 0);
 
     /* no user queues until the OS says so: no doorbell BOs, no queues */
@@ -10028,6 +10029,7 @@ static void test_vcn_uapi(rdna3_dev *dev, rdna3_gmc *gmc, rdna3_vcn *v)
     ops.submit = vcno_submit; ops.fence_signaled = vcno_signaled; ops.fence_wait = vcno_wait;
     make_discovery(&disc);
     rdna3_drm_device_init(&dd, &ops, &disc, 0x747E, 0xC8, 0, 16ull << 30, 256ull << 20, 8ull << 30);
+    rdna3_drm_device_set_asic_info(&dd, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20);
     CHECK(rdna3_drm_file_open(&dd, &f1) == 0);
 
     /* without the video block (rdna3vcn=0) nothing changes */
@@ -14041,10 +14043,223 @@ static void test_marketing_names(void)
 
 #include "sim_gfxhub11.inc"
 
+/* Synthetic GC 11.0.2 fixture, not a hardware discovery or firmware dump.
+ * Reuse the GFXHUB transport; only record the banked RS64 PC writes. */
+static struct { uint32_t reg, select, value; } gc2_pc[16];
+static unsigned gc2_pc_count;
+
+static void gc2_gfx_wr(void *ctx, uint64_t off, uint32_t value)
+{
+    uint32_t dw = (uint32_t)(off / 4);
+    switch (dw) {
+    case 0x3e44: case 0x3e59: case 0x3e45: case 0x3e79: case 0x8900: case 0x8938:
+        CHECK(gc2_pc_count < 16);
+        if (gc2_pc_count < 16) {
+            gc2_pc[gc2_pc_count].reg = dw;
+            gc2_pc[gc2_pc_count].select = gh11.reg[0x6900];
+            gc2_pc[gc2_pc_count].value = value;
+        }
+        gc2_pc_count++;
+        break;
+    }
+    gh11_wr(ctx, off, value);
+}
+
+static void test_navi33_gfx(void)
+{
+    /* Linux v6.12 gc_11_0_0_offset.h + synthetic segments 0x2000 / 0x6000.
+     * Expected addresses, selectors and packed PCs do not use register macros. */
+    static const struct {
+        uint32_t lo_reg, hi_reg, lo_value, hi_value, me, pipes;
+    } pc[] = {
+        { 0x3e44, 0x3e59, 0x848d159f, 0x5, 0, 2 },
+        { 0x3e45, 0x3e79, 0x61d950c8, 0xa, 0, 2 },
+        { 0x8900, 0x8938, 0xc4d5e6f7, 0xe, 1, 4 }
+    };
+    static const uint32_t start[3][2] = {
+        { 0x1234567c, 0x16 }, { 0x87654320, 0x29 }, { 0x13579bdc, 0x3b }
+    };
+    static const char *const names[3] = {
+        "gc_11_0_2_pfp.bin", "gc_11_0_2_me.bin", "gc_11_0_2_mec.bin"
+    };
+    uint8_t headers[3][64] = {{0}};
+    rdna3_dev dev;
+    rdna3_gmc gmc = {0};
+    rdna3_gfx_ring gr = {0};
+    rdna3_gfx_topo topo;
+    rdna3_rs64_start rs = {0};
+    rdna3_os os = {0};
+    amd_discovery disc;
+    const amd_fw_set *fw;
+    unsigned i, pipe, n = 0;
+    int ret;
+
+    memset(&gh11, 0, sizeof(gh11));
+    memset(gc2_pc, 0, sizeof(gc2_pc));
+    gc2_pc_count = 0;
+    gh11.base = 0x2000; gh11.req = 0x16ab; gh11.ack = 0x16bd;
+    gh11.fault = 0x15c4; gh11.status = 0x15c8;
+    os.udelay = gh11_delay; os.msleep = gh11_delay; os.vlog = gh11_log;
+    os.mmio_rd = gh11_rd; os.mmio_wr = gc2_gfx_wr; os.vram_written = gh11_vram_written;
+    rdna3_dev_init(&dev, &os, GH11_DWORDS * 4u);
+    make_discovery(&disc);
+    disc.ips[0].revision = 2;
+    disc.ips[0].base[0] = 0x2000; disc.ips[0].base[1] = 0x6000; disc.ips[0].base[2] = 0x10000;
+    CHECK(rdna3_dev_set_discovery(&dev, &disc) == RDNA3_OK);
+    fw = amd_fw_set_for_gc(dev.ipver[HWIP_GC].major, dev.ipver[HWIP_GC].minor, dev.ipver[HWIP_GC].rev);
+    CHECK(fw == &amd_navi33_fw_set);
+    if (!fw) return;
+    for (i = 0; i < 3; i++) {
+        CHECK(!strcmp(fw->blobs[AMD_BLOB_PFP + i], names[i]));
+        /* Header-only synthetic RS64 inputs: v2.0, start address at bytes 52/56. */
+        put32(headers[i], 64); put32(headers[i] + 4, 60); put16(headers[i] + 8, 2);
+        put32(headers[i] + 52, start[i][0]); put32(headers[i] + 56, start[i][1]);
+    }
+    CHECK(gfx11_rs64_from_fw(headers[0], 64, headers[1], 64, headers[2], 64, &rs) == RDNA3_OK);
+    CHECK(rs.pfp_lo == 0x1234567c && rs.pfp_hi == 0x16 && rs.me_lo == 0x87654320 && rs.me_hi == 0x29 &&
+          rs.mec_lo == 0x13579bdc && rs.mec_hi == 0x3b);
+
+    CHECK(gfx11_sw_init_topo(&topo, dev.ipver[HWIP_GC].major, dev.ipver[HWIP_GC].minor,
+                             dev.ipver[HWIP_GC].rev, -1, 1, -1) == RDNA3_OK);
+    CHECK(topo.gc_rev == 2 && topo.num_me == 1 && topo.me_pipes == 1 && topo.me_queues == 1 &&
+          topo.num_mec == 2 && topo.mec_pipes == 4 && topo.mec_queues == 4);
+    CHECK(topo.num_gfx_rings == 1 && topo.num_compute_rings == 8 && topo.me_bitmap[0] == 1 &&
+          topo.mec_bitmap[0] == 0x3333 && topo.mec_bitmap[1] == 0);
+    CHECK(topo.max_hw_contexts == 8 && topo.sc_prim_fifo_size_frontend == 0x20 &&
+          topo.sc_prim_fifo_size_backend == 0x100 && topo.sc_hiz_tile_fifo_size == 0 &&
+          topo.sc_earlyz_tile_fifo_size == 0x4c0);
+
+    dev.vram_cpu = calloc(1, 2u << 20);
+    CHECK(dev.vram_cpu != NULL);
+    if (!dev.vram_cpu) return;
+    dev.vram_cpu_len = 2u << 20;
+    dev.vram_size = 256u << 20;   /* model aperture, not a claim about physical VRAM */
+    dev.fb_start = 0x800000000ull; dev.fb_end = dev.fb_start + dev.vram_size - 1;
+    dev.fb_offset = 0x100000000ull;
+    dev.usec_timeout = 4;
+    dev.doorbell_ok = 1;
+    gr.async = 1;   /* production CP resume path; KIQ mapping / ready is not modeled here */
+    rdna3_vram_alloc_init(&dev, 4096, dev.vram_cpu_len);
+    ret = gmc11_init(&dev, &gmc, 16u << 20);
+    CHECK(ret == RDNA3_OK);
+    if (ret) goto out;
+
+    gh11.reg[0x79a2] = 0x5a5a1234;
+    gh11.reg[0xae82] = 0x80000000;
+    gh11.reg[0x2f40] = 1;   /* BOOTLOAD_COMPLETE alone is not enough: CP_STAT must be idle */
+    CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_ETIME && !gr.ready);
+    CHECK(gh11.errors == 1 && gh11.delayed == 4 && gc2_pc_count == 0 && !gmc.gfxhub_enabled);
+    gh11.reg[0x2f40] = 0;
+    gh11.reg[0xae82] = 0x7fffffff;   /* other status bits do not mean BOOTLOAD_COMPLETE */
+    CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_ETIME && !gr.ready);
+    CHECK(gh11.errors == 2 && gh11.delayed == 8 && gc2_pc_count == 0 && !gmc.gfxhub_enabled);
+    CHECK(gh11.reg[0x79a2] == 0x5a5a1234 && gh11.writes[0x79a2] == 0 && gh11.writes[0x3688] == 0);
+
+    gh11.reg[0xae82] = 0x80000000;
+    CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_OK && gr.async && !gr.ready);
+    CHECK(gh11.errors == 2 && gc2_pc_count == 16 && gmc.gfxhub_enabled);
+    for (i = 0; i < 3; i++)
+        for (pipe = 0; pipe < pc[i].pipes; pipe++) {
+            CHECK(gc2_pc[n].reg == pc[i].lo_reg && gc2_pc[n].select == 4 * pc[i].me + pipe &&
+                  gc2_pc[n].value == pc[i].lo_value);
+            n++;
+            CHECK(gc2_pc[n].reg == pc[i].hi_reg && gc2_pc[n].select == 4 * pc[i].me + pipe &&
+                  gc2_pc[n].value == pc[i].hi_value);
+            n++;
+        }
+    CHECK(gh11.writes[0x3688] == 1 && gh11.writes[0x36f3] == 1 && gh11.writes[0x3698] == 0);
+    CHECK(gh11.reads[0x79a2] == 1 && gh11.writes[0x79a2] == 1 && gh11.reg[0x79a2] == 0x7a5a1234);
+    gfxhub11_gart_disable(&dev, &gmc);
+out:
+    free(dev.vram_cpu);
+}
+
+static void test_navi33_vram_info(void)
+{
+    /* Independent synthetic ATOM ROM: VRAM_INFO 3.0 / 4238 bytes, no real ROM data. */
+    enum { ROM_HEADER = 0x80, DIRECTORY = 0xc0, TABLE = 0x200, TABLE_BYTES = 4238 };
+    static const uint16_t short_sizes[] = { 4, 64, 67 };
+    static const uint32_t modules[] = { 0, 1, 9 };
+    uint8_t rom[5120] = {0}, *t = rom + TABLE;
+    rdna3_vbios vb = {0};
+    rdna3_vbios_vram vr;
+    rdna3_dev dev;
+    rdna3_os os = {0};
+    uint16_t size;
+    uint8_t frev, crev;
+    unsigned i;
+
+    rom[0] = 0x55; rom[1] = 0xaa; rom[2] = sizeof(rom) / 512;
+    memcpy(rom + 0x30, " 761295520", 10);
+    put16(rom + 0x48, ROM_HEADER);
+    put16(rom + ROM_HEADER, 0x24); rom[ROM_HEADER + 2] = 2; rom[ROM_HEADER + 3] = 2;
+    memcpy(rom + ROM_HEADER + 4, "ATOM", 4);
+    put16(rom + ROM_HEADER + 0x20, DIRECTORY);
+    put16(rom + DIRECTORY, 4 + 2 * RD_ATOM_DT_COUNT);
+    rom[DIRECTORY + 2] = 2; rom[DIRECTORY + 3] = 1;
+    put16(rom + DIRECTORY + 4 + 2 * RD_ATOM_DT_VRAM_INFO, TABLE);
+    put16(t, TABLE_BYTES); t[2] = 3; t[3] = 0;
+    t[20] = 2; t[24] = 0x70; t[25] = 8; t[26] = 4;
+    put32(t + 28, 0xff);
+    t[64 + 3] = 0x31; t[132 + 3] = 0x46;   /* atom_vram_module_v3_0 is 68 bytes */
+    put32(t + 64 + 12, 1024); put32(t + 132 + 12, 2048);
+    rdna3_dev_init(&dev, &os, 0);
+    CHECK(vbios_parse(&dev, &vb, rom, sizeof(rom)) == RDNA3_OK);
+    CHECK(vbios_data_table(&vb, RD_ATOM_DT_VRAM_INFO, &size, &frev, &crev) == t &&
+          size == 4238 && frev == 3 && crev == 0);
+    /* v3.0 always uses the first vendor record, unlike the existing v2.5 tests. */
+    for (i = 0; i < 3; i++) {
+        memset(&vr, 0xa5, sizeof(vr));
+        CHECK(vbios_vram_info(&vb, modules[i], &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_GDDR6 &&
+              vr.width == 128 && vr.vendor == 1);
+    }
+    /* Linux v6.12 uses channel_num * 16, not channel_width, enable mask or per-channel size. */
+    t[26] = 5; put32(t + 28, 1); put32(t + 64 + 12, 4096);
+    CHECK(vbios_vram_info(&vb, 1, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_GDDR6 &&
+          vr.width == 128 && vr.vendor == 1);
+    t[26] = 4; put32(t + 28, 0xff); put32(t + 64 + 12, 1024);
+
+    put16(rom + DIRECTORY + 4 + 2 * RD_ATOM_DT_VRAM_INFO, 0);
+    CHECK(vbios_parse(&dev, &vb, rom, sizeof(rom)) == RDNA3_OK);
+    memset(&vr, 0xa5, sizeof(vr));
+    CHECK(vbios_vram_info(&vb, 0, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_UNKNOWN &&
+          vr.width == 0 && vr.vendor == 0);
+    put16(rom + DIRECTORY + 4 + 2 * RD_ATOM_DT_VRAM_INFO, TABLE);
+
+    /* A table within the ROM but too short for the first vendor is malformed. */
+    for (i = 0; i < 3; i++) {
+        put16(t, short_sizes[i]);
+        CHECK(vbios_parse(&dev, &vb, rom, sizeof(rom)) == RDNA3_OK);
+        memset(&vr, 0xa5, sizeof(vr));
+        CHECK(vbios_vram_info(&vb, 0, &vr) == RDNA3_EINVAL && vr.type == RD_VRAM_TYPE_UNKNOWN &&
+              vr.width == 0 && vr.vendor == 0);
+    }
+    put16(t, TABLE_BYTES);
+    t[3] = 1;
+    CHECK(vbios_parse(&dev, &vb, rom, sizeof(rom)) == RDNA3_OK);
+    memset(&vr, 0xa5, sizeof(vr));
+    CHECK(vbios_vram_info(&vb, 0, &vr) == RDNA3_EINVAL && vr.type == RD_VRAM_TYPE_UNKNOWN &&
+          vr.width == 0 && vr.vendor == 0);
+    t[2] = 4; t[3] = 0;
+    memset(&vr, 0xa5, sizeof(vr));
+    CHECK(vbios_vram_info(&vb, 0, &vr) == RDNA3_EINVAL && vr.type == RD_VRAM_TYPE_UNKNOWN &&
+          vr.width == 0 && vr.vendor == 0);
+    t[2] = 3;
+
+    /* Out-of-ROM tables are absent through the existing data-table API, not EINVAL. */
+    CHECK(vbios_parse(&dev, &vb, rom, TABLE + TABLE_BYTES - 1) == RDNA3_OK);
+    CHECK(vbios_data_table(&vb, RD_ATOM_DT_VRAM_INFO, NULL, NULL, NULL) == NULL);
+    memset(&vr, 0xa5, sizeof(vr));
+    CHECK(vbios_vram_info(&vb, 0, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_UNKNOWN &&
+          vr.width == 0 && vr.vendor == 0);
+}
+
 int main(int argc, char **argv)
 {
     test_marketing_names();
     test_gfxhub11();
+    test_navi33_gfx();
+    test_navi33_vram_info();
     run(NULL);
     if (argc > 1 && argv[1][0])
         run(argv[1]);

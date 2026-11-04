@@ -1818,49 +1818,26 @@ void RDNA3Bringup::pmInit()
             fOwner->drmSetVbios(fVbios.data, fVbios.len, &vi);
             BLOG("VBIOS %s, P/N %s, version %s, %s", vs.name, vs.pn, vs.ver_str, vs.date);
         }
+        fOwner->drmPublishVbiosMetadata(fDev, &fVbios);
         if (fAmdgpuExact) {
-            /* amdgpu_device_init: amdgpu_atomfirmware_get_clock_info
-             * (soc21_get_xclk = the spll reference), gmc_v11_0_sw_init:
-             * amdgpu_atomfirmware_get_vram_info (the module BIOS scratch 4
-             * names), amdgpu_ttm_reserve_tmr / psp_ras_initialize: the
-             * memory-training and dynamic-boot-config capabilities */
-            rdna3_vbios_clocks ck;
-            rdna3_vbios_vram vr;
             rdna3_vbios_boot bt;
-            uint32_t xclk = 0, module = 0;
-            int cr = vbios_clock_info(&fVbios, &ck);
-            if (cr == RDNA3_OK) {
-                xclk = ck.spll_ref * 10;
-                publish("RDNA3,XclkKHz", xclk);
-            } else {
-                BLOG("VBIOS: amdgpu_atomfirmware_get_clock_info failed (%d)", cr);
-            }
             int boot_result = fDev->ipver[HWIP_MP1].rev == 7
                 ? smu13_0_7_bootup_values(fDev, &fVbios, &bt) : vbios_bootup_values(fDev, &fVbios, &bt);
             if (boot_result == RDNA3_OK) {
-                const uint8_t *fwi = vbios_data_table(&fVbios, RD_ATOM_DT_FIRMWAREINFO, nullptr, nullptr, nullptr);
-                uint32_t scr = fwi ? (uint32_t)fwi[0x18] | ((uint32_t)fwi[0x19] << 8) |
-                                     ((uint32_t)fwi[0x1a] << 16) | ((uint32_t)fwi[0x1b] << 24) : 0;
-                if (scr)
-                    module = (rdna3_rreg(fDev, scr + 4) & 0x00ff0000) >> 16;
                 if (vbios_mem_training_supported(bt.firmware_capability))
                     BLOG("VBIOS: two-stage memory training requested (cap 0x%x): not done by this driver",
                          bt.firmware_capability);
                 if (vbios_dynamic_boot_config_supported(bt.firmware_capability))
                     BLOG("VBIOS: dynamic boot config (GECC) present (cap 0x%x): no RAS here",
                          bt.firmware_capability);
-            }
-            if (vbios_vram_info(&fVbios, module, &vr) == RDNA3_OK && vr.type) {
-                publish("RDNA3,VRAMType", vr.type);
-                publish("RDNA3,VRAMWidth", vr.width);
-                publish("RDNA3,VRAMVendor", vr.vendor);
             } else {
-                vr.type = vr.width = 0;
+                BLOG("VBIOS: boot metadata unavailable (%d); training / dynamic boot diagnostics unavailable",
+                     boot_result);
             }
-            fOwner->drmSetAsicInfo(xclk, vr.type, vr.width, 0);
         }
     } else {
-        BLOG("PM: VBIOS not readable (%d); non-SCPM Navi33 bootstrap will refuse it", ret);
+        publishString("RDNA3,VBIOSMetadata", "unavailable: read failed; prior or unknown DEV_INFO retained");
+        BLOG("PM: VBIOS not readable (%d); prior or unknown DEV_INFO metadata retained; non-SCPM Navi33 bootstrap will refuse it", ret);
     }
 
     /* smu_smc_hw_setup's pcie_gen / pcie_width from the link capability

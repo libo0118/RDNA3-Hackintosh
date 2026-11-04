@@ -37,3 +37,5 @@ Status: implemented
 新建前检索全部活跃 Note：[固件基础](../feature/2026-11-04-navi33-firmware-foundation.md)与本篇部分重叠，均坚持 discovery 选择与未知输入不回退。SMU 状态、PM bootstrap、Atom 板表及 PSP readiness 属于不同边界，保留原决定，不吸收、归档或改写；[GitHub CI](../process/2026-11-04-github-hosted-validation.md)及 [macOS 15 验证契约](../process/2026-11-05-macos15-cross-native-contract.md)的证据限制保持不变。没有需要废弃的提案。
 
 不改 `7480` IOKit 匹配、EFI、系统配置、固件或硬件通过记录。尚未实机启动，离线回归与 CI 均不能证明 RX 7600 XT 在 macOS 15 的初始化、出图、DP、Metal、功耗或恢复成功。
+
+[ASIC 元数据修复](2026-11-05-navi33-asic-metadata.md)在同一 DEV_INFO 边界继续检查真实 xclk / VRAM / MALL 消费条件；[GC2 / VRAM 合成回归](../testing/2026-11-05-navi33-gfx-vram-fixtures.md)为旧 Navi32 fixture 显式提供已知数据，身份用例不再依赖假全局默认。本篇 GC / NBIO / PCI revision 的独立选择不变。

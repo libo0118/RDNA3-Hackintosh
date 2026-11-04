@@ -468,6 +468,8 @@ static void dev_init(void)
     disc.ips[0].hw_id = AMD_HWID_GC; disc.ips[0].major = 11; disc.ips[0].revision = 3;
     disc.ips[1].hw_id = AMD_HWID_SDMA0; disc.ips[1].major = 6; disc.ips[1].revision = 3;
     rdna3_drm_device_init(&g_dev, &ops, &disc, 0x747E, 0xC8, 0, 16ull << 30, 256ull << 20, 8ull << 30);
+    /* Explicit synthetic Navi32 fixture, never a production-device default. */
+    rdna3_drm_device_set_asic_info(&g_dev, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20);
     rdna3_drm_device_set_enumeration_only(&g_dev, 1);
     rdna3_drm_device_set_ring_ready(&g_dev, AMDGPU_HW_IP_DMA, 1);   /* software SDMA */
     if (getenv("RDNA3_LB_GFX_NOP")) {   /* GFX/compute jobs accepted, not run (lb_submit) */

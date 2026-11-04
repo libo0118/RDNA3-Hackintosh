@@ -58,8 +58,11 @@ int main(void)
     CHECK(amdgpu_query_gpu_info(dev, &gi) == 0);
     CHECK(gi.asic_id == 0x747E && gi.family_id == AMDGPU_FAMILY_GC_11_0_0);
     CHECK(gi.num_shader_engines == 3 && gi.cu_active_number == 60);
+    CHECK(gi.vram_type == AMDGPU_VRAM_TYPE_GDDR6 && gi.vram_bit_width == 256 &&
+          gi.gpu_counter_freq == 100000);
     memset(&di, 0, sizeof(di));
     CHECK(amdgpu_query_info(dev, AMDGPU_INFO_DEV_INFO, sizeof(di), &di) == 0);
+    CHECK(di.vram_type == AMDGPU_VRAM_TYPE_GDDR6 && di.vram_bit_width == 256 && di.mall_size == (64ull << 20));
     /* no CP gfx shadowing on a physical function (gfx_v11_0_check_fw_cp_gfx_shadow) */
     CHECK(di.shadow_size == 0 && di.shadow_alignment == 0 && di.csa_size == 0 && di.csa_alignment == 0);
     printf("libdrm_amdgpu sees: %s, family %u, %u CUs\n",

@@ -747,6 +747,57 @@ void RDNA3Accel::drmSetAsicInfo(uint32_t xclkKhz, uint32_t vramType, uint32_t vr
     rdna3_drm_device_set_asic_info(fDrm, xclkKhz, vramType, vramWidth, mallSize);
 }
 
+void RDNA3Accel::drmPublishVbiosMetadata(rdna3_dev *dev, const rdna3_vbios *vbios)
+{
+    if (!vbios || !vbios->data || !vbios->len || !vbios->data_table) {
+        setProperty("RDNA3,VBIOSMetadata", "unavailable: no parsed VBIOS; prior or unknown DEV_INFO retained");
+        LOG("VBIOS: no parsed image for ASIC metadata; prior or unknown DEV_INFO retained");
+        return;
+    }
+    /* amdgpu_device_init: amdgpu_atomfirmware_get_clock_info /
+     * soc21_get_xclk, gmc_v11_0_sw_init: amdgpu_atomfirmware_get_vram_info.
+     * Neither depends on power initialization or the hardware-control profile. */
+    rdna3_vbios_clocks ck = {};
+    rdna3_vbios_vram vr = {};
+    uint32_t xclk = 0, module = UINT32_MAX;
+    int cr = vbios_clock_info(vbios, &ck);
+    if (cr == RDNA3_OK && ck.spll_ref) {
+        xclk = ck.spll_ref * 10;
+        setNumber("RDNA3,XclkKHz", xclk);
+    } else {
+        LOG("VBIOS: xclk unavailable (clock_info %d, reference %u); prior or unknown DEV_INFO retained",
+            cr, ck.spll_ref);
+    }
+    uint16_t fw_size = 0;
+    uint8_t fw_frev = 0, fw_crev = 0;
+    const uint8_t *fwi = vbios_data_table(vbios, RD_ATOM_DT_FIRMWAREINFO, &fw_size, &fw_frev, &fw_crev);
+    uint32_t scr = fwi && fw_frev == 3 && fw_crev <= 5 && fw_size >= 28
+        ? (uint32_t)fwi[0x18] | ((uint32_t)fwi[0x19] << 8) |
+          ((uint32_t)fwi[0x1a] << 16) | ((uint32_t)fwi[0x1b] << 24) : 0;
+    if (dev && scr)
+        module = (rdna3_rreg(dev, scr + 4) & 0x00ff0000) >> 16;
+    else
+        LOG("VBIOS: BIOS scratch module selection unavailable (firmware %u.%u, size %u, scratch 0x%x, register view %s)",
+            fw_frev, fw_crev, fw_size, scr, dev ? "present" : "absent");
+    /* VRAM_INFO 3.0 has global type/width; older tables need an actual module read. */
+    uint8_t vram_frev = 0;
+    vbios_data_table(vbios, RD_ATOM_DT_VRAM_INFO, nullptr, &vram_frev, nullptr);
+    int vram_result = module != UINT32_MAX || vram_frev == 3
+        ? vbios_vram_info(vbios, module, &vr) : RDNA3_ENOENT;
+    if (vram_result == RDNA3_OK && vr.type && vr.width) {
+        setNumber("RDNA3,VRAMType", vr.type);
+        setNumber("RDNA3,VRAMWidth", vr.width);
+        setNumber("RDNA3,VRAMVendor", vr.vendor);
+    } else {
+        LOG("VBIOS: VRAM metadata unavailable (result %d, module %u, type %u, width %u); prior or unknown DEV_INFO retained",
+            vram_result, module, vr.type, vr.width);
+        vr.type = vr.width = 0;
+    }
+    drmSetAsicInfo(xclk, vr.type, vr.width, 0);
+    setProperty("RDNA3,VBIOSMetadata", xclk && vr.type && vr.width ? "current" :
+                "incomplete: DEV_INFO retains prior or unknown fields");
+}
+
 void RDNA3Accel::drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz,
                               uint32_t maxMclkKhz)
 {
@@ -944,6 +995,18 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
         fDrm->gb_addr_config = 0x00000545; /* TODO: verify on hardware */
     setProperty("RDNA3,GBAddrConfig", fDrm->gb_addr_config, 32);
 
+    /* amdgpu_discovery_get_mall_info: metadata needs no harvesting MMIO or exact profile. */
+    if (fDiscSocOk && fDiscSoc.mall_size) {
+        rdna3_drm_device_set_asic_info(fDrm, 0, 0, 0, fDiscSoc.mall_size);
+        LOG("ASIC: MALL %llu bytes from discovery", (unsigned long long)fDiscSoc.mall_size);
+    } else {
+        LOG("ASIC: MALL size unknown (discovery %s); DEV_INFO keeps 0, not proof of no cache",
+            fDiscSocOk ? "has no size" : "unavailable");
+    }
+
+    /* displayInit already cached this image, before the async bring-up or rdna3pm gate. */
+    drmPublishVbiosMetadata(fDispDev, fDispVbios);
+
     /* harvesting (gfx_v11_0_get_cu_info / setup_rb) at rdna3lvl>=3, on the
      * display's register view; the bring-up thread, which also selects
      * SE/SA through GRBM_GFX_INDEX, has not started yet */
@@ -969,9 +1032,6 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
             uint32_t tcc = gfx11_get_tcc_info(fDispDev);
             rdna3_drm_device_set_tcc_disabled(fDrm, tcc);
             setProperty("RDNA3,TCCDisabledMask", tcc, 32);
-            /* amdgpu_discovery_get_mall_info: gmc.mall_size for DEV_INFO */
-            if (fDiscSocOk && fDiscSoc.mall_size)
-                rdna3_drm_device_set_asic_info(fDrm, 0, 0, 0, fDiscSoc.mall_size);
         }
     }
 
@@ -987,8 +1047,14 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
                                   "counter and VRAMLOST still report it");
     uint32_t enumOnly = 0;
     if (PE_parse_boot_argn("rdna3enum", &enumOnly, sizeof(enumOnly)) && enumOnly) {
-        rdna3_drm_device_set_enumeration_only(fDrm, 1);
-        LOG("rdna3enum=1: reporting accel_working + rings for enumeration; CS still fails");
+        if (rdna3_drm_device_has_asic_info(fDrm)) {
+            rdna3_drm_device_set_enumeration_only(fDrm, 1);
+            LOG("rdna3enum=1: reporting accel_working + rings for enumeration; CS still fails");
+        } else {
+            LOG("rdna3enum=1: refused: incomplete ASIC metadata (xclk %u kHz, type %u, width %u, MALL %llu, SE %u); hardware readiness unchanged",
+                fDrm->dev_info.gpu_counter_freq, fDrm->dev_info.vram_type, fDrm->dev_info.vram_bit_width,
+                (unsigned long long)fDrm->dev_info.mall_size, fDrm->dev_info.num_shader_engines);
+        }
     }
     LOG("DRM/amdgpu UAPI ready: VRAM %llu MiB (%llu MiB visible), user heap %llu MiB visible + "
         "%llu MiB beyond BAR0; of the visible part %llu MiB are the accelerator's reserve (%s), "

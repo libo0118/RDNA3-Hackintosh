@@ -153,9 +153,11 @@ public:
                                  const uint32_t ta[RD_TA_TYPES]);
     /* AMDGPU_INFO_VBIOS: a copy of the image and its strings */
     void          drmSetVbios(const uint8_t *image, uint32_t len, const struct drm_amdgpu_info_vbios *info);
-    /* rdna3amdgpu=1: DEV_INFO's xclk / VRAM type and width / MALL size
+    /* DEV_INFO's xclk / VRAM type and width / MALL size, independent of rdna3amdgpu,
      * from the VBIOS and the discovery binary (0 keeps a value) */
     void          drmSetAsicInfo(uint32_t xclkKhz, uint32_t vramType, uint32_t vramWidth, uint64_t mallSize);
+    /* Read-only ASIC metadata, shared by early cached VBIOS and PM refresh. */
+    void          drmPublishVbiosMetadata(struct rdna3_dev *dev, const struct rdna3_vbios *vbios);
     /* amdgpu_discovery_harvest_ip / _get_mall_info / _get_vcn_info, from
      * the binary readDiscovery parsed; nullptr when it failed */
     const amd_disc_soc *discSoc() const { return fDiscSocOk ? &fDiscSoc : nullptr; }

@@ -835,13 +835,18 @@ void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4
 /* gfx_v11_0_get_tcc_info's tcc_disabled_mask for DEV_INFO (rdna3amdgpu=1;
  * 0 otherwise, as before) */
 void rdna3_drm_device_set_tcc_disabled(rdna3_drm_device *dev, uint64_t mask);
-/* DEV_INFO values amdgpu takes from the VBIOS and the discovery binary
- * (rdna3amdgpu=1; the Navi 32 constants otherwise): gpu_counter_freq =
+/* DEV_INFO values amdgpu takes from the VBIOS and the discovery binary:
+ * gpu_counter_freq =
  * soc21_get_xclk (spll reference, kHz), vram_type / vram_bit_width =
  * amdgpu_atomfirmware_get_vram_info, mall_size = amdgpu_discovery_get_mall_info.
- * 0 leaves a value as it is. */
+ * Initial UNKNOWN/0 means not obtained, not physical capacity or no cache.
+ * DEV_INFO refuses missing xclk / VRAM metadata and the GFX11 multi-SE no-MALL
+ * combination Mesa cannot consume (Navi33 has an upstream MALL workaround).
+ * 0 leaves a value as it is, including a MALL-only update. */
 void rdna3_drm_device_set_asic_info(rdna3_drm_device *dev, uint32_t gpu_counter_freq_khz,
                                     uint32_t vram_type, uint32_t vram_bit_width, uint64_t mall_size);
+/* Same cached-metadata requirement as DEV_INFO, before diagnostic enumeration. */
+int rdna3_drm_device_has_asic_info(const rdna3_drm_device *dev);
 
 /* user queues (amdgpu_userq_funcs set for the IPs in 'ip_mask', 1 <<
  * AMDGPU_HW_IP_*): the MES runs, the ops are in place. 'doorbell_size' is

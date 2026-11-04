@@ -75,7 +75,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     di->num_shader_engines = se;
     di->num_shader_arrays_per_engine = sa;
     di->num_cu_per_sh = cu_per_sa;
-    di->gpu_counter_freq = 100000;        /* soc21_get_xclk(): 100 MHz, in kHz */
+    /* VBIOS xclk / VRAM and discovery MALL stay unknown until supplied. */
     /* placeholders until the SMU's DPM tables or the VBIOS boot clocks
      * arrive (rdna3_drm_device_set_clocks) */
     di->max_engine_clock = di->min_engine_clock = 2430000;
@@ -105,8 +105,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     di->pte_fragment_size = (1u << 9) * 4096;   /* fragment_size 9 */
     di->gart_page_size = 4096;
 
-    di->vram_type = AMDGPU_VRAM_TYPE_GDDR6;
-    di->vram_bit_width = 256;                    /* Navi 32: 4 MCDs x 64 bit */
+    di->vram_type = AMDGPU_VRAM_TYPE_UNKNOWN;
     if (disc->has_gc_info) {
         di->gc_double_offchip_lds_buf = gc->double_offchip_lds_buffer;
         di->wave_front_size = gc->wave_size;
@@ -122,7 +121,6 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
         di->gl1c_cache_size = gc->gl1c_size_per_instance * gc->gl1c_per_sa;
         di->gl2c_cache_size = gc->gl2c_per_gpu;
     }
-    di->mall_size = 64ull << 20;                 /* 64 MiB Infinity Cache (rdna3amdgpu=1: the MALL table) */
     di->pcie_gen = 4;
     di->pcie_num_lanes = 16;
 
@@ -200,6 +198,17 @@ void rdna3_drm_device_set_asic_info(rdna3_drm_device *dev, uint32_t gpu_counter_
         di->vram_bit_width = vram_bit_width;
     if (mall_size)
         di->mall_size = mall_size;
+}
+
+int rdna3_drm_device_has_asic_info(const rdna3_drm_device *dev)
+{
+    const struct drm_amdgpu_info_device *di = &dev->dev_info;
+    /* Mesa needs a real timestamp frequency and VRAM metadata. Its GFX11
+     * no-MALL path requires one SE; Navi33 has its own MALL calculation. */
+    return (dev->gc_ip_version == AMD_IP_VERSION(11, 0, 2) ||
+            dev->gc_ip_version == AMD_IP_VERSION(11, 0, 3)) &&
+           di->gpu_counter_freq && di->vram_type != AMDGPU_VRAM_TYPE_UNKNOWN && di->vram_bit_width &&
+           (dev->gc_ip_version == AMD_IP_VERSION(11, 0, 2) || di->mall_size || di->num_shader_engines == 1);
 }
 
 void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size)
@@ -4354,9 +4363,8 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
          * adev->gfx.cp_gfx_shadow (gfx_v11_0_check_fw_cp_gfx_shadow; not a
          * VF here, so never on this card), else they stay 0 */
         struct drm_amdgpu_info_device di;
-        if (dev->gc_ip_version != AMD_IP_VERSION(11, 0, 2) &&
-            dev->gc_ip_version != AMD_IP_VERSION(11, 0, 3))
-            return -RD_ENODEV;   /* no supported discovery identity */
+        if (!rdna3_drm_device_has_asic_info(dev))
+            return -RD_ENODEV;
         copy(&di, &dev->dev_info, sizeof(di));
         if (amd_gfx11_check_fw_cp_gfx_shadow(dev->gc_ip_version,
                                              dev->fw_version[AMDGPU_INFO_FW_GFX_ME],

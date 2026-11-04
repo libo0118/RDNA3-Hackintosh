@@ -170,9 +170,10 @@ void RDNA3Accel::displayReadVbios()
     fDispRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
     fDispVbios = (rdna3_vbios *)IOMalloc(sizeof(rdna3_vbios));
     fPaths = (rdna3_display_path *)IOMalloc(sizeof(rdna3_display_path) * RD_VBIOS_MAX_PATHS);
+    if (fDispVbios)
+        bzero(fDispVbios, sizeof(rdna3_vbios));
     if (!fDispRom || !fDispVbios || !fPaths)
         return;
-    bzero(fDispVbios, sizeof(rdna3_vbios));
     ret = vbios_read(fDispDev, fDispVbios, fDispRom, RD_VBIOS_MAX_LEN);
     if (ret != RDNA3_OK) {
         LOG("display: VBIOS not readable (%d), no display paths", ret);

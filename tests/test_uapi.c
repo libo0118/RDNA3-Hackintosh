@@ -567,10 +567,26 @@ int main(void)
     }
     /* amdgpu_query_info(DEV_INFO) */
     {
-        struct drm_amdgpu_info_device di;
+        struct drm_amdgpu_info_device di, untouched;
         uint32_t aw = 7;
+        CHECK(dev.dev_info.gpu_counter_freq == 0 && dev.dev_info.vram_type == AMDGPU_VRAM_TYPE_UNKNOWN &&
+              dev.dev_info.vram_bit_width == 0 && dev.dev_info.mall_size == 0);
+        memset(&untouched, 0xa5, sizeof(untouched));
+        memcpy(&di, &untouched, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == -RD_ENODEV);
+        CHECK(memcmp(&di, &untouched, sizeof(di)) == 0);
+        /* Explicit discovery-only and partial VBIOS updates cannot fabricate a device. */
+        rdna3_drm_device_set_asic_info(&dev, 0, 0, 0, 64ull << 20);
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == -RD_ENODEV);
+        CHECK(memcmp(&di, &untouched, sizeof(di)) == 0);
+        rdna3_drm_device_set_asic_info(&dev, 100000, AMDGPU_VRAM_TYPE_GDDR6, 0, 0);
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == -RD_ENODEV);
+        CHECK(memcmp(&di, &untouched, sizeof(di)) == 0);
+        rdna3_drm_device_set_asic_info(&dev, 0, 0, 256, 0);
         memset(&di, 0, sizeof(di));
         CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0);
+        CHECK(di.vram_type == AMDGPU_VRAM_TYPE_GDDR6 && di.vram_bit_width == 256 &&
+              di.gpu_counter_freq == 100000 && di.mall_size == (64ull << 20));
         CHECK(di.device_id == 0x747E && di.family == AMDGPU_FAMILY_GC_11_0_0);
         CHECK(di.external_rev == 0x20);
         CHECK(di.num_shader_engines == 3 && di.cu_active_number == 60);
@@ -606,14 +622,23 @@ int main(void)
         memset(&di, 0, sizeof(di));
         CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.tcc_disabled_mask == 0x10007);
         rdna3_drm_device_set_tcc_disabled(&dev, 0);
-        /* VBIOS / discovery values (rdna3amdgpu=1); 0 keeps */
+        /* Real VBIOS widths and MALL-only discovery updates; 0 keeps. */
+        rdna3_drm_device_set_asic_info(&dev, 27000, AMDGPU_VRAM_TYPE_GDDR6, 128, 0);
+        memset(&di, 0, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000 &&
+              di.vram_type == AMDGPU_VRAM_TYPE_GDDR6 && di.vram_bit_width == 128 && di.mall_size == (64ull << 20));
+        rdna3_drm_device_set_asic_info(&dev, 0, 0, 0, 96ull << 20);
+        memset(&di, 0, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000 &&
+              di.vram_type == AMDGPU_VRAM_TYPE_GDDR6 && di.vram_bit_width == 128 && di.mall_size == (96ull << 20));
         rdna3_drm_device_set_asic_info(&dev, 27000, AMDGPU_VRAM_TYPE_HBM, 4096, 96ull << 20);
         memset(&di, 0, sizeof(di));
         CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000 &&
               di.vram_type == AMDGPU_VRAM_TYPE_HBM && di.vram_bit_width == 4096 && di.mall_size == (96ull << 20));
         rdna3_drm_device_set_asic_info(&dev, 0, 0, 0, 0);
         memset(&di, 0, sizeof(di));
-        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000);
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000 &&
+              di.vram_type == AMDGPU_VRAM_TYPE_HBM && di.vram_bit_width == 4096 && di.mall_size == (96ull << 20));
         rdna3_drm_device_set_asic_info(&dev, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20);
         /* clocks from DPM: 500..2124 MHz gfx, 96..1218 MHz uclk; 0 keeps */
         rdna3_drm_device_set_clocks(&dev, 500000, 2124000, 96000, 1218000);
@@ -655,6 +680,7 @@ int main(void)
             id_disc.ips[0].revision = cases[i].gc & 0xff;
             rdna3_drm_device_init(&identity, &ops, &id_disc, cases[i].pci, cases[i].pci_rev,
                                   cases[i].chip_rev, 16ull << 30, 256ull << 20, 8ull << 30);
+            rdna3_drm_device_set_asic_info(&identity, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20);
             CHECK(identity.gc_ip_version == cases[i].gc);
             CHECK(identity.dev_info.external_rev == cases[i].external_rev);
             CHECK(rdna3_drm_file_open(&identity, &id_file) == 0);
@@ -670,6 +696,57 @@ int main(void)
             }
             rdna3_drm_file_close(&id_file);
             rdna3_drm_device_fini(&identity);
+            CHECK(vm_live == 1);
+        }
+    }
+    /* DEV_INFO is the input boundary for Mesa: no fake VRAM or cache,
+     * while its Navi33 MALL workaround and legal one-SE zero survive. */
+    {
+        static rdna3_drm_device metadata;
+        rdna3_drm_file meta_file;
+        amd_discovery meta_disc = disc;
+        struct drm_amdgpu_info_device di, untouched;
+        const struct {
+            uint8_t gc_rev;
+            uint32_t se, xclk, type, width;
+            uint64_t mall;
+            int result;
+        } cases[] = {
+            { 2, 2, 100000, AMDGPU_VRAM_TYPE_GDDR6, 128, 0, 0 },
+            { 3, 1, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 0, 0 },
+            { 3, 3, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 0, -RD_ENODEV },
+            { 2, 2, 100000, AMDGPU_VRAM_TYPE_UNKNOWN, 128, 0, -RD_ENODEV },
+            { 2, 2, 100000, AMDGPU_VRAM_TYPE_GDDR6, 0, 0, -RD_ENODEV },
+            { 3, 3, 100000, AMDGPU_VRAM_TYPE_UNKNOWN, 256, 64ull << 20, -RD_ENODEV },
+            { 3, 3, 100000, AMDGPU_VRAM_TYPE_GDDR6, 0, 64ull << 20, -RD_ENODEV },
+            { 3, 3, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20, 0 },
+            { 2, 2, 0, AMDGPU_VRAM_TYPE_GDDR6, 128, 0, -RD_ENODEV },
+            { 3, 1, 0, AMDGPU_VRAM_TYPE_GDDR6, 256, 0, -RD_ENODEV },
+            { 3, 3, 0, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20, -RD_ENODEV },
+        };
+        memset(&untouched, 0x5a, sizeof(untouched));
+        for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            meta_disc.ips[0].revision = cases[i].gc_rev;
+            meta_disc.gc.num_se = cases[i].se;
+            rdna3_drm_device_init(&metadata, &ops, &meta_disc, 0x747E, 0xC8, 0,
+                                  16ull << 30, 256ull << 20, 8ull << 30);
+            rdna3_drm_device_set_asic_info(&metadata, cases[i].xclk, cases[i].type, cases[i].width, cases[i].mall);
+            CHECK(rdna3_drm_device_has_asic_info(&metadata) == (cases[i].result == 0));
+            CHECK(rdna3_drm_file_open(&metadata, &meta_file) == 0);
+            memcpy(&di, &untouched, sizeof(di));
+            CHECK(info(&meta_file, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == cases[i].result);
+            if (cases[i].result) {
+                CHECK(memcmp(&di, &untouched, sizeof(di)) == 0);
+                /* Enumeration mode must not bypass missing real metadata. */
+                rdna3_drm_device_set_enumeration_only(&metadata, 1);
+                CHECK(info(&meta_file, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == -RD_ENODEV);
+                CHECK(memcmp(&di, &untouched, sizeof(di)) == 0);
+            } else {
+                CHECK(di.vram_type == cases[i].type && di.vram_bit_width == cases[i].width &&
+                      di.mall_size == cases[i].mall && di.num_shader_engines == cases[i].se);
+            }
+            rdna3_drm_file_close(&meta_file);
+            rdna3_drm_device_fini(&metadata);
             CHECK(vm_live == 1);
         }
     }
