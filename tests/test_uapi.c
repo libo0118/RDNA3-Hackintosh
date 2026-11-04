@@ -623,6 +623,56 @@ int main(void)
         CHECK(di.min_engine_clock == 500000 && di.max_engine_clock == 2124000 &&
               di.min_memory_clock == 96000 && di.max_memory_clock == 1218000);
     }
+    /* soc21_common_early_init: discovery chooses the offset; the NBIO
+     * chip revision and PCI product/revision stay distinct. */
+    {
+        static rdna3_drm_device identity;
+        rdna3_drm_file id_file;
+        amd_discovery id_disc = disc;
+        struct drm_amdgpu_info_device di, untouched;
+        const struct {
+            uint32_t gc;
+            uint16_t pci;
+            uint8_t pci_rev;
+            uint32_t chip_rev, external_rev;
+        } cases[] = {
+            { AMD_IP_VERSION(11, 0, 2), 0x7480, 0xC0, 0, 0x10 },
+            { AMD_IP_VERSION(11, 0, 2), 0x7480, 0xC0, 5, 0x15 },
+            { AMD_IP_VERSION(11, 0, 2), 0x7480, 0x01, 5, 0x15 },
+            { AMD_IP_VERSION(11, 0, 3), 0x747E, 0xC8, 5, 0x25 },
+            { AMD_IP_VERSION(11, 0, 3), 0x7480, 0xC0, 5, 0x25 },
+            { 0,                         0x7480, 0xC0, 5, 0 },
+            { AMD_IP_VERSION(11, 0, 0), 0x7480, 0xC0, 5, 0 },
+            { AMD_IP_VERSION(11, 0, 4), 0x7480, 0xC0, 5, 0 },
+            { AMD_IP_VERSION(11, 1, 2), 0x7480, 0xC0, 5, 0 },
+            { AMD_IP_VERSION(12, 0, 2), 0x7480, 0xC0, 5, 0 },
+        };
+        memset(&untouched, 0xa5, sizeof(untouched));
+        for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            id_disc.num_ips = cases[i].gc ? 1 : 0;
+            id_disc.ips[0].major = (cases[i].gc >> 16) & 0xff;
+            id_disc.ips[0].minor = (cases[i].gc >> 8) & 0xff;
+            id_disc.ips[0].revision = cases[i].gc & 0xff;
+            rdna3_drm_device_init(&identity, &ops, &id_disc, cases[i].pci, cases[i].pci_rev,
+                                  cases[i].chip_rev, 16ull << 30, 256ull << 20, 8ull << 30);
+            CHECK(identity.gc_ip_version == cases[i].gc);
+            CHECK(identity.dev_info.external_rev == cases[i].external_rev);
+            CHECK(rdna3_drm_file_open(&identity, &id_file) == 0);
+            memcpy(&di, &untouched, sizeof(di));
+            if (cases[i].external_rev) {
+                CHECK(info(&id_file, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0);
+                CHECK(di.device_id == cases[i].pci && di.pci_rev == cases[i].pci_rev);
+                CHECK(di.chip_rev == cases[i].chip_rev && di.external_rev == cases[i].external_rev);
+                CHECK(di.family == AMDGPU_FAMILY_GC_11_0_0);
+            } else {
+                CHECK(info(&id_file, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == -RD_ENODEV);
+                CHECK(memcmp(&di, &untouched, sizeof(di)) == 0);
+            }
+            rdna3_drm_file_close(&id_file);
+            rdna3_drm_device_fini(&identity);
+            CHECK(vm_live == 1);
+        }
+    }
     /* hw ip */
     {
         struct drm_amdgpu_info in;

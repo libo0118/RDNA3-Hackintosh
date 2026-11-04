@@ -53,6 +53,8 @@ Windows 本地没有 C compiler / make：没有声称新增 C、native kext 或�
 
 后续本机 VFCT 实际输入的 Atom 5.0/460 字节板表修复见[非 MMHUB 前缀决定](../bug-fix/2026-11-05-smc-board-prefix-padding.md)。它修正这里最初要求完整 wire BoardTable 的边界，其余 PM ABI 与分派决定保留。
 
+[GFXHUB 子阶段](2026-11-05-navi33-gfxhub.md) 补齐 GC 11.0.2 的 3.0 寄存器与专用 CP_DEBUG 步骤，覆盖 IRQ / 页表 / flush；它与本篇 PM ABI 决定并行，不改变 MMHUB、显示和实卡验证仍未完成的边界。
+
 收益是 13.0.7 不再只是被拒绝的安全子集：已有真正的版本专用表交换、特性/DPM 初始化和基础遥测生产实现。代价是增加私有 ABI 文件及中立摘要维护，外部表 ABI 变化必须重新审查，启动后失败时 firmware 可能已启用部分功能；不能以未经 Linux 证明的写命令“撤销”。
 
 本次审计三篇活跃 Note：[固件准备](2026-11-04-navi33-firmware-foundation.md) 与本篇部分重叠，保留固件选择和未绑定边界；[状态/mailbox](2026-11-04-navi33-smu-status-mailbox.md) 的部分拒绝边界由本篇取代，保留其状态/segment 原因并双向链接；[CI 决定](../process/2026-11-04-github-hosted-validation.md) 验证边界不变。无完全吸收或应删除的提案。

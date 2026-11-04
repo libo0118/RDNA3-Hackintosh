@@ -918,8 +918,8 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     uint64_t gtt = 8ull << 30;
     uint8_t rev = fPci->configRead8(kIOPCIConfigRevisionID);
     /* nbio_v4_3_get_rev_id: the chip revision is the NBIO strap, not the
-     * PCI revision; external_rev = rev_id + 0x20 for GC 11.0.3, which is
-     * how Mesa tells NAVI32 apart */
+     * PCI revision; soc21_common_early_init adds 0x10 for GC 11.0.2 or
+     * 0x20 for GC 11.0.3 to form Mesa's external_rev identity. */
     uint32_t revId = 0;
     if (fDispDev) {
         revId = rdna3_nbio_rev_id(fDispDev);

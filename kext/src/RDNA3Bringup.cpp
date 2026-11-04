@@ -288,8 +288,8 @@ void RDNA3Bringup::stopAndFree()
     ihSysFree();
     cohFree();   /* DRIVER-PLAN N54: the fence copy's page and the sysctls (the rings are stopped) */
     /* gfx_v11_0_hw_fini's gfxhub_v3_0_3_gart_disable with rdna3amdgpu=1 */
-    if (fAmdgpuExact && fGfx && fDev && fGmc)
-        gfxhub303_gart_disable(fDev);
+    if (fAmdgpuExact && fDev && fGmc && fGmc->gfxhub_enabled)
+        gfxhub11_gart_disable(fDev, fGmc);
     /* smu_hw_fini with rdna3amdgpu=1: the thermal alert off (no UNLOAD on
      * a card with display hardware) */
     if (fPmUp && fSmu && fDev && (fAmdgpuExact || fSmu->mp1_rev == 7))
@@ -306,7 +306,7 @@ void RDNA3Bringup::stopAndFree()
      * GART off */
     fIopGartReady = false;   /* N63: no IOP copy through the GART from here on */
     fIopGartHung = false;
-    if (fAmdgpuExact && fGmc && fDev)
+    if (fAmdgpuExact && fGmc && fDev && fGmc->mmhub_enabled)
         gmc11_hw_fini(fDev);
     /* ... and soc21_common_hw_fini last (IP block 0): doorbell apertures off */
     if (fAmdgpuExact && fDev && fDev->doorbell_ok)
@@ -1168,8 +1168,8 @@ bool RDNA3Bringup::hwInit()
         if (!ret)
             for (uint32_t id = 1; id < 16; id++)
                 if (fVmidUsed & (1u << id)) {
-                    gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
-                    gfxhub303_flush_tlb(fDev, id, 0);
+                    gfxhub11_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+                    gfxhub11_flush_tlb(fDev, id, 0);
                 }
         if (!ret && fAmdgpuExact) {
             /* rdna3amdgpu=1: the DMA ring as amdgpu sets it up - padded to
@@ -1464,11 +1464,11 @@ bool RDNA3Bringup::hwInit()
         }
         if (!ret && fVmReady) {
             /* VMs opened before the GFXHUB came up get their context now
-             * (gfxhub303_gart_enable reset VMID 1-15) */
+             * (gfxhub11_gart_enable reset VMID 1-15) */
             for (uint32_t id = 1; id < 16; id++)
                 if (fVmidUsed & (1u << id)) {
-                    gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
-                    gfxhub303_flush_tlb(fDev, id, 0);
+                    gfxhub11_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+                    gfxhub11_flush_tlb(fDev, id, 0);
                 }
             fOwner->drmRingReady(AMDGPU_HW_IP_GFX, 1);
             if (fKcq && fKcq->rb.ready) {
@@ -2862,7 +2862,7 @@ void RDNA3Bringup::vmRebuildAfterVramLoss()
         fVmPd[id] = gpuvm_pd_addr(fDev, &v->vm);
         mmhub302_setup_vm_pt_regs(fDev, id, fVmPd[id]);
         if (fGmc && fGmc->gfxhub_enabled)
-            gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+            gfxhub11_setup_vm_pt_regs(fDev, id, fVmPd[id]);
         vmFlush(id);
         v->gfxFlush = v->compFlush = v->dmaFlush = true;
         n++;
@@ -2929,7 +2929,7 @@ void RDNA3Bringup::ipSuspend(bool all)
             ih60_disable(fDev, fIh);
         fIopGartReady = false;   /* N63: the GART goes down; hwInit binds nothing again until asked */
         fIopGartHung = false;
-        if (fGmc && fDev)
+        if (fGmc && fDev && fGmc->mmhub_enabled)
             gmc11_hw_fini(fDev);
         /* soc21_common_suspend (= soc21_common_hw_fini), the first IP block */
         if (fDev && fDev->doorbell_ok)
@@ -3162,7 +3162,7 @@ void *RDNA3Bringup::vmCreate(bool quiet, bool kernel)
             /* both hubs: VCN walks MMHUB, SDMA and shaders the GFXHUB */
             mmhub302_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             if (fGmc && fGmc->gfxhub_enabled)
-                gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
+                gfxhub11_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             vmFlush(id);
             v->gfxFlush = v->compFlush = v->dmaFlush = true;
             BLOG("VM: VMID %u for %s (pid %d)", id, v->owner[0] ? v->owner : "?", v->ownerPid);
@@ -3290,19 +3290,21 @@ void RDNA3Bringup::kgqStop()
 
 void RDNA3Bringup::gfxSuspend()
 {
-    if (!fDev || !fGfx)
+    if (!fDev)
         return;
-    gfx11_set_priv_reg_fault_state(fDev, 0);
-    gfx11_set_priv_inst_fault_state(fDev, 0);
-    gfx11_set_bad_op_fault_state(fDev, 0);
-    if (fGfx->async && fGfx->ready && fKiq && fKiq->rb.ready)
-        kgqStop();
-    if (fKiq)
-        gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
-    gfx11_cp_gfx_enable(fDev, 0);
-    if (fGmc)
-        gfxhub303_gart_disable(fDev);
-    fGfx->ready = 0;
+    if (fGfx) {
+        gfx11_set_priv_reg_fault_state(fDev, 0);
+        gfx11_set_priv_inst_fault_state(fDev, 0);
+        gfx11_set_bad_op_fault_state(fDev, 0);
+        if (fGfx->async && fGfx->ready && fKiq && fKiq->rb.ready)
+            kgqStop();
+        if (fKiq)
+            gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
+        gfx11_cp_gfx_enable(fDev, 0);
+        fGfx->ready = 0;
+    }
+    if (fGmc && fGmc->gfxhub_enabled)
+        gfxhub11_gart_disable(fDev, fGmc);
 }
 
 void RDNA3Bringup::vmFlush(uint32_t vmid)
@@ -3318,7 +3320,7 @@ void RDNA3Bringup::vmFlush(uint32_t vmid)
         rdna3_vm_flush_regs f;
         if (fGmc && fGmc->gfxhub_enabled) {
             rdna3_hdp_flush(fDev);
-            gfxhub303_flush_regs(fDev, vmid, 17, &f);
+            gfxhub11_flush_regs(fDev, vmid, 17, &f);
             gfx11_mes_reg_write_reg_wait(fDev, fMes, f.req, f.ack, f.req_val, 1u << vmid);
         }
         rdna3_hdp_flush(fDev);
@@ -3330,7 +3332,7 @@ void RDNA3Bringup::vmFlush(uint32_t vmid)
         rdna3_vm_flush_regs f;
         if (fGmc && fGmc->gfxhub_enabled) {   /* adev->gfx.is_poweron */
             rdna3_hdp_flush(fDev);
-            gfxhub303_flush_regs(fDev, vmid, 17, &f);
+            gfxhub11_flush_regs(fDev, vmid, 17, &f);
             gfx11_kiq_reg_write_reg_wait(fDev, fKiq, f.req, f.ack, f.req_val, 1u << vmid);
         }
         rdna3_hdp_flush(fDev);
@@ -3340,7 +3342,7 @@ void RDNA3Bringup::vmFlush(uint32_t vmid)
     }
     mmhub302_flush_tlb(fDev, vmid, 0);
     if (fGmc && fGmc->gfxhub_enabled)
-        gfxhub303_flush_tlb(fDev, vmid, 0);
+        gfxhub11_flush_tlb(fDev, vmid, 0);
 }
 
 void RDNA3Bringup::vmDestroy(void *p)
@@ -3351,7 +3353,7 @@ void RDNA3Bringup::vmDestroy(void *p)
     if (v->live && fVmReady) {
         mmhub302_setup_vm_pt_regs(fDev, v->vmid, 0);
         if (fGmc && fGmc->gfxhub_enabled)
-            gfxhub303_setup_vm_pt_regs(fDev, v->vmid, 0);
+            gfxhub11_setup_vm_pt_regs(fDev, v->vmid, 0);
         vmFlush(v->vmid);
         gpuvm_vm_fini(fDev, &v->vm);
         fVmidUsed &= ~(1u << v->vmid);

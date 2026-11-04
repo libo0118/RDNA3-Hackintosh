@@ -377,6 +377,22 @@ GMC / GPUVM	amdgpu/gfxhub_v3_0_3.c	gfxhub_v3_0_3_program_invalidation
 GMC / GPUVM	amdgpu/gfxhub_v3_0_3.c	gfxhub_v3_0_3_set_fault_enable_default
 GMC / GPUVM	amdgpu/gfxhub_v3_0_3.c	gfxhub_v3_0_3_setup_vm_pt_regs
 GMC / GPUVM	amdgpu/gfxhub_v3_0_3.c	gfxhub_v3_0_3_setup_vmid_config
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_disable_identity_aperture
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_enable_system_domain
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_gart_disable
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_gart_enable
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_get_fb_location
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_get_invalidate_req
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_get_mc_fb_offset
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_init
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_init_cache_regs
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_init_gart_aperture_regs
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_init_system_aperture_regs
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_init_tlb_regs
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_program_invalidation
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_set_fault_enable_default
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_setup_vm_pt_regs
+GFXHUB 3.0	amdgpu/gfxhub_v3_0.c	gfxhub_v3_0_setup_vmid_config
 GMC / GPUVM	amdgpu/amdgpu_gmc.c	amdgpu_gmc_agp_addr
 GMC / GPUVM	amdgpu/amdgpu_gmc.c	amdgpu_gmc_agp_location
 GMC / GPUVM	amdgpu/amdgpu_gmc.c	amdgpu_gmc_allocate_vm_inv_eng

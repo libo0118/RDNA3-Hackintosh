@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "gmc11.h"
+#include "gen/gc_11_0_0_gmc.h"
 #include "gen/gc_11_0_3_gmc.h"
 
 #define FOUR_GB (1ull << 32)
@@ -18,17 +19,19 @@
     (((orig) & ~(uint32_t)REG_FIELD_MASK(reg, field)) | \
      ((uint32_t)REG_FIELD_MASK(reg, field) & ((uint32_t)(val) << REG_FIELD_SHIFT(reg, field))))
 
-/* paste reg##_BASE_IDX at the outermost macro so 'reg' is not expanded first */
+/* Both layouts use segment 0; gmc11_init validates discovery before any hub access. */
+#define GC_OFF(d, reg30, reg303) \
+    rdna3_reg_offset((d), HWIP_GC, 0, 0, (d)->ipver[HWIP_GC].rev == 2 ? (reg30) : (reg303))
 #define RGC(d, reg) \
-    rdna3_rreg((d), rdna3_reg_offset((d), HWIP_GC, 0, reg##_BASE_IDX, reg))
+    rdna3_rreg((d), GC_OFF((d), GFXHUB30_##reg, reg))
 #define WGC(d, reg, v) \
-    rdna3_wreg((d), rdna3_reg_offset((d), HWIP_GC, 0, reg##_BASE_IDX, reg), (v))
+    rdna3_wreg((d), GC_OFF((d), GFXHUB30_##reg, reg), (v))
 #define WGC_OFF(d, reg, o, v) \
-    rdna3_wreg((d), rdna3_reg_offset((d), HWIP_GC, 0, reg##_BASE_IDX, reg) + (o), (v))
+    rdna3_wreg((d), GC_OFF((d), GFXHUB30_##reg, reg) + (o), (v))
 #define RGC_OFF(d, reg, o) \
-    rdna3_rreg((d), rdna3_reg_offset((d), HWIP_GC, 0, reg##_BASE_IDX, reg) + (o))
+    rdna3_rreg((d), GC_OFF((d), GFXHUB30_##reg, reg) + (o))
 
-/* gfxhub_v3_0_3_init(): distances between per-context / per-engine regs */
+/* gfxhub_v3_0 / gfxhub_v3_0_3_init: identical strides and used field masks. */
 #define CTX_DISTANCE      (regGCVM_CONTEXT1_CNTL - regGCVM_CONTEXT0_CNTL)
 #define CTX_ADDR_DISTANCE (regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - \
                            regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
@@ -46,9 +49,17 @@
  * table */
 int gmc11_init(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_size)
 {
+    const rdna3_ipver *gc = &d->ipver[HWIP_GC];
     uint64_t max_mc = RD_GMC_HOLE_START - 1;   /* min(mc_mask, HOLE_START - 1) */
     uint64_t size_bf, size_af, table_size;
 
+    /* gmc_v11_0_set_gfxhub_funcs: only the two ported GC versions. */
+    if (!gc->present || !gc->num_base || gc->major != 11 || gc->minor != 0 ||
+        (gc->rev != 2 && gc->rev != 3)) {
+        RERR(d, "GMC: unsupported GC discovery (present %u, segments %u, IP %u.%u.%u)",
+             gc->present, gc->num_base, gc->major, gc->minor, gc->rev);
+        return RDNA3_ENODEV;
+    }
     if (!d->fb_end || d->fb_end <= d->fb_start)
         return RDNA3_ENODEV;
 
@@ -125,12 +136,12 @@ void gmc11_gart_tlb_flush(rdna3_dev *d, rdna3_gmc *g)
 {
     mmhub302_flush_tlb(d, 0, 0);
     if (g && g->gfxhub_enabled)
-        gfxhub303_flush_tlb(d, 0, 0);
+        gfxhub11_flush_tlb(d, 0, 0);
 }
 
-/* ---------------------------- GFXHUB 3.0.3 ---------------------------- */
+/* ------------------------- GFXHUB 3.0 / 3.0.3 ------------------------- */
 
-void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd)
+void gfxhub11_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd)
 {
     WGC_OFF(d, regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32, CTX_ADDR_DISTANCE * vmid, (uint32_t)pd);
     WGC_OFF(d, regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32, CTX_ADDR_DISTANCE * vmid,
@@ -143,7 +154,7 @@ static void init_gart_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
     /* amdgpu_gmc_pd_addr(gart.bo): VRAM physical address | VALID */
     uint64_t pt_base = rdna3_vram_pa(d, g->gart_table) | RD_PTE_VALID;
 
-    gfxhub303_setup_vm_pt_regs(d, 0, pt_base);
+    gfxhub11_setup_vm_pt_regs(d, 0, pt_base);
     WGC(d, regGCVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32, (uint32_t)(g->gart_start >> 12));
     WGC(d, regGCVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32, (uint32_t)(g->gart_start >> 44));
     WGC(d, regGCVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32, (uint32_t)(g->gart_end >> 12));
@@ -283,7 +294,7 @@ static void program_invalidation(rdna3_dev *d)
     }
 }
 
-int gfxhub303_gart_enable(rdna3_dev *d, rdna3_gmc *g)
+int gfxhub11_gart_enable(rdna3_dev *d, rdna3_gmc *g)
 {
     init_gart_aperture_regs(d, g);
     init_system_aperture_regs(d, g);
@@ -297,10 +308,19 @@ int gfxhub303_gart_enable(rdna3_dev *d, rdna3_gmc *g)
     return RDNA3_OK;
 }
 
-/* gfxhub_v3_0_3_set_fault_enable_default */
-void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value)
+/* gfxhub_v3_0 / gfxhub_v3_0_3_set_fault_enable_default */
+void gfxhub11_set_fault_enable_default(rdna3_dev *d, int value)
 {
-    uint32_t tmp = RGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL);
+    uint32_t tmp;
+    if (d->ipver[HWIP_GC].rev == 2) {
+        /* gfxhub_v3_0: a page fault must not halt the CP. */
+        uint32_t reg = rdna3_reg_offset(d, HWIP_GC, 0, GFXHUB30_regCP_DEBUG_BASE_IDX,
+                                       GFXHUB30_regCP_DEBUG);
+        tmp = rdna3_rreg(d, reg);
+        tmp = REG_SET_FIELD(tmp, GFXHUB30_CP_DEBUG, CPG_UTCL1_ERROR_HALT_DISABLE, 1);
+        rdna3_wreg(d, reg, tmp);
+    }
+    tmp = RGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, RANGE_PROTECTION_FAULT_ENABLE_DEFAULT, value);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, PDE0_PROTECTION_FAULT_ENABLE_DEFAULT, value);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, PDE1_PROTECTION_FAULT_ENABLE_DEFAULT, value);
@@ -313,8 +333,10 @@ void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value)
     tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, READ_PROTECTION_FAULT_ENABLE_DEFAULT, value);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, WRITE_PROTECTION_FAULT_ENABLE_DEFAULT, value);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, EXECUTE_PROTECTION_FAULT_ENABLE_DEFAULT, value);
-    tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, CRASH_ON_NO_RETRY_FAULT, !value);
-    tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, CRASH_ON_RETRY_FAULT, !value);
+    if (!value || d->ipver[HWIP_GC].rev == 3) {
+        tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, CRASH_ON_NO_RETRY_FAULT, !value);
+        tmp = REG_SET_FIELD(tmp, GCVM_L2_PROTECTION_FAULT_CNTL, CRASH_ON_RETRY_FAULT, !value);
+    }
     WGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL, tmp);
 }
 
@@ -333,20 +355,20 @@ static uint32_t invalidate_req(uint32_t vmid, uint32_t flush_type)
     return req;
 }
 
-void gfxhub303_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o)
+void gfxhub11_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o)
 {
-    o->pt_lo = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX,
-                                regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32) + CTX_ADDR_DISTANCE * vmid;
-    o->pt_hi = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX,
-                                regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32) + CTX_ADDR_DISTANCE * vmid;
-    o->req = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_INVALIDATE_ENG0_REQ_BASE_IDX,
-                              regGCVM_INVALIDATE_ENG0_REQ) + ENG_DISTANCE * eng;
-    o->ack = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_INVALIDATE_ENG0_ACK_BASE_IDX,
-                              regGCVM_INVALIDATE_ENG0_ACK) + ENG_DISTANCE * eng;
+    o->pt_lo = GC_OFF(d, GFXHUB30_regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32,
+                     regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32) + CTX_ADDR_DISTANCE * vmid;
+    o->pt_hi = GC_OFF(d, GFXHUB30_regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32,
+                     regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32) + CTX_ADDR_DISTANCE * vmid;
+    o->req = GC_OFF(d, GFXHUB30_regGCVM_INVALIDATE_ENG0_REQ,
+                   regGCVM_INVALIDATE_ENG0_REQ) + ENG_DISTANCE * eng;
+    o->ack = GC_OFF(d, GFXHUB30_regGCVM_INVALIDATE_ENG0_ACK,
+                   regGCVM_INVALIDATE_ENG0_ACK) + ENG_DISTANCE * eng;
     o->req_val = invalidate_req(vmid, 0);
 }
 
-int gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
+int gfxhub11_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
 {
     const uint32_t eng = 17;   /* "Use register 17 for GART" */
     uint32_t req = invalidate_req(vmid, flush_type), i, ack = 0;
@@ -440,7 +462,7 @@ void gmc11_set_vm_fault_interrupts(rdna3_dev *d, int enable)
 }
 
 /* Ported from gfxhub_v3_0_3_gart_disable (gfx_v11_0_hw_fini) */
-void gfxhub303_gart_disable(rdna3_dev *d)
+void gfxhub11_gart_disable(rdna3_dev *d, rdna3_gmc *g)
 {
     uint32_t tmp, i;
     /* Disable all tables */
@@ -455,10 +477,11 @@ void gfxhub303_gart_disable(rdna3_dev *d)
     tmp = RGC(d, regGCVM_L2_CNTL);
     WGC(d, regGCVM_L2_CNTL, REG_SET_FIELD(tmp, GCVM_L2_CNTL, ENABLE_L2_CACHE, 0));
     WGC(d, regGCVM_L2_CNTL3, 0);
+    g->gfxhub_enabled = 0;
 }
 
 /* Ported from gfxhub_v3_0_3_get_mc_fb_offset */
-uint64_t gfxhub303_get_mc_fb_offset(rdna3_dev *d)
+uint64_t gfxhub11_get_mc_fb_offset(rdna3_dev *d)
 {
     return (uint64_t)RGC(d, regGCMC_VM_FB_OFFSET) << 24;
 }

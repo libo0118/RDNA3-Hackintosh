@@ -62,3 +62,5 @@ Windows 无 `nm`，捕获器使用 bounds-checked stdlib Mach-O64 parser，读�
 收益是在原生 runner 不可用时仍获得真实的 x86_64 编译证据，并以严格增量门槛阻止未验证的导入和绑定元数据变化。代价是固定契约保守拒绝可能本来可用的新 import，也不能证明当前 Mac 上的实际 provider、vtable / ABI、KC 创建、签名加载或 RX 7600 XT 硬件正确；新依赖必须回到真正 Intel 目标验证，不能自动放宽。
 
 本篇与[既有 GitHub CI 决定](2026-11-04-github-hosted-validation.md)部分重叠，只增加补充手动证据，其 native / accelerator / 硬件边界仍保留。新建时检索所有活跃 Note；固件基础、SMU 状态、SMU PM 和 PSP ready 笔记只引用相同 CI 边界，与本篇流程决定无冲突，保持不动，无需吸收、归档或拒绝旧提案。
+
+[隔离枚举符号探针](2026-11-05-macos15-accel-symbol-probe.md) 另用真实 Intel 主机量测七个未解析方法的名称假设；它不修改这里的基线或扩大固定导入契约，也不把名称匹配当 ABI 或硬件完成。

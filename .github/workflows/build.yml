@@ -41,6 +41,7 @@ jobs:
           echo '::notice::Offline mode: real-firmware subcases are intentionally skipped, not hardware passes.'
           make test CC=clang JOBS=4 RDNA3_FW_DIR= 2>&1 | tee build/ci-logs/host-tests.log
           python3 -I -B tools/ci/test_macos15_native_contract.py 2>&1 | tee build/ci-logs/cross-contract-selftests.log
+          python3 -I -B tools/ci/test_macos15_accel_symbol_probe.py 2>&1 | tee build/ci-logs/accel-symbol-probe-selftests.log
       - name: Compile portable host tools
         run: make tools CC=clang 2>&1 | tee build/ci-logs/host-tools.log
       - name: Preserve test and compiler logs

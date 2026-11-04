@@ -2,10 +2,10 @@
  "amdgpu": {
   "works": 524,
   "ported": 1525,
-  "total": 1572,
-  "not_applicable": 642,
-  "works_pct": 33.3,
-  "ported_pct": 97.0,
+  "total": 1589,
+  "not_applicable": 641,
+  "works_pct": 33.0,
+  "ported_pct": 96.0,
   "groups": [
    {
     "name": "PSP 13",
@@ -357,7 +357,7 @@
     ],
     "works": 61,
     "ported": 34,
-    "todo": 0,
+    "todo": 1,
     "items": {
      "amdgpu_gmc_agp_location": "works",
      "amdgpu_gmc_allocate_vm_inv_eng": "ported",
@@ -402,7 +402,7 @@
      "gfxhub_v3_0_3_disable_identity_aperture": "works",
      "gfxhub_v3_0_3_enable_system_domain": "works",
      "gfxhub_v3_0_3_gart_disable": "ported",
-     "gfxhub_v3_0_3_gart_enable": "works",
+     "gfxhub_v3_0_3_gart_enable": "todo",
      "gfxhub_v3_0_3_get_fb_location": "works",
      "gfxhub_v3_0_3_get_invalidate_req": "works",
      "gfxhub_v3_0_3_get_mc_fb_offset": "ported",
@@ -433,6 +433,7 @@
      "gmc_v11_0_process_interrupt": "works",
      "gmc_v11_0_resume": "works",
      "gmc_v11_0_set_clockgating_state": "works",
+     "gmc_v11_0_set_gfxhub_funcs": "works",
      "gmc_v11_0_suspend": "ported",
      "gmc_v11_0_sw_init": "works",
      "gmc_v11_0_use_invalidate_semaphore": "works",
@@ -477,7 +478,6 @@
      "gmc_v11_0_get_vmid_pasid_mapping_info": "TLB flush by PASID: only amdgpu_vm_flush_compute_tlb (KFD compute VMs, ROCm on Linux) uses it; graphics VMs flush by VMID on their rings",
      "gmc_v11_0_init_golden_registers": "SR-IOV only (vm_contexts_disable); nothing on bare metal",
      "gmc_v11_0_is_idle": "IP-block callbacks that only return true / 0",
-     "gmc_v11_0_set_gfxhub_funcs": "Linux IP-block function-table wiring",
      "gmc_v11_0_set_gmc_funcs": "Linux IP-block function-table wiring",
      "gmc_v11_0_set_irq_funcs": "Linux IP-block function-table wiring",
      "gmc_v11_0_set_mmhub_funcs": "Linux IP-block function-table wiring",
@@ -491,6 +491,34 @@
      "mmhub_v3_0_update_medium_grain_clock_gating": "clock gating the card's cg_flags do not enable (soc21_common_early_init: no MC / IH flags for GC 11.0.3), a no-op here",
      "mmhub_v3_0_update_medium_grain_light_sleep": "clock gating the card's cg_flags do not enable (soc21_common_early_init: no MC / IH flags for GC 11.0.3), a no-op here"
     }
+   },
+   {
+    "name": "GFXHUB 3.0",
+    "steps": [
+     "?"
+    ],
+    "works": 0,
+    "ported": 0,
+    "todo": 16,
+    "items": {
+     "gfxhub_v3_0_disable_identity_aperture": "todo",
+     "gfxhub_v3_0_enable_system_domain": "todo",
+     "gfxhub_v3_0_gart_disable": "todo",
+     "gfxhub_v3_0_gart_enable": "todo",
+     "gfxhub_v3_0_get_fb_location": "todo",
+     "gfxhub_v3_0_get_invalidate_req": "todo",
+     "gfxhub_v3_0_get_mc_fb_offset": "todo",
+     "gfxhub_v3_0_init": "todo",
+     "gfxhub_v3_0_init_cache_regs": "todo",
+     "gfxhub_v3_0_init_gart_aperture_regs": "todo",
+     "gfxhub_v3_0_init_system_aperture_regs": "todo",
+     "gfxhub_v3_0_init_tlb_regs": "todo",
+     "gfxhub_v3_0_program_invalidation": "todo",
+     "gfxhub_v3_0_set_fault_enable_default": "todo",
+     "gfxhub_v3_0_setup_vm_pt_regs": "todo",
+     "gfxhub_v3_0_setup_vmid_config": "todo"
+    },
+    "na": {}
    },
    {
     "name": "IH interrupts",

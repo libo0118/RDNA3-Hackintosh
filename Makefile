@@ -26,6 +26,7 @@ HW      += hw/smu13_0_7.c
 UAPI    := uapi/rdna3_drm.c
 COMMON_H := $(wildcard common/*.h) $(wildcard hw/*.h) $(wildcard uapi/*.h)
 COMMON_H += $(wildcard hw/gen/*smu*.h)
+COMMON_H += hw/gen/gc_11_0_0_gmc.h hw/gen/gc_11_0_3_gmc.h
 
 .PHONY: all test test-run tools kext clean
 
@@ -46,7 +47,7 @@ $(BUILD)/test_fw: tests/test_fw.c $(COMMON) $(COMMON_H) | $(BUILD)
 $(BUILD)/amd_fw_dump: tools/amd_fw_dump.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ tools/amd_fw_dump.c $(COMMON)
 
-$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_audio.inc tests/sim_display_pstate.inc tests/sim_display_freesync.inc tests/sim_dc_irq.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
+$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_gfxhub11.inc tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_audio.inc tests/sim_display_pstate.inc tests/sim_display_freesync.inc tests/sim_dc_irq.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/sim_navi32.c $(COMMON) $(HW) $(UAPI)
 
 $(BUILD)/test_smu13: tests/test_smu13.c tests/sim_smu13_0_7.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
@@ -270,7 +271,7 @@ PY_TESTS := test_docs_html test_glyph_verdict test_lookimg test_triage_parallel 
     test_triage_bar test_triage_present_cost test_triage_write_gen test_fb_class test_triage_iop_log \
     test_triage_agdc_n48 test_triage_pairing test_triage_nocard test_kext_kpi_versions test_kmutil_kpi_guard \
     test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps test_iop_join \
-    test_triage_uclk_pin test_fw_dump test_pm_property
+    test_triage_uclk_pin test_fw_dump test_pm_property test_gfxhub_lifecycle
 SH_TESTS := test_bootwatch test_membw_load test_triage_a3 \
     test_baremetal test_triage_trace test_oc_install test_make_pkg test_coredisplay_prefs test_prune_traces \
     test_triage_tx test_triage_stale_plugin test_triage_latch test_result_checklist test_triage_vram \

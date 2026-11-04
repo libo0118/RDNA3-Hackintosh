@@ -6201,7 +6201,7 @@ static void test_mes_amdgpu(rdna3_dev *dev, rdna3_mes *mes, rdna3_mec_ring *kcq,
     CHECK(gfx11_mes_wreg(dev, mes, scratch, 0x1234ABCD) == RDNA3_OK && S.reg[scratch] == 0x1234ABCD);
     S.reg[scratch] = 0x55AA55AA;
     CHECK(gfx11_mes_rreg(dev, mes, scratch, &v) == RDNA3_OK && v == 0x55AA55AA);
-    gfxhub303_flush_regs(dev, 6, 17, &f);
+    gfxhub11_flush_regs(dev, 6, 17, &f);
     CHECK(gfx11_mes_reg_write_reg_wait(dev, mes, f.req, f.ack, f.req_val, 1u << 6) == RDNA3_OK);
     CHECK(S.tlb_flushes == t0 + 1 && S.mes_sched.misc == 3 && S.mes_sched.misc_stuck == 0);
     /* card run 34 (big4: rdna3amdgpu=1 with rdna3mes=1): the MES scheduler
@@ -6447,7 +6447,7 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
         rdna3_vm_flush_regs f;
         uint32_t t0 = S.tlb_flushes, m0 = S.mm_tlb_flushes, kseq = kiq->rb.fence_seq;
         kiq->rb.amdgpu_pad = 1;
-        gfxhub303_flush_regs(dev, 5, 17, &f);
+        gfxhub11_flush_regs(dev, 5, 17, &f);
         CHECK(gfx11_kiq_reg_write_reg_wait(dev, kiq, f.req, f.ack, f.req_val, 1u << 5) == RDNA3_OK);
         mmhub302_flush_regs(dev, 5, 17, &f);
         CHECK(f.req == MM_BASE0 + regMMVM_INVALIDATE_ENG0_REQ + 17 * (regMMVM_INVALIDATE_ENG1_REQ - regMMVM_INVALIDATE_ENG0_REQ) &&
@@ -6459,7 +6459,7 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
          * 256-dword padding the ring "filled up" after four flushes. The
          * completed KIQ fences free it instead. */
         S.mes_kiq_no_rptr_report = 1;
-        gfxhub303_flush_regs(dev, 5, 17, &f);
+        gfxhub11_flush_regs(dev, 5, 17, &f);
         for (int kk = 0; kk < 12; kk++)
             CHECK(gfx11_kiq_reg_write_reg_wait(dev, kiq, f.req, f.ack, f.req_val, 1u << 5) == RDNA3_OK);
         CHECK(S.tlb_flushes == t0 + 13 && kiq->rb.fence_seq == kseq + 14);
@@ -10792,8 +10792,8 @@ static void run(const char *fwdir)
         uint64_t pte = 0;
         CHECK(gmc11_init(&dev, &gmc, 0) == RDNA3_OK);
         CHECK(gmc.gart_start == 0 && gmc.gart_size == (512ull << 20));
-        CHECK(gfxhub303_gart_enable(&dev, &gmc) == RDNA3_OK);
-        gfxhub303_set_fault_enable_default(&dev, 1);
+        CHECK(gfxhub11_gart_enable(&dev, &gmc) == RDNA3_OK);
+        gfxhub11_set_fault_enable_default(&dev, 1);
         CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_CNTL] & GCVM_CONTEXT0_CNTL__ENABLE_CONTEXT_MASK);
         CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32] ==
               (uint32_t)(rdna3_vram_pa(&dev, gmc.gart_table) | 1));
@@ -10807,7 +10807,7 @@ static void run(const char *fwdir)
                              RD_PTE_WRITEABLE) == RDNA3_OK);
         memcpy(&pte, S.vram + gmc.gart_table + (0x10000 / 4096 + 1) * 8, 8);
         CHECK((pte & 0x0000FFFFFFFFF000ull) == 0x123457000ull && (pte & RD_PTE_VALID));
-        CHECK(gfxhub303_flush_tlb(&dev, 0, 0) == RDNA3_OK && S.tlb_flushes == 1);
+        CHECK(gfxhub11_flush_tlb(&dev, 0, 0) == RDNA3_OK && S.tlb_flushes == 1);
         CHECK(gmc11_gart_map(&dev, &gmc, gmc.gart_size, 0, 1, RD_PTE_VALID) == RDNA3_EINVAL);
         CHECK(S.unflushed_doorbells == 0);
 
@@ -11035,8 +11035,8 @@ static void run(const char *fwdir)
                         S.reg[ctx6] = saved;
                         CHECK(gfx11_gfxhub_enable(&dev, &gmc) == RDNA3_OK && gmc.gfxhub_enabled);
                         CHECK(S.reg[ctx6] & GCVM_CONTEXT0_CNTL__ENABLE_CONTEXT_MASK);
-                        gfxhub303_setup_vm_pt_regs(&dev, 6, gpuvm_pd_addr(&dev, &uvm));
-                        CHECK(gfxhub303_flush_tlb(&dev, 6, 0) == RDNA3_OK);
+                        gfxhub11_setup_vm_pt_regs(&dev, 6, gpuvm_pd_addr(&dev, &uvm));
+                        CHECK(gfxhub11_flush_tlb(&dev, 6, 0) == RDNA3_OK);
                     }
                     sdma60_emit_ib(&dev, &sd, 6, gva, n);
                     seq = sdma60_emit_fence(&dev, &sd);
@@ -11379,7 +11379,7 @@ static void run(const char *fwdir)
                   gpuvm_lookup(&dev, &vm, va + 1024ull * 4096) == 0);
             gpuvm_vm_fini(&dev, &vm);
             CHECK(vm.tables == 0 && pool.nfree == 64);
-            gfxhub303_setup_vm_pt_regs(&dev, 3, 0x123456789000ull | 1);
+            gfxhub11_setup_vm_pt_regs(&dev, 3, 0x123456789000ull | 1);
             CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 +
                         3 * (regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 -
                              regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)] == 0x56789001u);
@@ -13872,11 +13872,11 @@ static void run(const char *fwdir)
         CHECK(gmc11_allocate_vm_inv_eng(hubs, NULL, 15, 1, eng) == RDNA3_OK &&
               !memcmp(eng, want, sizeof(want)));
         CHECK(gmc11_allocate_vm_inv_eng(hubs, NULL, 15, 0, eng) == RDNA3_OK && eng[3] == 5);
-        CHECK(gfxhub303_get_mc_fb_offset(&dev) == ((uint64_t)S.reg[GC_BASE0 + regGCMC_VM_FB_OFFSET] << 24));
+        CHECK(gfxhub11_get_mc_fb_offset(&dev) == ((uint64_t)S.reg[GC_BASE0 + regGCMC_VM_FB_OFFSET] << 24));
         S.reg[GC_BASE0 + regGCVM_CONTEXT1_CNTL] = 1;
         S.reg[GC_BASE0 + regGCVM_L2_CNTL] |= 1;
         S.reg[MM_BASE0 + regMMVM_L2_CNTL] |= MMVM_L2_CNTL__ENABLE_L2_CACHE_MASK;
-        gfxhub303_gart_disable(&dev);
+        gfxhub11_gart_disable(&dev, &g2);
         CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT1_CNTL] == 0 && !(S.reg[GC_BASE0 + regGCVM_L2_CNTL] & 1) &&
               !(S.reg[GC_BASE0 + regGCMC_VM_MX_L1_TLB_CNTL] & 0x41) && S.reg[GC_BASE0 + regGCVM_L2_CNTL3] == 0);
         /* IH as ih_v6_0 runs it: rings 0 and 1 in system memory through
@@ -14039,9 +14039,12 @@ static void test_marketing_names(void)
     }
 }
 
+#include "sim_gfxhub11.inc"
+
 int main(int argc, char **argv)
 {
     test_marketing_names();
+    test_gfxhub11();
     run(NULL);
     if (argc > 1 && argv[1][0])
         run(argv[1]);

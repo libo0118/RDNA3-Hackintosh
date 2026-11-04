@@ -13,6 +13,7 @@ SMU 13.0.7 power     | pm/swsmu/smu13/smu_v13_0_7_ppt.c
 GMC / GPUVM          | amdgpu/gmc_v11_0.c
 GMC / GPUVM          | amdgpu/mmhub_v3_0.c
 GMC / GPUVM          | amdgpu/gfxhub_v3_0_3.c
+GFXHUB 3.0           | amdgpu/gfxhub_v3_0.c
 GMC / GPUVM          | amdgpu/amdgpu_gmc.c
 GMC / GPUVM          | amdgpu/amdgpu_vm_pt.c
 IH interrupts        | amdgpu/ih_v6_0.c

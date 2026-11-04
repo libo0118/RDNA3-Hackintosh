@@ -757,7 +757,7 @@ void sdma60_emit_reg_write_reg_wait(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t r
 void sdma60_emit_vm_flush(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr)
 {
     rdna3_vm_flush_regs f;
-    gfxhub303_flush_regs(d, vmid, r->vm_inv_eng, &f);
+    gfxhub11_flush_regs(d, vmid, r->vm_inv_eng, &f);
     /* Update the PD address for this VMID. */
     sdma60_emit_wreg(d, r, f.pt_lo, (uint32_t)pd_addr);
     sdma60_emit_wreg(d, r, f.pt_hi, (uint32_t)(pd_addr >> 32));

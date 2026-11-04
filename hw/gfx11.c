@@ -159,12 +159,12 @@ static void cp_compute_enable(rdna3_dev *d, int enable);
 /* gfx_v11_0_gfxhub_enable */
 int gfx11_gfxhub_enable(rdna3_dev *d, rdna3_gmc *g)
 {
-    int r = gfxhub303_gart_enable(d, g);
+    int r = gfxhub11_gart_enable(d, g);
     if (r)
         return r;
     rdna3_hdp_flush(d);
-    gfxhub303_set_fault_enable_default(d, 1);
-    return gfxhub303_flush_tlb(d, 0, 0);
+    gfxhub11_set_fault_enable_default(d, 1);
+    return gfxhub11_flush_tlb(d, 0, 0);
 }
 
 /* gfx_v11_0_init_golden_registers: golden_settings_gc_11_0 via
@@ -562,7 +562,7 @@ void gfx11_emit_wait_reg_mem(rdna3_dev *d, rdna3_gfx_ring *r, int eng_sel, int m
 void gfx11_emit_vm_flush(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t pd_addr)
 {
     rdna3_vm_flush_regs f;
-    gfxhub303_flush_regs(d, vmid, r->vm_inv_eng ? r->vm_inv_eng : RD_GFX_VM_INV_ENG, &f);
+    gfxhub11_flush_regs(d, vmid, r->vm_inv_eng ? r->vm_inv_eng : RD_GFX_VM_INV_ENG, &f);
     gfx11_emit_wreg(d, r, f.pt_lo, (uint32_t)pd_addr);
     gfx11_emit_wreg(d, r, f.pt_hi, (uint32_t)(pd_addr >> 32));
     /* gfx_v11_0_ring_emit_reg_write_reg_wait: write req, wait for the ack

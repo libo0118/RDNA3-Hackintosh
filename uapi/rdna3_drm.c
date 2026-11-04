@@ -66,7 +66,6 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
 
     di->device_id = pci_device;
     di->chip_rev = rev_id;
-    di->external_rev = rev_id + 0x20;     /* soc21.c, GC 11.0.3 */
     di->pci_rev = pci_revision;
     di->family = AMDGPU_FAMILY_GC_11_0_0;
 
@@ -137,6 +136,11 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
         dev->ip_ver_major[AMDGPU_HW_IP_COMPUTE] = ip->major;
         dev->ip_ver_minor[AMDGPU_HW_IP_COMPUTE] = ip->minor;
         dev->gc_ip_version = AMD_IP_VERSION(ip->major, ip->minor, ip->revision);
+        /* soc21_common_early_init: the NBIO strap is not the PCI revision. */
+        if (dev->gc_ip_version == AMD_IP_VERSION(11, 0, 2))
+            di->external_rev = rev_id + 0x10;
+        else if (dev->gc_ip_version == AMD_IP_VERSION(11, 0, 3))
+            di->external_rev = rev_id + 0x20;
     }
     ip = amd_discovery_find(disc, AMD_HWID_SDMA0, 0);
     if (ip) {
@@ -4350,6 +4354,9 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
          * adev->gfx.cp_gfx_shadow (gfx_v11_0_check_fw_cp_gfx_shadow; not a
          * VF here, so never on this card), else they stay 0 */
         struct drm_amdgpu_info_device di;
+        if (dev->gc_ip_version != AMD_IP_VERSION(11, 0, 2) &&
+            dev->gc_ip_version != AMD_IP_VERSION(11, 0, 3))
+            return -RD_ENODEV;   /* no supported discovery identity */
         copy(&di, &dev->dev_info, sizeof(di));
         if (amd_gfx11_check_fw_cp_gfx_shadow(dev->gc_ip_version,
                                              dev->fw_version[AMDGPU_INFO_FW_GFX_ME],

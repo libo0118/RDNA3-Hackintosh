@@ -1,7 +1,7 @@
 /*
- * gmc11.h - GMC 11 memory controller layout + GFXHUB 3.0.3 (GC 11.0.3)
+ * gmc11.h - GMC 11 memory controller layout + GFXHUB 3.0 / 3.0.3
  * VMID0 GART, ported from Linux amdgpu gmc_v11_0.c, amdgpu_gmc.c and
- * gfxhub_v3_0_3.c (MIT).
+ * gfxhub_v3_0.c / gfxhub_v3_0_3.c (MIT).
  *
  * Scope today: the system-domain GART that kernel-side engines use
  * (rings, fences, MES/KIQ buffers), with its flat page table in VRAM,
@@ -52,7 +52,8 @@ typedef struct rdna3_gmc {
     int      gfxhub_enabled, mmhub_enabled;
 } rdna3_gmc;
 
-/* Place GART (BEST_FIT, 4 GiB aligned), allocate table + scratch in VRAM. */
+/* Validate GC discovery (11.0.2 / 11.0.3, segment 0), then place/allocate
+ * GART. Must succeed before any GFXHUB access, including fault interrupts. */
 int  gmc11_init(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_size);
 /* Write PTEs for 'pages' 4 KiB pages starting at GART offset 'gart_off'.
  * 'pa' is a bus address (system memory, RD_PTE_SYSTEM) or a VRAM physical
@@ -88,11 +89,11 @@ void gmc11_set_vm_fault_interrupts(rdna3_dev *d, int enable);
 uint32_t mmhub302_fault_status(rdna3_dev *d, int clear);
 void     mmhub302_set_vm_fault_interrupts(rdna3_dev *d, int enable);
 
-/* gfxhub_v3_0_3_gart_enable() + set_fault_enable_default() */
-int  gfxhub303_gart_enable(rdna3_dev *d, rdna3_gmc *g);
-void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value);
+/* gfxhub_v3_0 / gfxhub_v3_0_3: selected by validated GC discovery. */
+int  gfxhub11_gart_enable(rdna3_dev *d, rdna3_gmc *g);
+void gfxhub11_set_fault_enable_default(rdna3_dev *d, int value);
 /* gmc_v11_0_flush_gpu_tlb() for the GFXHUB, MMIO path (before KIQ/MES) */
-int  gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
+int  gfxhub11_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
 /* register offsets + request word a ring needs to switch VMID n's page
  * directory and invalidate it on engine 'eng' (gmc_v11_0_emit_flush_gpu_tlb) */
 typedef struct rdna3_vm_flush_regs {
@@ -100,7 +101,7 @@ typedef struct rdna3_vm_flush_regs {
     uint32_t req, ack;       /* GCVM_INVALIDATE_ENGe_REQ/ACK */
     uint32_t req_val;        /* get_invalidate_req(vmid, 0) */
 } rdna3_vm_flush_regs;
-void gfxhub303_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
+void gfxhub11_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
 /* the same for the MMHUB (mmhub_v3_0: vm_inv_eng0_req / ack, get_invalidate_req) */
 void mmhub302_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
 /* gmc_v11_0_emit_pasid_mapping: the register a ring writes the job's PASID
@@ -115,8 +116,8 @@ uint32_t gmc11_get_vbios_fb_size(rdna3_dev *d);
  * VGA and extended sizes amdgpu reserves at the bottom of VRAM */
 void gmc11_get_vbios_allocations(rdna3_dev *d, uint64_t real_vram_size, uint64_t *stolen_vga,
                                  uint64_t *stolen_extended);
-/* program VMID n's page directory base (gfxhub_v3_0_3_setup_vm_pt_regs) */
-void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
+/* gfxhub_v3_0 / gfxhub_v3_0_3_setup_vm_pt_regs */
+void gfxhub11_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 
 /* MMHUB 3.0.2 (mmhub302.c, mmhub_v3_0_2.c): SDMA/IH/VCN/DCN/PSP side */
 int      mmhub302_gart_enable(rdna3_dev *d, rdna3_gmc *g);
@@ -126,9 +127,9 @@ int      mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
 void     mmhub302_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 uint64_t mmhub302_get_fb_location(rdna3_dev *d);
 uint64_t mmhub302_get_mc_fb_offset(rdna3_dev *d);
-/* gfxhub_v3_0_3_gart_disable (gfx_v11_0_hw_fini), _get_mc_fb_offset */
-void     gfxhub303_gart_disable(rdna3_dev *d);
-uint64_t gfxhub303_get_mc_fb_offset(rdna3_dev *d);
+/* gfxhub_v3_0 / gfxhub_v3_0_3_gart_disable, _get_mc_fb_offset */
+void     gfxhub11_gart_disable(rdna3_dev *d, rdna3_gmc *g);
+uint64_t gfxhub11_get_mc_fb_offset(rdna3_dev *d);
 /* gmc_v11_0_gart_disable (MMHUB) / gmc_v11_0_hw_fini (VM fault interrupts
  * off, then the GART) */
 void     gmc11_gart_disable(rdna3_dev *d);
