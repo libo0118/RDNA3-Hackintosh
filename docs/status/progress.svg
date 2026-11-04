@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 33.3%   ported 97.1%   (524 / 1526 / 1572)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 33.3%   ported 97.0%   (524 / 1525 / 1572)</text>
 <g><title>Display: modeset: works 28%, ported 100% (51+130 of 181); verified by step(s) modeset</title>
 <rect x="1.0" y="53.0" width="9.2" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.2" y="53.0" width="9.2" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1406,7 +1406,7 @@
 <text x="289.8" y="296.1" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SDMA 6</text>
 <text x="289.8" y="310.1" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">49% / 100%</text>
 </g>
-<g><title>SMU 13.0.7 power: works 0%, ported 32% (0+13 of 40); verified by step(s) ?</title>
+<g><title>SMU 13.0.7 power: works 0%, ported 30% (0+12 of 40); verified by step(s) ?</title>
 <rect x="340.4" y="202.5" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="349.9" y="202.5" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="359.4" y="202.5" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
@@ -1419,7 +1419,7 @@
 <rect x="378.4" y="211.7" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="340.4" y="221.0" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="349.9" y="221.0" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="359.4" y="221.0" width="9.5" height="9.3" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="359.4" y="221.0" width="9.5" height="9.3" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="368.9" y="221.0" width="9.5" height="9.3" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="378.4" y="221.0" width="9.5" height="9.3" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="340.4" y="230.3" width="9.5" height="9.3" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1449,7 +1449,7 @@
 <rect x="378.4" y="267.4" width="9.5" height="9.3" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="339.4" y="201.5" width="49.6" height="76.2" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="344.4" y="216.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SMU 1…</text>
-<text x="344.4" y="230.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 32%</text>
+<text x="344.4" y="230.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 30%</text>
 </g>
 <g><title>Display: FreeSync: works 0%, ported 54% (0+21 of 39); verified by step(s) ?</title>
 <rect x="340.4" y="278.7" width="9.5" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>

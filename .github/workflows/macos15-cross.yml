@@ -1,0 +1,110 @@
+name: Supplemental macOS 15 ARM to x86_64 contract
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  macos15-cross:
+    name: Cross-compile x86_64 and preserve the fixed native name-level contract
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the macOS 15 ARM host and exact Xcode 16.4 / SDK 15.5
+        # Official ARM image: https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md
+        run: |
+          mkdir -p build/ci-logs
+          printf '%s\n' \
+            'EXPERIMENTAL CROSS-COMPILE: x86_64 target on an ARM host; NOT HARDWARE VERIFIED.' \
+            "Commit: $GITHUB_SHA" \
+            'Supplement only: the existing macos-15-intel jobs are neither replaced nor cancelled.' \
+            'Core/framebuffer/AGDC: fixed native name-level guard contract must not expand.' \
+            'Accelerator: compile/import contract only; the native baseline had 7 unresolved imports, NOT validated binding.' \
+            'This job never runs kmutil/kextlibs, creates a KC, installs or loads a kext, or downloads GPU firmware.' \
+            'No ABI/vtable, boot, DisplayPort, Metal, RADV, firmware execution or real-GPU result is claimed.' \
+            'Baseline: https://github.com/libo0118/RDNA3-Hackintosh/actions/runs/41824849834/job/126556846479' \
+            | tee build/ci-logs/EXPERIMENTAL.txt >> "$GITHUB_STEP_SUMMARY"
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          test "$(xcrun --sdk macosx --show-sdk-version)" = 15.5
+          test -d "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers"
+          sw_vers 2>&1 | tee build/ci-logs/toolchain.log
+          xcodebuild -version 2>&1 | tee -a build/ci-logs/toolchain.log
+          grep -qx 'Xcode 16.4' build/ci-logs/toolchain.log
+          grep -qx 'Build version 16F6' build/ci-logs/toolchain.log
+          xcrun --sdk macosx --show-sdk-path 2>&1 | tee -a build/ci-logs/toolchain.log
+          xcrun clang --version 2>&1 | tee -a build/ci-logs/toolchain.log
+          printf 'Host: %s\nImage: %s %s\n' "$(uname -m)" "$ImageOS" "$ImageVersion" | tee -a build/ci-logs/toolchain.log
+      - name: Test fail-closed Mach-O, archive and contract checks
+        run: python3 -I -B tools/ci/test_macos15_native_contract.py 2>&1 | tee build/ci-logs/contract-selftests.log
+      - name: Cross-compile four x86_64 kexts (no host KPI resolution)
+        run: |
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          make -C kext all SDK="$sdk" ARCH='-arch x86_64 -mmacosx-version-min=11.0' 2>&1 | tee build/ci-logs/kext.log
+          make -C accel all check SDK="$sdk" ARCH='-arch x86_64 -mmacosx-version-min=11.0' 2>&1 | tee build/ci-logs/accel.log
+          make -C fb all check SDK="$sdk" ARCH='-arch x86_64 -mmacosx-version-min=11.0' 2>&1 | tee build/ci-logs/fb.log
+          make -C agdc all SDK="$sdk" ARCH='-arch x86_64 -mmacosx-version-min=11.0' 2>&1 | tee build/ci-logs/agdc.log
+          # Keep the native jobs' safe symbol-name checks, not AGDC's host export report.
+          xcrun nm -m build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel | grep -E '_kmod_info|RDNA3Accel10gMetaClassE' | tee -a build/ci-logs/kext.log
+          xcrun nm -m build/RDNA3AGDC.kext/Contents/MacOS/RDNA3AGDC | grep -E '_kmod_info|RDNA3AGDC10gMetaClassE|RD3DeviceControl10gMetaClassE' | tee -a build/ci-logs/agdc.log
+          if xcrun nm build/RDNA3AGDC.kext/Contents/MacOS/RDNA3AGDC | grep -E '__ZN[0-9]+NV[A-Za-z0-9]*10gMetaClassE'; then
+            echo '::error::Unexpected upstream NV metaclass'; exit 1
+          fi
+      - name: Cross-compile libdrm and diagnostic tools (never execute them)
+        run: |
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          make -C userspace all ARCH='-arch x86_64 -mmacosx-version-min=15.0' 2>&1 | tee build/ci-logs/userspace.log
+      - name: Require same-bundle import subset, metadata and current XNU policy
+        run: |
+          cp tools/ci/data/macos15-native-contract.json build/ci-logs/native-baseline-contract.json
+          python3 -B tools/ci/macos15_native_contract.py check build --nm 2>&1 | tee build/ci-logs/native-contract.log
+          cat build/ci-logs/native-contract.log >> "$GITHUB_STEP_SUMMARY"
+      - name: Package cross-compiled binaries, attribution and scope (no firmware)
+        run: |
+          for binary in build/*.kext/Contents/MacOS/* \
+            build/userspace/libdrm.dylib build/userspace/libdrm_amdgpu.dylib \
+            build/userspace/rdna3_drminfo build/userspace/rdna3_modetest build/userspace/rdna3_pmctl; do
+            file "$binary"
+            test "$(lipo -archs "$binary")" = x86_64
+          done 2>&1 | tee build/ci-logs/architectures.log
+          cp build/userspace/libdrm.dylib build/userspace/libdrm.2.dylib
+          cp build/userspace/libdrm_amdgpu.dylib build/userspace/libdrm_amdgpu.1.dylib
+          mkdir -p build/cross-licenses
+          cp LICENSE NOTICE metal/LICENSE.PolyForm-Noncommercial-1.0.0 accel/PROVENANCE.md build/cross-licenses/
+          # Keep this small vendored subset verbatim, including every original MIT notice.
+          cp -R third_party/libdrm build/cross-licenses/libdrm-source
+          tar -czf build/rdna3-macos15-x86_64-CROSSCOMPILED-NOT-HARDWARE-VERIFIED.tar.gz -C build \
+            ci-logs/ cross-licenses/ \
+            RDNA3Accel.kext/Contents/Info.plist RDNA3Accel.kext/Contents/MacOS/RDNA3Accel \
+            RDNA3Accelerator.kext/Contents/Info.plist RDNA3Accelerator.kext/Contents/MacOS/RDNA3Accelerator \
+            RDNA3Framebuffer.kext/Contents/Info.plist RDNA3Framebuffer.kext/Contents/MacOS/RDNA3Framebuffer \
+            RDNA3AGDC.kext/Contents/Info.plist RDNA3AGDC.kext/Contents/MacOS/RDNA3AGDC \
+            userspace/libdrm.dylib userspace/libdrm_amdgpu.dylib \
+            userspace/libdrm.2.dylib userspace/libdrm_amdgpu.1.dylib \
+            userspace/rdna3_drminfo userspace/rdna3_modetest userspace/rdna3_pmctl
+      - name: Preserve supplemental cross-compiled binaries (NOT HARDWARE VERIFIED)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-macos15-x86_64-CROSSCOMPILED-NOT-HARDWARE-VERIFIED
+          path: build/rdna3-macos15-x86_64-CROSSCOMPILED-NOT-HARDWARE-VERIFIED.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve cross compiler and contract logs even on rejection
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-macos15-crosscompiled-contract-logs
+          path: build/ci-logs/
+          if-no-files-found: error
+          retention-days: 7

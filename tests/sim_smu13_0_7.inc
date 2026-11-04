@@ -87,6 +87,7 @@ static void pm_fixture(rdna3_dev *d, model *m, rdna3_vbios *v)
     w16(sku + 2810, 110);
     w32(sku + 3484, 0x87654321); /* PMFW board, replaced only without SCPM. */
     sku[3484 + 189] = 1;
+    for (i = 0; i < 32; i++) sku[3484 + 456 + i] = (uint8_t)(0xc0 + i);
 
     /* A real parser consumes an in-memory Atom ROM, not hand-filled offsets. */
     b = m->rom;
@@ -176,7 +177,8 @@ static void test_pm7_success(int scpm, int exact)
     assert(s.board_table_appended == !scpm);
     if (!scpm) {
         assert(!memcmp(m.uploaded, m.combo + 832, 3484));
-        assert(!memcmp(m.uploaded + 3484, m.rom + 0x404, 488));
+        assert(!memcmp(m.uploaded + 3484, m.rom + 0x404, 456));
+        assert(!memcmp(m.uploaded + 3484 + 456, m.combo + 832 + 3484 + 456, 32));
         assert(s.navi33.board_version == 0 && s.navi33.maco_support);
         assert(msg_index(&m, 0x13, 0) < msg_index(&m, 0x5, (uint32_t)(s.allowed >> 32)));
         assert(msg_index(&m, 0x5, (uint32_t)(s.allowed >> 32)) < msg_index(&m, 0x4, (uint32_t)s.allowed));
@@ -565,6 +567,36 @@ static void test_clock_registers(void)
     assert(!m.ndal && !m.writes);
 }
 
+static void test_board_prefix(void)
+{
+    rdna3_dev d;
+    rdna3_smu s;
+    rdna3_vbios v;
+    model m;
+    for (unsigned invalid = 0; invalid < 3; invalid++) {
+        pm_fixture(&d, &m, &v);
+        w16(m.rom + 0x80, 44); m.rom[0x83] = 3; /* observed ATOM 2.3 header prefix */
+        assert(vbios_parse(&d, &v, m.rom, sizeof(m.rom)) == RDNA3_OK);
+        assert(v.data_table == 0xc0);
+        w16(m.rom + 0x400, invalid == 1 ? 459 : 460);
+        m.rom[0x402] = 5;
+        m.rom[0x403] = invalid == 2 ? 1 : 0;
+        memset(m.rom + 0x404 + 456, 0x5a, 32); /* adjacent data is not board padding */
+        w32(m.rom + 0x180 + 8, 0); /* GFX uses the independently enumerated DPM table */
+        w32(m.rom + 0x180 + 12, 100000);
+        m.enabled &= ~(1ull << 3); /* fixed UCLK uses the actual boot field */
+        int r = smu13_pm_init(&d, &s, &v, ~0ull, 3, 6, 0);
+        if (invalid) {
+            assert(r == RDNA3_EINVAL && !m.uploads && !s.initialized);
+        } else {
+            assert(r == RDNA3_OK && m.uploads == 1 && s.initialized);
+            assert(!memcmp(m.uploaded + 3484, m.rom + 0x404, 456));
+            assert(!memcmp(m.uploaded + 3484 + 456, m.combo + 832 + 3484 + 456, 32));
+            assert(s.uclk.count == 1 && s.uclk.level[0] == 1000);
+        }
+    }
+}
+
 static void test_navi33_pm(void)
 {
     int scpm, exact;
@@ -581,4 +613,5 @@ static void test_navi33_pm(void)
     test_metrics_cache(7);
     test_metrics_cache(10);
     test_clock_registers();
+    test_board_prefix();
 }

@@ -18,6 +18,7 @@ ABI_ASSERT(driver_if, SMU13_0_7_DRIVER_IF_VERSION == RD_SMU_13_0_7_IF_VERSION);
 ABI_ASSERT(pptable_version, PPTABLE_VERSION == 0x27);
 ABI_ASSERT(sku_size, sizeof(SkuTable_t) == 3484);
 ABI_ASSERT(board_size, sizeof(BoardTable_t) == 488);
+ABI_ASSERT(board_prefix_size, offsetof(BoardTable_t, MmHubPadding) == 456);
 ABI_ASSERT(pp_size, sizeof(PPTable_t) == 3972);
 ABI_ASSERT(board_offset, offsetof(PPTable_t, BoardTable) == 3484);
 ABI_ASSERT(sku_temp, offsetof(SkuTable_t, TemperatureLimit) == 50);
@@ -185,18 +186,22 @@ int smu13_0_7_setup_pptable(rdna3_dev *d, rdna3_smu_13_0_7 *p, uint64_t driver_t
      * selects this layout by MP1, not an invented VBIOS revision whitelist. */
     p->board_table_appended = 0;
     if (!scpm) {
+        const size_t header = sizeof(struct atom_common_table_header);
+        const size_t board_data = offsetof(BoardTable_t, MmHubPadding);
         if (!vbios) {
             RERR(d, "SMU 13.0.7: non-SCPM bootstrap needs VBIOS smc_dpm_info");
             return RDNA3_ENOENT;
         }
         board = vbios_data_table(vbios, RD_ATOM_DT_SMC_DPM_INFO, &size, &frev, &crev);
-        if (!board || size < sizeof(struct atom_common_table_header) + sizeof(BoardTable_t)) {
-            RERR(d, "SMU 13.0.7: smc_dpm_info %u.%u has %u bytes, needs %u", frev, crev, size,
-                 (unsigned)(sizeof(struct atom_common_table_header) + sizeof(BoardTable_t)));
+        if (!board || (size < header + sizeof(BoardTable_t) &&
+            !(frev == 5 && crev == 0 && size >= header + board_data))) {
+            RERR(d, "SMU 13.0.7: smc_dpm_info %u.%u has %u bytes, needs %u (Atom 5.0 prefix %u)",
+                 frev, crev, size, (unsigned)(header + sizeof(BoardTable_t)),
+                 (unsigned)(header + board_data));
             return board ? RDNA3_EINVAL : RDNA3_ENOENT;
         }
-        /* smu_v13_0_7_append_powerplay_table: copy the complete opaque board. */
-        copy_bytes(&pp->BoardTable, board + sizeof(struct atom_common_table_header), sizeof(BoardTable_t));
+        /* Observed Atom 5.0 contains the whole board prefix, not SMU-internal MMHUB padding. */
+        copy_bytes(&pp->BoardTable, board + header, board_data);
         p->board_table_appended = 1;
         RLOG(d, "SMU 13.0.7: opaque BoardTable 0x%x from VBIOS smc_dpm_info %u.%u",
              pp->BoardTable.Version, frev, crev);
