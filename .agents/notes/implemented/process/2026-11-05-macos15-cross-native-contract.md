@@ -8,7 +8,7 @@ GitHub `macos-15-intel` 曾因 hosted runner 未领取任务失败，新的 Inte
 
 ## Decision
 
-独立的 `.github/workflows/macos15-cross.yml` 只接受 `workflow_dispatch`，不修改、替换或取消既有 `build.yml` 的 Intel 验证。它使用标准 `macos-15` ARM runner，固定 `DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer`，要求 host 为 ARM/macOS 15、Xcode 16.4 build 16F6、SDK 精确为 15.5；条件不满足就失败，不自动改标签或 SDK。
+独立的 `.github/workflows/macos15-cross.yml` 只接受 `workflow_dispatch`，不修改、替换或取消既有 `build.yml` 的 Intel 验证；既有 Ubuntu host 步骤另运行这组 Python selftests，使检查器自身也随正常 push 持续测试，不依赖手动交叉编译任务被触发。它使用标准 `macos-15` ARM runner，固定 `DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer`，要求 host 为 ARM/macOS 15、Xcode 16.4 build 16F6、SDK 精确为 15.5；条件不满足就失败，不自动改标签或 SDK。
 
 官方 [runner 标签文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) 将 `macos-15` 列为 arm64；[ARM 镜像软件表](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md) 在核验时为 image `20261028.0489.1`，明确列出 Xcode 16.4 / SDK 15.5。实际 workflow 再检查工具链，避免文档或镜像漂移被忽略。
 
