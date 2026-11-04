@@ -531,8 +531,9 @@ void RDNA3Accel::displayPublishRoutes()
     {
         rdna3_dcn_clocks ck;
         char val[128];
-        dcn32_clk_read(fDispDev, &ck);
-        snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
+        int cr = dcn32_clk_read(fDispDev, &ck);
+        if (cr) snprintf(val, sizeof(val), "unavailable: clock read failed (%d)", cr);
+        else snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
                  ck.vco_khz, ck.dispclk_khz, ck.dppclk_khz, ck.dprefclk_khz, ck.dcfclk_khz, ck.dtbclk_khz);
         setProperty("RDNA3,DCNClocks", val);
         LOG("display: clocks %s", val);
@@ -1898,7 +1899,8 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
                  scdc.status_flags[1], scdc.status_flags[0], sr, want->pixel_khz);
     }
     rdna3_dcn_clocks ck;
-    dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
+    int clock_result = dcn32_clk_read(fDispDev, &ck); /* raised or not: the report sees them */
+    if (!r && clock_result) r = clock_result;
     char dpval[128] = "";
     char dscval[96] = "", mstval[128] = "", uhbrval[160] = "", odmval[96] = "";
     if (dpHead) {
@@ -1978,7 +1980,8 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     }
     {
         char val[128];
-        snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
+        if (clock_result) snprintf(val, sizeof(val), "unavailable: clock read failed (%d)", clock_result);
+        else snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
                  ck.vco_khz, ck.dispclk_khz, ck.dppclk_khz, ck.dprefclk_khz, ck.dcfclk_khz, ck.dtbclk_khz);
         setProperty("RDNA3,DCNClocks", val);
     }

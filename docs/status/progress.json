@@ -1,11 +1,11 @@
 {
  "amdgpu": {
   "works": 524,
-  "ported": 1513,
-  "total": 1531,
-  "not_applicable": 641,
-  "works_pct": 34.2,
-  "ported_pct": 98.8,
+  "ported": 1526,
+  "total": 1572,
+  "not_applicable": 642,
+  "works_pct": 33.3,
+  "ported_pct": 97.1,
   "groups": [
    {
     "name": "PSP 13",
@@ -147,7 +147,7 @@
     ],
     "works": 44,
     "ported": 47,
-    "todo": 0,
+    "todo": 1,
     "items": {
      "smu_v13_0_0_append_powerplay_table": "works",
      "smu_v13_0_0_check_powerplay_table": "works",
@@ -169,7 +169,7 @@
      "smu_v13_0_0_is_dpm_running": "works",
      "smu_v13_0_0_is_mode1_reset_supported": "ported",
      "smu_v13_0_0_is_od_feature_supported": "ported",
-     "smu_v13_0_0_mode1_reset": "works",
+     "smu_v13_0_0_mode1_reset": "todo",
      "smu_v13_0_0_od_edit_dpm_table": "ported",
      "smu_v13_0_0_od_restore_table_single": "ported",
      "smu_v13_0_0_populate_umd_state_clk": "ported",
@@ -216,6 +216,7 @@
      "smu_v13_0_gpo_control": "ported",
      "smu_v13_0_init_microcode": "works",
      "smu_v13_0_irq_process": "ported",
+     "smu_v13_0_mode1_reset": "works",
      "smu_v13_0_notify_display_change": "ported",
      "smu_v13_0_notify_memory_pool_location": "works",
      "smu_v13_0_process_pending_interrupt": "ported",
@@ -280,7 +281,6 @@
      "smu_v13_0_init_pptable_microcode": "returns at once on MP1 13.0.0 / 13.0.7 / 13.0.10 (the PSP hands the PMFW its PPTable)",
      "smu_v13_0_init_smc_tables": "kzalloc / kfree of the SMU table, DPM and power contexts (smu_sw_init / sw_fini): rdna3_smu holds them as members",
      "smu_v13_0_load_microcode": "the driver loading the PMFW itself (smu_start_smc_engine without PSP loading, MP1 < 11.0); the PSP loads it here",
-     "smu_v13_0_mode1_reset": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)",
      "smu_v13_0_od_edit_dpm_table": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)",
      "smu_v13_0_set_azalia_d3_pme": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)",
      "smu_v13_0_set_default_dpm_tables": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)",
@@ -292,6 +292,61 @@
      "smu_v13_0_setup_pptable": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)",
      "smu_v13_0_wait_for_event": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)",
      "smu_v13_0_wait_for_reset_complete": "smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)"
+    }
+   },
+   {
+    "name": "SMU 13.0.7 power",
+    "steps": [
+     "?"
+    ],
+    "works": 0,
+    "ported": 13,
+    "todo": 27,
+    "items": {
+     "smu_v13_0_7_allocate_dpm_context": "todo",
+     "smu_v13_0_7_append_powerplay_table": "ported",
+     "smu_v13_0_7_check_fw_status": "ported",
+     "smu_v13_0_7_check_powerplay_table": "todo",
+     "smu_v13_0_7_enable_mgpu_fan_boost": "todo",
+     "smu_v13_0_7_force_clk_levels": "todo",
+     "smu_v13_0_7_get_allowed_feature_mask": "ported",
+     "smu_v13_0_7_get_current_clk_freq_by_table": "ported",
+     "smu_v13_0_7_get_dpm_ultimate_freq": "todo",
+     "smu_v13_0_7_get_fan_speed_pwm": "ported",
+     "smu_v13_0_7_get_fan_speed_rpm": "ported",
+     "smu_v13_0_7_get_gpu_metrics": "ported",
+     "smu_v13_0_7_get_od_setting_limits": "todo",
+     "smu_v13_0_7_get_overdrive_table": "todo",
+     "smu_v13_0_7_get_power_limit": "todo",
+     "smu_v13_0_7_get_power_profile_mode": "todo",
+     "smu_v13_0_7_get_pptable_from_pmfw": "ported",
+     "smu_v13_0_7_get_smu_metrics_data": "todo",
+     "smu_v13_0_7_get_thermal_temperature_range": "ported",
+     "smu_v13_0_7_get_throttler_status": "todo",
+     "smu_v13_0_7_init_smc_tables": "todo",
+     "smu_v13_0_7_is_dpm_running": "ported",
+     "smu_v13_0_7_is_mode1_reset_supported": "ported",
+     "smu_v13_0_7_is_od_feature_supported": "todo",
+     "smu_v13_0_7_od_edit_dpm_table": "todo",
+     "smu_v13_0_7_od_restore_table_single": "todo",
+     "smu_v13_0_7_populate_umd_state_clk": "todo",
+     "smu_v13_0_7_read_sensor": "todo",
+     "smu_v13_0_7_restore_user_od_settings": "todo",
+     "smu_v13_0_7_set_default_dpm_table": "ported",
+     "smu_v13_0_7_set_default_od_settings": "todo",
+     "smu_v13_0_7_set_df_cstate": "todo",
+     "smu_v13_0_7_set_mp1_state": "todo",
+     "smu_v13_0_7_set_power_limit": "todo",
+     "smu_v13_0_7_set_power_profile_mode": "todo",
+     "smu_v13_0_7_set_supported_od_feature_mask": "todo",
+     "smu_v13_0_7_setup_pptable": "ported",
+     "smu_v13_0_7_store_powerplay_table": "todo",
+     "smu_v13_0_7_tables_init": "todo",
+     "smu_v13_0_7_upload_overdrive_table": "todo"
+    },
+    "na": {
+     "smu_v13_0_7_set_ppt_funcs": "Linux IP-block function-table wiring",
+     "smu_v13_0_7_wbrf_support_check": "Wi-Fi band RF mitigation (WBRF): ACPI on AMD laptops"
     }
    },
    {

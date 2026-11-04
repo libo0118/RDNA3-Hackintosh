@@ -30,22 +30,41 @@ uint32_t dcn32_dentist_divider(uint32_t did)
     return 248 + 264 * (did - 0x7e);       /* 62, 128 */
 }
 
-void dcn32_clk_read(rdna3_dev *d, rdna3_dcn_clocks *c)
+/* Linux v6.12 dcn32_clk_mgr_construct / dcn32_dump_clk_registers. */
+static int clk0_reg(rdna3_dev *d, uint32_t *reg)
 {
-    uint32_t pll = rdna3_rreg(d, RD_CLK1_CLK_PLL_REQ);
+    const rdna3_ipver *gc = &d->ipver[HWIP_GC];
+    if (gc->present && gc->major == 11 && gc->minor == 0 &&
+        (gc->rev == 0 || gc->rev == 2 || gc->rev == 3)) {
+        *reg = gc->rev == 2 ? RD_CLK01_CLK0_CLK0_DFS_CNTL : RD_CLK1_CLK0_DFS_CNTL;
+        return RDNA3_OK;
+    }
+    RERR(d, "DCN clocks: unsupported GC discovery (present %u, IP %u.%u.%u)",
+         gc->present, gc->major, gc->minor, gc->rev);
+    return RDNA3_ENODEV;
+}
+
+int dcn32_clk_read(rdna3_dev *d, rdna3_dcn_clocks *c)
+{
+    uint32_t pll, base;
+    int ret = clk0_reg(d, &base);
     uint32_t *out[5] = { &c->dispclk_khz, &c->dppclk_khz, &c->dprefclk_khz, &c->dcfclk_khz,
                          &c->dtbclk_khz };
-    /* FbMult_int [8:0] . FbMult_frac [31:16] (a 32-bit fraction) x DFS ref */
-    uint64_t fx = ((uint64_t)(pll & 0x1ff) << 32) | (pll & 0xffff0000u);
+    uint64_t fx;
     unsigned i;
+    if (ret) return ret;
+    pll = rdna3_rreg(d, RD_CLK1_CLK_PLL_REQ);
+    /* FbMult_int [8:0] . FbMult_frac [31:16] (a 32-bit fraction) x DFS ref */
+    fx = ((uint64_t)(pll & 0x1ff) << 32) | (pll & 0xffff0000u);
     c->vco_khz = (uint32_t)((fx * RD_DCN32_DFS_REF_KHZ) >> 32);
     if (!c->vco_khz)
         c->vco_khz = RD_DCN32_VCO_DEFAULT_KHZ;
     for (i = 0; i < 5; i++) {
-        uint32_t did = rdna3_rreg(d, RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE * i);
+        uint32_t did = rdna3_rreg(d, base + RD_CLK1_DFS_STRIDE * i);
         /* DENTIST_DIVIDER_RANGE_SCALE_FACTOR (4) x VCO / divider */
         *out[i] = (uint32_t)(4ull * c->vco_khz / dcn32_dentist_divider(did & 0x7f));
     }
+    return RDNA3_OK;
 }
 
 /* dcn32_smu_wait_for_response: until RESP is non-zero, 10 us x 200000 */
@@ -76,8 +95,8 @@ static uint32_t dal_wait_delay(rdna3_dev *d, uint32_t *total_delay_us)
     return r;
 }
 
-/* Both DAL send variants share this boundary; the driver mailbox's query
- * whitelist cannot protect these independent, absolute registers. */
+/* Linux v6.12 dcn32_smu_send_msg_with_param is shared by DCN320/321.
+ * Its DAL IF 0x18 is independent from the MP1 driver IF (0x3d / 0x35). */
 static int dal_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out, uint32_t *total_delay_us)
 {
     const rdna3_ipver *mp1 = &d->ipver[HWIP_MP1];
@@ -85,16 +104,19 @@ static int dal_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out, uin
     if (total_delay_us)
         *total_delay_us = 2000000; /* a refusal must also end the status wait */
     if (!mp1->present || !mp1->num_base || mp1->major != 13 || mp1->minor != 0 ||
-        (mp1->rev != 0 && mp1->rev != 10)) {
-        RERR(d, "DAL SMU: unsupported MP1 discovery (present %u, segments %u, IP %u.%u.%u); DAL ABI requires 13.0.0/10",
+        (mp1->rev != 0 && mp1->rev != 7 && mp1->rev != 10)) {
+        RERR(d, "DAL SMU: unsupported MP1 discovery (present %u, segments %u, IP %u.%u.%u)",
              mp1->present, mp1->num_base, mp1->major, mp1->minor, mp1->rev);
-        return mp1->present && mp1->num_base && mp1->major == 13 && mp1->minor == 0 && mp1->rev == 7
-                   ? RDNA3_EOPNOTSUPP : RDNA3_ENODEV;
+        return RDNA3_ENODEV;
     }
     if (total_delay_us)
-        dal_wait_delay(d, &delay1_us);
+        r = dal_wait_delay(d, &delay1_us);
     else
-        dal_wait(d);
+        r = dal_wait(d);
+    if (mp1->rev == 7 && !r) {
+        RERR(d, "DAL SMU: not ready for message 0x%x", msg);
+        return RDNA3_ETIME;
+    }
     rdna3_wreg(d, RD_DAL_RESP_REG, 0);
     rdna3_wreg(d, RD_DAL_ARG_REG, arg);
     rdna3_wreg(d, RD_DAL_MSG_REG, msg);
@@ -154,11 +176,19 @@ int dcn32_smu_set_hard_min_ex(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32
         *taken = r == RDNA3_OK;
     if (r)
         return r;
-    /* dcn32_get_hard_min_status_supported (GC 11.0.3) and
+    /* dcn32_get_hard_min_status_supported (Linux v6.12) and
      * dcn32_smu_wait_get_hard_min_status: the PMFW reports which hard
      * minimums are in place; give it up to 2 s */
-    if (pmfw < 0x503900)
-        return RDNA3_OK;
+    {
+        const rdna3_ipver *gc = &d->ipver[HWIP_GC];
+        uint32_t minimum;
+        if (!gc->present || gc->major != 11 || gc->minor != 0) return RDNA3_OK;
+        if (gc->rev == 0) minimum = 0x4e6a00;
+        else if (gc->rev == 2) minimum = 0x524e00;
+        else if (gc->rev == 3) minimum = 0x503900;
+        else return RDNA3_OK;
+        if (pmfw < minimum) return RDNA3_OK;
+    }
     if (ppclk == RD_PPCLK_DISPCLK)
         check |= RD_CHECK_HARD_MIN_CLK_DISPCLK;
     else if (ppclk == RD_PPCLK_DPPCLK)
@@ -325,15 +355,17 @@ int dcn32_clk_raise(rdna3_dev *d, uint32_t pmfw, uint32_t pipe, uint32_t dispclk
                     rdna3_dcn_clocks *now)
 {
     rdna3_dcn_clocks c0, c1;
-    uint32_t disp, dpp, pipe_khz;
-    int r = RDNA3_OK;
+    uint32_t disp, dpp, pipe_khz, base;
+    int r = clk0_reg(d, &base);
+    if (r) return r;
 
-    dcn32_clk_read(d, &c0);
+    r = dcn32_clk_read(d, &c0);
+    if (r) return r;
     disp = dentist_round(c0.vco_khz, dispclk_khz);
     dpp = dentist_round(c0.vco_khz, dppclk_khz);
     /* dcn32_update_clocks_update_dentist: leaving divider 127 needs every
      * stream's OTG pixel drop dance (not ported): refused */
-    if (disp > c0.dispclk_khz && (rdna3_rreg(d, RD_CLK1_CLK0_DFS_CNTL) & 0x7f) == 127) {
+    if (disp > c0.dispclk_khz && (rdna3_rreg(d, base) & 0x7f) == 127) {
         RERR(d, "DCN clocks: DISPCLK at divider 127, not raised");
         return RDNA3_EBUSY;
     }
@@ -343,11 +375,12 @@ int dcn32_clk_raise(rdna3_dev *d, uint32_t pmfw, uint32_t pipe, uint32_t dispclk
         r = dcn32_smu_set_hard_min(d, RD_PPCLK_DPPCLK, dpp / 1000, pmfw, NULL);
     if (!r && disp > c0.dispclk_khz)
         r = dcn32_smu_set_hard_min(d, RD_PPCLK_DISPCLK, disp / 1000, pmfw, NULL);
-    dcn32_clk_read(d, &c1);
-    if (now)
-        *now = c1;
-    if (r)
-        return r;
+    {
+        int cr = dcn32_clk_read(d, &c1);
+        if (!cr && now) *now = c1;
+        if (r) return r;
+        if (cr) return cr;
+    }
     if (c1.dispclk_khz < disp / 1000 * 1000 || c1.dppclk_khz < dpp / 1000 * 1000) {
         RERR(d, "DCN clocks: asked DISPCLK %u DPPCLK %u kHz, the PMFW set %u / %u kHz", disp, dpp, c1.dispclk_khz,
              c1.dppclk_khz);

@@ -3,8 +3,8 @@
  * smu_cmn.c / smu_v13_0.c / smu_v13_0_0_ppt.c / amdgpu_smu.c (MIT). amdgpu
  * drives MP1 13.0.0 (Navi 31) and 13.0.10 (Navi 32) with smu_v13_0_0_ppt.c
  * and smu13_driver_if_v13_0_0.h.
- * MP1 13.0.7 only has firmware-status and TestMessage/version queries here;
- * its PM initialization, table transfers and mailbox controls are rejected.
+ * MP1 13.0.7 uses its isolated Linux v6.12 PM ABI in smu13_0_7.c;
+ * the 13.0.0 structs below remain exclusively the 13.0.0/10 state.
  *
  * Mailbox: C2PMSG_66 = message, C2PMSG_82 = argument, C2PMSG_90 = response.
  *
@@ -25,6 +25,7 @@
 #include "vbios.h"
 #include "gen/smu13_driver_if_v13_0_0.h"
 #include "rdna3_pmctl.h"
+#include "smu13_0_7.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,8 +94,8 @@ extern "C" {
 #define PPSMC_MSG_EnableUCLKShadow      0x51
 #define PPSMC_MSG_DALNotPresent         0x4E
 
-/* Unknown/missing MP1 discovery fails before register access. 13.0.7 allows
- * only TestMessage / GetSmuVersion / GetDriverIfVersion, not PM commands. */
+/* Unknown/missing MP1 discovery fails before register access. 13.0.7 accepts
+ * only the commands audited by its private backend. */
 int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out);
 /* Waits for PMFW to be up (response register non-zero), then
  * TestMessage + GetSmuVersion + GetDriverIfVersion. On 13.0.7 the firmware
@@ -167,6 +168,9 @@ typedef struct rdna3_smu_dpm {
 typedef struct rdna3_smu {
     uint32_t version, if_version;
     int      fw_status_ok;
+    uint8_t  mp1_rev;
+    int      initialized;
+    rdna3_smu_13_0_7 navi33;           /* decoded values, never a 13.0.0 overlay */
 
     /* VRAM offsets (smu_init_fb_allocations) */
     uint64_t driver_table, tool_table;
@@ -186,12 +190,13 @@ typedef struct rdna3_smu {
     uint64_t allowed, enabled;         /* feature masks */
     int      dpm_running;
 
-    rdna3_smu_dpm gfx, uclk, soc, fclk;
+    rdna3_smu_dpm gfx, uclk, soc, fclk, dcef;
     uint32_t ppt_limit_w;              /* GetPptLimit (AC) */
     uint32_t pcie_gen_cap, pcie_width_cap, pcie_levels;
 
     SmuMetricsExternal_t metrics;      /* last smu13_read_metrics */
     int      metrics_valid;
+    uint64_t metrics_generation;       /* advances only after a successful DMA read */
 
     /* ---- PM control (smu13_pm_query and the functions below) ---- */
     uint64_t supported;                /* smu_feature.supported: running after setup */
@@ -221,7 +226,7 @@ typedef struct rdna3_smu {
     uint32_t dpm_level, saved_dpm_level;   /* smu_dpm_context, RD_DPM_FORCED_LEVEL_* */
     int      irq_enabled;              /* smu_v13_0_set_irq_state(ENABLE) */
     uint64_t throttle_int_counter;     /* SMU_IH_INTERRUPT_CONTEXT_ID_THERMAL_THROTTLING */
-    int      ac_power;                 /* adev->pm.ac_power (AC/DC context ids) */
+    int      ac_power;                 /* AC=1/DC=0; 13.0.7 starts unknown (-1) until real FW context */
 } rdna3_smu;
 
 /* Allocates the driver and tool tables in VRAM (needs rdna3_vram_alloc_init
@@ -237,8 +242,9 @@ typedef struct rdna3_smu {
  * OverridePcieParameters (caps from the PCIe link: gen 0..4 = Gen1..Gen5,
  * width 1..7 = x1,x2,x4,x8,x12,x16,x32), EnableAllSmuFeatures, running
  * features, DPM tables, PPT limit, default workload. 'vbios' may be NULL
- * when the ROM could not be read: the PMFW's BoardTable is then written
- * back unchanged, which amdgpu only does with SCPM. */
+ * when the ROM could not be read on the legacy path. 13.0.7 requires its
+ * real BoardTable without SCPM; its private backend never uploads a 13.0.0
+ * struct, never calls RunDcBtc, and never applies the legacy SCPM pins. */
 int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t allowed,
                   uint32_t pcie_gen_cap, uint32_t pcie_width_cap, int scpm);
 /* With d->amdgpu_exact (rdna3amdgpu=1) smu13_pm_init follows
@@ -250,7 +256,8 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
  * smu_v13_0_enable_thermal_alert and smu_v13_0_notify_display_change
  * (d->amdgpu_dc). */
 
-/* smu_cmn_update_table: VRAM driver table <-> PMFW table 'table_id' */
+/* Legacy ABI table API: 13.0.7 uses only its private typed transfers.
+ * smu_cmn_update_table: VRAM driver table <-> PMFW table 'table_id' */
 int smu13_table_read(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t arg, void *dst,
                      uint32_t size);
 int smu13_table_write(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t arg,
@@ -258,6 +265,11 @@ int smu13_table_write(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t ar
 
 /* SMU_TABLE_SMU_METRICS -> s->metrics (smu_cmn_get_metrics_table) */
 int smu13_read_metrics(rdna3_dev *d, rdna3_smu *s);
+/* Shared stats/sensor cache boundary; age is monotonic elapsed nanoseconds. */
+int smu13_read_metrics_cached(rdna3_dev *d, rdna3_smu *s, uint64_t now,
+                              uint64_t age_ns, uint64_t *timestamp);
+uint64_t smu13_metrics_after_control(const rdna3_smu *s, uint64_t generation_before,
+                                     int result, uint64_t now);
 /* convenience over s->metrics (units as in smu_v13_0_0_get_smu_metrics_data) */
 uint32_t smu13_metric_gfxclk_mhz(const rdna3_smu *s);     /* AverageGfxclkFrequencyPreDs */
 uint32_t smu13_metric_uclk_mhz(const rdna3_smu *s);       /* CurrClock[PPCLK_UCLK] */
@@ -271,19 +283,20 @@ uint32_t smu13_metric_vddgfx_mv(const rdna3_smu *s);
 uint32_t smu13_metric_throttlers(const rdna3_smu *s);     /* bit i = ThrottlingPercentage[i] != 0 */
 /* what decides idle power: the GFX clock before/after deep sleep, memory
  * clock after deep sleep, PCIe and UCLK activity (smu_v13_0_0_get_gpu_metrics) */
-typedef struct rdna3_pm_detail {
-    uint32_t gfx_activity, uclk_activity, pcie_busy;
-    uint32_t gfxclk_target, gfxclk_pre_ds, gfxclk_post_ds, memclk_post_ds, fclk_post_ds;
-    uint32_t socclk, dcefclk, socket_w, board_w, vddgfx_mv;
-} rdna3_pm_detail;
 void     smu13_metric_detail(const rdna3_smu *s, rdna3_pm_detail *o);
+uint32_t smu13_temp_limit_edge(const rdna3_smu *s);
+uint32_t smu13_temp_limit_hotspot(const rdna3_smu *s);
+uint32_t smu13_temp_limit_mem(const rdna3_smu *s);
+uint32_t smu13_fan_max_rpm(const rdna3_smu *s);
+uint32_t smu13_od_feature_mask(const rdna3_smu *s);
 
 /* smu_v13_0_set_single_dpm_table for one PPCLK_* clock */
 int smu13_get_dpm_table(rdna3_dev *d, uint32_t ppclk, rdna3_smu_dpm *t);
 /* smu_v13_0_set_soft_freq_limited_range (MHz; 0 = leave) */
 int smu13_set_soft_freq_range(rdna3_dev *d, const rdna3_smu *s, uint32_t ppclk, uint32_t min_mhz,
                               uint32_t max_mhz);
-/* smu_v13_0_set_ppt_limit / smu_v13_0_get_ppt_limit (W, AC) */
+/* smu_v13_0_set_ppt_limit / smu_v13_0_get_ppt_limit (W). Legacy uses AC;
+ * 13.0.7 current-limit reads require an observed real AC/DC context. */
 int smu13_set_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t watts);
 int smu13_get_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t *watts);
 /* smu_v13_0_0_set_power_profile_mode: WORKLOAD_PPLIB_*_BIT */
@@ -293,7 +306,7 @@ int smu13_set_workload(rdna3_dev *d, uint32_t workload_bit);
  * then (doorbells wake it). Needs FEATURE_GFXOFF in the allowed mask. */
 int smu13_gfx_off(rdna3_dev *d, int allow);
 
-/* smu_v13_0_0_mode1_reset (13.0.10): DEBUGSMC_MSG_Mode1Reset, param 0 (no
+/* smu_v13_0_mode1_reset (also registered by 13.0.7): DEBUGSMC_MSG_Mode1Reset, param 0 (no
  * RAS recovery) through the debug mailbox (C2PMSG_53/75/54, no response),
  * then SMU13_MODE1_RESET_WAIT_TIME.
  * Afterwards the PSP bootloader is back (psp13_wait_for_bootloader) and
@@ -399,7 +412,9 @@ int  smu13_pmctl(rdna3_dev *d, rdna3_smu *s, const rdna3_pmctl_req *rq, rdna3_pm
                  uint32_t gates);
 void smu13_pmctl_info(rdna3_dev *d, rdna3_smu *s, uint32_t gates, rdna3_pmctl_info *o);
 
-/* smu_hw_fini for a driver unload: on 13.0.10 the PMFW handles the DPM
+/* 13.0.7 smu_hw_fini only disables thermal alerts; DPM stays PMFW-managed,
+ * no PrepareMp1ForUnload / DisableAll / flag clear. Legacy driver unload:
+ * on 13.0.10 the PMFW handles the DPM
  * features itself (smu_disable_dpms returns early), the driver only sends
  * PrepareMp1ForUnload (smu_reset_mp1_state). With rdna3amdgpu=1 exactly
  * amdgpu's: the thermal alert off, and no UNLOAD (smu_reset_mp1_state sends

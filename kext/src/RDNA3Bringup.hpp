@@ -240,6 +240,7 @@ private:
     void resetIfPspStuck();
     int  mode1Reset();
     void publish(const char *key, uint64_t v);
+    void publishPowerLimit(const char *key, uint32_t v);
     void publishString(const char *key, const char *s);
 
     RDNA3Accel   *fOwner  = nullptr;

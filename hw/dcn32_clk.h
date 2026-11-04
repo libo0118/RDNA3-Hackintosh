@@ -53,6 +53,7 @@ extern "C" {
 /* clock generator registers (dcn32_clk_mgr.c, DCN 3.2 set) */
 #define RD_CLK1_CLK_PLL_REQ    0x16E37u
 #define RD_CLK1_CLK0_DFS_CNTL  0x16E69u   /* + 3 per slice: DISPCLK, DPPCLK, DPREFCLK, DCFCLK, DTBCLK */
+#define RD_CLK01_CLK0_CLK0_DFS_CNTL 0x16E64u /* DCN321, same slice order and stride */
 #define RD_CLK1_DFS_STRIDE     3
 #define RD_DCN32_DFS_REF_KHZ   100000u    /* clk_mgr->dfs_ref_freq_khz */
 #define RD_DCN32_VCO_DEFAULT_KHZ 4300000u /* when the PLL register reads 0 */
@@ -64,12 +65,13 @@ typedef struct rdna3_dcn_clocks {
 
 /* dentist_get_divider_from_did: DFS divider ID -> divider x4 */
 uint32_t dcn32_dentist_divider(uint32_t did);
-/* dcn32_get_vco_frequency_from_reg + dcn32_dump_clk_registers */
-void dcn32_clk_read(rdna3_dev *d, rdna3_dcn_clocks *c);
+/* dcn32_get_vco_frequency_from_reg + dcn32_dump_clk_registers.
+ * GC 11.0.2 selects DCN321; 11.0.0/3 selects DCN320. Unknown GC fails before MMIO. */
+int dcn32_clk_read(rdna3_dev *d, rdna3_dcn_clocks *c);
 
 /* dcn32_smu_send_msg_with_param: 0, or RDNA3_ETIME when the PMFW does not
  * answer, RDNA3_EIO for any answer but OK. The DAL ABI is ported only for
- * discovered MP1 13.0.0/10 with register segment 0; other IPs are refused. */
+ * discovered MP1 13.0.0/7/10 with register segment 0; other IPs are refused. */
 int  dcn32_smu_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out);
 /* dcn30_smu_set_num_of_displays. NOT used: on the RX 7800 XT (PMFW 80.92,
  * driver interface 0x40) the driver mailbox stopped answering right after

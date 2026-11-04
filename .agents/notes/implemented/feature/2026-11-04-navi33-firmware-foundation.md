@@ -51,4 +51,6 @@ GitHub hosted 验证的触发、依赖和制品边界见[CI 决定](../process/2
 
 后续 [SMU 状态与基础 mailbox 子阶段](2026-11-04-navi33-smu-status-mailbox.md) 分派 MP1 状态地址和接口提示，并隔离未移植的 13.0.7 PM ABI；它不取代这里的固件准备边界，也不启用硬件匹配。
 
+[私有 SMU PM bootstrap 子阶段](2026-11-04-navi33-smu-pm-bootstrap.md) 继续增加真正的 13.0.7 表交换、DPM 与基础读取，不把固件选择或 CI 绿色当作 RX 7600 XT 的硬件完成；本篇文件集与未绑定决定仍保留。
+
 升级到可绑定 RX 7600 XT 的条件是：先取得本机 Linux IP discovery / VBIOS 参考，在对应 amdgpu 函数基础上核对并移植初始化差异，再单独评审受控实卡测试方案。本阶段的 CI 只能证明离线测试或编译，不证明裸机 Sequoia 15 出图、DP 热插拔、硬件提交完成、Metal 或功耗 / 复位正确。

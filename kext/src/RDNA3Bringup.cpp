@@ -292,7 +292,7 @@ void RDNA3Bringup::stopAndFree()
         gfxhub303_gart_disable(fDev);
     /* smu_hw_fini with rdna3amdgpu=1: the thermal alert off (no UNLOAD on
      * a card with display hardware) */
-    if (fAmdgpuExact && fPmUp && fSmu && fDev)
+    if (fPmUp && fSmu && fDev && (fAmdgpuExact || fSmu->mp1_rev == 7))
         smu13_pm_fini(fDev, fSmu);
     /* psp_hw_fini with rdna3amdgpu=1 (TAs, ASD, DESTROY_TMR, ring
      * destroy); the verified default only stops the ring */
@@ -379,6 +379,17 @@ void RDNA3Bringup::publish(const char *key, uint64_t v)
         fOwner->setProperty(key, n);
         n->release();
     }
+}
+
+void RDNA3Bringup::publishPowerLimit(const char *key, uint32_t v)
+{
+    char available[96];
+    snprintf(available, sizeof(available), "%sAvailable", key);
+    publish(available, v != UINT32_MAX);
+    if (v == UINT32_MAX)
+        fOwner->removeProperty(key);
+    else
+        publish(key, v);
 }
 
 void RDNA3Bringup::publishString(const char *key, const char *s)
@@ -1760,6 +1771,8 @@ void RDNA3Bringup::pmInit()
     if (fGfxOffWanted && !fPmMask)
         allowed |= RD_SMU_FEATURE(FEATURE_GFXOFF_BIT);
     uint32_t gen = 3, width = 6;     /* Gen4 x16 unless the link says less */
+    if (fDev->ipver[HWIP_MP1].rev == 7)
+        gen = width = UINT32_MAX;   /* Navi33 requires real PCIe capability input. */
     const rdna3_vbios *vb = nullptr;
     int ret;
 
@@ -1774,7 +1787,7 @@ void RDNA3Bringup::pmInit()
     }
     /* a re-init (reset, resume): the user's overdrive settings survive it
      * like amdgpu's user_overdrive_table */
-    if (fPmCtl && fSmu->od_valid && fSmu->user_od) {
+    if (fDev->ipver[HWIP_MP1].rev != 7 && fPmCtl && fSmu->od_valid && fSmu->user_od) {
         if (!fUserOdTable)
             fUserOdTable = (OverDriveTableExternal_t *)IOMalloc(sizeof(*fUserOdTable));
         if (fUserOdTable) {
@@ -1822,7 +1835,9 @@ void RDNA3Bringup::pmInit()
             } else {
                 BLOG("VBIOS: amdgpu_atomfirmware_get_clock_info failed (%d)", cr);
             }
-            if (vbios_bootup_values(fDev, &fVbios, &bt) == RDNA3_OK) {
+            int boot_result = fDev->ipver[HWIP_MP1].rev == 7
+                ? smu13_0_7_bootup_values(fDev, &fVbios, &bt) : vbios_bootup_values(fDev, &fVbios, &bt);
+            if (boot_result == RDNA3_OK) {
                 const uint8_t *fwi = vbios_data_table(&fVbios, RD_ATOM_DT_FIRMWAREINFO, nullptr, nullptr, nullptr);
                 uint32_t scr = fwi ? (uint32_t)fwi[0x18] | ((uint32_t)fwi[0x19] << 8) |
                                      ((uint32_t)fwi[0x1a] << 16) | ((uint32_t)fwi[0x1b] << 24) : 0;
@@ -1845,7 +1860,7 @@ void RDNA3Bringup::pmInit()
             fOwner->drmSetAsicInfo(xclk, vr.type, vr.width, 0);
         }
     } else {
-        BLOG("PM: VBIOS not readable (%d), going on with the PMFW's BoardTable", ret);
+        BLOG("PM: VBIOS not readable (%d); non-SCPM Navi33 bootstrap will refuse it", ret);
     }
 
     /* smu_smc_hw_setup's pcie_gen / pcie_width from the link capability
@@ -1887,30 +1902,43 @@ void RDNA3Bringup::pmInit()
         return;
     }
     fPmUp = true;
-    if (fAmdgpuExact) {
+    if (fAmdgpuExact || fSmu->mp1_rev == 7) {
         /* smu_v13_0_register_irq_handler: the IVs reach smuIrq */
         if (!fSmuIrqCall)
             fSmuIrqCall = rd3_tcall_alloc("core.smuIrqTick", (thread_call_func_t)smuIrqTick, this);
+        if (fSmu->mp1_rev == 7 && !fSmuIrqCall) {
+            smu13_pm_fini(fDev, fSmu);
+            fPmUp = false;
+            publish("RDNA3,PMResult", (uint64_t)(int64_t)RDNA3_ENOMEM);
+            publishString("RDNA3,PM", "failed: no SMU thermal worker");
+            BLOG("PM: SMU 13.0.7 needs its thermal worker; initialization stopped");
+            return;
+        }
         publish("RDNA3,PMThermalAlert", fSmu->irq_enabled ? 1 : 0);
         publish("RDNA3,PMPcieLevels", fSmu->pcie_levels);
-        BLOG("PM: rdna3amdgpu=1: %u PCIe levels sent, thermal alert at %u C, %s",
+        BLOG("PM: %s: %u PCIe levels sent, thermal alert at %u C, %s",
+             fSmu->mp1_rev == 7 ? "SMU 13.0.7 bootstrap" : "rdna3amdgpu=1",
              fSmu->pcie_levels, fSmu->software_shutdown_temp,
+             fSmu->mp1_rev == 7 ? "DCN321 uses independent DAL messages" :
              fDev->amdgpu_dc ? "display core present" : "DALNotPresent sent");
     }
     pmCtlInit(vb);
     publishString("RDNA3,PM", fSmu->dpm_running ? "dpm running" : "features enabled, dpm off");
     publish("RDNA3,PMFeaturesAllowed", fSmu->allowed);
     publish("RDNA3,PMFeaturesRunning", fSmu->enabled);
-    publish("RDNA3,PMBootGfxClkMHz", fSmu->boot.gfxclk / 100);
-    publish("RDNA3,PMBootUclkMHz", fSmu->boot.uclk / 100);
+    if (fSmu->mp1_rev != 7 || fSmu->boot.gfxclk)
+        publish("RDNA3,PMBootGfxClkMHz", fSmu->boot.gfxclk / 100);
+    if (fSmu->mp1_rev != 7 || fSmu->boot.uclk)
+        publish("RDNA3,PMBootUclkMHz", fSmu->boot.uclk / 100);
     publish("RDNA3,PMGfxClkMinMHz", fSmu->gfx.level[0]);
     publish("RDNA3,PMGfxClkMaxMHz", fSmu->gfx.level[fSmu->gfx.count ? fSmu->gfx.count - 1 : 0]);
     publish("RDNA3,PMUclkMaxMHz", fSmu->uclk.level[fSmu->uclk.count ? fSmu->uclk.count - 1 : 0]);
     publish("RDNA3,PMSocClkMaxMHz", fSmu->soc.level[fSmu->soc.count ? fSmu->soc.count - 1 : 0]);
-    publish("RDNA3,PMPowerLimitW", fSmu->ppt_limit_w);
-    publish("RDNA3,PMTempLimitEdge", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_EDGE]);
-    publish("RDNA3,PMTempLimitHotspot", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_HOTSPOT]);
-    publish("RDNA3,PMFanMaxRPM", fSmu->pptable.SkuTable.FanMaximumRpm);
+    publishPowerLimit("RDNA3,PMPowerLimitW", fSmu->mp1_rev == 7 ?
+        fSmu->current_power_limit : fSmu->ppt_limit_w);
+    publish("RDNA3,PMTempLimitEdge", smu13_temp_limit_edge(fSmu));
+    publish("RDNA3,PMTempLimitHotspot", smu13_temp_limit_hotspot(fSmu));
+    publish("RDNA3,PMFanMaxRPM", smu13_fan_max_rpm(fSmu));
 
     /* DEV_INFO clock range (amdgpu_kms with dpm_enabled: amdgpu_dpm_get_sclk
      * / get_mclk, lowest and highest DPM level), MHz -> kHz */
@@ -2198,11 +2226,8 @@ bool RDNA3Bringup::stats(uint32_t v[8])
     if (!fPmUp || !fFinished || !fSmu)
         return false;
     absolutetime_to_nanoseconds(now - fMetricsAt, &ns);
-    if (!fMetricsAt || ns > 100ull * 1000 * 1000) {
-        if (smu13_read_metrics(fDev, fSmu))
-            return false;
-        fMetricsAt = now;
-    }
+    if (smu13_read_metrics_cached(fDev, fSmu, now, ns, &fMetricsAt))
+        return false;
     v[0] = smu13_metric_gfx_activity(fSmu);
     v[1] = smu13_metric_temp_edge_c(fSmu);
     v[2] = smu13_metric_temp_hotspot_c(fSmu);
@@ -2377,11 +2402,8 @@ int RDNA3Bringup::sensor(uint32_t type, uint32_t *value)
         break;
     }
     absolutetime_to_nanoseconds(now - fMetricsAt, &ns);
-    if (!fMetricsAt || ns > 100ull * 1000 * 1000) {
-        if (smu13_read_metrics(fDev, fSmu))
-            return -RD_EIO;
-        fMetricsAt = now;
-    }
+    if (smu13_read_metrics_cached(fDev, fSmu, now, ns, &fMetricsAt))
+        return -RD_EIO;
     switch (type) {
     case AMDGPU_INFO_SENSOR_GFX_SCLK:     *value = smu13_metric_gfxclk_mhz(fSmu); return 0;
     case AMDGPU_INFO_SENSOR_GFX_MCLK:     *value = smu13_metric_uclk_mhz(fSmu); return 0;
@@ -2418,6 +2440,16 @@ void RDNA3Bringup::pmCtlInit(const rdna3_vbios *vb)
 {
     int r = smu13_pm_query(fDev, fSmu, vb, fPmCtl >= 2);
     publish("RDNA3,PMQueryResult", (uint64_t)(int64_t)r);
+    if (fSmu->mp1_rev == 7) {
+        if (fPmCtl >= 1) publish("RDNA3,PMODResult", (uint64_t)(int64_t)RDNA3_EOPNOTSUPP);
+        pmCtlPublish();
+        if (fSmu->current_power_limit == UINT32_MAX)
+            BLOG("PM control: SMU 13.0.7 telemetry only, current PPT unavailable; manual tuning unsupported");
+        else
+            BLOG("PM control: SMU 13.0.7 telemetry only, observed current PPT %u W; manual tuning unsupported",
+                 fSmu->current_power_limit);
+        return;
+    }
     if (fPmCtl >= 1) {
         int in_suspend = 0;
         if (fReinit && fUserOd && fUserOdTable) {
@@ -2455,14 +2487,15 @@ void RDNA3Bringup::pmCtlPublish()
     rdna3_temp_range tr;
     publish("RDNA3,PMCtl", fPmCtl);
     publish("RDNA3,PMBACOAllowed", fBacoWanted ? 1 : 0);
-    publish("RDNA3,PMPowerLimitW", fSmu->current_power_limit);
-    publish("RDNA3,PMPowerLimitDefaultW", fSmu->power_limit_default);
-    publish("RDNA3,PMPowerLimitMinW", fSmu->power_limit_min);
-    publish("RDNA3,PMPowerLimitMaxW", fSmu->power_limit_max);
-    publish("RDNA3,PMFanControl", fSmu->no_fan ? 0 : 1);
+    publishPowerLimit("RDNA3,PMPowerLimitW", fSmu->current_power_limit);
+    publishPowerLimit("RDNA3,PMPowerLimitDefaultW", fSmu->power_limit_default);
+    publishPowerLimit("RDNA3,PMPowerLimitMinW", fSmu->power_limit_min);
+    publishPowerLimit("RDNA3,PMPowerLimitMaxW", fSmu->power_limit_max);
+    publish("RDNA3,PMFanControl", fSmu->mp1_rev == 7 ?
+        !!(fSmu->enabled & RD_SMU_FEATURE(FEATURE_FAN_CONTROL_BIT)) : !fSmu->no_fan);
     publish("RDNA3,PMFanMode", smu13_get_fan_control_mode(fDev, fSmu));
     publish("RDNA3,PMODEnabled", fSmu->od_enabled ? 1 : 0);
-    publish("RDNA3,PMODFeatures", fSmu->pptable.SkuTable.OverDriveLimitsBasicMax.FeatureCtrlMask);
+    publish("RDNA3,PMODFeatures", smu13_od_feature_mask(fSmu));
     publish("RDNA3,PMODPptPercentMax", (uint64_t)(int64_t)fSmu->od_ppt_pct_max);
     publish("RDNA3,PMODPptPercentMin", (uint64_t)(int64_t)fSmu->od_ppt_pct_min);
     publish("RDNA3,PMGfxClkStandardMHz", fSmu->pstate_gfx.standard);
@@ -2471,7 +2504,7 @@ void RDNA3Bringup::pmCtlPublish()
     publish("RDNA3,PMProfile", fSmu->power_profile_mode);
     publish("RDNA3,PMWorkloadMask", fSmu->workload_mask);
     if (smu13_get_thermal_temperature_range(fSmu, &tr) == RDNA3_OK) {
-        publish("RDNA3,PMTempLimitMem", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_MEM]);
+        publish("RDNA3,PMTempLimitMem", smu13_temp_limit_mem(fSmu));
         publish("RDNA3,PMTempEmergencyHotspot", (uint64_t)(tr.hotspot_emergency_max / 1000));
         publish("RDNA3,PMShutdownTempC", (uint64_t)tr.software_shutdown_temp);
     }
@@ -2545,6 +2578,7 @@ int RDNA3Bringup::pmctl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool a
         rp->err = RDNA3_ENODEV;
         return rp->err;
     }
+    uint64_t generation = fSmu->metrics_generation;
     if (rq->op == RD_PMCTL_BACO_CYCLE && rq->abi == RDNA3_PMCTL_ABI) {
         if (!(gates & RD_PMCTL_GATE_BACO))
             r = RDNA3_EOPNOTSUPP;
@@ -2558,6 +2592,7 @@ int RDNA3Bringup::pmctl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool a
         if (fPmUp)
             smu13_pmctl_info(fDev, fSmu, gates, &rp->info);
         rp->err = r;
+        fMetricsAt = smu13_metrics_after_control(fSmu, generation, r, mach_absolute_time());
         return r;
     }
     r = smu13_pmctl(fDev, fSmu, rq, rp, gates);
@@ -2570,7 +2605,7 @@ int RDNA3Bringup::pmctl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool a
             pmCtlPublish();
         }
     }
-    fMetricsAt = mach_absolute_time();   /* the reply just read the metrics */
+    fMetricsAt = smu13_metrics_after_control(fSmu, generation, r, mach_absolute_time());
     return r;
 }
 
@@ -4799,7 +4834,8 @@ void RDNA3Bringup::irqAction(OSObject *owner, IOInterruptEventSource *, int)
 void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
 {
     RDNA3Bringup *b = (RDNA3Bringup *)ctx;
-    if (b->fAmdgpuExact && b->fPmUp && b->fSmu && smu13_iv_is_smu(iv->client_id, iv->src_id)) {
+    if (b->fPmUp && b->fSmu && (b->fAmdgpuExact || b->fSmu->mp1_rev == 7) &&
+        smu13_iv_is_smu(iv->client_id, iv->src_id)) {
         b->smuIrq(iv);
         return;
     }
@@ -5053,8 +5089,13 @@ void RDNA3Bringup::overTemp(const char *why)
 void RDNA3Bringup::pmShutdown()
 {
     uint32_t ecx = 0;
-    if (!fAmdgpuExact || !fPmUp || !fSmu || !fDev)
+    if (!fPmUp || !fSmu || !fDev || (!fAmdgpuExact && fSmu->mp1_rev != 7))
         return;
+    if (fSmu->mp1_rev == 7) {
+        int r = smu13_pm_fini(fDev, fSmu);
+        BLOG("shutdown: SMU 13.0.7 thermal cleanup -> %d; DPM remains PMFW-managed", r);
+        return;
+    }
 #if defined(__x86_64__)
     {
         uint32_t eax = 1, ebx = 0, edx = 0;

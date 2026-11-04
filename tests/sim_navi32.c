@@ -5908,13 +5908,13 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
         unsigned msgs0 = S.dal_msgs;
         S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x60;
         S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x60;
-        dcn32_clk_read(dev, &ck0);
+        CHECK(dcn32_clk_read(dev, &ck0) == RDNA3_OK);
         CHECK(dcn32_clk_fits(&ck0, st.head[0].pclk_khz) == RDNA3_EBUSY);
         CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0, NULL) == RDNA3_ENODEV);   /* no DMCUB: before the clocks */
         CHECK(S.dal_msgs == msgs0);
         S.dmub.nseq = 0;
         CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0, NULL) == RDNA3_OK);
-        dcn32_clk_read(dev, &ck0);
+        CHECK(dcn32_clk_read(dev, &ck0) == RDNA3_OK);
         CHECK(dcn32_clk_fits(&ck0, st.head[0].pclk_khz) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_DISPCLK] &&
               S.dal_hard_min[RD_PPCLK_DPPCLK] && S.dal_msgs > msgs0);
         /* back to the power-loss state for the order checks below */
@@ -8404,7 +8404,7 @@ static void test_dp_uhbr(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rd
     /* DISPCLK / DPPCLK for 1.07 GHz (the GOP's are lower) */
     S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x0c;
     S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x0c;
-    dcn32_clk_read(dev, &clk);
+    CHECK(dcn32_clk_read(dev, &clk) == RDNA3_OK);
     CHECK(clk.dispclk_khz >= 1300000 && clk.dppclk_khz >= 1300000);
 
     /* the sink: an SST DP 2.1 monitor, HBR3 x4 and 128b/132b UHBR10 / 13.5 / 20,

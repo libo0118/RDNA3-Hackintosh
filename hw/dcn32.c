@@ -293,7 +293,8 @@ static uint32_t lb_memory_config(uint32_t line, uint32_t vtaps)
 static uint32_t ceil64(uint32_t x) { return (x + 63) & ~63u; }
 
 /* the line buffer and DLG/TTU for a w x h source over nw x nh (see dcn32.h) */
-static void scale_bw(rdna3_dev *d, rdna3_dcn_scale *sc, uint32_t p, uint32_t w, uint32_t nw)
+static void scale_bw(rdna3_dev *d, rdna3_dcn_scale *sc, uint32_t p, uint32_t w, uint32_t nw,
+                      const rdna3_dcn_clocks *clocks)
 {
     const uint32_t *g = sc->bw_reg[p];
     uint32_t cfg, x, y, htot, v, k;
@@ -329,10 +330,8 @@ static void scale_bw(rdna3_dev *d, rdna3_dcn_scale *sc, uint32_t p, uint32_t w, 
     x = GET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, REFCYC_X_AFTER_SCALER);
     y = GET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, DST_Y_AFTER_SCALER);
     if (!GET(sc->reg[p][5], DSCL0_SCL_MODE, DSCL_MODE)) {   /* kDscl[5]: the GOP's SCL_MODE */
-        rdna3_dcn_clocks c;
         uint32_t dpp;
-        dcn32_clk_read(d, &c);
-        dpp = dcn32_pipe_dppclk(d, &c, p);
+        dpp = dcn32_pipe_dppclk(d, clocks, p);
         if (dpp)
             x += (uint32_t)(((uint64_t)(RD_DCN32_DPPCLK_DELAY_SCL - RD_DCN32_DPPCLK_DELAY_SCL_LB_ONLY) *
                              RD_DCN32_DCHUB_REFCLK_KHZ + dpp - 1) / dpp);
@@ -361,6 +360,7 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
     rdna3_dcn_head *hd;
     uint32_t p, k, nw, nh, v;
     uint64_t hr, vr;
+    rdna3_dcn_clocks clocks;
     if (i >= dc->nheads)
         return RDNA3_EINVAL;
     hd = &dc->head[i];
@@ -377,6 +377,11 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
     if (!w || !h || w > nw || h > nh || w * 4 < nw || h * 4 < nh || pitch_px < w || pitch_px > 0x4000 ||
         (mc & 0xff) || mc < d->fb_start || mc - d->fb_start + (uint64_t)pitch_px * 4 * h > d->vram_size)
         return RDNA3_EINVAL;
+    if ((w != nw || h != nh) && (sc->bw_saved[p] || (!sc->saved[p] && sc->dlg))) {
+        /* Clock validation precedes the OTG lock and any scaler writes. */
+        int ret = dcn32_clk_read(d, &clocks);
+        if (ret) return ret;
+    }
     if (!sc->saved[p] && (w != nw || h != nh)) {
         for (k = 0; k < N_DSCL; k++)
             sc->reg[p][k] = rdna3_rreg(d, dscl_off(d, kDscl[k], p));
@@ -445,7 +450,7 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
         WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
         /* rdna3scaledlg: line buffer and DLG/TTU for the scaled plane */
         if (sc->bw_saved[p])
-            scale_bw(d, sc, p, w, nw);
+            scale_bw(d, sc, p, w, nw, &clocks);
     }
     /* hubp2_program_surface_flip_and_addr: HIGH first, the LOW write latches */
     WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, p, (uint32_t)(mc >> 32) & 0xffff);
@@ -545,7 +550,10 @@ int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
         s->compbuf_segs = GET(rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regDCHUBBUB_COMPBUF_CTRL_BASE_IDX,
                                                              regDCHUBBUB_COMPBUF_CTRL)),
                               DCHUBBUB_COMPBUF_CTRL, COMPBUF_SIZE_CURRENT);
-        dcn32_clk_read(d, &c);
+        {
+            int ret = dcn32_clk_read(d, &c);
+            if (ret) return ret;
+        }
         s->dispclk_khz = c.dispclk_khz;
         s->dppclk_khz = dcn32_pipe_dppclk(d, &c, pipe);
         s->dscl_mode = GET(RD(d, regDSCL0_SCL_MODE, pipe), DSCL0_SCL_MODE, DSCL_MODE);

@@ -298,7 +298,10 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
     for (k = 0; k < NGLOBAL; k++)
         st->global[k] = rd(d, kGlobal[k].seg, kGlobal[k].off);
     st->nglobal = NGLOBAL;
-    dcn32_clk_read(d, &st->clk);
+    {
+        int ret = dcn32_clk_read(d, &st->clk);
+        if (ret) return ret;
+    }
     h->valid = 1;
     st->saves++;
     RLOG(d, "state: head %u saved: pipe %u otg %u opp %u mpcc %u DIG %u/%u mode %u %ux%u %u kHz at MC 0x%llx, "
@@ -646,7 +649,8 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
      * a power loss: the PMFW came back at its boot clocks; the ones the
      * head ran at (or what its pixel rate needs) are asked back through
      * the DAL mailbox before anything is programmed */
-    dcn32_clk_read(d, &ck);
+    ret = dcn32_clk_read(d, &ck);
+    if (ret) return ret;
     if (dcn32_clk_fits(&ck, h->pclk_khz)) {
         uint32_t pmfw = 0, disp, dpp;
         int rr = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &pmfw);

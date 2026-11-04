@@ -183,10 +183,10 @@ typedef struct rdna3_pmctl_info {
     uint32_t pm_up;
     uint64_t features_enabled;
     /* fan */
-    uint32_t fan_mode;           /* RD_FAN_CTRL_* */
+    uint32_t fan_mode;           /* RD_FAN_CTRL_*; UINT32_MAX = unobserved/unsupported mode */
     uint32_t fan_pwm;            /* 0..255 */
-    uint32_t fan_rpm, fan_max_rpm, no_fan;
-    /* power limit, W (smu_v13_0_0_get_power_limit) */
+    uint32_t fan_rpm, fan_max_rpm, no_fan; /* no usable fan control, not physical topology */
+    /* power limit, W (UINT32_MAX = unavailable; separate from metrics power) */
     uint32_t power_current, power_default, power_min, power_max;
     /* overdrive */
     uint32_t od_enabled;         /* smu->od_enabled */

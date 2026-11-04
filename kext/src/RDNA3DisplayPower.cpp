@@ -191,7 +191,13 @@ void RDNA3Accel::displayPowerUpdate(const char *why)
     }
     if (fSubvp->enabled || next.n) {
         rdna3_dcn_clocks ck;
-        dcn32_clk_read(fDispDev, &ck);
+        r = dcn32_clk_read(fDispDev, &ck);
+        if (r) {
+            snprintf(val, sizeof(val), "not updated (%s): clock read failed (%d)", why, r);
+            setProperty("RDNA3,DCNPower", val);
+            LOG("display power: %s", val);
+            return;
+        }
         /* SubVP to another SubVP topology: a minimal transition first
          * (dc's commit_minimal_transition_state: the new heads without
          * SubVP), then the new phantoms */

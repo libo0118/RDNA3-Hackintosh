@@ -1,13 +1,19 @@
-/* Production smu13.c over a small MMIO/SMN model, no GPU or PM table fixture.
+/* Production SMU C over an independent MMIO/SMN/VRAM model, not a real GPU.
  * Linux v6.12 smu_v13_0_7_check_fw_status / smu_v13_0_set_smu_mailbox_registers.
  * SPDX-License-Identifier: MIT
  */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
 #include "smu13.h"
 #include "vcn40.h"
 #include "dcn32_pstate.h"
+
+/* The other translation unit asserts 13.0.7 independently. */
+typedef char abi0_metrics_size[(sizeof(SmuMetricsExternal_t) == 392) ? 1 : -1];
+typedef char abi0_serial_low[(offsetof(SmuMetrics_t, PublicSerialNumberLower) == 236) ? 1 : -1];
+typedef char abi0_serial_high[(offsetof(SmuMetrics_t, PublicSerialNumberUpper) == 240) ? 1 : -1];
 
 /* Independent Linux addresses: catch a wrong production register constant. */
 enum {
@@ -22,12 +28,17 @@ enum {
 typedef struct model {
     uint32_t reg[MMIO_DWORDS], index, flags0, flags7, mp1_base;
     uint32_t reads, writes, flag_writes, smn_reads, last_smn_read, vram_writes, waits;
-    uint32_t msgs[16], params[16], nmsg, response, if_version;
+    uint32_t msgs[256], params[256], nmsg, response, if_version;
     uint32_t dal_msgs[16], dal_params[16], ndal;
     char log[32768];
     size_t log_len;
-    uint8_t vram[64];
+    uint8_t vram[0x40000];
+    uint8_t combo[4804], metric_bytes[392], uploaded[3972], rom[2048];
+    uint64_t driver_mc, fb_start, enabled, allowed;
+    uint32_t uploads, pm_model, fail_msg, fail_param, dpm_count, bad_clock_value;
 } model;
+
+static void pm_message(model *m, uint32_t msg, uint32_t param);
 
 static void delay(void *ctx, uint32_t us)
 {
@@ -93,6 +104,7 @@ static void mmio_write(void *ctx, uint64_t off, uint32_t value)
         if (value == 2) m->reg[m->mp1_base + 0x292] = 0x00526100;
         if (value == 3) m->reg[m->mp1_base + 0x292] = m->if_version;
         m->reg[m->mp1_base + 0x29a] = m->response;
+        if (m->pm_model) pm_message(m, value, m->params[m->nmsg - 1]);
     }
     if (reg == DAL_MSG) {
         uint32_t arg = m->reg[DAL_ARG];
@@ -134,11 +146,14 @@ static int fixture_mp1(rdna3_dev *d, model *m, uint8_t rev, uint8_t mp1_bases, u
 #define IP(hw, ma, re, base0) do { amd_ip_entry *e = &disc.ips[disc.num_ips++]; \
     e->hw_id = hw; e->major = ma; e->revision = re; \
     e->num_base = e->num_base_kept = 2; e->base[0] = base0; } while (0)
-    IP(AMD_HWID_GC, 11, 3, 0x3000);
+    IP(AMD_HWID_GC, 11, rev == 0 ? 0 : rev == 7 ? 2 : 3, 0x3000);
     IP(AMD_HWID_MP0, 13, 10, MP1_BASE);
     IP(AMD_HWID_NBIF, 4, 0, SMN_INDEX);
     disc.ips[2].base[1] = SMN_INDEX;
     IP(AMD_HWID_MP1, 13, rev, MP1_BASE);
+    IP(AMD_HWID_THM, 13, 0, 0x6000);
+    IP(AMD_HWID_DMU, 3, rev == 7 ? 1 : 0, 0x7000);
+    disc.ips[5].minor = 2;
 #undef IP
     disc.ips[3].num_base = disc.ips[3].num_base_kept = mp1_bases;
     disc.ips[3].base[0] = mp1_base;
@@ -156,6 +171,7 @@ static int fixture_mp1(rdna3_dev *d, model *m, uint8_t rev, uint8_t mp1_bases, u
         w16(bin + p, e->hw_id);
         bin[p + 3] = e->num_base;
         bin[p + 4] = e->major;
+        bin[p + 5] = e->minor;
         bin[p + 6] = e->revision;
         p += 8;
         for (k = 0; k < e->num_base; k++, p += 4)
@@ -208,7 +224,7 @@ static void test_status_and_hello(uint8_t rev)
     assert(m.params[0] == 0x1234 && m.params[1] == 0 && m.params[2] == 0);
     assert(strstr(m.log, "differs") == NULL);
     if (rev == 7)
-        assert(strstr(m.log, "mailbox ready; power management is not ported") != NULL);
+        assert(strstr(m.log, "mailbox ready; PM requires private IF 0x35 tables") != NULL);
     m.if_version = 0;
     assert(smu13_hello(&d, &fw, &ifv) == RDNA3_OK); /* Linux warns, not a new ABI port. */
     assert(strstr(m.log, rev == 7 ? "header's 0x35" : "header's 0x3d") != NULL);
@@ -231,28 +247,6 @@ static void test_hello_status_failure(void)
     assert(!m.nmsg && !m.ndal && !m.waits && !m.vram_writes);
     assert(strstr(m.log, "flags at 0x3b10028 = 0x0, PMFW not running") != NULL);
     assert(strstr(m.log, "mailbox ready") == NULL && strstr(m.log, "SMU: PMFW") == NULL);
-}
-
-static void test_navi33_bringup_boundary(void)
-{
-    rdna3_dev d;
-    rdna3_smu s;
-    rdna3_uclk_pin u;
-    model m;
-    uint32_t fw = 0, ifv = 0, reads, writes;
-    int sent = -1;
-    fixture(&d, &m, 7);
-    m.flags7 = 1;
-    /* Production C entries in hwInit's order, including its continuation
-     * after pmInit refuses: only the three basic driver queries may write. */
-    assert(smu13_hello(&d, &fw, &ifv) == RDNA3_OK);
-    reads = m.reads;
-    writes = m.writes;
-    assert(smu13_pm_init(&d, &s, NULL, ~0ull, 3, 6, 0) == RDNA3_EOPNOTSUPP);
-    assert(dcn32_uclk_pin_init(&d, &u, 0) == RDNA3_ENODEV && u.last_err == RDNA3_EOPNOTSUPP);
-    assert(dcn32_uclk_pin_update(&d, &u, 2, 0, 0, &sent) == RDNA3_ENODEV && !sent);
-    assert(m.reads == reads && m.writes == writes && m.nmsg == 3 && !m.ndal);
-    assert(!u.ready && !s.fw_status_ok && !s.driver_table && !m.vram_writes && !m.flag_writes);
 }
 
 static void test_mailbox_errors(uint8_t rev)
@@ -345,10 +339,10 @@ static void test_pm_isolation(int unknown)
     assert(dcn32_uclk_pin_update(&d, &u, 2, 0, 0, &sent) == error);
     assert(dcn32_smu_set_hard_min(&d, RD_PPCLK_UCLK, 1200, 0x526100, NULL) == error);
     assert(dcn32_smu_num_displays(&d, 2) == error);
-    assert(!m.ndal && strstr(m.log, "DAL ABI requires 13.0.0/10") != NULL);
+    assert(!m.ndal && strstr(m.log, "DAL SMU: unsupported MP1 discovery") != NULL);
     assert(m.reads == 0 && m.writes == 0 && m.nmsg == 0 && m.waits == 0);
     assert(m.flag_writes == 0 && m.vram_writes == 0 && m.vram[8] == 0x5a);
-    assert(strstr(m.log, unknown ? "unsupported MP1 discovery" : "PM/control not ported") != NULL);
+    assert(strstr(m.log, "unsupported MP1 discovery") != NULL);
 }
 
 static void test_mp1_segment(uint8_t rev)
@@ -416,6 +410,8 @@ static void test_navi32_unload(void)
     assert(m.nmsg == 3 && m.msgs[2] == 4 && m.params[2] == 0x55);
 }
 
+#include "sim_smu13_0_7.inc"
+
 int main(void)
 {
     const uint8_t revisions[] = { 0, 7, 10 };
@@ -426,12 +422,12 @@ int main(void)
         test_mp1_segment(revisions[i]);
     }
     test_hello_status_failure();
-    test_navi33_bringup_boundary();
-    for (i = 0; i <= 5; i++)
+    test_navi33_pm();
+    for (i = 1; i <= 5; i++)
         test_pm_isolation((int)i);
     test_dal_navi32(0);
     test_dal_navi32(10);
     test_navi32_unload();
-    puts("smu13: discovery segments, status/hello and driver/DAL mailbox isolation ok (no hardware)");
+    puts("smu13: 13.0.7 PM bootstrap/telemetry, ABI and DAL model; Navi32 boundaries ok (no hardware)");
     return 0;
 }

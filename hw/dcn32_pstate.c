@@ -147,6 +147,11 @@ void dcn32_pstate_soc_init(rdna3_dcn32_soc *soc, const rdna3_vbios *vb)
 
 int dcn32_smu_send_fclk_pstate_message(rdna3_dev *d, int enable)
 {
+    const rdna3_ipver *dce = &d->ipver[HWIP_DCE];
+    if (dce->present && dce->major == 3 && dce->minor == 2 && dce->rev == 1) {
+        RERR(d, "DAL SMU: DCN 3.2.1 has no FCLK p-state notification");
+        return RDNA3_EOPNOTSUPP;
+    }
     RLOG(d, "DAL SMU: FCLK p-state support %d", enable);
     return dcn32_smu_send(d, RD_DALSMC_MSG_SetFclkSwitchAllow,
                           enable ? RD_FCLK_PSTATE_SUPPORTED : RD_FCLK_PSTATE_NOTSUPPORTED, NULL);
@@ -1463,7 +1468,8 @@ int dcn32_clk_update_pstate(rdna3_dev *d, const rdna3_dcn32_bw *bw, rdna3_dcn32_
     if (should_update_pstate_support(safe_to_lower, ctx->fclk_p_state_change_support, c->fclk_p_state_change_support)) {
         c->fclk_p_state_change_support = ctx->fclk_p_state_change_support;
         /* FCLK switching allowed (DCN 3.2.0, not 3.2.1) */
-        if (c->fclk_p_state_change_support)
+        if (c->fclk_p_state_change_support &&
+            !(d->ipver[HWIP_DCE].major == 3 && d->ipver[HWIP_DCE].minor == 2 && d->ipver[HWIP_DCE].rev == 1))
             MSG(dcn32_smu_send_fclk_pstate_message(d, 1));
     }
     if (should_set_clock(safe_to_lower, ctx->dcfclk_khz, c->dcfclk_khz)) {
@@ -1491,7 +1497,8 @@ int dcn32_clk_update_pstate(rdna3_dev *d, const rdna3_dcn32_bw *bw, rdna3_dcn32_
     /* dcn32_smu_wait_for_dmub_ack_mclk */
     MSG(dcn32_smu_send(d, RD_DALSMC_MSG_SetAlwaysWaitDmcubResp, ctx->fw_based_mclk_switching ? 1 : 0, NULL));
     update_fclk = safe_to_lower && c->fclk_p_state_change_support != c->fclk_prev_p_state_change_support;
-    if (!c->fclk_p_state_change_support && update_fclk)
+    if (!c->fclk_p_state_change_support && update_fclk &&
+        !(d->ipver[HWIP_DCE].major == 3 && d->ipver[HWIP_DCE].minor == 2 && d->ipver[HWIP_DCE].rev == 1))
         MSG(dcn32_smu_send_fclk_pstate_message(d, 0));
     if (should_set_clock(safe_to_lower, ctx->dramclk_khz, c->dramclk_khz)) {
         c->dramclk_khz = ctx->dramclk_khz;
@@ -1695,7 +1702,7 @@ uint32_t dcn32_pstate_planes_from_heads(rdna3_dev *d, const rdna3_dcn *dc, const
         ((uint8_t *)ctx)[i] = 0;
     {
         rdna3_dcn_clocks ck;
-        dcn32_clk_read(d, &ck);
+        if (dcn32_clk_read(d, &ck)) return 0; /* no usable planes on a clock-read failure */
         ctx->dispclk_khz = ck.dispclk_khz;
         ctx->dppclk_khz = ck.dppclk_khz;
     }

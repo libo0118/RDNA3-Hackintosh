@@ -57,3 +57,5 @@ Windows 本地未发现 `cc` / `clang` / `gcc` / `make`，因此没有冒称 C �
 新建时审计两个活跃 Note：固件准备与本阶段部分重叠，保留并双向互链；[GitHub CI 决定](../process/2026-11-04-github-hosted-validation.md) 与验证边界相关但决定不变，保留，不吸收或归档。没有被本阶段完全取代的提案。
 
 没有触碰设备、U 盘、系统、固件 blob 或 `hw-verified.txt`。缺少本机 IP discovery、VBIOS、SCPM、PMFW 运行数据和实卡日志；CI 绿色也不能证明 RX 7600 XT 的 SMN/BAR 可访问、Sequoia 15 启动、DP、Metal、风扇/功耗或复位正确。
+
+后续[私有 PM bootstrap 决定](2026-11-04-navi33-smu-pm-bootstrap.md) 部分取代本阶段的 PM/DAL 拒绝边界：真正增加 13.0.7 独立表交换、DPM、遥测和合法 DAL 路径；本篇保留状态/segment 边界的独特理由和未取得实卡证据的限制，不改写成“显卡适配完成”。

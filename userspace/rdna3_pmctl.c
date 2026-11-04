@@ -114,8 +114,11 @@ static void print_info(const rdna3_pmctl_info *i)
     printf("features running: 0x%016llx\n", (unsigned long long)i->features_enabled);
     printf("fan: %s, %u rpm, pwm %u/255, max %u rpm%s\n", i->fan_mode < 3 ? fan[i->fan_mode] : "?",
            i->fan_rpm, i->fan_pwm, i->fan_max_rpm, i->no_fan ? " (no fan control)" : "");
-    printf("power limit: %u W (default %u W, range %u..%u W)\n", i->power_current, i->power_default,
-           i->power_min, i->power_max);
+    if (i->power_current == UINT32_MAX)
+        printf("power limit: unavailable\n");
+    else
+        printf("power limit: %u W (default %u W, range %u..%u W)\n", i->power_current, i->power_default,
+               i->power_min, i->power_max);
     print_levels("pp_dpm_sclk", i->gfxclk_lv, i->gfxclk_levels, i->gfxclk_cur);
     print_levels("pp_dpm_mclk", i->uclk_lv, i->uclk_levels, i->uclk_cur);
     print_levels("pp_dpm_socclk", i->socclk_lv, i->socclk_levels, i->socclk_cur);

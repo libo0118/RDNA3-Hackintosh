@@ -217,7 +217,10 @@ int dcn32_clone_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head,
         c->det_src_new = c->det_src - c->det_dst_new;
     }
     /* B5 subset: the clocks are shared, the GOP sized them for its head */
-    dcn32_clk_read(d, &c->clk);
+    {
+        int ret = dcn32_clk_read(d, &c->clk);
+        if (ret) return ret;
+    }
     RLOG(d, "clone: DCN clocks VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
          c->clk.vco_khz, c->clk.dispclk_khz, c->clk.dppclk_khz, c->clk.dprefclk_khz,
          c->clk.dcfclk_khz, c->clk.dtbclk_khz);

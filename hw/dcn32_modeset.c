@@ -345,7 +345,7 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
     ms->hpd = path->hpd;
     ms->encoder_id = (uint8_t)path->encoder_objid;
     ms->connector_id = (uint8_t)path->connector_objid;
-    dcn32_clk_read(d, &ms->clk);
+    if (dcn32_clk_read(d, &ms->clk)) return RD_MODESET_CLOCKS;
     ms->odm_want = ms->odm_cur = 1;
     if (h->dig_mode == 0 || h->dig_mode == 5) {
         ms->dp = dp;
