@@ -8,10 +8,10 @@ T=$(mktemp -d)
 trap 'rm -rf -- "$T"' EXIT
 fail() { echo "test_make_pkg: FAIL $*"; exit 1; }
 FILES=$(sh "$ROOT/package/firmware.sh" --list | tr '\n' ' ' | sed 's/ $//')
-MK=$(make -s -C "$ROOT/kext" firmware-list 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+MK=$(make --no-print-directory -s -C "$ROOT/kext" firmware-list 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
 [ "$FILES" = "$MK" ] || fail "firmware.sh and kext/Makefile FW_FILES differ: '$FILES' vs '$MK'"
 FILES33=$(sh "$ROOT/package/firmware.sh" --chip navi33 --list | tr '\n' ' ' | sed 's/ $//')
-MK33=$(make -s -C "$ROOT/kext" firmware-list FW_CHIP=navi33 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+MK33=$(make --no-print-directory -s -C "$ROOT/kext" firmware-list FW_CHIP=navi33 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
 [ "$FILES33" = "$MK33" ] || fail "Navi 33 firmware.sh and kext/Makefile differ"
 sh "$ROOT/package/firmware.sh" --chip unknown --list >/dev/null 2>&1 && fail "unknown firmware chip accepted"
 
