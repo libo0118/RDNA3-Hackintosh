@@ -1,7 +1,7 @@
 #!/bin/sh
 # What CoreDisplay checks where WindowServer aborts with K5 answered (card
 # runs 41, 45: __assert_rtn in CoreDisplay_CreateDisplayForCGXDisplayDevice).
-# Runs on the self-hosted macOS runner (.github/workflows/probe.yml): the
+# Probe script retained with the offline fixture (.github/fixtures/probe.yml): the
 # disassembly of the functions on the crash stack, read from the dyld
 # shared cache with dyld_info, plus the strings __assert_rtn is called with.
 # Output: $1 (a directory).

@@ -361,8 +361,37 @@ static void ucode_helpers(void)
           strcmp(amd_ucode_name(500), "UNKNOWN UCODE") == 0);
 }
 
+static void firmware_sets(void)
+{
+    static const char *const expected33[AMD_BLOB_COUNT] = {
+        "smu_13_0_7.bin", "sdma_6_0_2.bin", "gc_11_0_2_pfp.bin", "gc_11_0_2_me.bin",
+        "gc_11_0_2_mec.bin", "gc_11_0_2_rlc.bin", "gc_11_0_2_imu.bin", "gc_11_0_2_mes_2.bin",
+        "gc_11_0_2_mes1.bin", "dcn_3_2_1_dmcub.bin", "vcn_4_0_2.bin"
+    };
+    const amd_fw_set *fw = amd_fw_set_for_gc(11, 0, 3);
+    unsigned i;
+    CHECK(fw == &amd_navi32_fw_set);
+    if (!fw)
+        return;
+    CHECK(fw->blobs == amd_navi32_fw_names);
+    CHECK(strcmp(fw->sos, amd_navi32_sos_name) == 0 && strcmp(fw->ta, amd_navi32_ta_name) == 0);
+    fw = amd_fw_set_for_gc(11, 0, 2);
+    CHECK(fw == &amd_navi33_fw_set);
+    if (!fw)
+        return;
+    CHECK(strcmp(fw->chip, "Navi 33") == 0);
+    CHECK(strcmp(fw->sos, "psp_13_0_7_sos.bin") == 0 && strcmp(fw->ta, "psp_13_0_7_ta.bin") == 0);
+    for (i = 0; i < AMD_BLOB_COUNT; i++)
+        CHECK(strcmp(fw->blobs[i], expected33[i]) == 0);
+    CHECK(amd_fw_set_for_gc(11, 0, 0) == NULL);   /* no implicit Navi 31 support */
+    CHECK(amd_fw_set_for_gc(10, 0, 2) == NULL);
+    CHECK(amd_fw_set_for_gc(11, 1, 2) == NULL);
+    CHECK(amd_fw_set_for_gc(0, 0, 0) == NULL);
+}
+
 int main(int argc, char **argv)
 {
+    firmware_sets();
     ucode_helpers();
     synthetic();
     shadow_check();

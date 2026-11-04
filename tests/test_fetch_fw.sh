@@ -22,7 +22,7 @@ export FAKE_LOG=$T/calls.txt
 
 run() {   # run <fake code> [budget]: fetch_fw.sh with the fake curl, a fresh DEST, the shared cache
     rm -rf "$T/dest"
-    FAKE_CODE=$1 PATH="$T/bin:$PATH" RDNA3_FW_CACHE=$T/cache RDNA3_FW_BUDGET=${2:-20} sh "$ROOT/tools/ci/fetch_fw.sh" "$T/dest" > "$T/out.txt" 2>&1
+    FAKE_CODE=$1 PATH="$T/bin:$PATH" RDNA3_FW_CACHE=$T/cache RDNA3_FW_BUDGET=${2:-20} sh "$ROOT/tools/ci/fetch_fw.sh" "$T/dest" "${3:-navi32}" > "$T/out.txt" 2>&1
 }
 
 # a corrupt file in the cache is dropped, not trusted
@@ -46,4 +46,13 @@ run 200 4 || fail "exit status not 0 with wrong files"
 grep -q 'SHA-256 differs' "$T/out.txt" || fail "a wrong file was not reported"
 [ -z "$(ls -A "$T/cache")" ] || fail "a file with a wrong SHA-256 reached the cache: $(ls -A "$T/cache")"
 [ ! -e "$T/dest/.complete" ] || fail ".complete with wrong files"
+
+# The explicit Navi 33 set uses its own names and retains the same failure contract.
+: > "$FAKE_LOG"
+run 429 20 navi33 || fail "Navi 33 rate limit exit status"
+grep -q 'psp_13_0_7_sos.bin' "$FAKE_LOG" || fail "Navi 33 PSP file not requested"
+grep -q 'gc_11_0_2_mes_2.bin' "$FAKE_LOG" || fail "Navi 33 MES file not requested"
+grep -q 'psp_13_0_10_sos.bin' "$FAKE_LOG" && fail "Navi 32 PSP requested for Navi 33"
+[ ! -e "$T/dest/.complete" ] || fail ".complete after Navi 33 download failures"
+sh "$ROOT/tools/ci/fetch_fw.sh" "$T/dest" unknown > "$T/out.txt" 2>&1 && fail "unknown chip accepted"
 echo "test_fetch_fw: ok"

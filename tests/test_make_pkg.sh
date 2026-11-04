@@ -8,9 +8,12 @@ T=$(mktemp -d)
 trap 'rm -rf -- "$T"' EXIT
 fail() { echo "test_make_pkg: FAIL $*"; exit 1; }
 FILES=$(sh "$ROOT/package/firmware.sh" --list | tr '\n' ' ' | sed 's/ $//')
-MK=$(sed -n '/^FW_FILES *:=/,/[^\\]$/p' "$ROOT/kext/Makefile" | sed 's/^FW_FILES *:=//; s/\\//g' | tr -s ' \n' '  ' |
-     sed 's/^ *//; s/ *$//')
+MK=$(make -s -C "$ROOT/kext" firmware-list 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
 [ "$FILES" = "$MK" ] || fail "firmware.sh and kext/Makefile FW_FILES differ: '$FILES' vs '$MK'"
+FILES33=$(sh "$ROOT/package/firmware.sh" --chip navi33 --list | tr '\n' ' ' | sed 's/ $//')
+MK33=$(make -s -C "$ROOT/kext" firmware-list FW_CHIP=navi33 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+[ "$FILES33" = "$MK33" ] || fail "Navi 33 firmware.sh and kext/Makefile differ"
+sh "$ROOT/package/firmware.sh" --chip unknown --list >/dev/null 2>&1 && fail "unknown firmware chip accepted"
 
 # --- fake artifacts: RDNA3Accel-kext (dir), RDNA3MTL (zip), radv-macos-logs (dir)
 a=$T/art
@@ -36,12 +39,18 @@ echo x > "$T/radv/install/lib/libvulkan_radeon.dylib"
 
 # --- fake firmware: the header's size word = the file size
 mkdir -p "$T/lf/amdgpu"
-python3 - "$T/lf/amdgpu" "$FILES" <<'PY'
+python3 - "$T/lf/amdgpu" "$FILES $FILES33" <<'PY'
 import struct, sys
 for f in sys.argv[2].split():
     open(sys.argv[1] + "/" + f, "wb").write(struct.pack("<II", 8192, 32) + bytes(8184))
 PY
 echo license > "$T/lf/LICENSE.amdgpu"
+
+# Firmware-only Navi 33 preparation: no install, OpenCore edit or hardware load.
+sh "$ROOT/package/firmware.sh" --chip navi33 --dest "$T/fw33" --from "$T/lf/amdgpu" >/dev/null
+sh "$ROOT/package/firmware.sh" --chip navi33 --dest "$T/fw33" --check >/dev/null || fail "Navi 33 firmware copy"
+[ ! -e "$T/fw33/psp_13_0_10_sos.bin" ] || fail "Navi 32 firmware copied for Navi 33"
+for f in $FILES33; do [ -f "$T/fw33/$f" ] || fail "Navi 33 file missing: $f"; done
 
 "$ROOT/package/make_pkg.sh" --no-pkg --from "$a" --from "$T/RDNA3MTL.zip" --from "$T/radv" --out "$T/out" >/dev/null
 tgz=$(ls "$T"/out/RDNA3-Hackintosh-*.tar.gz)

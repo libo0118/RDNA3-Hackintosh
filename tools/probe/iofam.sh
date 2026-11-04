@@ -3,7 +3,7 @@
 # read in IOAccelLegacySurface::clientClose+0x1cc while WindowServer exited
 # (iokit_client_died). What that function reads there, from the
 # IOAcceleratorFamily2 of the self-hosted macOS runner (the same macOS
-# build as the VM, .github/workflows/probe.yml). macOS 11+ keeps the kexts'
+# build as the VM, see .github/fixtures/probe.yml). macOS 11+ keeps the kexts'
 # code only in the kernel collections (MH_FILESET); neither otool nor lldb
 # splits them (probe run 3: lldb saw one image), so kc_func.py cuts the
 # functions out by the fileset entry's own symbol table. Output: $1.

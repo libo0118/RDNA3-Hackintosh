@@ -2233,7 +2233,7 @@ commit_unbuilt() {
     local f n=0
     while read -r f; do
         [ -n "$f" ] || continue
-        case $f in docs/*|*.md|NOTICE|LICENSE*|tools/probe/*|.github/workflows/probe.yml) ;; *) return 1 ;; esac
+        case $f in docs/*|*.md|NOTICE|LICENSE*|tools/probe/*|.github/fixtures/probe.yml) ;; *) return 1 ;; esac
         n=$((n + 1))
     done < <(git -C "$ROOT" diff --name-only HEAD~1 HEAD 2>/dev/null)
     [ "$n" -gt 0 ]

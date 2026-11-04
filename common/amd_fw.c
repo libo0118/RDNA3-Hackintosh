@@ -708,6 +708,39 @@ const char *const amd_navi32_fw_names[AMD_BLOB_COUNT] = {
 const char *const amd_navi32_sos_name = "psp_13_0_10_sos.bin";
 const char *const amd_navi32_ta_name = "psp_13_0_10_ta.bin";
 
+/* Linux v6.12 per-IP MODULE_FIRMWARE declarations; linux-firmware 20260916 WHENCE. */
+static const char *const navi33_fw_names[AMD_BLOB_COUNT] = {
+    [AMD_BLOB_SMC]   = "smu_13_0_7.bin",
+    [AMD_BLOB_SDMA]  = "sdma_6_0_2.bin",
+    [AMD_BLOB_PFP]   = "gc_11_0_2_pfp.bin",
+    [AMD_BLOB_ME]    = "gc_11_0_2_me.bin",
+    [AMD_BLOB_MEC]   = "gc_11_0_2_mec.bin",
+    [AMD_BLOB_RLC]   = "gc_11_0_2_rlc.bin",
+    [AMD_BLOB_IMU]   = "gc_11_0_2_imu.bin",
+    [AMD_BLOB_MES]   = "gc_11_0_2_mes_2.bin",
+    [AMD_BLOB_MES1]  = "gc_11_0_2_mes1.bin",
+    [AMD_BLOB_DMCUB] = "dcn_3_2_1_dmcub.bin",
+    [AMD_BLOB_VCN]   = "vcn_4_0_2.bin",
+};
+
+const amd_fw_set amd_navi32_fw_set = {
+    "Navi 32", amd_navi32_fw_names, "psp_13_0_10_sos.bin", "psp_13_0_10_ta.bin"
+};
+const amd_fw_set amd_navi33_fw_set = {
+    "Navi 33", navi33_fw_names, "psp_13_0_7_sos.bin", "psp_13_0_7_ta.bin"
+};
+
+const amd_fw_set *amd_fw_set_for_gc(uint8_t major, uint8_t minor, uint8_t revision)
+{
+    if (major != 11 || minor != 0)
+        return NULL;
+    switch (revision) {
+    case 3: return &amd_navi32_fw_set;
+    case 2: return &amd_navi33_fw_set;
+    default: return NULL;
+    }
+}
+
 /* ---------------- AMDGPU_INFO_FW_VERSION ---------------- */
 
 void amd_fw_versions(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const amd_psp_sos *sos,

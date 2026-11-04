@@ -1,5 +1,5 @@
 #!/bin/sh
-# tools/ci/fetch_fw.sh DEST - the 13 Navi 32 firmware files the host tests read (RDNA3_FW_DIR of `make test`), for CI.
+# tools/ci/fetch_fw.sh DEST [navi32|navi33] - a pinned firmware set for offline CI checks (default: Navi 32).
 # The firmware is not redistributed, so it is fetched: the tag and the SHA-256 of every file are the ones of
 # package/firmware.sh (the installer's), nothing unpinned or unchecked reaches DEST.
 #  - a cache first ($RDNA3_FW_CACHE, default ~/.cache/rdna3-fw; the Linux runner's jobs run in a fresh container, so it
@@ -10,17 +10,18 @@
 #  - a time budget for the whole step ($RDNA3_FW_BUDGET s, default 150): when it is used up the rest is not tried
 #  - a file lands in the cache only whole and verified (written to a temporary name inside the cache, then renamed; a
 #    cancelled job leaves only .tmp.* there, which the next run removes)
-# Exit status is always 0. DEST/.complete exists only when all files are there and verified; the caller runs the
+# Download failures return 0 (an unknown chip returns 2). DEST/.complete exists only when all files are verified; the caller runs the
 # firmware-dependent checks only then (the tests print a "skip" note when they get no firmware directory).
 # POSIX sh (also runs on macOS).
 set -u
 DEST=${1:?usage: fetch_fw.sh DEST}
+CHIP=${2:-navi32}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 FWSH=$ROOT/package/firmware.sh
 CACHE=${RDNA3_FW_CACHE:-$HOME/.cache/rdna3-fw}
 BUDGET=${RDNA3_FW_BUDGET:-150}
 PIN=$(sed -n 's/^PIN=//p' "$FWSH")
-FILES=$(sh "$FWSH" --list)
+FILES=$(sh "$FWSH" --chip "$CHIP" --list) || exit 2
 SUMS=$(grep -oE '[a-z0-9_]+\.bin [0-9a-f]{64}' "$FWSH")
 if [ -z "$PIN" ] || [ -z "$FILES" ] || [ -z "$SUMS" ]; then
     echo "fetch_fw: cannot read the pin / files / sums from $FWSH"

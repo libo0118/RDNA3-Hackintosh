@@ -301,7 +301,7 @@ grep -q '^FAILED: CoreDisplay dyld_info -platform failed' "$O3/00-system.txt" ||
 
 # ---- the workflow step, run under bash -e like Actions does: it prints the .err files and
 # 00-system.txt, survives missing files, and fails loudly when CoreDisplay.dis is tiny
-WF=$ROOT/.github/workflows/probe.yml
+WF=$ROOT/.github/fixtures/probe.yml
 grep -q 'if: always()' "$WF" || fail "probe.yml: the artifact upload must run after a failure"
 python3 -I - "$WF" "$T/step.sh" "$T/peek_step.sh" <<'PY'
 import sys

@@ -68,7 +68,7 @@ nav.toc details ol{padding-left:18px}
 <li><a href="#4-tests-and-ci">4. Tests and CI</a></li>
 <li><a href="#5-where-to-change-x">5. Where to change X</a></li>
 </ol></nav>
-<p>Last updated: 2026-10-26 (branch <code>stage1-kext</code>). Read at the start of every task.</p>
+<p>Last updated: 2026-11-04 (branch <code>stage1-kext</code>). Read at the start of every task.</p>
 <ul>
 <li>The N-numbers (<a href="DRIVER-PLAN.html#n38">N38</a>, <a href="DRIVER-PLAN.html#n54">N54</a>, ...) and "card run &lt;date&gt;" in comments and docs are the
 history: <code>docs/DRIVER-PLAN.html</code> has one row per N, <code>docs/AFTER-TESTS.html</code> the
@@ -164,7 +164,7 @@ accelerator and framebuffer); test <code>tests/test_bootargs.c</code>.</p>
 display). New amdgpu sources to track: <code>tools/progress/sources.txt</code>.</p>
 <h3 id="23-common-and-uapi">2.3 <code>common/</code> and <code>uapi/</code></h3>
 <p><code>common/amd_discovery.c</code>, <code>amd_fw.c</code>, <code>range_alloc.c</code>, <code>amd_mqd.h</code>: parsers and allocators (tests
-<code>test_discovery</code>, <code>test_fw</code>, <code>test_range_alloc</code>). The <code>rdna3_*.h</code> headers are kernel-free decision logic
+<code>test_discovery</code>, <code>test_fw</code>, <code>test_fw_dump</code>, <code>test_range_alloc</code>). <code>amd_fw_set_for_gc</code> selects the Navi 32 / Navi 33 firmware names from GC discovery; this is offline preparation, not Navi 33 hardware support. The <code>rdna3_*.h</code> headers are kernel-free decision logic
 with one host test each (<code>tests/test_&lt;name&gt;.c</code>):</p>
 <table id="23-common-and-uapi-t1">
 <thead><tr><th>Header</th><th>Decides</th></tr></thead>

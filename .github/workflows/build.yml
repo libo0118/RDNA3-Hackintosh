@@ -1,405 +1,216 @@
-name: build
+name: Experimental RX7600XT source validation
 
-# Runs on the owner's self-hosted runners (labels: self-hosted + Linux /
-# macOS). Kext + host tests run on every push, the Metal plugin and RADV
-# only when their sources change (or on a manual run with "full"),
-# docs-only pushes run nothing, and a newer push cancels an older run of
-# the same branch. No pull_request trigger: fork code never reaches the
-# self-hosted machines.
 on:
   push:
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - 'NOTICE'
-      - 'LICENSE*'
-      - 'tools/probe/**'
-      - '.github/workflows/probe.yml'
+  pull_request:
   workflow_dispatch:
-    inputs:
-      full:
-        description: 'Build everything (Metal plugin + RADV too)'
-        type: boolean
-        default: true
-      radv:
-        description: 'With full off: build RADV + rdna3_vktest too (no Metal plugin)'
-        type: boolean
-        default: false
-      cts:
-        description: 'Build the Vulkan CTS subset for step cts (deqp-vk + loader, an hour the first time)'
-        type: boolean
-        default: false
 
-# a CTS build (an hour) has its own group: a push does not cancel it
+permissions:
+  contents: read
+
 concurrency:
-  group: build-${{ github.ref }}${{ inputs.cts && '-cts' || '' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  changes:
-    runs-on: linux
-    outputs:
-      metal: ${{ steps.f.outputs.metal }}
-      radv: ${{ steps.f.outputs.radv }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: f
-        env:
-          BEFORE: ${{ github.event.before }}
-          EVENT: ${{ github.event_name }}
-          FULL: ${{ inputs.full }}
-          RADV: ${{ inputs.radv }}
-        run: |
-          if [ "$EVENT" = "workflow_dispatch" ] && [ "$FULL" != "true" ]; then
-            echo "metal=false" >> "$GITHUB_OUTPUT"
-            [ "$RADV" = "true" ] && echo "radv=true" >> "$GITHUB_OUTPUT" || echo "radv=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$FULL" = "true" ] || [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
-             || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            echo "metal=true" >> "$GITHUB_OUTPUT"; echo "radv=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          changed=$(git diff --name-only "$BEFORE" HEAD)
-          echo "$changed"
-          echo "$changed" | grep -qE '^metal/' && echo "metal=true" >> "$GITHUB_OUTPUT" || echo "metal=false" >> "$GITHUB_OUTPUT"
-          echo "$changed" | grep -qE '^(userspace/|third_party/libdrm/)' && echo "radv=true" >> "$GITHUB_OUTPUT" || echo "radv=false" >> "$GITHUB_OUTPUT"
-
   host-tests:
-    runs-on: linux
+    name: Offline host tests (no GPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Restore the firmware cache
-        # the Linux runner runs jobs in a fresh container, so $HOME/.cache does not survive a job by itself; this is
-        # best effort (the runner's cache service may be off): a failure or a hang here costs at most 3 minutes
-        continue-on-error: true
-        timeout-minutes: 3
-        uses: actions/cache@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: ~/.cache/rdna3-fw
-          key: rdna3-fw-${{ hashFiles('package/firmware.sh') }}
-      - name: Fetch Navi 32 firmware for header tests (not redistributed)
-        # tools/ci/fetch_fw.sh: the pinned tag and SHA-256 of package/firmware.sh, cache, then gitlab.com, then
-        # git.kernel.org, a time budget of 150 s, exit 0 always; without the full set the real-firmware checks are skipped
-        timeout-minutes: 5
-        run: sh tools/ci/fetch_fw.sh "$RUNNER_TEMP/fw"
-      - name: Unit tests + fuzz (ASan/UBSan), real firmware headers
+          persist-credentials: false
+      - name: Record scope and host toolchain
         run: |
-          # the real-firmware checks (test_fw, sim_navi32) run only with the complete verified set, else they print a skip note
-          fw="$RUNNER_TEMP/fw"; [ -f "$fw/.complete" ] || fw=""
-          make test RDNA3_FW_DIR="$fw"
-      - name: Firmware load plan
+          mkdir -p build/ci-logs
+          printf '%s\n' \
+            'EXPERIMENTAL: source validation only; RX7600XT/Navi33 hardware is NOT verified.' \
+            'This job has no GPU, kext loading, boot, DisplayPort, Metal, RADV or real-firmware validation.' \
+            'This job downloads no firmware. test_fw and sim_navi32 skip real Navi32 firmware subcases; synthetic tests still run.' \
+            | tee build/ci-logs/EXPERIMENTAL.txt >> "$GITHUB_STEP_SUMMARY"
+          clang --version 2>&1 | tee build/ci-logs/toolchain.log
+          python3 --version 2>&1 | tee -a build/ci-logs/toolchain.log
+          make --version 2>&1 | tee -a build/ci-logs/toolchain.log
+      - name: Unit tests and synthetic models (ASan/UBSan)
         run: |
-          make tools
-          if [ -f "$RUNNER_TEMP/fw/.complete" ]; then build/host/amd_fw_dump "$RUNNER_TEMP/fw"
-          else echo "skip: no firmware fetched (rate limited or unreachable), the load plan is not checked"; fi
-      - name: Host tools
-        run: make tools
-      - name: README status is up to date
-        run: python3 tools/progress.py --check
-
-  kext:
-    runs-on: macOS
-    steps:
-      - uses: actions/checkout@v4
-      - name: Toolchain
-        run: |
-          xcodebuild -version
-          xcrun --sdk macosx --show-sdk-path
-      - name: Build RDNA3Accel.kext (x86_64)
-        run: make -k -C kext   # -k: one run lists every compile error
-      - name: Build RDNA3Accelerator.kext (Stage 7, Sequoia and Tahoe layouts)
-        run: |
-          make -C accel
-          make -C accel check
-          make -C accel clean && make -C accel NM_TAHOE=1
-          # the macOS 26 build next to the other (rdna3vm: OpenCore injects
-          # each for its own kernel; the VM installs the one for its Darwin)
-          rm -rf build/RDNA3AcceleratorTahoe.kext
-          cp -R build/RDNA3Accelerator.kext build/RDNA3AcceleratorTahoe.kext
-          make -C accel clean && make -C accel
-      - name: Build RDNA3Framebuffer.kext (Stage 3)
-        run: |
-          make -C fb
-          make -C fb check
-      - name: Build RDNA3AGDC.kext (AppleGraphicsDeviceControl for IOPresentment)
-        run: |
-          make -C agdc
-          make -C agdc check
-      - name: Inspect
-        run: |
-          file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
-          make -C kext check
-      # card run 2026-10-25b (DRIVER-PLAN N47): kmutil refused the framebuffer
-      # and the accelerator on macOS 26 (thread_call_cancel_wait is exported
-      # only by com.apple.kpi.private); the build never noticed. Each kext
-      # kmutil links on its own (the Auxiliary KC) must bind every import to
-      # a library its Info.plist declares, never to kpi.private, against this
-      # runner's kernel collections, and (this runner being macOS 15) never to
-      # what xnu-12377 (macOS 26.4) exports only from kpi.private or, if not
-      # declared, kpi.unsupported (tools/ci/data). No kmutil = an error, not a pass.
-      - name: KPI guard (kmutil libraries) for the kexts kmutil links
-        run: |
-          # fb and agdc: blocking on any runner. The accelerator: on macOS 26
-          # (Darwin >= 25) kmutil links its Tahoe layout, so that one blocks;
-          # up to Darwin 24 OpenCore injects the Sequoia layout and its
-          # prelinker binds IOAcceleratorFamily2 symbols the family does not
-          # export (Forgejo run 45, macOS 15 runner: IOAccelSurface::set_shape
-          # & co unresolved by kmutil, yet card runs on 15 load it), so both
-          # layouts only warn there. Imports macOS 26 keeps private (or
-          # unsupported, undeclared) fail in every mode.
-          darwin=$(uname -r | cut -d. -f1)
-          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Framebuffer.kext build/RDNA3AGDC.kext
-          if [ "$darwin" -ge 25 ]; then
-            echo "runner Darwin $darwin: blocking check of the Tahoe accelerator, warnings only for the Sequoia one"
-            python3 tools/ci/kmutil_kpi_guard.py build/RDNA3AcceleratorTahoe.kext
-            python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3Accelerator.kext
-          else
-            echo "runner Darwin $darwin: both accelerator layouts with unresolved imports as warnings (OpenCore injects the Sequoia one)"
-            python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3Accelerator.kext build/RDNA3AcceleratorTahoe.kext
-          fi
-      # the core too, blocking (DRIVER-PLAN N47 (b)): OpenCore injects it and
-      # its prelinker bound what kmutil would refuse, IOMemoryDescriptor::doMap
-      # / doUnmap through RDNA3BoMemory's vtable (the public SDK mangles
-      # vm_map_t as ipc_port *, xnu-11417 and xnu-12377 export only the
-      # _vm_map * names); RDNA3BoMemory overrides both now, so a new import
-      # no kext exports, or one kept private, turns this red before it ever
-      # has to be installed through kmutil
-      - name: KPI guard for the core
-        run: python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accel.kext
-      - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest, rdna3_pmctl)
-        run: make -C userspace
-      - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)
-        continue-on-error: true
-        run: make -C userspace probes
-      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+          echo '::notice::Offline mode: real-firmware subcases are intentionally skipped, not hardware passes.'
+          make test CC=clang JOBS=4 RDNA3_FW_DIR= 2>&1 | tee build/ci-logs/host-tests.log
+      - name: Compile portable host tools
+        run: make tools CC=clang 2>&1 | tee build/ci-logs/host-tools.log
+      - name: Preserve test and compiler logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: RDNA3Accel-kext
+          name: experimental-ubuntu-host-logs
           path: |
-            build/RDNA3Accel.kext
-            build/RDNA3Accelerator.kext
-            build/RDNA3AcceleratorTahoe.kext
-            build/RDNA3Framebuffer.kext
-            build/RDNA3AGDC.kext
-            build/userspace/rdna3_drminfo
-            build/userspace/rdna3_modetest
-            build/userspace/rdna3_pmctl
-            build/userspace/rdna3_vktest
-            build/userspace/mtlprobe
-            build/userspace/libdrm.dylib
-            build/userspace/libdrm_amdgpu.dylib
-      # seconds: pkgbuild over the files above, no firmware inside
-      # (package/make_pkg.sh; the Metal plugin and RADV are added locally)
-      # the package TESTING-HW.html has users install: a broken build fails
-      # the run (PR #2 review)
-      - name: Installer (.pkg + tarball)
-        run: package/make_pkg.sh --out build/pkg
-      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
-        with:
-          name: RDNA3-pkg
-          path: build/pkg/
+            build/ci-logs/
+            build/test-logs/
           if-no-files-found: error
+          retention-days: 7
 
-  # the host tests on macOS (BSD tools, bash 3.2) in a job of their own, after the kext job: the
-  # kext artifact rdna3vm update waits for is uploaded about 2 minutes into a run instead of
-  # after these 10 minutes (one macOS runner: needs keeps the kext job first)
-  macos-tests:
-    needs: kext
-    runs-on: macOS
+  wifi-cli:
+    name: MT7925 connection tool (macOS x86_64, compile only)
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
-      - name: Host tests on macOS
-        run: make test tools
-
-  metal:
-    needs: changes
-    if: needs.changes.outputs.metal == 'true'
-    runs-on: macOS
-    steps:
-      - uses: actions/checkout@v4
-      - name: Metal plugin (RDNA3MTLDriver.bundle)
-        run: make -C metal plugin
-      - name: AIR->SPIR-V translator (librdna3mtl_translate.dylib)
+      - name: Fetch the exact source matching the USB wireless driver
         run: |
-          # rustup into ~/.cargo on first use (no Homebrew on Intel Macs),
-          # a pinned release checked by SHA-256. The runner is x86_64, so
-          # cargo's host target is the one the plugin loads.
-          tools/ci/install_tools.sh rustup
-          export PATH="$HOME/.cargo/bin:$PATH"
-          make -C metal translator
-          lipo -archs build/metal/librdna3mtl_translate.dylib | grep -qw x86_64
-      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            https://codeload.github.com/watchthelight-labs/WTLMtkWireless/legacy.zip/0ea306289654c7fcb1a9348f971f385cf906b822 \
+            --output "$RUNNER_TEMP/mtkwlan.zip"
+          printf '%s  %s\n' d7577531e4ed6dd70fc301c3d7f6c525151fd7a41029902a208e6450774c9e98 "$RUNNER_TEMP/mtkwlan.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/mtkwlan.zip" -d "$RUNNER_TEMP/mtkwlan"
+      - name: Compile and ad-hoc sign the CLI without running it
+        run: |
+          src="$RUNNER_TEMP/mtkwlan/watchthelight-labs-WTLMtkWireless-0ea3062"
+          out="$RUNNER_TEMP/mtkwifi-artifact"
+          mkdir -p "$out"
+          xcrun clang -std=c11 -O2 -arch x86_64 -mmacosx-version-min=10.15 \
+            -Wall -Wextra -Wno-unused-parameter -I"$src/src" \
+            "$src/tools/mtkwifi/mtkwifi.c" "$src/src/MtkCrypto.c" \
+            -framework IOKit -framework CoreFoundation -o "$out/mtkwifi"
+          codesign --force --sign - "$out/mtkwifi"
+          codesign --verify --strict "$out/mtkwifi"
+          test "$(lipo -archs "$out/mtkwifi")" = x86_64
+          cp "$src/LICENSE" "$out/LICENSE"
+          cp "$src/tools/mtkwifi/README.md" "$out/README-upstream.md"
+          printf '%s\n' \
+            'WTLMtkWireless 0.12.1 / 0ea306289654c7fcb1a9348f971f385cf906b822' \
+            'Source: https://github.com/watchthelight-labs/WTLMtkWireless' \
+            'Compiled only; wireless connectivity and WPA2 are NOT verified.' \
+            'No installer or LaunchDaemon has been run.' > "$out/BUILD-SCOPE.txt"
+          (cd "$out" && shasum -a 256 mtkwifi > SHA256SUMS)
+      - name: Preserve the connection tool and attribution
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: RDNA3MTL
-          path: |
-            build/metal/RDNA3MTLDriver.bundle
-            build/metal/librdna3mtl_translate.dylib
+          name: mtkwifi-0.12.1-macos-x86_64
+          path: ${{ runner.temp }}/mtkwifi-artifact/
+          if-no-files-found: error
+          retention-days: 7
 
-  translator:
-    # The Metal translator's own tests (metal/translator/translator/tests),
-    # no GPU and no Mac needed: every test file whose fixtures are imported
-    # (the ones reading ../validation/ are not). They check each module with
-    # SPIRV-Tools, built here once and kept in the runner's tool cache.
-    needs: changes
-    if: needs.changes.outputs.metal == 'true'
-    runs-on: linux
+  firmware-headers:
+    name: ${{ matrix.chip }} firmware headers (no GPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        chip: [navi32, navi33]
+    env:
+      CHIP: ${{ matrix.chip }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Tools (rustup, cmake / ninja from PyPI, SPIRV-Tools from source)
-        run: |
-          T="$RUNNER_TOOL_CACHE/rdna3-translator"
-          mkdir -p "$T"
-          command -v cargo >/dev/null || tools/ci/install_tools.sh rustup
-          tools/ci/install_tools.sh uv
-          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
-          [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
-          uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja
-          export PATH="$T/venv/bin:$PATH"
-          if [ ! -x "$T/bin/spirv-val" ]; then
-            rm -rf "$T/spirv-tools"
-            git -c advice.detachedHead=false clone -q --depth 1 --branch vulkan-sdk-1.4.321.0 \
-              https://github.com/KhronosGroup/SPIRV-Tools.git "$T/spirv-tools"
-            git -c advice.detachedHead=false clone -q --depth 1 --branch vulkan-sdk-1.4.321.0 \
-              https://github.com/KhronosGroup/SPIRV-Headers.git "$T/spirv-tools/external/spirv-headers"
-            cmake -S "$T/spirv-tools" -B "$T/spirv-tools/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-              -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF -DCMAKE_INSTALL_PREFIX="$T" >/dev/null
-            ninja -C "$T/spirv-tools/build" install >/dev/null
-          fi
-          cargo --version; "$T/bin/spirv-val" --version | head -1
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$T/bin" >> "$GITHUB_PATH"
-          echo "XLATE_TARGET=$T/target" >> "$GITHUB_ENV"
-      - name: Translator tests
-        working-directory: metal/translator/translator
-        run: |
-          t=""
-          for f in $(grep -L 'validation/' tests/*.rs); do
-            n=$(basename "$f" .rs)
-            [ "$n" = leaf_memcpy_interior_field ] || t="$t --test $n"
-          done
-          cargo test --release --target-dir "$XLATE_TARGET" --no-fail-fast $t
-      - name: leaf_memcpy_interior_field (fails as imported, not counted)
-        # Upstream's own failure: with METAL2VULKAN_NO_LEAF_MEMCPY set the
-        # module is refused, but as "unresolved external shader function:
-        # llvm.memcpy..." where the test expects "OpFunctionCall". Shown
-        # here so a change in it is seen.
-        continue-on-error: true
-        working-directory: metal/translator/translator
-        run: cargo test --release --target-dir "$XLATE_TARGET" --test leaf_memcpy_interior_field
-
-  cts-macos:
-    # The Vulkan CTS subset of the card report (V2): deqp-vk + the Khronos
-    # loader for the macOS VM, on request only. The clones and build trees
-    # stay in the runner's tool cache, so a rebuild is quick. The artifact
-    # goes to the VM with `rdna3vm cts`; step cts runs it.
-    if: inputs.cts
-    runs-on: macOS
-    timeout-minutes: 300
-    steps:
-      - uses: actions/checkout@v4
-      - name: Tools (Python 3.12 venv with cmake + ninja, as radv-macos)
-        run: |
-          T="$RUNNER_TOOL_CACHE/rdna3-radv"
-          mkdir -p "$T"
-          tools/ci/install_tools.sh uv
-          export PATH="$HOME/.local/bin:$PATH"
-          [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
-          uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja certifi
-          echo "$T/venv/bin" >> "$GITHUB_PATH"
-      - name: Build deqp-vk + the loader
-        run: tools/ci/build_cts.sh build/cts-out "$RUNNER_TOOL_CACHE/rdna3-cts"
-      - name: deqp-vk starts without a driver (lists the smoke cases)
-        run: |
-          d=$(mktemp -d)
-          tar -xzf build/cts-out/rdna3-cts.tar.gz -C "$d"
-          cd "$d/cts"
-          file deqp-vk libvulkan.1.dylib
-          ./deqp-vk --deqp-runmode=stdout-caselist --deqp-case='dEQP-VK.api.smoke.*' | head -20
-      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: rdna3-cts
-          path: build/cts-out/rdna3-cts.tar.gz
-          retention-days: 30
-
-  radv-macos:
-    # Experimental: drives the Stage 5 port. Failures here are the to-do list.
-    # Builds x86_64 (-arch x86_64).
-    needs: changes
-    if: needs.changes.outputs.radv == 'true'
-    runs-on: macOS
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Tools (no Homebrew, it no longer installs on Intel Macs)
+          persist-credentials: false
+      - name: Compile the firmware parser and record validation scope
         run: |
-          # As tools/vm/macos/build_radv.sh: Python 3.12 (through uv, Xcode's
-          # is 3.9) with the build tools from PyPI in a venv, glslang from
-          # source. Kept in the runner's tool cache, so only the first run
-          # downloads and builds them.
-          T="$RUNNER_TOOL_CACHE/rdna3-radv"
-          mkdir -p "$T"
-          tools/ci/install_tools.sh uv   # pinned, checked by SHA-256
-          export PATH="$HOME/.local/bin:$PATH"
-          [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
-          uv pip install --python "$T/venv/bin/python3" --quiet meson ninja mako pyyaml packaging pkgconf cmake
-          export PATH="$T/venv/bin:$T/bin:$PATH"
-          if ! command -v glslangValidator >/dev/null; then
-            rm -rf "$T/glslang"
-            git -c advice.detachedHead=false clone -q --depth 1 --branch 15.1.0 \
-              https://github.com/KhronosGroup/glslang.git "$T/glslang"
-            cmake -S "$T/glslang" -B "$T/glslang/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=OFF \
-              -DGLSLANG_TESTS=OFF -DCMAKE_INSTALL_PREFIX="$T" >/dev/null
-            ninja -C "$T/glslang/build" install >/dev/null
-          fi
-          python3 --version; meson --version; glslangValidator --version | head -1
-          echo "$T/venv/bin" >> "$GITHUB_PATH"
-          echo "$T/bin" >> "$GITHUB_PATH"
-          echo "PKG_CONFIG=$T/venv/bin/pkgconf" >> "$GITHUB_ENV"
-      - name: Build RADV against libdrm_xnu
-        run: userspace/mesa/build_radv.sh build/mesa
-      - name: rdna3_vktest (the VM runs it against the card from step 8)
+          mkdir -p build/ci-logs
+          printf '%s\n' \
+            "EXPERIMENTAL: download and parse pinned linux-firmware headers for $CHIP; no GPU or microcode execution." \
+            'Incomplete downloads or parser failures fail this job; they are never counted as skips.' \
+            'Only logs are uploaded, never firmware blobs. Hardware, boot, DisplayPort and Metal remain unverified.' \
+            | tee build/ci-logs/EXPERIMENTAL.txt >> "$GITHUB_STEP_SUMMARY"
+          make tools CC=clang 2>&1 | tee build/ci-logs/host-tools.log
+      - name: Download and require the complete verified firmware set
         run: |
-          mkdir -p build/mesa/install/bin
-          xcrun clang -O1 -g -arch x86_64 -mmacosx-version-min=15.0 -std=gnu11 -Wall -Wextra -Werror \
-            -I build/mesa/src/include -o build/mesa/install/bin/rdna3_vktest userspace/rdna3_vktest.c
-      - name: vulkaninfo on the in-process UAPI (loopback libdrm, no kext)
+          sh tools/ci/fetch_fw.sh "$RUNNER_TEMP/fw" "$CHIP" 2>&1 | tee build/ci-logs/firmware-fetch.log
+          test -f "$RUNNER_TEMP/fw/.complete" || { echo "::error::Incomplete verified firmware set for $CHIP"; exit 1; }
+      - name: Parse the selected chip's real firmware headers
+        run: |
+          build/host/amd_fw_dump "$RUNNER_TEMP/fw" "$CHIP" 2>&1 | tee build/ci-logs/firmware-headers.log
+      - name: Preserve firmware validation logs (no blobs)
         if: always()
-        # build 167 hung here for 1.5 h (no log while it ran) and held the
-        # macOS runner; a diagnostic step must not decide the build
-        timeout-minutes: 10
-        continue-on-error: true
-        run: |
-          make -C userspace loopback
-          cp build/userspace/libdrm_loopback.dylib build/userspace/prefix/lib/libdrm.2.dylib
-          export VK_ICD_FILENAMES="$PWD/build/mesa/install/share/vulkan/icd.d/radeon_icd.x86_64.json"
-          export VK_LOADER_DEBUG=error,warn
-          export DRM_XNU_TRACE=1
-          # vulkaninfo needs the Vulkan loader (e.g. the LunarG SDK); without
-          # one, rdna3_vktest below loads RADV directly
-          if command -v vulkaninfo >/dev/null; then
-            vulkaninfo --summary 2>&1 | tee build/mesa/vulkaninfo.log | head -120
-            grep -q "RADV" build/mesa/vulkaninfo.log && echo "RADV enumerated through the loopback UAPI" || echo "vulkaninfo did not enumerate RADV (see log)"
-          else
-            echo "no vulkaninfo on this runner: skipped"
-          fi
-          build/mesa/install/bin/rdna3_vktest --loopback build/mesa/install/lib/libvulkan_radeon.dylib 2>&1 \
-            | tee build/mesa/vktest.log || true
-      - name: Error summary
-        if: always()
-        run: |
-          grep -E "error:|ERROR:|meson.build:[0-9]+:[0-9]+: ERROR" build/mesa/meson-setup.log build/mesa/ninja.log 2>/dev/null | sort | uniq -c | sort -rn | head -80 || true
-      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
-        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: radv-macos-logs
-          path: |
-            build/mesa/meson-setup.log
-            build/mesa/ninja.log
-            build/mesa/install/lib/libvulkan_radeon.dylib
-            build/mesa/install/bin/rdna3_vktest
-            build/mesa/install/share/vulkan/icd.d
-            build/mesa/missing.txt
-            build/mesa/weak.txt
-            build/mesa/vulkaninfo.log
-            build/mesa/vktest.log
+          name: experimental-${{ matrix.chip }}-firmware-header-logs
+          path: build/ci-logs/
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-compile:
+    name: macOS 15 Intel x86_64 compile (not hardware validation)
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require macOS 15 Intel and the macOS 15 SDK
+        run: |
+          mkdir -p build/ci-logs
+          printf '%s\n' \
+            'EXPERIMENTAL: compilation only; RX7600XT/Navi33 hardware is NOT verified.' \
+            "Commit: $GITHUB_SHA" \
+            'No kext is installed or loaded. No boot, DisplayPort, Metal, RADV or real-firmware validation.' \
+            'Only the macOS 15 accelerator layout is compiled. Accelerator unresolved imports are reported, not validated.' \
+            'Metal plugin/translator, Vulkan probes, RADV, CTS and installers are outside this CI; firmware headers are checked in separate jobs.' \
+            | tee build/ci-logs/EXPERIMENTAL.txt >> "$GITHUB_STEP_SUMMARY"
+          test "$(uname -m)" = x86_64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          test "$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)" = 15
+          test -d "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers"
+          sw_vers 2>&1 | tee build/ci-logs/toolchain.log
+          xcodebuild -version 2>&1 | tee -a build/ci-logs/toolchain.log
+          xcrun --sdk macosx --show-sdk-path 2>&1 | tee -a build/ci-logs/toolchain.log
+          xcrun clang --version 2>&1 | tee -a build/ci-logs/toolchain.log
+      - name: Compile and inspect the four x86_64 kexts
+        run: |
+          make -C kext all check 2>&1 | tee build/ci-logs/kext.log
+          make -C accel all check 2>&1 | tee build/ci-logs/accel.log
+          make -C fb all check 2>&1 | tee build/ci-logs/fb.log
+          make -C agdc all check 2>&1 | tee build/ci-logs/agdc.log
+      - name: Strict KPI guards (core, framebuffer and AGDC)
+        run: |
+          python3 tools/ci/kmutil_kpi_guard.py \
+            build/RDNA3Accel.kext build/RDNA3Framebuffer.kext build/RDNA3AGDC.kext \
+            2>&1 | tee build/ci-logs/kpi-strict.log
+      - name: Accelerator import report (unresolved imports are not verified)
+        # Upstream's macOS 15 layout relies on OpenCore binding non-exported IOAcceleratorFamily2 symbols.
+        run: |
+          python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3Accelerator.kext \
+            2>&1 | tee build/ci-logs/kpi-accelerator-report.log
+      - name: Compile native libdrm and diagnostic tools (do not run against a GPU)
+        run: make -C userspace 2>&1 | tee build/ci-logs/userspace.log
+      - name: Verify architecture and package only binaries and plists (no firmware)
+        run: |
+          for binary in build/*.kext/Contents/MacOS/* \
+            build/userspace/libdrm.dylib build/userspace/libdrm_amdgpu.dylib \
+            build/userspace/rdna3_drminfo build/userspace/rdna3_modetest build/userspace/rdna3_pmctl; do
+            file "$binary"
+            test "$(lipo -archs "$binary")" = x86_64 || exit 1
+          done 2>&1 | tee build/ci-logs/architectures.log
+          cp build/userspace/libdrm.dylib build/userspace/libdrm.2.dylib
+          cp build/userspace/libdrm_amdgpu.dylib build/userspace/libdrm_amdgpu.1.dylib
+          tar -czf build/rdna3-experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED.tar.gz -C build \
+            ci-logs/EXPERIMENTAL.txt \
+            RDNA3Accel.kext/Contents/Info.plist RDNA3Accel.kext/Contents/MacOS/RDNA3Accel \
+            RDNA3Accelerator.kext/Contents/Info.plist RDNA3Accelerator.kext/Contents/MacOS/RDNA3Accelerator \
+            RDNA3Framebuffer.kext/Contents/Info.plist RDNA3Framebuffer.kext/Contents/MacOS/RDNA3Framebuffer \
+            RDNA3AGDC.kext/Contents/Info.plist RDNA3AGDC.kext/Contents/MacOS/RDNA3AGDC \
+            userspace/libdrm.dylib userspace/libdrm_amdgpu.dylib \
+            userspace/libdrm.2.dylib userspace/libdrm_amdgpu.1.dylib \
+            userspace/rdna3_drminfo userspace/rdna3_modetest userspace/rdna3_pmctl
+      - name: Preserve experimental binaries (NOT HARDWARE VERIFIED)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED
+          path: build/rdna3-experimental-macos15-x86_64-NOT-HARDWARE-VERIFIED.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve native compiler and KPI logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-macos15-compile-logs
+          path: build/ci-logs/
+          if-no-files-found: error
+          retention-days: 7

@@ -206,6 +206,19 @@ const char *amd_fw_status_str(amd_fw_status s);
 /* linux-firmware file names for Navi 32 (GC 11.0.3), index by enum amd_fw_blob */
 extern const char *const amd_navi32_fw_names[AMD_BLOB_COUNT];
 
+typedef struct amd_fw_set {
+    const char *chip;
+    const char *const *blobs;   /* indexed by enum amd_fw_blob */
+    const char *sos;
+    const char *ta;
+} amd_fw_set;
+
+extern const amd_fw_set amd_navi32_fw_set;
+extern const amd_fw_set amd_navi33_fw_set;
+/* Select files from the discovered GC IP, never a PCI marketing name.
+ * NULL means no known firmware set; selection alone is not hardware support. */
+const amd_fw_set *amd_fw_set_for_gc(uint8_t major, uint8_t minor, uint8_t revision);
+
 /* amdgpu_ucode_validate (amdgpu_ucode_request): a firmware file is used
  * only when its common header's size_bytes is the file's size */
 amd_fw_status amd_ucode_validate(const uint8_t *fw, size_t len);

@@ -265,7 +265,7 @@ PY_TESTS := test_docs_html test_glyph_verdict test_lookimg test_triage_parallel 
     test_triage_bar test_triage_present_cost test_triage_write_gen test_fb_class test_triage_iop_log \
     test_triage_agdc_n48 test_triage_pairing test_triage_nocard test_kext_kpi_versions test_kmutil_kpi_guard \
     test_triage_tcall test_triage_bomem test_accel_slots test_accel_locks test_triage_apps test_iop_join \
-    test_triage_uclk_pin
+    test_triage_uclk_pin test_fw_dump
 SH_TESTS := test_bootwatch test_membw_load test_triage_a3 \
     test_baremetal test_triage_trace test_oc_install test_make_pkg test_coredisplay_prefs test_prune_traces \
     test_triage_tx test_triage_stale_plugin test_triage_latch test_result_checklist test_triage_vram \
@@ -290,6 +290,7 @@ $(foreach p,$(LADDER_PARTS),$(eval $(call TEST_RULE,test_ladder_step.$(p),,tests
 $(foreach p,$(APPS_PARTS),$(eval $(call TEST_RULE,test_apps_step.$(p),,tests/test_apps_step.sh $(p))))
 $(foreach t,$(SH_TESTS),$(eval $(call TEST_RULE,$(t),,tests/$(t).sh)))
 $(foreach t,$(PY_TESTS),$(eval $(call TEST_RULE,$(t),,python3 -I -B tests/$(t).py)))
+t.test_fw_dump: $(BUILD)/amd_fw_dump
 $(foreach t,$(C_TESTS),$(eval $(call TEST_RULE,$(t),$(BUILD)/$(t),$(BUILD)/$(t))))
 $(eval $(call TEST_RULE,test_fw,$(BUILD)/test_fw,$(BUILD)/test_fw $(RDNA3_FW_DIR)))
 $(eval $(call TEST_RULE,sim_navi32,$(BUILD)/sim_navi32,$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)))

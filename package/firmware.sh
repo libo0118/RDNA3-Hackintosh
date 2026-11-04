@@ -10,6 +10,7 @@
 #   firmware.sh [--dest DIR] --from DIR    copy from linux-firmware's amdgpu/ (plain .bin)
 #   firmware.sh [--dest DIR] --fetch       download (RDNA3_FW_REF=<tag|main> to change the tag)
 #   firmware.sh [--dest DIR]               --check, else --fetch
+#   Add --chip navi33 for its offline firmware set; default: navi32.
 #
 # Sane = the size in the common firmware header (first 32-bit word) equals
 # the file size, so an HTML error page or a truncated download never lands.
@@ -36,17 +37,44 @@ dcn_3_2_0_dmcub.bin 858ff09f406688c7cfd9ec749de37fb26d6659b078617a628c259aa86c91
 vcn_4_0_0.bin 0312642f73717256299524f9ace75320ceb098b43609c07ce90ba24b47e7c6a5"
 
 DEST="/Library/Application Support/RDNA3/firmware"
-MODE=auto; SRC=""
+MODE=auto; SRC=""; CHIP=navi32
 while [ $# -gt 0 ]; do
     case "$1" in
         --dest) DEST=$2; shift 2 ;;
         --check) MODE=check; shift ;;
         --from) MODE=copy; SRC=$2; shift 2 ;;
         --fetch) MODE=fetch; shift ;;
-        --list) for f in $FILES; do echo "$f"; done; exit 0 ;;
+        --chip) CHIP=$2; shift 2 ;;
+        --list) MODE=list; shift ;;
         *) echo "firmware.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
+case "$CHIP" in
+    navi32) ;;
+    navi33)
+        FILES="psp_13_0_7_sos.bin psp_13_0_7_ta.bin smu_13_0_7.bin sdma_6_0_2.bin gc_11_0_2_imu.bin
+gc_11_0_2_pfp.bin gc_11_0_2_me.bin gc_11_0_2_mec.bin gc_11_0_2_rlc.bin
+gc_11_0_2_mes_2.bin gc_11_0_2_mes1.bin dcn_3_2_1_dmcub.bin vcn_4_0_2.bin"
+        SUMS="psp_13_0_7_sos.bin 94db505fa6482f258c33a0a8d412050f6d843ab4ada368252e988f82f8a26fa8
+psp_13_0_7_ta.bin 088bdb884d7482763b2affa3599e70b0e8dd949457fb69f5604f2557417cea27
+smu_13_0_7.bin 6046f6379f42b4d3618151eace413d8c076ea374944afb770a8871ad79fcec55
+sdma_6_0_2.bin 16c374344d2894da751f7028f9ec1f7520035fa9548d8c750d99a00a4afa86c7
+gc_11_0_2_imu.bin 9befca62b0b0cfd252c3df4a9edca295526f4d43821cd99a6326454995a6ca2d
+gc_11_0_2_pfp.bin 9020f53788ad881fa01aa656fc082f9f8d3cdfc81f70aaac0bed6e6001491128
+gc_11_0_2_me.bin f5fe48f97acbd3ce13b35929290bfbac01ce522631cc91dcef1fdeb3ff35c8ed
+gc_11_0_2_mec.bin 19bf080d6e672de5ed3fb86e3fdbdda4d700d8e3bda2dbdcc923101484ad645b
+gc_11_0_2_rlc.bin b43eb2fd0600f50a1a5796bc9983d6b39b5c20960234920f5e89cb362193e0b8
+gc_11_0_2_mes_2.bin 719f446830ec8766f47b9cfcf1dc606b77dbf720a9e868c4cfcdc60e0767d1a7
+gc_11_0_2_mes1.bin 5f8f0b50b7a9f8c34f68ee516a51968ed190cb0d0fb36c99e5301799dd65097c
+dcn_3_2_1_dmcub.bin c18dacee03a68fb94413fda5e47dac82ddc144a099be96d764568c389c774c45
+vcn_4_0_2.bin 0312642f73717256299524f9ace75320ceb098b43609c07ce90ba24b47e7c6a5"
+        ;;
+    *) echo "firmware.sh: unknown chip $CHIP (expected navi32 or navi33)" >&2; exit 2 ;;
+esac
+if [ "$MODE" = list ]; then
+    for f in $FILES; do echo "$f"; done
+    exit 0
+fi
 say() { echo "firmware: $*"; }
 NF=$(echo "$FILES" | wc -w | tr -d ' ')
 

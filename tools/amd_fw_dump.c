@@ -1,14 +1,15 @@
 /*
- * amd_fw_dump - show the PSP load plan amdgpu would use for a Navi 32,
+ * amd_fw_dump - show the PSP load plan for a Navi 32 or Navi 33 firmware set,
  * computed by common/amd_fw.c from a directory of linux-firmware files.
  *
- * Usage: amd_fw_dump <dir-with-amdgpu-firmware>
+ * Usage: amd_fw_dump <dir-with-amdgpu-firmware> [navi32|navi33]
  *
  * SPDX-License-Identifier: MIT
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "amd_fw.h"
 
 static uint8_t *slurp(const char *dir, const char *name, size_t *len)
@@ -41,24 +42,44 @@ int main(int argc, char **argv)
     amd_psp_sos sos;
     amd_fw_status st;
     size_t len = 0;
-    uint8_t *sosbuf;
+    uint8_t *sosbuf, *tabuf;
     unsigned i;
+    const amd_fw_set *fw = &amd_navi32_fw_set;
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <firmware-dir>\n", argv[0]);
+    if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "navi32") && strcmp(argv[2], "navi33"))) {
+        fprintf(stderr, "usage: %s <firmware-dir> [navi32|navi33]\n", argv[0]);
         return 2;
     }
+    if (argc == 3 && strcmp(argv[2], "navi33") == 0)
+        fw = &amd_navi33_fw_set;
 
-    sosbuf = slurp(argv[1], amd_navi32_sos_name, &len);
+    sosbuf = slurp(argv[1], fw->sos, &len);
     if (!sosbuf) {
-        fprintf(stderr, "missing %s\n", amd_navi32_sos_name);
+        fprintf(stderr, "missing %s\n", fw->sos);
         return 1;
     }
     st = amd_psp_sos_parse(sosbuf, len, &sos);
-    printf("%s: %s, ucode 0x%08x\n", amd_navi32_sos_name, amd_fw_status_str(st),
+    printf("%s: %s, ucode 0x%08x\n", fw->sos, amd_fw_status_str(st),
            sos.ucode_version);
     if (st != AMD_FW_OK)
         return 1;
+    errno = 0;
+    tabuf = slurp(argv[1], fw->ta, &len);
+    if (tabuf) {
+        amd_psp_ta ta;
+        st = amd_ucode_validate(tabuf, len);
+        if (st == AMD_FW_OK)
+            st = amd_psp_ta_parse(tabuf, len, &ta);
+        printf("%s: %s\n", fw->ta, amd_fw_status_str(st));
+        free(tabuf);
+        if (st != AMD_FW_OK)
+            return 1;
+    } else if (errno == ENOENT) {
+        printf("  (optional TA not found: %s)\n", fw->ta);
+    } else {
+        fprintf(stderr, "cannot read %s\n", fw->ta);
+        return 1;
+    }
     printf("PSP bootloader sequence:\n");
     for (i = 0; i < amd_psp_bl_sequence_len; i++) {
         const amd_psp_bl_step *s = &amd_psp_bl_sequence[i];
@@ -77,9 +98,9 @@ int main(int argc, char **argv)
 
     memset(blobs, 0, sizeof(blobs));
     for (i = 0; i < AMD_BLOB_COUNT; i++) {
-        blobs[i].data = slurp(argv[1], amd_navi32_fw_names[i], &blobs[i].len);
+        blobs[i].data = slurp(argv[1], fw->blobs[i], &blobs[i].len);
         if (!blobs[i].data)
-            printf("  (not found: %s)\n", amd_navi32_fw_names[i]);
+            printf("  (not found: %s)\n", fw->blobs[i]);
     }
     st = amd_ucode_plan_build(blobs, &plan);
     printf("\nLOAD_IP_FW plan: %s, %u ucodes, fw buffer %u KiB\n",
@@ -89,7 +110,7 @@ int main(int argc, char **argv)
     for (i = 0; i < plan.count; i++) {
         const amd_ucode *u = &plan.ucode[i];
         printf("  id %2u  psp type %2u  %-24s %-22s off 0x%06x size %7u\n",
-               u->ucode_id, u->psp_type, u->name, amd_navi32_fw_names[u->blob],
+               u->ucode_id, u->psp_type, u->name, fw->blobs[u->blob],
                u->offset, u->size);
     }
     for (i = 0; i < AMD_BLOB_COUNT; i++)

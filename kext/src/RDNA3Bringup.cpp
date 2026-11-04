@@ -685,6 +685,7 @@ void RDNA3Bringup::run()
     rdna3_os os = {};
     amd_fw_blob_ref blobs[AMD_BLOB_COUNT] = {};
     amd_fw_status fst;
+    const amd_fw_set *fw;
 
     os.ctx = this;
     os.udelay = osUdelay;
@@ -706,6 +707,15 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", "failed: device setup");
         return;
     }
+    const rdna3_ipver *gcIp = &fDev->ipver[HWIP_GC];
+    fw = amd_fw_set_for_gc(gcIp->major, gcIp->minor, gcIp->rev);
+    if (!fw) {
+        BLOG("no firmware set for GC %u.%u.%u", gcIp->major, gcIp->minor, gcIp->rev);
+        publishString("RDNA3,Stage2", "failed: unsupported firmware IP");
+        return;
+    }
+    /* shortcut: firmware selection only; keep Navi 33 PCI matching disabled until its hardware init is ported. */
+    BLOG("firmware set: %s (GC %u.%u.%u)", fw->chip, gcIp->major, gcIp->minor, gcIp->rev);
     resetIfPspStuck();
     if (!postIfNeeded() || rdna3_read_fb_location(fDev) != RDNA3_OK) {
         publishString("RDNA3,Stage2", "failed: device setup");
@@ -754,9 +764,8 @@ void RDNA3Bringup::run()
             { AMD_UCODE_BLOCK_GC, HWIP_GC },   { AMD_UCODE_BLOCK_SDMA, HWIP_SDMA0 }, { AMD_UCODE_BLOCK_MP0, HWIP_MP0 },
             { AMD_UCODE_BLOCK_MP1, HWIP_MP1 }, { AMD_UCODE_BLOCK_VCN, HWIP_VCN },
         };
-        const char *files[5] = { amd_navi32_fw_names[AMD_BLOB_PFP], amd_navi32_fw_names[AMD_BLOB_SDMA],
-                                 amd_navi32_sos_name, amd_navi32_fw_names[AMD_BLOB_SMC],
-                                 amd_navi32_fw_names[AMD_BLOB_VCN] };
+        const char *files[5] = { fw->blobs[AMD_BLOB_PFP], fw->blobs[AMD_BLOB_SDMA],
+                                 fw->sos, fw->blobs[AMD_BLOB_SMC], fw->blobs[AMD_BLOB_VCN] };
         uint32_t bad = 0;
         for (unsigned i = 0; i < 5; i++) {
             const rdna3_ipver *v = &fDev->ipver[names[i].hwip];
@@ -772,12 +781,12 @@ void RDNA3Bringup::run()
         }
         publish("RDNA3,FirmwareNameMismatch", bad);
     }
-    if (!loadFirmware(amd_navi32_sos_name, &fSos)) {
+    if (!loadFirmware(fw->sos, &fSos)) {
         publishString("RDNA3,Stage2", "failed: no PSP firmware");
         return;
     }
     for (unsigned i = 0; i < AMD_BLOB_COUNT && !fAbort; i++) {
-        if (loadFirmware(amd_navi32_fw_names[i], &fBlobs[i])) {
+        if (loadFirmware(fw->blobs[i], &fBlobs[i])) {
             blobs[i].data = fBlobs[i].data;
             blobs[i].len = fBlobs[i].len;
         }
@@ -807,7 +816,7 @@ void RDNA3Bringup::run()
     /* psp_init_ta_microcode: with rdna3amdgpu=1 psp_load_fw starts ASD and
      * the HDCP / DTM TAs from the TA file (optional, as for amdgpu) */
     if (fAmdgpuExact && !fTa.data)
-        loadFirmware(amd_navi32_ta_name, &fTa, true);
+        loadFirmware(fw->ta, &fTa, true);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
         fBlobRefs[i] = blobs[i];
 
@@ -839,12 +848,12 @@ void RDNA3Bringup::run()
         {
             RDNA3Firmware taFw = {};
             amd_psp_ta t;
-            if (loadFirmware(amd_navi32_ta_name, &taFw, true)) {
+            if (loadFirmware(fw->ta, &taFw, true)) {
                 amd_fw_status tst = amd_psp_ta_parse(taFw.data, taFw.len, &t);
                 if (tst == AMD_FW_OK)
                     amd_fw_ta_versions(&t, ver, feat, ta);
                 else
-                    BLOG("firmware %s: %s", amd_navi32_ta_name, amd_fw_status_str(tst));
+                    BLOG("firmware %s: %s", fw->ta, amd_fw_status_str(tst));
                 IOFree(taFw.data, taFw.len);
             }
         }
