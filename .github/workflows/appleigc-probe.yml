@@ -1,4 +1,4 @@
-name: AppleIGC I226 INTx diagnostic (compile only)
+name: AppleIGC I226 INTx diagnostic (build and temporary KC)
 
 on:
   workflow_dispatch:
@@ -21,6 +21,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Preserve verification sources
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/igc-artifact"
+          mkdir -p "$dist/support/appleigc" "$dist/tools/ci/data" "$dist/tools/probe"
+          cp support/appleigc/verify_probe.py support/appleigc/test_verify_probe.py "$dist/support/appleigc/"
+          cp tools/ci/kmutil_kpi_guard.py tools/ci/macos15_native_contract.py "$dist/tools/ci/"
+          cp tools/ci/data/xnu-*-x86_64-private-only.txt tools/ci/data/xnu-*-x86_64-unsupported-only.txt "$dist/tools/ci/data/"
+          cp tools/probe/kc_func.py "$dist/tools/probe/"
       - name: Fetch and verify reviewed public sources
         run: |
           set -euo pipefail
@@ -49,7 +58,8 @@ jobs:
       - name: Exact source predicate and diagnostic safety contracts
         run: |
           set -euo pipefail
-          python3 -I support/appleigc/test_probe.py "$RUNNER_TEMP/igc/AppleIGC-$IGC_COMMIT" | tee "$RUNNER_TEMP/probe-tests.txt"
+          python3 -I support/appleigc/test_probe.py "$RUNNER_TEMP/igc/AppleIGC-$IGC_COMMIT" 2>&1 | tee "$RUNNER_TEMP/probe-tests.txt"
+          python3 -B support/appleigc/test_verify_probe.py 2>&1 | tee "$RUNNER_TEMP/verify-probe-tests.txt"
       - name: Native x86_64 build (never install or load)
         run: |
           set -euo pipefail
@@ -67,7 +77,8 @@ jobs:
           mkdir -p "$dist"
           test "$(lipo -archs "$bin")" = x86_64
           codesign --force --sign - --timestamp=none "$kext"
-          codesign --verify --strict --verbose=2 "$kext"
+          codesign --verify --strict --verbose=2 "$kext" 2>&1 | tee "$dist/probe-signature-verify.txt"
+          xcrun dwarfdump --uuid "$bin" | tee "$dist/probe-uuid.txt"
           plutil -lint "$kext/Contents/Info.plist"
           python3 - "$kext/Contents/Info.plist" <<'PY'
           import plistlib, sys
@@ -79,13 +90,18 @@ jobs:
           assert p['IOKitPersonalities']['i226']['NETIF_F_TSO'] is True
           PY
           strings "$bin" | grep -F 'i226-intx-probe-8802cba'
-          # Keep the strict name-level verdict; require real KC links below instead of hiding vtable imports.
+          # Retain the strict verdict, then require baseline parity and real KC links.
           set +e
           python3 tools/ci/kmutil_kpi_guard.py "$kext" 2>&1 | tee "$dist/native-kpi-check.txt"
-          name_guard_status=${PIPESTATUS[0]}
+          guard_status=("${PIPESTATUS[@]}")
           set -e
-          echo "STRICT_NAME_GUARD_EXIT=$name_guard_status" | tee "$dist/name-guard-status.txt"
-          test "$name_guard_status" -le 1
+          echo "STRICT_NAME_GUARD_EXIT=${guard_status[0]}" | tee "$dist/name-guard-status.txt"
+          test "${guard_status[1]}" -eq 0
+          case "${guard_status[0]}" in 0|1) ;; *) exit "${guard_status[0]}" ;; esac
+          official="$RUNNER_TEMP/igc-official/AppleIGC.kext"
+          codesign --force --sign - --timestamp=none "$official"
+          codesign --verify --strict --verbose=2 "$official" 2>&1 | tee "$dist/official-signature-verify.txt"
+          python3 -B support/appleigc/verify_probe.py native "$official" "$kext" 2>&1 | tee "$dist/native-parity.txt"
           otool -hv "$bin" > "$dist/mach-header.txt"
           otool -L "$bin" > "$dist/dylib-dependencies.txt"
           test -z "$(tail -n +2 "$dist/dylib-dependencies.txt")"
@@ -95,42 +111,40 @@ jobs:
           system=/System/Library/KernelCollections/SystemKernelExtensions.kc
           test -f "$boot"
           test -f "$system"
-          codesign --force --sign - --timestamp=none "$RUNNER_TEMP/igc-official/AppleIGC.kext"
           kc_failed=0
           for variant in official probe; do
-            if test "$variant" = official; then input="$RUNNER_TEMP/igc-official/AppleIGC.kext"; else input="$kext"; fi
+            if test "$variant" = official; then input="$official"; else input="$kext"; fi
             output="$RUNNER_TEMP/igc-kc-$variant/AuxiliaryKernelExtensions.kc"
             mkdir -p "$(dirname "$output")"
             set +e
             sudo kmutil create --new aux --volume-root / --boot-path "$boot" --system-path "$system" \
-              --aux-path "$output" --bundle-path "$input" --variant-suffix release --allow-missing-kdk \
+              --auxiliary-path "$output" --bundle-path "$input" --variant-suffix release \
+              --no-variant-extension --explicit-only --no-authorization --allow-missing-kdk \
               2>&1 | tee "$dist/kc-$variant.txt"
-            kc_status=${PIPESTATUS[0]}
+            kc_status=("${PIPESTATUS[@]}")
             set -e
-            echo "KC_$variant=$kc_status" | tee -a "$dist/kc-status.txt"
-            if test "$kc_status" -ne 0 || ! test -s "$output"; then kc_failed=1; continue; fi
-            python3 - "$output" <<'PY'
-          import pathlib, struct, sys
-          b=pathlib.Path(sys.argv[1]).read_bytes()
-          assert len(b)>65536 and struct.unpack_from('<I',b)[0]==0xfeedfacf
-          assert struct.unpack_from('<I',b,4)[0]==0x01000007
-          assert struct.unpack_from('<I',b,12)[0]==12
-          assert b'com.sxx.AppleIGC' in b
-          PY
-            if test "$variant" = probe; then strings "$output" | grep -F 'i226-intx-probe-8802cba'; fi
+            echo "KC_$variant=${kc_status[0]}" | tee -a "$dist/kc-status.txt"
+            if test "${kc_status[0]}" -ne 0 || test "${kc_status[1]}" -ne 0 || ! test -s "$output"; then kc_failed=1; continue; fi
+            if ! python3 -B support/appleigc/verify_probe.py kc "$output" "$variant" 2>&1 | tee "$dist/kc-$variant-verify.txt"; then
+              kc_failed=1
+            fi
           done
           test "$kc_failed" = 0
           ditto "$kext" "$dist/AppleIGC.kext"
-          cp "$RUNNER_TEMP/AppleIGC-source.zip" "$RUNNER_TEMP/MacKernelSDK-source.zip" "$dist/"
+          cp "$RUNNER_TEMP/AppleIGC-source.zip" "$RUNNER_TEMP/MacKernelSDK-source.zip" "$RUNNER_TEMP/AppleIGC-official-v1.9.zip" "$dist/"
           cp support/appleigc/intx-probe.patch support/appleigc/test_probe.py "$dist/"
-          cp "$RUNNER_TEMP/xcode.txt" "$RUNNER_TEMP/probe-tests.txt" "$RUNNER_TEMP/igc-build.txt" "$RUNNER_TEMP/runner-os.txt" "$dist/"
+          cp "$RUNNER_TEMP/xcode.txt" "$RUNNER_TEMP/probe-tests.txt" "$RUNNER_TEMP/verify-probe-tests.txt" "$RUNNER_TEMP/igc-build.txt" "$RUNNER_TEMP/runner-os.txt" "$dist/"
           printf '%s\n' \
             'EXPERIMENTAL I226 IRQ DIAGNOSTIC; NOT A VERIFIED NETWORK FIX.' \
             'Only select source 0 when IOKit confirms a non-messaged source. Otherwise initialization refuses.' \
             'AppleIGC upstream: 8802cba391e68ad66fdabacc7a0f5e9e0cd61597; SDK: c41d877b64e7fd916bd271390bcdf30f7deb7b7a.' \
             "Overlay commit: $GITHUB_SHA" \
-            'Strict name-level result is retained separately. Both official baseline and candidate must link into new private temporary Aux KCs.' \
-            'KC build is not installation/load/hardware/DHCP/wake/stability validation; no live kernel collections are modified.' \
+            'The early source-0 guard does not audit subsequent upstream failure paths.' \
+            'Ad-hoc signature verification checks local integrity, not Apple approval or trust.' \
+            'Strict name-level output is retained; metadata and import parity is not full symbol resolution.' \
+            'Both official baseline and candidate linked into new temporary Aux KCs and their AppleIGC members were checked.' \
+            'No kext was installed or loaded; KC output paths are new runner-temporary directories.' \
+            'KC links do not validate hardware, DHCP, wake or stability; kmutil may have other cache side effects.' \
             'No EFI, device identity, VBIOS, reports or credentials are included.' \
             'Upstream per-file licence notices are retained in the complete source archives; no relicensing.' \
             > "$dist/BUILD-SCOPE.txt"
@@ -149,6 +163,7 @@ jobs:
           path: |
             ${{ runner.temp }}/igc-build.txt
             ${{ runner.temp }}/probe-tests.txt
+            ${{ runner.temp }}/verify-probe-tests.txt
             ${{ runner.temp }}/xcode.txt
             ${{ runner.temp }}/runner-os.txt
             ${{ runner.temp }}/igc-artifact/

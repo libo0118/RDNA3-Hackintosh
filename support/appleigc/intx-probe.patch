@@ -13,10 +13,11 @@
  OSDefineMetaClassAndStructors(AppleIGC, IOEthernetController);
 
  bool AppleIGC::init(OSDictionary *properties) {
-@@ -5831,6 +5837,10 @@
+@@ -5831,6 +5837,11 @@
      enabledForNetif = false;
      workLoop = NULL;
      usingMsi = false;
++    diagInterruptType = 0;
 +    diagIrqCount = 0;
 +    diagDisabledCount = 0;
 +    diagNotMineCount = 0;
@@ -24,7 +25,21 @@
 
      pdev = NULL;
      mediumDict = NULL;
-@@ -7195,8 +7205,11 @@
+@@ -6126,3 +6137,13 @@
++    // One-variable experiment inspired by upstream issue #40, not a general MSI fix.
++    int interruptType = 0;
++    IOReturn probeTypeStatus = provider->getInterruptType(0, &interruptType);
++    if (!igcProbeLegacyTypeOK(probeTypeStatus, interruptType)) {
++        pr_err("INTx diagnostic refused: source 0 status=0x%x type=0x%x\n",
++               (unsigned int)probeTypeStatus, (unsigned int)interruptType);
++        return false;
++    }
++    diagInterruptType = interruptType;
++
+     if (super::start(provider) == false) {
+         return false;
+     }
+@@ -7195,8 +7216,11 @@
      /* Interrupt Auto-Mask...upon reading ICR, interrupts are masked.  No
           * need for the IMC write */
      u32 icr = igc_rd32(hw, IGC_ICR);
@@ -36,7 +51,7 @@
          pr_err("Interrupt 0x%08x on disabled device\n", icr);
          return;
      }
-@@ -7204,6 +7217,7 @@
+@@ -7204,6 +7228,7 @@
      /* INT_ASSERTED identifies interrupts on the shared legacy line.  MSI
       * delivery already identifies the source, so this bit is not required. */
      if (!usingMsi && !(icr & IGC_ICR_INT_ASSERTED)) {
@@ -44,7 +59,7 @@
          return;
      }
      igc_write_itr(q_vector);
-@@ -7243,6 +7257,15 @@
+@@ -7243,6 +7268,15 @@
  }
 
 
@@ -60,7 +75,7 @@
  // corresponds to igb_watchdog_task
  void AppleIGC::watchdogTask()
  {
-@@ -7250,6 +7273,8 @@
+@@ -7250,6 +7284,8 @@
      struct igc_hw *hw = &adapter->hw;
      int i;
 
@@ -69,7 +84,7 @@
 
      /* Always check link status - this is how we detect link-up after
       * setLinkDown or resume. checkLinkStatus will call setLinkUp/
-@@ -7262,6 +7287,13 @@
+@@ -7262,6 +7298,13 @@
          return;
 
      igc_update_stats(adapter);
@@ -83,15 +98,15 @@
 
      for (i = 0; i < adapter->num_tx_queues; i++) {
          struct igc_ring *tx_ring = adapter->tx_ring[i];
-@@ -7586,6 +7618,7 @@
+@@ -7585,7 +7628,6 @@
+ {
      bool result = false;
      int interruptIndex = 0;
-     int interruptType = 0;
-+    IOReturn probeTypeStatus = kIOReturnError;
+-    int interruptType = 0;
 
      pr_debug("initEventSources() ===>\n");
 
-@@ -7610,26 +7643,19 @@
+@@ -7610,26 +7652,12 @@
      }
      transmitQueue->retain();
  #endif
@@ -115,28 +130,22 @@
 -        pr_debug("Using PCI messaged interrupt source %d (type=0x%x)\n", interruptIndex, interruptType);
 -    else
 -        pr_debug("No PCI messaged interrupt source found; using source 0 (type=0x%x)\n", interruptType);
-+    // One-variable experiment inspired by upstream issue #40, not a general MSI fix.
-+    probeTypeStatus = provider->getInterruptType(0, &interruptType);
-+    if (!igcProbeLegacyTypeOK(probeTypeStatus, interruptType)) {
-+        setProperty("IGCDiag_Failure", "source0-is-unavailable-or-messaged");
-+        pr_err("INTx diagnostic refused: source 0 is unavailable or messaged\n");
-+        goto error1;
-+    }
 +    usingMsi = false;
 +    setProperty("IGCDiag_Build", "i226-intx-probe-8802cba");
 +    setProperty("IGCDiag_Mode", "legacy-source0-test-only");
 +    setProperty("IGCDiag_IrqIndex", interruptIndex, 32);
-+    setProperty("IGCDiag_IrqType", interruptType, 32);
++    setProperty("IGCDiag_IrqType", diagInterruptType, 32);
 +    publishInterruptDiagnostics();
 
      interruptSource = IOInterruptEventSource::interruptEventSource(this,&AppleIGC::interruptHandler,provider,interruptIndex);
      if (!interruptSource) {
 --- a/AppleIGC/AppleIGC.hpp
 +++ b/AppleIGC/AppleIGC.hpp
-@@ -146,6 +146,11 @@
+@@ -146,6 +146,12 @@
      bool bSuspended;
      bool useTSO;
      bool usingMsi;
++    int diagInterruptType;
 +    UInt64 diagIrqCount;
 +    UInt64 diagDisabledCount;
 +    UInt64 diagNotMineCount;
