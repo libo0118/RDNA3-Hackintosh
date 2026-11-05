@@ -114,14 +114,14 @@ jobs:
           kc_failed=0
           for variant in official probe; do
             if test "$variant" = official; then input="$official"; else input="$kext"; fi
-            # Root bundles are Boot/SysKC inputs. Adapt only a temporary link fixture to AuxKC.
+            # Third-party AuxKC fixture omits the boot requirement; production remains Root.
             fixture="$RUNNER_TEMP/igc-kc-input-$variant/AppleIGC.kext"
             ditto "$input" "$fixture"
             python3 - "$fixture/Contents/Info.plist" <<'PY'
           import pathlib, plistlib, sys
           p=pathlib.Path(sys.argv[1]); info=plistlib.loads(p.read_bytes())
           assert info['OSBundleRequired']=='Root'
-          info['OSBundleRequired']='Auxiliary'
+          del info['OSBundleRequired']
           p.write_bytes(plistlib.dumps(info,sort_keys=False))
           PY
             codesign --force --sign - --timestamp=none "$fixture"
@@ -133,7 +133,7 @@ jobs:
           original, fixture = map(pathlib.Path,sys.argv[1:])
           p=plistlib.loads((original/'Contents/Info.plist').read_bytes())
           q=plistlib.loads((fixture/'Contents/Info.plist').read_bytes())
-          assert p['OSBundleRequired']=='Root' and q['OSBundleRequired']=='Auxiliary'
+          assert p['OSBundleRequired']=='Root' and 'OSBundleRequired' not in q
           q['OSBundleRequired']='Root'
           assert p==q, 'fixture changed metadata other than collection placement'
           def parts(path):
@@ -144,7 +144,7 @@ jobs:
               assert 0<offset and offset+size<=len(b)
               return (offset,size,b[:offset],b[offset+size:])
           assert parts(original/'Contents/MacOS/AppleIGC')==parts(fixture/'Contents/MacOS/AppleIGC'), 'link fixture changed Mach-O outside signature data'
-          print('Link fixture only: Root -> Auxiliary, original unchanged, Mach-O outside signature data byte-identical.')
+          print('Link fixture only: omit Root boot requirement, original unchanged, Mach-O outside signature data byte-identical.')
           PY
             output="$RUNNER_TEMP/igc-kc-$variant/AuxiliaryKernelExtensions.kc"
             mkdir -p "$(dirname "$output")"
@@ -175,7 +175,7 @@ jobs:
             'Ad-hoc signature verification checks local integrity, not Apple approval or trust.' \
             'Strict name-level output is retained; metadata and import parity is not full symbol resolution.' \
             'Both code-link fixtures linked into new temporary Aux KCs and their AppleIGC members were checked.' \
-            'Fixtures ONLY: OSBundleRequired Root -> Auxiliary; Mach-O outside signature data is byte-identical. Distributed driver retains original Root placement.' \
+            'Fixtures ONLY: OSBundleRequired Root omitted; Mach-O outside signature data is byte-identical. Distributed driver retains original Root placement.' \
             'This does NOT validate BootKC placement or actual OpenCore injection; it validates code linking against the runner dependencies.' \
             'No kext was installed or loaded; KC output paths are new runner-temporary directories.' \
             'KC links do not validate hardware, DHCP, wake or stability; kmutil may have other cache side effects.' \
