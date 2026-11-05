@@ -25,6 +25,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
+          sw_vers | tee "$RUNNER_TEMP/runner-os.txt"
+          uname -a | tee -a "$RUNNER_TEMP/runner-os.txt"
+          sw_vers -productVersion | grep -E '^15[.]'
           xcodebuild -version | tee "$RUNNER_TEMP/xcode.txt"
           grep -qx 'Xcode 16.4' "$RUNNER_TEMP/xcode.txt"
           curl --proto '=https' --tlsv1.2 --fail --location --retry 2 --max-time 180 \
@@ -37,6 +40,10 @@ jobs:
           unzip -q "$RUNNER_TEMP/MacKernelSDK-source.zip" -d "$RUNNER_TEMP/sdk"
           src="$RUNNER_TEMP/igc/AppleIGC-$IGC_COMMIT"
           ditto "$RUNNER_TEMP/sdk/MacKernelSDK-$SDK_COMMIT" "$src/MacKernelSDK"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 2 --max-time 120 \
+            https://github.com/SongXiaoXi/AppleIGC/releases/download/v1.9/AppleIGC.kext.zip -o "$RUNNER_TEMP/AppleIGC-official-v1.9.zip"
+          printf '%s  %s\n' 3398c5cf609b26be9485445c4f10fe2ef2c43554db1c25f406d8bc955c399466 "$RUNNER_TEMP/AppleIGC-official-v1.9.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/AppleIGC-official-v1.9.zip" -d "$RUNNER_TEMP/igc-official"
           git -c core.autocrlf=false -C "$src" apply --check "$GITHUB_WORKSPACE/support/appleigc/intx-probe.patch"
           git -c core.autocrlf=false -C "$src" apply "$GITHUB_WORKSPACE/support/appleigc/intx-probe.patch"
       - name: Exact source predicate and diagnostic safety contracts
@@ -72,21 +79,58 @@ jobs:
           assert p['IOKitPersonalities']['i226']['NETIF_F_TSO'] is True
           PY
           strings "$bin" | grep -F 'i226-intx-probe-8802cba'
-          python3 tools/ci/kmutil_kpi_guard.py "$kext" | tee "$dist/native-kpi-check.txt"
+          # Keep the strict name-level verdict; require real KC links below instead of hiding vtable imports.
+          set +e
+          python3 tools/ci/kmutil_kpi_guard.py "$kext" 2>&1 | tee "$dist/native-kpi-check.txt"
+          name_guard_status=${PIPESTATUS[0]}
+          set -e
+          echo "STRICT_NAME_GUARD_EXIT=$name_guard_status" | tee "$dist/name-guard-status.txt"
+          test "$name_guard_status" -le 1
           otool -hv "$bin" > "$dist/mach-header.txt"
           otool -L "$bin" > "$dist/dylib-dependencies.txt"
           test -z "$(tail -n +2 "$dist/dylib-dependencies.txt")"
           nm -u "$bin" > "$dist/undefined-symbols.txt"
+          kmutil create --help > "$dist/kmutil-create-help.txt" 2>&1
+          boot=/System/Library/KernelCollections/BootKernelExtensions.kc
+          system=/System/Library/KernelCollections/SystemKernelExtensions.kc
+          test -f "$boot"
+          test -f "$system"
+          codesign --force --sign - --timestamp=none "$RUNNER_TEMP/igc-official/AppleIGC.kext"
+          kc_failed=0
+          for variant in official probe; do
+            if test "$variant" = official; then input="$RUNNER_TEMP/igc-official/AppleIGC.kext"; else input="$kext"; fi
+            output="$RUNNER_TEMP/igc-kc-$variant/AuxiliaryKernelExtensions.kc"
+            mkdir -p "$(dirname "$output")"
+            set +e
+            sudo kmutil create --new aux --volume-root / --boot-path "$boot" --system-path "$system" \
+              --aux-path "$output" --bundle-path "$input" --variant-suffix release --allow-missing-kdk \
+              2>&1 | tee "$dist/kc-$variant.txt"
+            kc_status=${PIPESTATUS[0]}
+            set -e
+            echo "KC_$variant=$kc_status" | tee -a "$dist/kc-status.txt"
+            if test "$kc_status" -ne 0 || ! test -s "$output"; then kc_failed=1; continue; fi
+            python3 - "$output" <<'PY'
+          import pathlib, struct, sys
+          b=pathlib.Path(sys.argv[1]).read_bytes()
+          assert len(b)>65536 and struct.unpack_from('<I',b)[0]==0xfeedfacf
+          assert struct.unpack_from('<I',b,4)[0]==0x01000007
+          assert struct.unpack_from('<I',b,12)[0]==12
+          assert b'com.sxx.AppleIGC' in b
+          PY
+            if test "$variant" = probe; then strings "$output" | grep -F 'i226-intx-probe-8802cba'; fi
+          done
+          test "$kc_failed" = 0
           ditto "$kext" "$dist/AppleIGC.kext"
           cp "$RUNNER_TEMP/AppleIGC-source.zip" "$RUNNER_TEMP/MacKernelSDK-source.zip" "$dist/"
           cp support/appleigc/intx-probe.patch support/appleigc/test_probe.py "$dist/"
-          cp "$RUNNER_TEMP/xcode.txt" "$RUNNER_TEMP/probe-tests.txt" "$RUNNER_TEMP/igc-build.txt" "$dist/"
+          cp "$RUNNER_TEMP/xcode.txt" "$RUNNER_TEMP/probe-tests.txt" "$RUNNER_TEMP/igc-build.txt" "$RUNNER_TEMP/runner-os.txt" "$dist/"
           printf '%s\n' \
             'EXPERIMENTAL I226 IRQ DIAGNOSTIC; NOT A VERIFIED NETWORK FIX.' \
             'Only select source 0 when IOKit confirms a non-messaged source. Otherwise initialization refuses.' \
             'AppleIGC upstream: 8802cba391e68ad66fdabacc7a0f5e9e0cd61597; SDK: c41d877b64e7fd916bd271390bcdf30f7deb7b7a.' \
             "Overlay commit: $GITHUB_SHA" \
-            'Native compile/signature/imports only; no load, KernelCollection, vtable, hardware, DHCP, wake or stability validation.' \
+            'Strict name-level result is retained separately. Both official baseline and candidate must link into new private temporary Aux KCs.' \
+            'KC build is not installation/load/hardware/DHCP/wake/stability validation; no live kernel collections are modified.' \
             'No EFI, device identity, VBIOS, reports or credentials are included.' \
             'Upstream per-file licence notices are retained in the complete source archives; no relicensing.' \
             > "$dist/BUILD-SCOPE.txt"
@@ -106,5 +150,8 @@ jobs:
             ${{ runner.temp }}/igc-build.txt
             ${{ runner.temp }}/probe-tests.txt
             ${{ runner.temp }}/xcode.txt
+            ${{ runner.temp }}/runner-os.txt
+            ${{ runner.temp }}/igc-artifact/
+            ${{ runner.temp }}/igc-products/Release/AppleIGC.kext/
           if-no-files-found: warn
           retention-days: 7
