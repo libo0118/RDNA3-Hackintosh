@@ -149,7 +149,7 @@ jobs:
             output="$RUNNER_TEMP/igc-kc-$variant/AuxiliaryKernelExtensions.kc"
             mkdir -p "$(dirname "$output")"
             set +e
-            sudo kmutil create --new aux --volume-root / --boot-path "$boot" --system-path "$system" \
+            sudo kmutil create --verbose --new aux --volume-root / --boot-path "$boot" --system-path "$system" \
               --auxiliary-path "$output" --bundle-path "$fixture" --variant-suffix release \
               --no-variant-extension --explicit-only --no-authorization --allow-missing-kdk \
               2>&1 | tee "$dist/kc-$variant.txt"
