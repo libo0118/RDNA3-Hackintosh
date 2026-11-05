@@ -1,0 +1,110 @@
+name: AppleIGC I226 INTx diagnostic (compile only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-probe:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      IGC_COMMIT: 8802cba391e68ad66fdabacc7a0f5e9e0cd61597
+      SDK_COMMIT: c41d877b64e7fd916bd271390bcdf30f7deb7b7a
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fetch and verify reviewed public sources
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode.txt"
+          grep -qx 'Xcode 16.4' "$RUNNER_TEMP/xcode.txt"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 2 --max-time 180 \
+            "https://codeload.github.com/SongXiaoXi/AppleIGC/zip/$IGC_COMMIT" -o "$RUNNER_TEMP/AppleIGC-source.zip"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 2 --max-time 180 \
+            "https://codeload.github.com/acidanthera/MacKernelSDK/zip/$SDK_COMMIT" -o "$RUNNER_TEMP/MacKernelSDK-source.zip"
+          printf '%s  %s\n' 4050d72f00685990bac2749526704b3b4427a7b783ebda47d8cd87726006bd53 "$RUNNER_TEMP/AppleIGC-source.zip" | shasum -a 256 -c -
+          printf '%s  %s\n' 4fc58fe0cbc2611e5a32365308ca273bf03cb1dd7e564a5f2c9d128352512a8b "$RUNNER_TEMP/MacKernelSDK-source.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/AppleIGC-source.zip" -d "$RUNNER_TEMP/igc"
+          unzip -q "$RUNNER_TEMP/MacKernelSDK-source.zip" -d "$RUNNER_TEMP/sdk"
+          src="$RUNNER_TEMP/igc/AppleIGC-$IGC_COMMIT"
+          ditto "$RUNNER_TEMP/sdk/MacKernelSDK-$SDK_COMMIT" "$src/MacKernelSDK"
+          git -c core.autocrlf=false -C "$src" apply --check "$GITHUB_WORKSPACE/support/appleigc/intx-probe.patch"
+          git -c core.autocrlf=false -C "$src" apply "$GITHUB_WORKSPACE/support/appleigc/intx-probe.patch"
+      - name: Exact source predicate and diagnostic safety contracts
+        run: |
+          set -euo pipefail
+          python3 -I support/appleigc/test_probe.py "$RUNNER_TEMP/igc/AppleIGC-$IGC_COMMIT" | tee "$RUNNER_TEMP/probe-tests.txt"
+      - name: Native x86_64 build (never install or load)
+        run: |
+          set -euo pipefail
+          xcodebuild -project "$RUNNER_TEMP/igc/AppleIGC-$IGC_COMMIT/AppleIGC.xcodeproj" \
+            -target AppleIGC -configuration Release -sdk macosx ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES \
+            CURRENT_PROJECT_VERSION=1.9d2 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            SYMROOT="$RUNNER_TEMP/igc-products" OBJROOT="$RUNNER_TEMP/igc-objects" build \
+            2>&1 | tee "$RUNNER_TEMP/igc-build.txt"
+      - name: Verify identity, signature and native imports; preserve reproducible sources
+        run: |
+          set -euo pipefail
+          kext="$RUNNER_TEMP/igc-products/Release/AppleIGC.kext"
+          bin="$kext/Contents/MacOS/AppleIGC"
+          dist="$RUNNER_TEMP/igc-artifact"
+          mkdir -p "$dist"
+          test "$(lipo -archs "$bin")" = x86_64
+          codesign --force --sign - --timestamp=none "$kext"
+          codesign --verify --strict --verbose=2 "$kext"
+          plutil -lint "$kext/Contents/Info.plist"
+          python3 - "$kext/Contents/Info.plist" <<'PY'
+          import plistlib, sys
+          p=plistlib.load(open(sys.argv[1], 'rb'))
+          assert p['CFBundleIdentifier']=='com.sxx.AppleIGC'
+          assert p['CFBundleVersion']=='1.9d2'
+          assert p['IOKitPersonalities']['i226']['IOClass']=='AppleIGC'
+          assert '0x125c8086' in p['IOKitPersonalities']['i226']['IOPCIMatch'].split()
+          assert p['IOKitPersonalities']['i226']['NETIF_F_TSO'] is True
+          PY
+          strings "$bin" | grep -F 'i226-intx-probe-8802cba'
+          python3 tools/ci/kmutil_kpi_guard.py "$kext" | tee "$dist/native-kpi-check.txt"
+          otool -hv "$bin" > "$dist/mach-header.txt"
+          otool -L "$bin" > "$dist/dylib-dependencies.txt"
+          test -z "$(tail -n +2 "$dist/dylib-dependencies.txt")"
+          nm -u "$bin" > "$dist/undefined-symbols.txt"
+          ditto "$kext" "$dist/AppleIGC.kext"
+          cp "$RUNNER_TEMP/AppleIGC-source.zip" "$RUNNER_TEMP/MacKernelSDK-source.zip" "$dist/"
+          cp support/appleigc/intx-probe.patch support/appleigc/test_probe.py "$dist/"
+          cp "$RUNNER_TEMP/xcode.txt" "$RUNNER_TEMP/probe-tests.txt" "$RUNNER_TEMP/igc-build.txt" "$dist/"
+          printf '%s\n' \
+            'EXPERIMENTAL I226 IRQ DIAGNOSTIC; NOT A VERIFIED NETWORK FIX.' \
+            'Only select source 0 when IOKit confirms a non-messaged source. Otherwise initialization refuses.' \
+            'AppleIGC upstream: 8802cba391e68ad66fdabacc7a0f5e9e0cd61597; SDK: c41d877b64e7fd916bd271390bcdf30f7deb7b7a.' \
+            "Overlay commit: $GITHUB_SHA" \
+            'Native compile/signature/imports only; no load, KernelCollection, vtable, hardware, DHCP, wake or stability validation.' \
+            'No EFI, device identity, VBIOS, reports or credentials are included.' \
+            'Upstream per-file licence notices are retained in the complete source archives; no relicensing.' \
+            > "$dist/BUILD-SCOPE.txt"
+          (cd "$dist" && shasum -a 256 AppleIGC.kext/Contents/MacOS/AppleIGC AppleIGC.kext/Contents/Info.plist > SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: appleigc-i226-intx-probe-x86_64
+          path: ${{ runner.temp }}/igc-artifact/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: appleigc-intx-probe-failure-logs
+          path: |
+            ${{ runner.temp }}/igc-build.txt
+            ${{ runner.temp }}/probe-tests.txt
+            ${{ runner.temp }}/xcode.txt
+          if-no-files-found: warn
+          retention-days: 7
